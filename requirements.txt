@@ -1,0 +1,42 @@
+# Camera Topic Viewer - pip 依赖
+# 适用环境: Ubuntu 22.04 + Python 3.10（系统 Python，非 conda）
+#
+# ⚠️  重要: ROS2 Humble 的 rclpy/cv_bridge 仅支持 Python 3.10。
+#     不要在 conda Python 3.11/3.12 环境中运行本工具。
+#
+# 安装步骤:
+#   1. 安装 ROS2 Humble 系统包:
+#      sudo apt update
+#      sudo apt install -y \
+#          ros-humble-rclpy \
+#          ros-humble-cv-bridge \
+#          ros-humble-sensor-msgs \
+#          python3-pip
+#
+#   2. 用 Python 3.10 安装 pip 依赖（不要用 conda 的 pip）:
+#      python3.10 -m pip install --user -r requirements.txt
+#
+#   3. 运行:
+#      bash run_in_docker.sh     # ROS 在 Docker 内（推荐）
+#      bash run.sh               # ROS 在宿主机
+
+# GUI
+PyQt5==5.15.10
+
+# 图像处理（使用 headless 版，避免与 PyQt5 的 Qt 插件冲突）
+opencv-python-headless==4.10.0.84
+
+# 数值计算（须 <2.0，与 ROS2 Humble cv_bridge 兼容）
+numpy>=1.23.5,<2.0.0
+
+# 深度图 3D 点云显示
+pyqtgraph==0.13.7
+PyOpenGL==3.1.7
+
+# AI 对话（可选）: 使用 OpenAI 兼容 HTTP API，无需额外 pip 包。
+# 配置环境变量 LLM_API_KEY；本地 Ollama 示例:
+#   export LLM_API_BASE=http://127.0.0.1:11434/v1
+#   export LLM_MODEL=qwen2.5
+#   export LLM_API_KEY=ollama
+
+# SAM3 分割（可选，独立环境）: 见 requirements-sam3.txt 与 sam3_segment_worker.py

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <!--
+      宿主机用 DDS 配置：启用 UDP 组播，用于与 Docker 外通信。
+      注意：若 Docker 内仅使用 SHM 发布（fastdds_profiles_a2d.xml），
+      宿主机仍无法收到图像数据，须在 Docker 内运行 viewer（见 run_in_docker.sh）。
+    -->
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>shm_transport</transport_id>
+            <type>SHM</type>
+            <segment_size>134217728</segment_size>
+        </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="host_participant" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>shm_transport</transport_id>
+            </userTransports>
+            <useBuiltinTransports>true</useBuiltinTransports>
+        </rtps>
+    </participant>
+</profiles>
