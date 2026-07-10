@@ -10,8 +10,8 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run.sh                    # ROS 在宿主机直接运行时用此方式
   python3.10 show_camera_topics.py --prefix /camera
 
-顶部控制区按功能分为标签页：相机 / 回放 / 分割 / 手臂·手。
-前置条件：robot-service + base_services 已运行，control_mode=0，手臂/手部已使能。
+顶部控制区按功能分为标签页：相机 / 回放 / 分割 / 训练 / 手臂·手。
+前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
 """
 
 from __future__ import annotations
@@ -42,7 +42,9 @@ import os
 
 os.environ.pop("QT_PLUGIN_PATH", None)
 
+import shlex
 import subprocess
+import shutil
 import threading
 import time
 from collections import deque
@@ -56,7 +58,7 @@ import pyqtgraph.opengl as gl
 import rclpy
 from cv_bridge import CvBridge, CvBridgeError
 from PyQt5.QtCore import Qt, QProcess, QTimer, pyqtSignal, QObject, QPoint, QEvent
-from PyQt5.QtGui import QCloseEvent, QFont, QImage, QMouseEvent, QPixmap
+from PyQt5.QtGui import QCloseEvent, QFont, QImage, QMouseEvent, QPixmap, QPalette, QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -135,10 +137,158 @@ SAM3_WORKER_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "sam3_segment_worker.py"
 )
 SAM3_PYTHON_DEFAULT = os.environ.get("SAM3_PYTHON", "python3")
-SAM3_MODEL_DEFAULT = os.environ.get("SAM3_MODEL", "sam3.pt")
+
+
+def resolve_sam3_model_path() -> str:
+    env = os.environ.get("SAM3_MODEL", "").strip()
+    if env and os.path.isfile(os.path.expanduser(env)):
+        return os.path.abspath(os.path.expanduser(env))
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "sam3.pt"),
+        os.path.expanduser(
+            "~/.cache/modelscope/models/facebook--sam3/snapshots/master/sam3.pt"
+        ),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return os.path.abspath(path)
+    return os.path.abspath(os.path.expanduser(env or os.path.join(here, "sam3.pt")))
+
+
+SAM3_MODEL_DEFAULT = resolve_sam3_model_path()
 SAM3_SERVER_URL_DEFAULT = os.environ.get("SAM3_SERVER_URL", "http://127.0.0.1:8765")
 SAM3_USE_HTTP_DEFAULT = os.environ.get("SAM3_USE_HTTP", "0").strip() in ("1", "true", "yes")
 SAM3_TIMEOUT_S = float(os.environ.get("SAM3_TIMEOUT_S", "120"))
+SAM3_RUN_SCRIPT_NAME = "run_sam3.sh"
+SAM3_DEFAULT_PORT = int(os.environ.get("SAM3_PORT", "8765"))
+OLLAMA_API_BASE_DEFAULT = "http://127.0.0.1:11434/v1"
+
+POSE_BACKEND_PCA = "pca"
+POSE_BACKEND_FOUNDATIONPOSE = "foundationpose"
+POSE_BACKENDS = (POSE_BACKEND_PCA, POSE_BACKEND_FOUNDATIONPOSE)
+FP_WORKER_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "foundationpose_worker.py"
+)
+FP_RUN_SCRIPT_NAME = "run_foundationpose.sh"
+FP_PYTHON_DEFAULT = os.environ.get("FP_PYTHON", "python3")
+FP_SERVER_URL_DEFAULT = os.environ.get("FP_SERVER_URL", "http://127.0.0.1:8766")
+FP_USE_HTTP_DEFAULT = os.environ.get("FP_USE_HTTP", "0").strip() in ("1", "true", "yes")
+FP_TIMEOUT_S = float(os.environ.get("FP_TIMEOUT_S", "180"))
+FP_DEFAULT_PORT = int(os.environ.get("FP_PORT", "8766"))
+
+
+def fp_mesh_path_exists(mesh_path: str) -> bool:
+    return resolve_fp_mesh_absolute(mesh_path) is not None
+
+
+def resolve_fp_mesh_absolute(mesh_path: str) -> Optional[str]:
+    path = (mesh_path or "").strip()
+    if not path:
+        path = resolve_fp_mesh_path()
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [os.path.expanduser(path)]
+    if not os.path.isabs(path):
+        candidates.append(os.path.join(here, path))
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return os.path.abspath(candidate)
+    return None
+
+
+def resolve_fp_mesh_for_call(
+    mesh_path: str,
+    use_http: bool,
+    server_url: str,
+) -> Tuple[str, str]:
+    """解析调用时传给 worker 的 mesh 路径；Docker viewer 可用 worker 侧默认 mesh。"""
+    local = resolve_fp_mesh_absolute(mesh_path)
+    if local:
+        return local, "local"
+    if use_http:
+        health = fetch_foundationpose_health(server_url, timeout_s=0.8)
+        worker_mesh = str(health.get("mesh_resolved") or "").strip()
+        if worker_mesh:
+            return worker_mesh, "worker"
+        worker_default = str(health.get("mesh") or "").strip()
+        if worker_default and worker_default != "not_set":
+            return worker_default, "worker_default"
+    stripped = (mesh_path or "").strip()
+    if stripped:
+        return stripped, "path"
+    return resolve_fp_mesh_path(), "default"
+
+
+def fp_mesh_available(mesh_path: str, use_http: bool, server_url: str) -> Tuple[bool, bool]:
+    """返回 (本地 mesh 可用, 服务/worker mesh 可用)。"""
+    local_ok = resolve_fp_mesh_absolute(mesh_path) is not None
+    worker_ok = False
+    if use_http:
+        health = fetch_foundationpose_health(server_url, timeout_s=0.8)
+        worker_ok = bool(health.get("mesh_ok")) or bool(
+            str(health.get("mesh_resolved") or "").strip()
+        )
+    return local_ok, worker_ok
+
+
+def resolve_fp_mesh_path() -> str:
+    env = os.environ.get("FP_MESH", "").strip()
+    here = os.path.dirname(os.path.abspath(__file__))
+    if env:
+        for candidate in (
+            os.path.expanduser(env),
+            os.path.join(here, env),
+        ):
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+    # 方案 A：优先使用 meshes/<name>/reconstructed.obj（按修改时间最新）
+    meshes_root = os.path.join(here, "meshes")
+    if os.path.isdir(meshes_root):
+        recon: list[tuple[float, str]] = []
+        for name in os.listdir(meshes_root):
+            path = os.path.join(meshes_root, name, "reconstructed.obj")
+            if os.path.isfile(path):
+                recon.append((os.path.getmtime(path), path))
+        if recon:
+            recon.sort(key=lambda x: x[0], reverse=True)
+            return os.path.abspath(recon[0][1])
+    candidates = [
+        os.path.join(
+            here,
+            "FoundationPose",
+            "demo_data",
+            "mustard0",
+            "mesh",
+            "textured_simple.obj",
+        ),
+        os.path.join(here, "demo_data", "mustard0", "mesh", "textured_simple.obj"),
+        os.path.expanduser("~/FoundationPose/demo_data/mustard0/mesh/textured_simple.obj"),
+        os.path.expanduser(
+            "~/workspace_liyichao/eai/FoundationPose/demo_data/mustard0/mesh/textured_simple.obj"
+        ),
+    ]
+    fp_root = os.environ.get("FOUNDATIONPOSE_ROOT", "").strip()
+    if fp_root:
+        candidates.insert(
+            0,
+            os.path.join(
+                fp_root,
+                "demo_data",
+                "mustard0",
+                "mesh",
+                "textured_simple.obj",
+            ),
+        )
+    for path in candidates:
+        if os.path.isfile(path):
+            return os.path.abspath(path)
+    return os.path.abspath(os.path.expanduser(env or candidates[-1]))
+
+
+FP_MESH_DEFAULT = resolve_fp_mesh_path()
+PSI_POLICY_DIR_ENV = "PSI_POLICY_DIR"
+PSI_POLICY_CONFIG_DEFAULT = "example_workspace_imle_rgb"
+PSI_POLICY_LOGGING_MODES = ("offline", "online", "disabled")
 MAX_GL_SEGMENT_POINTS = 4000
 UI_IMAGE_MIN_INTERVAL_S = 1.0 / 15.0
 UI_DEPTH_MIN_INTERVAL_S = 1.0 / 8.0
@@ -151,8 +301,11 @@ MINK_FK_FRAME_ALIASES = frozenset({"map", "world"})
 
 ROBOT_ARM_TOPIC = "/hal/arm_joint_state"
 ROBOT_SERVICE_SCRIPT = "start_ros_service.sh"
-BASE_SERVICES_SCRIPT = "nodes/start_base_services.sh"
-BASE_SERVICES_LOG = "/var/psi/log/base_services/latest.log"
+STACK_SERVICES_SCRIPT = "nodes/start_arm_hand_services.sh"
+STACK_SERVICES_LAUNCH = "arm_hand_services.launch.py"
+STACK_SERVICES_LOG = "/var/psi/log/arm_hand_services/latest.log"
+# 兼容手动启动完整 base_services 时的状态检测
+LEGACY_BASE_SERVICES_LAUNCH = "base_services.launch.py"
 ROBOT_FK_JOINTS_TOPIC = "/fk/joint_states"
 ROBOT_LEFT_HAND_TOPIC = "/ry_hand/left/joint_states"
 ROBOT_RIGHT_HAND_TOPIC = "/ry_hand/right/joint_states"
@@ -189,6 +342,22 @@ REPLAY_STATE_LABELS = {
     3: "已完成",
     4: "已停止",
 }
+
+# 深色界面文字对比度（避免 #666/#888 在深色底上难以辨认）
+UI_TEXT_PRIMARY = "#ececec"
+UI_TEXT_SECONDARY = "#c8c8c8"
+UI_TEXT_MUTED = "#b0b0b0"
+UI_TEXT_PLACEHOLDER = "#9a9a9a"
+UI_ACCENT_BLUE = "#7ec8ff"
+UI_ACCENT_BLUE_BRIGHT = "#4da3ff"
+UI_ACCENT_ORANGE = "#ffb86c"
+UI_ACCENT_GREEN = "#50fa7b"
+UI_ACCENT_RED = "#ff8888"
+UI_MONO_FAMILY = "Monospace"
+UI_MONO_SIZE_SMALL = 9
+UI_MONO_SIZE_NORMAL = 10
+UI_MONO_SIZE_TITLE = 11
+
 IDLE_CONTROL_MODE = 99
 MODEL_CONTROL_MODE = 0
 TELEOP_CONTROL_MODES = {1, 3}
@@ -806,8 +975,20 @@ class SegmentSettings:
     sam3_model: str = SAM3_MODEL_DEFAULT
 
 
+@dataclass
+class PoseSettings:
+    backend: str = POSE_BACKEND_PCA
+    fp_use_http: bool = FP_USE_HTTP_DEFAULT
+    fp_server_url: str = FP_SERVER_URL_DEFAULT
+    fp_python: str = FP_PYTHON_DEFAULT
+    fp_mesh: str = FP_MESH_DEFAULT
+    fp_mode: str = "register"
+
+
 _segment_settings = SegmentSettings()
 _segment_settings_lock = threading.Lock()
+_pose_settings = PoseSettings()
+_pose_settings_lock = threading.Lock()
 
 
 def get_segment_settings() -> SegmentSettings:
@@ -822,11 +1003,30 @@ def get_segment_settings() -> SegmentSettings:
         )
 
 
+def get_pose_settings() -> PoseSettings:
+    with _pose_settings_lock:
+        return PoseSettings(
+            backend=_pose_settings.backend,
+            fp_use_http=_pose_settings.fp_use_http,
+            fp_server_url=_pose_settings.fp_server_url,
+            fp_python=_pose_settings.fp_python,
+            fp_mesh=_pose_settings.fp_mesh,
+            fp_mode=_pose_settings.fp_mode,
+        )
+
+
 def set_segment_settings(**kwargs) -> None:
     with _segment_settings_lock:
         for key, value in kwargs.items():
             if hasattr(_segment_settings, key):
                 setattr(_segment_settings, key, value)
+
+
+def set_pose_settings(**kwargs) -> None:
+    with _pose_settings_lock:
+        for key, value in kwargs.items():
+            if hasattr(_pose_settings, key):
+                setattr(_pose_settings, key, value)
 
 
 def _encode_image_bgr_b64(image_bgr: np.ndarray) -> str:
@@ -844,6 +1044,48 @@ def _decode_sam3_mask_payload(payload: Dict[str, object]) -> np.ndarray:
     )
     flat = np.unpackbits(packed)[: h * w]
     return flat.reshape(h, w).astype(bool)
+
+
+def _summarize_sam3_payload(payload: Dict[str, object]) -> Dict[str, object]:
+    summary: Dict[str, object] = {}
+    for key, value in payload.items():
+        if key == "image_b64":
+            summary[key] = f"<base64 {len(str(value))} chars>"
+        else:
+            summary[key] = value
+    return summary
+
+
+def _summarize_sam3_mask_result(mask: np.ndarray, method: str) -> Dict[str, object]:
+    return {
+        "ok": True,
+        "method": method,
+        "mask": {
+            "h": int(mask.shape[0]),
+            "w": int(mask.shape[1]),
+            "pixels": int(mask.sum()),
+        },
+    }
+
+
+def _log_sam3_request_result(
+    tag: str,
+    request_summary: Dict[str, object],
+    result_summary: Dict[str, object],
+    elapsed_s: float,
+) -> None:
+    print(
+        f"[show_camera SAM3 {tag}] request: "
+        f"{json.dumps(request_summary, ensure_ascii=False)}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        f"[show_camera SAM3 {tag}] result ({elapsed_s:.3f}s): "
+        f"{json.dumps(result_summary, ensure_ascii=False)}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _sam3_build_request_payload(
@@ -931,12 +1173,140 @@ def run_sam3_segmentation(
     v: int,
     text: Optional[str] = None,
     settings: Optional[SegmentSettings] = None,
+    *,
+    tag: str = "viewer",
 ) -> Tuple[np.ndarray, str]:
     cfg = settings or get_segment_settings()
     payload = _sam3_build_request_payload(image_bgr, u, v, text, cfg.sam3_model)
+    request_summary = _summarize_sam3_payload(payload)
+    request_summary["image_shape"] = [
+        int(image_bgr.shape[0]),
+        int(image_bgr.shape[1]),
+        int(image_bgr.shape[2]),
+    ]
+    request_summary["transport"] = "HTTP" if cfg.sam3_use_http else "subprocess"
     if cfg.sam3_use_http:
-        return _sam3_segment_via_http(payload, cfg.sam3_server_url, SAM3_TIMEOUT_S)
-    return _sam3_segment_via_subprocess(payload, cfg.sam3_python, SAM3_TIMEOUT_S)
+        request_summary["server_url"] = cfg.sam3_server_url
+    else:
+        request_summary["python"] = cfg.sam3_python
+    t0 = time.time()
+    try:
+        if cfg.sam3_use_http:
+            mask, method = _sam3_segment_via_http(
+                payload, cfg.sam3_server_url, SAM3_TIMEOUT_S
+            )
+        else:
+            mask, method = _sam3_segment_via_subprocess(
+                payload, cfg.sam3_python, SAM3_TIMEOUT_S
+            )
+        result_summary = _summarize_sam3_mask_result(mask, method)
+        _log_sam3_request_result(tag, request_summary, result_summary, time.time() - t0)
+        return mask, method
+    except Exception as exc:
+        _log_sam3_request_result(
+            tag,
+            request_summary,
+            {"ok": False, "error": str(exc)},
+            time.time() - t0,
+        )
+        raise
+
+
+@dataclass
+class Sam3CallResult:
+    ok: bool
+    topic: str = ""
+    u: int = 0
+    v: int = 0
+    text: str = ""
+    method: str = ""
+    pixel_count: int = 0
+    mask_shape: Tuple[int, int] = (0, 0)
+    centroid_uv: Tuple[float, float] = (0.0, 0.0)
+    transport: str = ""
+    elapsed_s: float = 0.0
+    error: str = ""
+    mask: Optional[np.ndarray] = None
+
+
+def format_sam3_call_result_text(result: Sam3CallResult) -> str:
+    lines = [
+        f"时间: {time.strftime('%H:%M:%S')}",
+        f"图像: {result.topic or '--'}",
+    ]
+    if result.text:
+        lines.append(f"文本提示: {result.text}")
+    else:
+        lines.append(f"点提示: ({result.u}, {result.v})")
+    lines.append(f"传输: {result.transport or '--'}")
+    if result.ok:
+        lines.extend(
+            [
+                "状态: 成功",
+                f"方法: {result.method}",
+                f"mask: {result.mask_shape[1]}x{result.mask_shape[0]}",
+                f"像素数: {result.pixel_count}",
+                f"质心: ({result.centroid_uv[0]:.1f}, {result.centroid_uv[1]:.1f})",
+                f"耗时: {result.elapsed_s:.2f}s",
+            ]
+        )
+    else:
+        lines.extend(["状态: 失败", f"错误: {result.error}"])
+    return "\n".join(lines)
+
+
+class Sam3CallBridge(QObject):
+    finished = pyqtSignal(object)
+
+
+@dataclass
+class FpCallResult:
+    ok: bool
+    color_topic: str = ""
+    depth_topic: str = ""
+    u: int = 0
+    v: int = 0
+    mesh: str = ""
+    segment_method: str = ""
+    pose_method: str = ""
+    transport: str = ""
+    elapsed_s: float = 0.0
+    error: str = ""
+    mask: Optional[np.ndarray] = None
+    pose_result: Optional[Object6DPoseResult] = None
+
+
+def format_fp_call_result_text(result: FpCallResult) -> str:
+    lines = [
+        f"时间: {time.strftime('%H:%M:%S')}",
+        f"彩色: {result.color_topic or '--'}",
+        f"深度: {result.depth_topic or '--'}",
+        f"提示点: ({result.u}, {result.v})",
+        f"mesh: {result.mesh or '--'}",
+        f"传输: {result.transport or '--'}",
+    ]
+    if result.ok and result.pose_result is not None:
+        pose = result.pose_result
+        lines.extend(
+            [
+                "状态: 成功",
+                f"分割: {result.segment_method}",
+                f"位姿: {result.pose_method}",
+                f"mask 像素: {pose.pixel_count}",
+                f"点云: {pose.point_count} pts",
+                f"耗时: {result.elapsed_s:.2f}s",
+                format_pose_6d_info(pose, result.u, result.v),
+            ]
+        )
+    elif result.ok:
+        lines.extend(["状态: 成功", f"耗时: {result.elapsed_s:.2f}s"])
+    else:
+        lines.extend(["状态: 失败", f"错误: {result.error}"])
+    return "\n".join(lines)
+
+
+class FpCallBridge(QObject):
+    finished = pyqtSignal(object)
 
 
 def check_sam3_server_health(server_url: str, timeout_s: float = 2.0) -> bool:
@@ -947,6 +1317,593 @@ def check_sam3_server_health(server_url: str, timeout_s: float = 2.0) -> bool:
             return bool(body.get("ok"))
     except Exception:
         return False
+
+
+def check_ollama_server_health(
+    api_base: str = OLLAMA_API_BASE_DEFAULT, timeout_s: float = 2.0
+) -> bool:
+    root = api_base.rstrip("/").removesuffix("/v1").rstrip("/")
+    url = f"{root}/api/tags"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def is_running_in_docker() -> bool:
+    return os.path.isfile("/.dockerenv")
+
+
+def resolve_sam3_run_script() -> Optional[str]:
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, SAM3_RUN_SCRIPT_NAME)
+    return path if os.path.isfile(path) else None
+
+
+def resolve_psi_policy_dir(user_dir: Optional[str] = None) -> Optional[str]:
+    if user_dir:
+        path = os.path.abspath(os.path.expanduser(user_dir.strip()))
+        train_py = os.path.join(path, "psi_policy", "train.py")
+        if os.path.isfile(train_py):
+            return path
+    env = os.environ.get(PSI_POLICY_DIR_ENV, "").strip()
+    if env and os.path.isdir(env):
+        train_py = os.path.join(env, "psi_policy", "train.py")
+        if os.path.isfile(train_py):
+            return os.path.abspath(env)
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(os.path.dirname(here), "psi-policy"),
+        os.path.expanduser("~/workspace_liyichao/psi-policy"),
+    ]
+    for path in candidates:
+        train_py = os.path.join(path, "psi_policy", "train.py")
+        if os.path.isfile(train_py):
+            return os.path.abspath(path)
+    return None
+
+
+def is_valid_psi_policy_dir(path: str) -> bool:
+    if not path or not os.path.isdir(path):
+        return False
+    return os.path.isfile(os.path.join(path, "psi_policy", "train.py"))
+
+
+def resolve_psi_policy_python(repo_dir: str) -> str:
+    env = os.environ.get("PSI_POLICY_PYTHON", "").strip()
+    if env:
+        return env
+    venv_py = os.path.join(repo_dir, ".venv", "bin", "python")
+    if os.path.isfile(venv_py):
+        return venv_py
+    return "python3"
+
+
+def list_psi_policy_workspace_configs(repo_dir: str) -> List[str]:
+    config_dir = os.path.join(repo_dir, "psi_policy", "config")
+    if not os.path.isdir(config_dir):
+        return []
+    names: List[str] = []
+    for fname in sorted(os.listdir(config_dir)):
+        if fname.startswith("example_workspace_") and fname.endswith(".yaml"):
+            names.append(fname[:-5])
+    return names
+
+
+def format_hydra_override(key: str, value: str) -> str:
+    val = value.strip()
+    if not val:
+        return ""
+    if any(ch in val for ch in ' \t"\'=,'):
+        escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+        return f'{key}="{escaped}"'
+    return f"{key}={val}"
+
+
+def resolve_sam3_bind_host() -> str:
+    env = os.environ.get("SAM3_HOST", "").strip()
+    if env:
+        return env
+    return "0.0.0.0" if is_running_in_docker() else "127.0.0.1"
+
+
+def resolve_sam3_viewer_server_url(port: int = SAM3_DEFAULT_PORT) -> str:
+    env = os.environ.get("SAM3_SERVER_URL", "").strip()
+    if env:
+        return env
+    if is_running_in_docker():
+        candidates = (
+            "host.docker.internal",
+            "172.17.0.1",
+            "127.0.0.1",
+        )
+        for host in candidates:
+            url = f"http://{host}:{port}"
+            if check_sam3_server_health(url, timeout_s=0.6):
+                return url
+        return f"http://172.17.0.1:{port}"
+    return f"http://127.0.0.1:{port}"
+
+
+def _stop_sam3_server_processes() -> None:
+    for pattern in ("sam3_segment_worker.py --serve", "sam3_segment_worker --serve"):
+        try:
+            subprocess.run(
+                ["pkill", "-f", pattern],
+                capture_output=True,
+                timeout=1.0,
+                check=False,
+            )
+        except Exception:
+            pass
+
+
+def _sam3_server_process_running() -> bool:
+    return _pgrep_pattern("sam3_segment_worker.py --serve") or _pgrep_pattern(
+        "sam3_segment_worker --serve"
+    )
+
+
+def resolve_fp_run_script() -> Optional[str]:
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(here, FP_RUN_SCRIPT_NAME)
+    return path if os.path.isfile(path) else None
+
+
+def resolve_fp_viewer_server_url(port: int = FP_DEFAULT_PORT) -> str:
+    env = os.environ.get("FP_SERVER_URL", "").strip()
+    if env:
+        return env
+    if is_running_in_docker():
+        candidates = ("host.docker.internal", "172.17.0.1", "127.0.0.1")
+        for host in candidates:
+            url = f"http://{host}:{port}"
+            if check_foundationpose_server_health(url, timeout_s=0.6):
+                return url
+        return f"http://172.17.0.1:{port}"
+    return f"http://127.0.0.1:{port}"
+
+
+def check_foundationpose_server_health(url: str, timeout_s: float = 1.5) -> bool:
+    return fetch_foundationpose_health(url, timeout_s).get("online", False)
+
+
+def fetch_foundationpose_health(url: str, timeout_s: float = 1.5) -> Dict[str, object]:
+    health_url = url.rstrip("/") + "/health"
+    try:
+        with urllib.request.urlopen(health_url, timeout=timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        online = resp.status == 200 and bool(body.get("ok", True))
+        fp_ready = bool(body.get("fp_ready", body.get("ok", False)))
+        return {
+            "online": online,
+            "fp_ready": fp_ready,
+            "foundationpose_root": str(body.get("foundationpose_root") or ""),
+            "mesh": str(body.get("mesh") or ""),
+            "mesh_resolved": str(body.get("mesh_resolved") or ""),
+        }
+    except Exception as exc:
+        return {"online": False, "fp_ready": False, "error": str(exc)}
+
+
+@dataclass
+class FpAvailabilityStatus:
+    label: str
+    detail: str
+    tooltip: str
+    color: str
+    can_invoke: bool
+    http_online: bool = False
+    fp_ready: bool = False
+    mesh_ok: bool = False
+    worker_ok: bool = False
+
+
+def evaluate_fp_availability(
+    mesh_path: str,
+    use_http: bool,
+    server_url: str,
+    timeout_s: float = 0.8,
+) -> FpAvailabilityStatus:
+    worker_ok = os.path.isfile(FP_WORKER_SCRIPT)
+    local_mesh_ok, server_mesh_ok = fp_mesh_available(mesh_path, use_http, server_url)
+    mesh_ok = local_mesh_ok or server_mesh_ok
+    if use_http:
+        health = fetch_foundationpose_health(server_url, timeout_s)
+        http_online = bool(health.get("online"))
+        fp_ready = bool(health.get("fp_ready"))
+        fp_root = str(health.get("foundationpose_root") or "")
+        mesh_local_tag = "✓" if local_mesh_ok else "✗"
+        mesh_srv_tag = "✓" if server_mesh_ok else "✗"
+        checks = [
+            f"HTTP: {'✓' if http_online else '✗'}",
+            f"FP源码: {'✓' if fp_ready else '✗'}",
+            f"mesh本地:{mesh_local_tag}",
+            f"mesh服务:{mesh_srv_tag}",
+        ]
+        detail = "  ".join(checks)
+        service_ready = http_online and fp_ready
+        can_invoke = service_ready
+        if service_ready and mesh_ok:
+            return FpAvailabilityStatus(
+                label="可用",
+                detail=detail,
+                tooltip=f"FoundationPose 可调用\n{detail}",
+                color=UI_ACCENT_GREEN,
+                can_invoke=True,
+                http_online=http_online,
+                fp_ready=fp_ready,
+                mesh_ok=mesh_ok,
+                worker_ok=worker_ok,
+            )
+        if service_ready:
+            worker_mesh = str(health.get("mesh_resolved") or health.get("mesh") or "")
+            return FpAvailabilityStatus(
+                label="可用",
+                detail=detail,
+                tooltip=(
+                    "服务已就绪，可点击「调用 FP」尝试。\n"
+                    "viewer 本地未找到 mesh（Docker 内常见）；"
+                    "将使用 worker 启动时指定的 mesh。\n"
+                    + (f"worker mesh: {worker_mesh}\n" if worker_mesh else "")
+                    + "若未配置 worker mesh，调用时会报错。"
+                ),
+                color=UI_ACCENT_GREEN,
+                can_invoke=True,
+                http_online=http_online,
+                fp_ready=fp_ready,
+                mesh_ok=mesh_ok,
+                worker_ok=worker_ok,
+            )
+        if http_online:
+            return FpAvailabilityStatus(
+                label="未就绪",
+                detail=detail,
+                tooltip=(
+                    "HTTP 服务已启动，但 FoundationPose 源码未就绪。\n"
+                    f"检测: {fp_root or '未找到 eai/FoundationPose'}\n"
+                    "请设置 FOUNDATIONPOSE_ROOT 并重启 worker"
+                ),
+                color=UI_ACCENT_ORANGE,
+                can_invoke=False,
+                http_online=http_online,
+                fp_ready=fp_ready,
+                mesh_ok=mesh_ok,
+                worker_ok=worker_ok,
+            )
+        err = str(health.get("error") or "")
+        return FpAvailabilityStatus(
+            label="离线",
+            detail=detail,
+            tooltip=(
+                f"无法连接 {server_url}\n"
+                "宿主机请运行: bash run_foundationpose.sh --host 0.0.0.0\n"
+                + (f"错误: {err}" if err else "")
+            ),
+            color=UI_ACCENT_RED,
+            can_invoke=False,
+            http_online=http_online,
+            fp_ready=fp_ready,
+            mesh_ok=mesh_ok,
+            worker_ok=worker_ok,
+        )
+
+    checks = [
+        f"worker: {'✓' if worker_ok else '✗'}",
+        f"mesh本地:{'✓' if local_mesh_ok else '✗'}",
+    ]
+    detail = "  ".join(checks)
+    can_invoke = worker_ok
+    if can_invoke and local_mesh_ok:
+        return FpAvailabilityStatus(
+            label="可用(本地)",
+            detail=detail,
+            tooltip=f"子进程模式可调用\n{detail}",
+            color=UI_TEXT_SECONDARY,
+            can_invoke=True,
+            mesh_ok=True,
+            worker_ok=worker_ok,
+        )
+    if can_invoke:
+        return FpAvailabilityStatus(
+            label="可用(本地)",
+            detail=detail,
+            tooltip=(
+                "子进程 worker 可用，可点击尝试。\n"
+                "本地未找到 mesh 时将把路径传给 worker 解析。"
+            ),
+            color=UI_TEXT_SECONDARY,
+            can_invoke=True,
+            mesh_ok=local_mesh_ok,
+            worker_ok=worker_ok,
+        )
+    if not worker_ok:
+        return FpAvailabilityStatus(
+            label="无 worker",
+            detail=detail,
+            tooltip=f"未找到 {FP_WORKER_SCRIPT}",
+            color=UI_ACCENT_ORANGE,
+            can_invoke=False,
+            mesh_ok=local_mesh_ok,
+            worker_ok=worker_ok,
+        )
+    return FpAvailabilityStatus(
+        label="离线",
+        detail=detail,
+        tooltip="子进程模式不可用",
+        color=UI_ACCENT_RED,
+        can_invoke=False,
+        mesh_ok=local_mesh_ok,
+        worker_ok=worker_ok,
+    )
+
+
+def _fp_server_process_running() -> bool:
+    return _pgrep_pattern("foundationpose_worker.py --serve") or _pgrep_pattern(
+        "foundationpose_worker --serve"
+    )
+
+
+def _encode_depth_b64(depth: np.ndarray) -> Tuple[str, int, int, str]:
+    depth_m = depth_to_meters_array(depth)
+    h, w = depth_m.shape[:2]
+    raw = depth_m.astype(np.float32).tobytes()
+    return base64.b64encode(raw).decode("ascii"), h, w, "float32"
+
+
+def _encode_mask_payload(mask: np.ndarray) -> Dict[str, object]:
+    flat = mask.reshape(-1).astype(bool)
+    packed = np.packbits(flat)
+    return {
+        "h": int(mask.shape[0]),
+        "w": int(mask.shape[1]),
+        "packed_b64": base64.b64encode(packed.tobytes()).decode("ascii"),
+    }
+
+
+def _summarize_fp_payload(payload: Dict[str, object]) -> Dict[str, object]:
+    summary: Dict[str, object] = {}
+    for key, value in payload.items():
+        if key in ("rgb_b64", "depth_b64"):
+            summary[key] = f"<base64 {len(str(value))} chars>"
+        elif key == "mask" and isinstance(value, dict):
+            summary[key] = {
+                "h": value.get("h"),
+                "w": value.get("w"),
+                "packed_b64": f"<base64 {len(str(value.get('packed_b64', '')))} chars>",
+            }
+        else:
+            summary[key] = value
+    return summary
+
+
+def _log_fp_request_result(
+    tag: str,
+    request_summary: Dict[str, object],
+    result_summary: Dict[str, object],
+    elapsed_s: float,
+) -> None:
+    print(
+        f"[show_camera FP {tag}] request: "
+        f"{json.dumps(request_summary, ensure_ascii=False)}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        f"[show_camera FP {tag}] result ({elapsed_s:.3f}s): "
+        f"{json.dumps(result_summary, ensure_ascii=False)}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _fp_build_request_payload(
+    color_bgr: np.ndarray,
+    depth: np.ndarray,
+    mask: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    mesh_path: str,
+    mode: str = "register",
+) -> Dict[str, object]:
+    depth_b64, dh, dw, depth_dtype = _encode_depth_b64(depth)
+    return {
+        "rgb_b64": _encode_image_bgr_b64(color_bgr),
+        "depth_b64": depth_b64,
+        "depth_h": dh,
+        "depth_w": dw,
+        "depth_dtype": depth_dtype,
+        "fx": float(fx),
+        "fy": float(fy),
+        "cx": float(cx),
+        "cy": float(cy),
+        "mask": _encode_mask_payload(mask),
+        "mesh": mesh_path,
+        "mode": mode,
+    }
+
+
+def _fp_pose_via_http(
+    payload: Dict[str, object],
+    server_url: str,
+    timeout_s: float,
+) -> Dict[str, object]:
+    url = server_url.rstrip("/") + "/pose"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"FoundationPose HTTP {exc.code}: {detail[:400]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"FoundationPose 服务不可达 ({server_url})，请先运行: "
+            f"bash run_foundationpose.sh --host 0.0.0.0 --mesh <object.obj>"
+        ) from exc
+    if not body.get("ok"):
+        raise RuntimeError(str(body.get("error") or body))
+    return body
+
+
+def _fp_pose_via_subprocess(
+    payload: Dict[str, object],
+    python_exe: str,
+    timeout_s: float,
+) -> Dict[str, object]:
+    if not os.path.isfile(FP_WORKER_SCRIPT):
+        raise RuntimeError(f"未找到 worker: {FP_WORKER_SCRIPT}")
+    proc = subprocess.run(
+        [python_exe, FP_WORKER_SCRIPT, "--once"],
+        input=json.dumps(payload).encode("utf-8"),
+        capture_output=True,
+        timeout=timeout_s,
+    )
+    stdout = proc.stdout.decode("utf-8", errors="replace").strip()
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(err or stdout or f"FoundationPose worker 退出码 {proc.returncode}")
+    try:
+        body = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"FoundationPose worker 输出非 JSON: {stdout[:200]}") from exc
+    if not body.get("ok"):
+        raise RuntimeError(str(body.get("error") or body))
+    return body
+
+
+def run_foundationpose_estimation(
+    color_bgr: np.ndarray,
+    depth: np.ndarray,
+    mask: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    settings: Optional[PoseSettings] = None,
+    *,
+    tag: str = "viewer",
+) -> Dict[str, object]:
+    cfg = settings or get_pose_settings()
+    mesh_path, mesh_source = resolve_fp_mesh_for_call(
+        cfg.fp_mesh.strip() or FP_MESH_DEFAULT,
+        cfg.fp_use_http,
+        cfg.fp_server_url,
+    )
+    payload = _fp_build_request_payload(
+        color_bgr, depth, mask, fx, fy, cx, cy, mesh_path, mode=cfg.fp_mode
+    )
+    request_summary = _summarize_fp_payload(payload)
+    request_summary["mesh_source"] = mesh_source
+    request_summary["transport"] = "HTTP" if cfg.fp_use_http else "subprocess"
+    if cfg.fp_use_http:
+        request_summary["server_url"] = cfg.fp_server_url
+    else:
+        request_summary["python"] = cfg.fp_python
+    t0 = time.time()
+    try:
+        if cfg.fp_use_http:
+            body = _fp_pose_via_http(payload, cfg.fp_server_url, FP_TIMEOUT_S)
+        else:
+            body = _fp_pose_via_subprocess(payload, cfg.fp_python, FP_TIMEOUT_S)
+        result_summary = {
+            "ok": True,
+            "method": body.get("method"),
+            "position_xyz": body.get("position_xyz"),
+        }
+        _log_fp_request_result(tag, request_summary, result_summary, time.time() - t0)
+        return body
+    except Exception as exc:
+        _log_fp_request_result(
+            tag,
+            request_summary,
+            {"ok": False, "error": str(exc)},
+            time.time() - t0,
+        )
+        raise
+
+
+def object6d_from_foundationpose(
+    mask: np.ndarray,
+    depth: np.ndarray,
+    seed_u: int,
+    seed_v: int,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    fp_body: Dict[str, object],
+    segment_method: str = "",
+) -> Optional[Object6DPoseResult]:
+    pose_flat = fp_body.get("pose_matrix")
+    if not isinstance(pose_flat, list) or len(pose_flat) != 16:
+        return None
+    pose = np.asarray(pose_flat, dtype=np.float64).reshape(4, 4)
+    rotation = pose[:3, :3].astype(np.float32)
+    position = pose[:3, 3]
+    rpy = rotation_matrix_to_euler_xyz(rotation)
+    quat = rotation_matrix_to_quaternion(rotation)
+
+    corners_flat = fp_body.get("obb_corners")
+    if isinstance(corners_flat, list) and len(corners_flat) == 24:
+        corners = np.asarray(corners_flat, dtype=np.float32).reshape(8, 3)
+    else:
+        half = np.array(fp_body.get("obb_extents") or [0.05, 0.05, 0.05], dtype=np.float32) * 0.5
+        corners = obb_corners(position, rotation, half)
+
+    depth_m = depth_to_meters_array(depth)
+    refined_mask, points = refine_stereo_segment(
+        mask, depth, seed_u, seed_v, fx, fy, cx, cy
+    )
+    us = (points[:, 0] * fx / points[:, 2] + cx) if len(points) else np.array([seed_u])
+    vs = (points[:, 1] * fy / points[:, 2] + cy) if len(points) else np.array([seed_v])
+    centroid_uv = (float(np.median(us)), float(np.median(vs)))
+    contact_xyz = compute_contact_point_3d(
+        seed_u, seed_v, depth, fx, fy, cx, cy, points_3d=points
+    )
+    if contact_xyz is None:
+        contact_xyz = (float(position[0]), float(position[1]), float(position[2]))
+
+    obb_extents = fp_body.get("obb_extents")
+    if isinstance(obb_extents, list) and len(obb_extents) == 3:
+        extents = tuple(float(x) for x in obb_extents)
+    else:
+        extents = (
+            float(np.linalg.norm(corners[0] - corners[6])),
+            float(np.linalg.norm(corners[1] - corners[3])),
+            float(np.linalg.norm(corners[0] - corners[4])),
+        )
+
+    method = str(fp_body.get("method") or "foundationpose")
+    if segment_method:
+        method = f"{method}+{segment_method}"
+
+    return Object6DPoseResult(
+        mask=refined_mask,
+        points_3d=points,
+        centroid_uv=centroid_uv,
+        contact_uv=(float(seed_u), float(seed_v)),
+        contact_xyz=contact_xyz,
+        position_xyz=(float(position[0]), float(position[1]), float(position[2])),
+        euler_rpy_rad=rpy,
+        quaternion_xyzw=quat,
+        rotation_matrix=rotation,
+        obb_center=(float(position[0]), float(position[1]), float(position[2])),
+        obb_extents=extents,
+        obb_corners=corners,
+        depth_m=float(position[2]),
+        pixel_count=int(refined_mask.sum()),
+        point_count=len(points),
+        method=method,
+    )
 
 
 def segment_object_at_click_with_backend(
@@ -976,7 +1933,7 @@ def segment_object_at_click_with_backend(
         raise RuntimeError("SAM3 分割需要彩色图（请同时订阅 color topic）")
     text = cfg.sam3_text.strip() if cfg.backend == SAM3_BACKEND_TEXT else None
     mask, method = run_sam3_segmentation(
-        color_bgr, seed_u, seed_v, text=text, settings=cfg
+        color_bgr, seed_u, seed_v, text=text, settings=cfg, tag="stereo_click"
     )
     if mask.shape[:2] != depth.shape[:2]:
         mask = resize_mask_to_shape(mask, depth.shape[:2])
@@ -1283,7 +2240,9 @@ def run_stereo_pose_pipeline(
     cx: float,
     cy: float,
     color_bgr: Optional[np.ndarray] = None,
+    pose_settings: Optional[PoseSettings] = None,
 ) -> Tuple[Optional[Object6DPoseResult], str]:
+    pcfg = pose_settings or get_pose_settings()
     try:
         mask, method = segment_object_at_click_with_backend(
             seed_u, seed_v, depth, color_bgr=color_bgr
@@ -1292,6 +2251,43 @@ def run_stereo_pose_pipeline(
         return None, f"点击 ({seed_u}, {seed_v})  |  分割失败: {exc}"
     if not mask.any():
         return None, f"点击 ({seed_u}, {seed_v})  |  立体分割失败（无有效区域）"
+
+    if pcfg.backend == POSE_BACKEND_FOUNDATIONPOSE:
+        if color_bgr is None:
+            return None, (
+                f"点击 ({seed_u}, {seed_v})  |  FoundationPose 需要彩色图"
+                "（请同时订阅 color topic）"
+            )
+        try:
+            fp_body = run_foundationpose_estimation(
+                color_bgr,
+                depth,
+                mask,
+                fx,
+                fy,
+                cx,
+                cy,
+                settings=pcfg,
+                tag="stereo_click",
+            )
+            result = object6d_from_foundationpose(
+                mask,
+                depth,
+                seed_u,
+                seed_v,
+                fx,
+                fy,
+                cx,
+                cy,
+                fp_body,
+                segment_method=method,
+            )
+        except Exception as exc:
+            return None, f"点击 ({seed_u}, {seed_v})  |  FoundationPose 失败: {exc}"
+        if result is None:
+            return None, f"点击 ({seed_u}, {seed_v})  |  FoundationPose 响应无效"
+        return result, format_pose_6d_info(result, seed_u, seed_v)
+
     result = compute_stereo_segment_6d_pose(
         mask, depth, seed_u, seed_v, fx, fy, cx, cy, method=method
     )
@@ -1962,7 +2958,7 @@ def _format_joint_group_html(
     unit: str = "rad",
 ) -> str:
     if not joints:
-        return _html_span(f"{title}: (无数据)", "#888888") + "<br/>"
+        return _html_span(f"{title}: (无数据)", UI_TEXT_MUTED) + "<br/>"
     lines = [_html_span(f"{title}:", title_color, bold=True)]
     for name, val in joints:
         if unit == "rad":
@@ -1992,7 +2988,7 @@ def format_robot_state_html(
         header += f"  ({age:.1f}s 前)"
 
     parts = [
-        "<div style='font-family: Monospace, Consolas, monospace; font-size: 9pt; "
+        "<div style='font-family: Monospace, Consolas, monospace; font-size: 10pt; "
         "line-height: 1.45;'>",
         _html_span(header, "#f0f0f0", bold=True),
         "<br/><br/>",
@@ -2011,7 +3007,7 @@ def format_robot_state_html(
         )
         parts.append(_html_span(tcp_text, "#ff79c6", bold=True))
     else:
-        parts.append(_html_span("左臂 TCP: (无数据)", "#888888"))
+        parts.append(_html_span("左臂 TCP: (无数据)", UI_TEXT_MUTED))
 
     parts.append("<br/>")
 
@@ -2028,7 +3024,7 @@ def format_robot_state_html(
         )
         parts.append(_html_span(tcp_text, "#79d8ff", bold=True))
     else:
-        parts.append(_html_span("右臂 TCP: (无数据)", "#888888"))
+        parts.append(_html_span("右臂 TCP: (无数据)", UI_TEXT_MUTED))
 
     parts.append("<br/><br/>")
     parts.append(_format_joint_group_html("左臂关节", state.left_arm, "#ff79c6", "#ffd0ea"))
@@ -2313,6 +3309,16 @@ class ChatPanelWidget(QWidget):
             if idx != self.provider_combo.findText("自定义"):
                 self._apply_provider_preset(self.provider_combo.currentText(), silent=True)
 
+    def apply_local_ollama_preset(self, silent: bool = False) -> None:
+        """切换到本地 Ollama 预设（供「本地部署 AI」按钮调用）。"""
+        name = "本地 Ollama · Qwen3.5-4B"
+        idx = self.provider_combo.findText(name)
+        if idx >= 0:
+            self.provider_combo.setCurrentIndex(idx)
+        self._apply_provider_preset(name, silent=silent)
+        if not silent:
+            self._append_system_line(f"已切换对话 API 为 {OLLAMA_API_BASE_DEFAULT}")
+
     def _apply_provider_preset(self, name: str, silent: bool = False) -> None:
         preset = LLM_PROVIDER_PRESETS.get(name)
         if preset is None or name == "自定义":
@@ -2349,7 +3355,7 @@ class ChatPanelWidget(QWidget):
         self._client = LlmChatClient(self._config)
 
     def _append_system_line(self, text: str) -> None:
-        self.history_view.append(f'<span style="color:#888;">[系统] {text}</span>')
+        self.history_view.append(f'<span style="color:{UI_TEXT_MUTED};">[系统] {text}</span>')
 
     def _append_user_line(self, text: str) -> None:
         safe = _html_escape(text).replace("\n", "<br>")
@@ -2431,6 +3437,8 @@ class RosBridge(QObject):
     frame_stats = pyqtSignal(str, int, float)
     robot_state_updated = pyqtSignal()
     arm_enable_changed = pyqtSignal(bool)
+    hand_enable_changed = pyqtSignal(bool)
+    control_mode_changed = pyqtSignal(int)
     replay_state_changed = pyqtSignal(int)
     left_hand_preset_changed = pyqtSignal(bool)
     slow_motion_progress = pyqtSignal(float, str)
@@ -2460,7 +3468,7 @@ class ClickableImageLabel(QLabel):
         self.setMinimumSize(64, 48)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet(
-            "background-color: #1e1e1e; color: #888; border: 1px solid #444;"
+            f"background-color: #1e1e1e; color: {UI_TEXT_MUTED}; border: 1px solid #555;"
         )
         self.setCursor(Qt.CrossCursor)
         self._source_image: Optional[np.ndarray] = None
@@ -2595,6 +3603,7 @@ class CameraPanel(QWidget):
         ] = None,
         is_paired_depth_enabled: Optional[Callable[[str], bool]] = None,
         on_segment_pose: Optional[Callable[[SegmentPoseTarget], None]] = None,
+        on_click_uv: Optional[Callable[[str, int, int], None]] = None,
         status_callback: Optional[Callable[[str], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -2607,6 +3616,7 @@ class CameraPanel(QWidget):
         self._resolve_segment_camera_frame = resolve_segment_camera_frame
         self._is_paired_depth_enabled = is_paired_depth_enabled
         self._on_segment_pose = on_segment_pose
+        self._on_click_uv = on_click_uv
         self._status_callback = status_callback
         self._frame_count = 0
         self._last_fps_time = time.time()
@@ -2620,7 +3630,7 @@ class CameraPanel(QWidget):
 
         title = topic.split("/")[-1] or topic
         self.title_label = QLabel(title)
-        self.title_label.setFont(QFont("Monospace", 10, QFont.Bold))
+        self.title_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_TITLE, QFont.Bold))
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout.addWidget(self.title_label)
@@ -2630,16 +3640,16 @@ class CameraPanel(QWidget):
         layout.addWidget(self.image_label, stretch=1)
 
         self.info_label = QLabel(topic)
-        self.info_label.setFont(QFont("Monospace", 8))
+        self.info_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.info_label.setAlignment(Qt.AlignCenter)
-        self.info_label.setStyleSheet("color: #666;")
+        self.info_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
         self.info_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout.addWidget(self.info_label)
 
         self.coord_label = QLabel("点击图像：需勾选配对 depth topic 后才可进行立体分割")
-        self.coord_label.setFont(QFont("Monospace", 8))
+        self.coord_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.coord_label.setAlignment(Qt.AlignCenter)
-        self.coord_label.setStyleSheet("color: #2a82da;")
+        self.coord_label.setStyleSheet(f"color: {UI_ACCENT_BLUE_BRIGHT};")
         self.coord_label.setWordWrap(True)
         self.coord_label.setMaximumHeight(40)
         self.coord_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -2750,7 +3760,25 @@ class CameraPanel(QWidget):
         target = SegmentPoseTarget.from_pose_result(result, camera_frame, self.topic)
         QTimer.singleShot(0, lambda t=target: self._on_segment_pose(t))
 
+    def show_sam3_mask(self, mask: np.ndarray, seed_u: int, seed_v: int) -> None:
+        if self._latest_image is None or not mask.any():
+            self.image_label.clear_segment_overlay()
+            return
+        display_mask = resize_mask_to_shape(mask, self._latest_image.shape[:2])
+        ys, xs = np.where(mask)
+        if len(xs) > 0:
+            cu, cv = float(np.mean(xs)), float(np.mean(ys))
+        else:
+            cu, cv = float(seed_u), float(seed_v)
+        self.image_label.set_segment_overlay(display_mask, (cu, cv))
+        self.coord_label.setText(
+            f"SAM3 {int(mask.sum())} px @ ({seed_u}, {seed_v})  "
+            f"质心 ({cu:.0f}, {cv:.0f})"
+        )
+
     def _on_pixel_clicked(self, u: int, v: int) -> None:
+        if self._on_click_uv is not None:
+            self._on_click_uv(self.topic, u, v)
         if self._latest_image is None or self._pose_busy:
             return
 
@@ -2853,7 +3881,7 @@ class DepthPanel3D(QWidget):
 
         title = topic.split("/")[-1] or topic
         self.title_label = QLabel(f"{title}  [3D]")
-        self.title_label.setFont(QFont("Monospace", 10, QFont.Bold))
+        self.title_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_TITLE, QFont.Bold))
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout.addWidget(self.title_label)
@@ -2942,16 +3970,16 @@ class DepthPanel3D(QWidget):
         layout.addWidget(self.depth_preview, stretch=1)
 
         self.info_label = QLabel("等待深度图...")
-        self.info_label.setFont(QFont("Monospace", 8))
+        self.info_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.info_label.setAlignment(Qt.AlignCenter)
-        self.info_label.setStyleSheet("color: #666;")
+        self.info_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
         self.info_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout.addWidget(self.info_label)
 
         self.coord_label = QLabel("点击深度图：立体分割 + 6D 位姿（位置 + RPY + OBB）")
-        self.coord_label.setFont(QFont("Monospace", 8))
+        self.coord_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.coord_label.setAlignment(Qt.AlignCenter)
-        self.coord_label.setStyleSheet("color: #2a82da;")
+        self.coord_label.setStyleSheet(f"color: {UI_ACCENT_BLUE_BRIGHT};")
         self.coord_label.setWordWrap(True)
         self.coord_label.setMaximumHeight(40)
         self.coord_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -2979,11 +4007,11 @@ class DepthPanel3D(QWidget):
         robot_layout = QVBoxLayout(robot_group)
         robot_layout.setContentsMargins(6, 4, 6, 4)
         self.robot_info_label = QLabel("等待机器人 joint_states / TCP 数据...")
-        self.robot_info_label.setFont(QFont("Monospace", 9))
+        self.robot_info_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_NORMAL))
         self.robot_info_label.setWordWrap(True)
         self.robot_info_label.setTextFormat(Qt.RichText)
         self.robot_info_label.setStyleSheet(
-            "color: #f5f5f5;"
+            f"color: {UI_TEXT_PRIMARY};"
             "background-color: #252525;"
             "padding: 4px 6px;"
             "border-radius: 3px;"
@@ -3315,6 +4343,7 @@ def create_camera_panel(
     ] = None,
     get_tf_buffer: Optional[Callable[[], Optional[Buffer]]] = None,
     on_segment_pose: Optional[Callable[[SegmentPoseTarget], None]] = None,
+    on_click_uv: Optional[Callable[[str, int, int], None]] = None,
     status_callback: Optional[Callable[[str], None]] = None,
 ) -> QWidget:
     if is_depth_topic(topic):
@@ -3338,6 +4367,7 @@ def create_camera_panel(
         resolve_segment_camera_frame=resolve_segment_camera_frame,
         is_paired_depth_enabled=is_paired_depth_enabled,
         on_segment_pose=on_segment_pose,
+        on_click_uv=on_click_uv,
         status_callback=status_callback,
     )
 
@@ -3439,6 +4469,7 @@ class CameraTopicNode(Node):
         self._slow_motion_timer = None
         self._slow_motion_prep_timer = None
         self._slow_motion_mode_timer = None
+        self._replay_prep_mode_timer = None
         self._slow_motion_saved_control_mode: Optional[int] = None
         self._slow_motion_right_pose: Optional[
             Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]
@@ -3482,6 +4513,7 @@ class CameraTopicNode(Node):
             self._stop_slow_motion_timer()
             self._stop_slow_motion_prep_timer()
             self._stop_slow_motion_mode_timer()
+            self._stop_replay_prep_mode_timer()
             self._restore_control_mode_if_needed()
         if self._scan_timer is not None:
             try:
@@ -3489,6 +4521,7 @@ class CameraTopicNode(Node):
             except Exception:
                 pass
             self._scan_timer = None
+        self._stop_replay_prep_mode_timer()
         self._tf_listener = None
 
     def is_left_hand_at_a(self) -> bool:
@@ -3567,8 +4600,13 @@ class CameraTopicNode(Node):
 
     def get_hand_enable_label(self) -> str:
         if not self._hand_enable_received_at:
-            return "手部: 等待 /hand/enable_state ..."
-        return f"手部: {'已使能' if self._hand_enabled else '未使能'}"
+            return "手: 等待 /hand/enable_state ..."
+        return f"手: {'已使能' if self._hand_enabled else '未使能'}"
+
+    def get_control_mode_label(self) -> str:
+        if not self._control_mode_received_at:
+            return "mode: 等待 /control_mode ..."
+        return f"mode: {self._control_mode}"
 
     def request_hand_enable(self, enable: bool = True) -> str:
         if enable and self._hand_enabled:
@@ -3613,16 +4651,27 @@ class CameraTopicNode(Node):
         return self._replay_start_client.service_is_ready()
 
     def prepare_for_rrd_replay(self) -> List[str]:
-        """兼容旧接口：回放前不再自动使能/切模式（与 GUI 行为一致）。"""
+        """回放前切 model 模式并请求手/臂使能；需 pedal_controller 已运行才会收到 enable_state。"""
+        self._start_replay_prep_mode_lock()
         return self.get_replay_prerequisite_warnings()
 
     def get_replay_prerequisite_warnings(self) -> List[str]:
         warnings: List[str] = []
-        if self._control_mode_received_at and self._control_mode != MODEL_CONTROL_MODE:
+        if not _is_stack_services_running():
+            warnings.append(
+                "手/臂服务栈未运行（需 pedal_controller / topic_router，请先点「启动机器人栈」）"
+            )
+        if not self._control_mode_received_at:
+            warnings.append("未收到 /control_mode（等待 pedal_controller 或 viewer 发布）")
+        elif self._control_mode != MODEL_CONTROL_MODE:
             warnings.append(f"control_mode={self._control_mode}，需为 {MODEL_CONTROL_MODE}")
-        if self._arm_enable_received_at and not self._arm_enabled:
+        if not self._arm_enable_received_at:
+            warnings.append("未收到 /arm/enable_state（请使能手臂）")
+        elif not self._arm_enabled:
             warnings.append("手臂未使能")
-        if self._hand_enable_received_at and not self._hand_enabled:
+        if not self._hand_enable_received_at:
+            warnings.append("未收到 /hand/enable_state（请使能手部）")
+        elif not self._hand_enabled:
             warnings.append("手部未使能")
         return warnings
 
@@ -3874,6 +4923,25 @@ class CameraTopicNode(Node):
         if self._slow_motion_mode_timer is not None:
             self.destroy_timer(self._slow_motion_mode_timer)
             self._slow_motion_mode_timer = None
+
+    def _maintain_replay_prep(self) -> None:
+        self._burst_control_mode(MODEL_CONTROL_MODE)
+        if self._arm_set_enable_client.service_is_ready() and not self._arm_enabled:
+            self.request_arm_enable(True)
+        if self._hand_set_enable_client.service_is_ready() and not self._hand_enabled:
+            self.request_hand_enable(True)
+
+    def _start_replay_prep_mode_lock(self) -> None:
+        self._stop_replay_prep_mode_timer()
+        self._burst_control_mode(MODEL_CONTROL_MODE)
+        self.request_arm_enable(True)
+        self.request_hand_enable(True)
+        self._replay_prep_mode_timer = self.create_timer(1.0, self._maintain_replay_prep)
+
+    def _stop_replay_prep_mode_timer(self) -> None:
+        if self._replay_prep_mode_timer is not None:
+            self.destroy_timer(self._replay_prep_mode_timer)
+            self._replay_prep_mode_timer = None
 
     def _publish_slow_motion_targets(
         self,
@@ -4589,18 +5657,28 @@ class CameraTopicNode(Node):
             self._slow_motion_wbc_changed = True
 
     def _on_control_mode(self, msg: UInt32) -> None:
+        new_mode = int(msg.data)
+        first_receive = self._control_mode_received_at <= 0
+        changed = first_receive or (
+            not self._is_motion_control_locked() and new_mode != self._control_mode
+        )
         if not self._is_motion_control_locked():
-            self._control_mode = int(msg.data)
-        if self._control_mode_received_at <= 0:
+            self._control_mode = new_mode
+        if first_receive:
             self._control_mode_received_at = time.time()
             self.get_logger().info(f"control_mode={self._control_mode}")
+        elif changed and not self._is_motion_control_locked():
+            self.get_logger().info(f"control_mode={self._control_mode}")
+        if changed:
+            self.ros_bridge.control_mode_changed.emit(self._control_mode)
 
     def _on_arm_enable_state(self, msg: UInt32) -> None:
         enabled = int(msg.data) != 0
-        if self._arm_enable_received_at <= 0 or enabled != self._arm_enabled:
+        first_receive = self._arm_enable_received_at <= 0
+        if first_receive or enabled != self._arm_enabled:
             self.get_logger().info(f"arm/enable_state={'ON' if enabled else 'OFF'}")
         self._arm_enable_received_at = time.time()
-        if enabled != self._arm_enabled:
+        if first_receive or enabled != self._arm_enabled:
             self._arm_enabled = enabled
             self._arm_enabled_since = time.time() if enabled else 0.0
             self.ros_bridge.arm_enable_changed.emit(enabled)
@@ -4609,12 +5687,14 @@ class CameraTopicNode(Node):
 
     def _on_hand_enable_state(self, msg: UInt32) -> None:
         enabled = int(msg.data) != 0
-        if self._hand_enable_received_at <= 0 or enabled != self._hand_enabled:
+        first_receive = self._hand_enable_received_at <= 0
+        if first_receive or enabled != self._hand_enabled:
             self.get_logger().info(f"hand/enable_state={'ON' if enabled else 'OFF'}")
         self._hand_enable_received_at = time.time()
-        if enabled != self._hand_enabled:
+        if first_receive or enabled != self._hand_enabled:
             self._hand_enabled = enabled
             self._hand_enabled_since = time.time() if enabled else 0.0
+            self.ros_bridge.hand_enable_changed.emit(enabled)
         else:
             self._hand_enabled = enabled
 
@@ -4905,14 +5985,25 @@ def resolve_scripts_pack_dir() -> Optional[str]:
     if env_dir and os.path.isdir(env_dir):
         return os.path.abspath(env_dir)
     here = os.path.dirname(os.path.abspath(__file__))
+    psibot_home = os.environ.get("PSIBOT_HOME", "/home/psibot").strip() or "/home/psibot"
     candidates = [
-        "/opt/psi/rt/a2d-tele/install/scripts_pack/share/scripts_pack/scripts",
-        os.path.expanduser("~/workspace_liyichao/a2d-tele/install/scripts_pack/share/scripts_pack/scripts"),
-        os.path.join(here, "..", "install", "scripts_pack", "share", "scripts_pack", "scripts"),
+        os.path.join(psibot_home, "workspace_liyichao/install/scripts_pack/share/scripts_pack/scripts"),
+        os.path.abspath(os.path.join(here, "..", "install", "scripts_pack", "share", "scripts_pack", "scripts")),
+        os.path.join(psibot_home, "workspace_liyichao/a2d-tele/install/scripts_pack/share/scripts_pack/scripts"),
         os.path.expanduser("~/workspace_liyichao/install/scripts_pack/share/scripts_pack/scripts"),
+        os.path.expanduser("~/workspace_liyichao/a2d-tele/install/scripts_pack/share/scripts_pack/scripts"),
+        "/opt/psi/rt/a2d-tele/install/scripts_pack/share/scripts_pack/scripts",
     ]
+    stack_script = STACK_SERVICES_SCRIPT
+    resolved_candidates: List[str] = []
     for path in candidates:
         resolved = os.path.abspath(path)
+        if resolved in resolved_candidates:
+            continue
+        resolved_candidates.append(resolved)
+        if os.path.isfile(os.path.join(resolved, stack_script)):
+            return resolved
+    for resolved in resolved_candidates:
         if os.path.isdir(resolved):
             return resolved
     return None
@@ -4966,6 +6057,9 @@ def build_ros_shell_prefix() -> str:
     ):
         if os.path.isfile(setup):
             parts.append(f"source {setup}")
+    scripts_dir = resolve_scripts_pack_dir()
+    if scripts_dir:
+        parts.append(f"export A2D_SCRIPTS_DIR={scripts_dir}")
     dds = os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE", "").strip()
     if dds and os.path.isfile(dds):
         parts.append(f"export FASTRTPS_DEFAULT_PROFILES_FILE={dds}")
@@ -4984,6 +6078,12 @@ def _pgrep_pattern(pattern: str) -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+def _is_stack_services_running() -> bool:
+    return _pgrep_pattern(STACK_SERVICES_LAUNCH) or _pgrep_pattern(
+        LEGACY_BASE_SERVICES_LAUNCH
+    )
 
 
 def _ros_service_exists(service: str) -> bool:
@@ -5067,8 +6167,117 @@ def _stop_existing_rrd_replay() -> None:
         time.sleep(0.1)
 
 
+class LocalAiLauncher(QObject):
+    """启动/停止本地 AI：SAM3 分割 HTTP 服务 + Ollama 对话服务。"""
+
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+
+    def is_sam3_running(self) -> bool:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            return True
+        return _sam3_server_process_running()
+
+    def start_deploy(self) -> None:
+        self._ensure_ollama()
+        self._start_sam3()
+
+    def stop(self) -> None:
+        if self._process is not None:
+            if self._process.state() == QProcess.Running:
+                self._process.terminate()
+                QTimer.singleShot(2000, self._force_kill_process)
+            else:
+                self._process = None
+        _stop_sam3_server_processes()
+        self.running_changed.emit(False)
+        self.status_message.emit("已停止本地 SAM3 服务")
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.terminate()
+            self._process.waitForFinished(1500)
+        self._process = None
+
+    def _ensure_ollama(self) -> None:
+        if check_ollama_server_health():
+            self.status_message.emit("Ollama 已在运行")
+            return
+        ollama_bin = shutil.which("ollama")
+        if not ollama_bin:
+            self.status_message.emit(
+                "未检测到 Ollama，请安装: https://ollama.com 后执行 ollama pull qwen3.5:4b"
+            )
+            return
+        if QProcess.startDetached(ollama_bin, ["serve"]):
+            self.status_message.emit("正在启动 Ollama 服务 (127.0.0.1:11434)…")
+        else:
+            self.status_message.emit("Ollama 启动失败")
+
+    def _start_sam3(self) -> None:
+        if self.is_sam3_running():
+            self.status_message.emit("SAM3 服务已在运行")
+            self.running_changed.emit(True)
+            return
+
+        script = resolve_sam3_run_script()
+        if script is None:
+            hint = (
+                "cd eai && bash run_sam3.sh --host 0.0.0.0"
+                if is_running_in_docker()
+                else f"未找到 {SAM3_RUN_SCRIPT_NAME}，请确认与 show_camera_topics.py 同目录"
+            )
+            self.status_message.emit(f"无法启动 SAM3: {hint}")
+            return
+
+        bind_host = resolve_sam3_bind_host()
+        script_dir = os.path.dirname(script)
+        cmd = f"exec bash {os.path.basename(script)} --host {bind_host}"
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(script_dir)
+        proc.start("bash", ["-lc", cmd])
+        self._process = proc
+        self.running_changed.emit(True)
+        viewer_url = resolve_sam3_viewer_server_url()
+        self.status_message.emit(
+            f"正在启动 SAM3 ({bind_host}:{SAM3_DEFAULT_PORT})，viewer URL: {viewer_url}"
+        )
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            text = line.strip()
+            if text:
+                self.status_message.emit(f"[SAM3] {text}")
+
+    def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        self._process = None
+        self.running_changed.emit(False)
+        if exit_code != 0:
+            self.status_message.emit(f"SAM3 进程退出 (code={exit_code})")
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error != QProcess.Crashed:
+            self.status_message.emit(f"SAM3 进程错误: {error}")
+
+    def _force_kill_process(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.kill()
+            self._process = None
+
+
 class RobotStackLauncher(QObject):
-    """后台启动 robot-service 与 base_services（不阻塞 UI）。"""
+    """后台启动 robot-service 与手/臂精简服务栈（不阻塞 UI）。"""
 
     status_message = pyqtSignal(str)
     stack_status_changed = pyqtSignal(str, str)
@@ -5100,13 +6309,13 @@ class RobotStackLauncher(QObject):
     def start_stack(self) -> None:
         robot, base = self.get_cached_status()
         if base == "运行中":
-            self.status_message.emit("base_services 已在运行")
+            self.status_message.emit("手/臂服务栈已在运行")
             return
         if base == "启动中" or self._base_launch_pending:
-            self.status_message.emit("base_services 正在启动…")
+            self.status_message.emit("手/臂服务栈正在启动…")
             return
         if self._node.is_hal_arm_ready() or robot == "就绪":
-            self._launch_base_services()
+            self._launch_stack_services()
             return
         if robot == "启动中" or self._robot_launch_pending:
             self.status_message.emit("robot-service 启动中，请等待 (~3 分钟)…")
@@ -5132,17 +6341,21 @@ class RobotStackLauncher(QObject):
         self._robot_launch_pending = True
         self.status_message.emit("正在启动 robot-service（约 3 分钟）…")
 
-    def _launch_base_services(self) -> None:
+    def _launch_stack_services(self) -> None:
         robot, base = self.get_cached_status()
         if base == "运行中":
-            self.status_message.emit("base_services 已在运行")
+            self.status_message.emit("手/臂服务栈已在运行")
             return
         if self._base_launch_pending or base == "启动中":
-            self.status_message.emit("base_services 正在启动…")
+            self.status_message.emit("手/臂服务栈正在启动…")
             return
-        script = self._resolve_script(BASE_SERVICES_SCRIPT)
+        script = self._resolve_script(STACK_SERVICES_SCRIPT)
         if script is None:
-            self.status_message.emit("未找到 start_base_services.sh，请设置 A2D_SCRIPTS_DIR")
+            tried = resolve_scripts_pack_dir() or "(未找到 scripts_pack 目录)"
+            self.status_message.emit(
+                f"未找到 {STACK_SERVICES_SCRIPT}（已查: {tried}）。"
+                "请设置 A2D_SCRIPTS_DIR 或 colcon build scripts_pack"
+            )
             return
         script_dir = os.path.dirname(script)
         cmd = (
@@ -5150,10 +6363,16 @@ class RobotStackLauncher(QObject):
             f"exec bash {os.path.basename(script)}"
         )
         if not QProcess.startDetached("bash", ["-lc", cmd], script_dir):
-            self.status_message.emit("base_services 启动失败（startDetached 返回 false）")
+            self.status_message.emit("手/臂服务栈启动失败（startDetached 返回 false）")
             return
         self._base_launch_pending = True
-        self.status_message.emit("正在启动 base_services…")
+        self.status_message.emit(
+            "正在启动手/臂服务（pedal_controller、topic_router、ik/fk、arm_control、hand）…"
+        )
+
+    def _launch_base_services(self) -> None:
+        """兼容旧信号连接，实际启动精简栈。"""
+        self._launch_stack_services()
 
     def _resolve_script(self, relative_name: str) -> Optional[str]:
         scripts_dir = resolve_scripts_pack_dir()
@@ -5171,7 +6390,7 @@ class RobotStackLauncher(QObject):
             self._poll_stop.wait(interval)
 
     def _refresh_status_cache(self) -> None:
-        base_running = _pgrep_pattern("base_services.launch.py")
+        base_running = _is_stack_services_running()
         robot_running = _pgrep_pattern("robot-service")
         hal_ready = self._node.is_hal_arm_ready()
 
@@ -5211,7 +6430,7 @@ class RobotStackLauncher(QObject):
         if not hal_ready:
             return
         self._robot_launch_pending = False
-        self.status_message.emit("robot-service 完成，正在启动 base_services…")
+        self.status_message.emit("robot-service 完成，正在启动手/臂服务栈…")
         self.start_base_on_main.emit()
 
 
@@ -5290,6 +6509,7 @@ class RrdReplayLauncher(QObject):
         proc.start("setsid", ["bash", "-lc", cmd])
         self._process = proc
         self.node_active_changed.emit(True)
+        self._node.prepare_for_rrd_replay()
         self.status_message.emit(
             f"正在启动 RRD 回放: {os.path.basename(resolved_path)} "
             f"（共 {self._target_loops} 次）"
@@ -5301,6 +6521,7 @@ class RrdReplayLauncher(QObject):
         completed = self._completed_loops
         total = self._target_loops
         self._auto_start_timer.stop()
+        self._node._stop_replay_prep_mode_timer()
         self._loop_restart_pending = False
         self._completed_loops = 0
         self._target_loops = REPLAY_LOOP_COUNT_DEFAULT
@@ -5323,6 +6544,7 @@ class RrdReplayLauncher(QObject):
 
     def shutdown(self) -> None:
         self._auto_start_timer.stop()
+        self._node._stop_replay_prep_mode_timer()
         if self._process is not None and self._process.state() == QProcess.Running:
             self._process.terminate()
             self._process.waitForFinished(2000)
@@ -5437,6 +6659,146 @@ class RrdReplayLauncher(QObject):
             self._process.kill()
 
 
+class PsiPolicyTrainLauncher(QObject):
+    """启动/停止 psi-policy 训练，并将 stdout/stderr 实时转发到 UI。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() == QProcess.Running
+
+    def start(
+        self,
+        config_name: str,
+        datahouse_id: str,
+        view_id: str,
+        *,
+        repo_dir: Optional[str] = None,
+        num_epochs: int = 0,
+        batch_size: int = 0,
+        logging_mode: str = "offline",
+        num_processes: int = 1,
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("psi-policy 训练已在运行")
+            return
+
+        repo = repo_dir or resolve_psi_policy_dir()
+        if repo is None:
+            self.status_message.emit(
+                "未找到 psi-policy 目录，请点击「选择路径」指定仓库"
+            )
+            return
+
+        config = (config_name or PSI_POLICY_CONFIG_DEFAULT).strip()
+        if not config:
+            self.status_message.emit("请选择训练配置 (config-name)")
+            return
+
+        overrides: List[str] = [f"logging.mode={logging_mode}"]
+        dh_override = format_hydra_override(
+            "task.dataset.sources.0.datahouse_id", datahouse_id
+        )
+        if dh_override:
+            overrides.append(dh_override)
+        view_override = format_hydra_override(
+            "task.dataset.sources.0.view_id", view_id
+        )
+        if view_override:
+            overrides.append(view_override)
+        if num_epochs > 0:
+            overrides.append(f"training.num_epochs={int(num_epochs)}")
+        if batch_size > 0:
+            overrides.append(f"train_dataloader.batch_size={int(batch_size)}")
+
+        python_bin = resolve_psi_policy_python(repo)
+        train_args = ["psi_policy/train.py", "--config-name", config] + overrides
+        if num_processes > 1:
+            launch_args = [
+                "-m",
+                "accelerate.commands.launch",
+                f"--num_processes={int(num_processes)}",
+            ] + train_args
+        else:
+            launch_args = train_args
+
+        quoted_args = " ".join(shlex.quote(arg) for arg in launch_args)
+        venv_activate = os.path.join(repo, ".venv", "bin", "activate")
+        prefix = ""
+        if os.path.isfile(venv_activate):
+            prefix = f"source {shlex.quote(venv_activate)} && "
+        cmd = (
+            f"{prefix}cd {shlex.quote(repo)} && "
+            f"export PYTHONUNBUFFERED=1 && "
+            f"exec {shlex.quote(python_bin)} {quoted_args}"
+        )
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(repo)
+        proc.start("setsid", ["bash", "-lc", cmd])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ cd {repo}")
+        self.log_line.emit(f"$ {python_bin} {' '.join(launch_args)}")
+        self.status_message.emit(f"正在启动 psi-policy 训练 ({config})…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的训练")
+            return
+        self.status_message.emit("正在停止训练…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(3000, self._force_kill_process)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.terminate()
+            self._process.waitForFinished(2000)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            if line:
+                self.log_line.emit(line.rstrip())
+
+    def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        self._process = None
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- 训练进程正常退出 ---")
+            self.status_message.emit("psi-policy 训练已完成")
+        else:
+            self.log_line.emit(f"--- 训练进程退出 (code={exit_code}) ---")
+            self.status_message.emit(f"psi-policy 训练异常退出 (code={exit_code})")
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error != QProcess.Crashed:
+            self.status_message.emit(f"psi-policy 训练进程错误: {error}")
+
+    def _force_kill_process(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.kill()
+            self._process = None
+            self.running_changed.emit(False)
+            self.log_line.emit("--- 训练进程已被强制终止 ---")
+            self.status_message.emit("训练已强制停止")
+
+
 class CameraTopicWindow(QMainWindow):
     def __init__(
         self,
@@ -5453,12 +6815,20 @@ class CameraTopicWindow(QMainWindow):
         self._topic_types: Dict[str, List[str]] = {}
         self._frame_cache: Dict[str, np.ndarray] = {}
         self._last_segment_target: Optional[SegmentPoseTarget] = None
+        self._last_sam3_topic = ""
+        self._sam3_call_busy = False
+        self._sam3_call_bridge = Sam3CallBridge()
+        self._sam3_call_bridge.finished.connect(self._on_sam3_call_finished)
+        self._fp_call_busy = False
+        self._fp_call_bridge = FpCallBridge()
+        self._fp_call_bridge.finished.connect(self._on_fp_call_finished)
         self._robot_ui_last_update = 0.0
         self._pending_arm_move_goal: Optional[ResolvedArmMoveGoal] = None
         self._arm_enable_wait_deadline = 0.0
         self._arm_enable_wait_timer = QTimer(self)
         self._arm_enable_wait_timer.setInterval(200)
         self._arm_enable_wait_timer.timeout.connect(self._on_arm_enable_wait_tick)
+        self._psi_policy_dir_override: Optional[str] = None
 
         self.setWindowTitle("Camera Topic Viewer")
         win_x, win_y, win_w, win_h = default_viewer_geometry()
@@ -5498,29 +6868,64 @@ class CameraTopicWindow(QMainWindow):
         robot_layout.setSpacing(6)
         stack_row = QHBoxLayout()
         self._stack_launcher = RobotStackLauncher(node, self)
-        self.robot_stack_status = QLabel("robot: -- | base: --")
-        self.robot_stack_status.setFont(QFont("Monospace", 8))
+        self.robot_stack_status = QLabel("robot: -- | stack: --")
+        self.robot_stack_status.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.robot_stack_status.setToolTip(
-            f"robot-service 初始化 HAL；base_services 启动 topic_router/ik/fk 等。\n"
-            f"日志: tail -f {BASE_SERVICES_LOG}"
+            f"robot-service 初始化 HAL；手/臂栈启动 pedal_controller/topic_router/ik/fk/arm/hand。\n"
+            f"不启动 VR、扫码、数据采集、RealSense 等。\n"
+            f"日志: tail -f {STACK_SERVICES_LOG}"
         )
         self.robot_stack_btn = QPushButton("启动机器人栈")
         self.robot_stack_btn.setToolTip(
-            "依次启动 robot-service（约 3 分钟）与 base_services。\n"
-            "若 HAL 已就绪则跳过 robot-service。"
+            "依次启动 robot-service（约 3 分钟）与手/臂精简服务栈。\n"
+            "若 HAL 已就绪则跳过 robot-service。\n"
+            "仅含控制手臂与手所需节点。"
         )
         self.robot_stack_btn.clicked.connect(self._on_robot_stack_clicked)
         stack_row.addWidget(self.robot_stack_status, 1)
         stack_row.addWidget(self.robot_stack_btn)
         robot_layout.addLayout(stack_row)
 
+        enable_row = QHBoxLayout()
+        enable_row.setSpacing(10)
+        self.robot_arm_enable_label = QLabel("手臂: --")
+        self.robot_arm_enable_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robot_arm_enable_label.setToolTip(f"订阅 {ARM_ENABLE_STATE_TOPIC}，1=已使能")
+        self.robot_hand_enable_label = QLabel("手: --")
+        self.robot_hand_enable_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robot_hand_enable_label.setToolTip(f"订阅 {HAND_ENABLE_STATE_TOPIC}，1=已使能")
+        self.robot_control_mode_label = QLabel("mode: --")
+        self.robot_control_mode_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robot_control_mode_label.setToolTip(
+            f"订阅 {CONTROL_MODE_TOPIC}，回放需 mode={MODEL_CONTROL_MODE}"
+        )
+        enable_row.addWidget(self.robot_arm_enable_label)
+        self.robot_arm_enable_btn = QPushButton("启用手臂")
+        self.robot_arm_enable_btn.setToolTip(
+            "等同踏板 F2 开启/关闭手臂控制"
+        )
+        self.robot_arm_enable_btn.clicked.connect(self._on_arm_enable_clicked)
+        enable_row.addWidget(self.robot_arm_enable_btn)
+        enable_row.addSpacing(8)
+        enable_row.addWidget(self.robot_hand_enable_label)
+        self.robot_hand_enable_btn = QPushButton("启用手")
+        self.robot_hand_enable_btn.setToolTip(
+            "等同踏板 F1 开启/关闭手部控制"
+        )
+        self.robot_hand_enable_btn.clicked.connect(self._on_hand_enable_clicked)
+        enable_row.addWidget(self.robot_hand_enable_btn)
+        enable_row.addSpacing(8)
+        enable_row.addWidget(self.robot_control_mode_label)
+        enable_row.addStretch()
+        robot_layout.addLayout(enable_row)
+
         replay_row = QHBoxLayout()
         replay_row.setSpacing(6)
         self.replay_status_label = QLabel("回放: --")
-        self.replay_status_label.setFont(QFont("Monospace", 8))
+        self.replay_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.replay_status_label.setToolTip(
             "RRD 轨迹回放状态（/rrd_replay/running_state）\n"
-            "需 base_services + control_mode=0 + 手/臂使能"
+            "需手/臂服务栈 + control_mode=0 + 手/臂使能"
         )
         self.replay_select_btn = QPushButton("选择路径")
         self.replay_select_btn.setToolTip(
@@ -5530,13 +6935,13 @@ class CameraTopicWindow(QMainWindow):
         self.replay_select_btn.clicked.connect(self._on_replay_select_clicked)
         self.replay_start_btn = QPushButton("开始")
         self.replay_start_btn.setToolTip(
-            "启动 rrd_replay 节点并开始回放（与 a2d-tele GUI 回放一致）。\n"
-            "前置：control_mode=0，手动 F1/F2 使能手/臂。"
+            "启动 rrd_replay 并开始回放。\n"
+            "会自动启动手/臂服务栈（若未运行）、切 control_mode=0 并使能手/臂。"
         )
         self.replay_start_btn.clicked.connect(self._on_replay_start_clicked)
         self.replay_stop_btn = QPushButton("停止")
         self.replay_stop_btn.setToolTip("停止 rrd_replay 节点与当前回放。")
-        self.replay_stop_btn.setStyleSheet("color: #ff8888;")
+        self.replay_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
         self.replay_stop_btn.clicked.connect(self._on_replay_stop_clicked)
         replay_row.addWidget(QLabel("次数"))
         self.replay_count_spin = QSpinBox()
@@ -5562,7 +6967,7 @@ class CameraTopicWindow(QMainWindow):
         self.replay_rrd_path_edit = QLineEdit()
         self.replay_rrd_path_edit.setReadOnly(True)
         self.replay_rrd_path_edit.setPlaceholderText("点击「选择路径」选择 .rrd 文件")
-        self.replay_rrd_path_edit.setFont(QFont("Monospace", 8))
+        self.replay_rrd_path_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         rrd_path_row.addWidget(self.replay_rrd_path_edit, 1)
         robot_layout.addLayout(rrd_path_row)
         control_tabs.addTab(robot_tab, "回放")
@@ -5570,8 +6975,11 @@ class CameraTopicWindow(QMainWindow):
         self._replay_launcher = RrdReplayLauncher(node, self)
 
         segment_tab = QWidget()
-        segment_layout = QHBoxLayout(segment_tab)
-        segment_layout.setContentsMargins(8, 6, 8, 6)
+        segment_outer = QVBoxLayout(segment_tab)
+        segment_outer.setContentsMargins(8, 6, 8, 6)
+        segment_outer.setSpacing(6)
+        segment_layout = QHBoxLayout()
+        segment_layout.setSpacing(6)
         segment_layout.addWidget(QLabel("分割"))
         self.segment_backend_combo = QComboBox()
         self.segment_backend_combo.addItem("几何(深度+颜色)", SAM3_BACKEND_GEOMETRY)
@@ -5599,11 +7007,243 @@ class CameraTopicWindow(QMainWindow):
         self.sam3_http_check.toggled.connect(self._on_segment_settings_changed)
         segment_layout.addWidget(self.sam3_http_check)
         self.sam3_status_label = QLabel("SAM3: --")
-        self.sam3_status_label.setFont(QFont("Monospace", 8))
+        self.sam3_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.sam3_status_label.setToolTip("SAM3 HTTP 服务健康检查")
         segment_layout.addWidget(self.sam3_status_label)
-        segment_layout.addStretch()
+        self._local_ai_launcher = LocalAiLauncher(self)
+        self.local_ai_deploy_btn = QPushButton("本地部署 AI")
+        self.local_ai_deploy_btn.setToolTip(
+            "启动本地 SAM3 分割服务 (run_sam3.sh) 与 Ollama 对话服务。\n"
+            "SAM3: 自动勾选 HTTP，分割模式切到 SAM3 点提示。\n"
+            "Ollama: 自动切换 AI 对话为本地 Qwen 预设。\n"
+            "Docker 内 viewer 时请在宿主机执行: bash run_sam3.sh --host 0.0.0.0"
+        )
+        self.local_ai_deploy_btn.clicked.connect(self._on_local_ai_deploy_clicked)
+        segment_layout.addWidget(self.local_ai_deploy_btn)
+        segment_outer.addLayout(segment_layout)
+
+        sam3_invoke_row = QHBoxLayout()
+        sam3_invoke_row.setSpacing(6)
+        sam3_invoke_row.addWidget(QLabel("提示点"))
+        self.sam3_u_spin = QSpinBox()
+        self.sam3_u_spin.setRange(0, 9999)
+        self.sam3_u_spin.setToolTip("SAM3 点提示横坐标 u（点击图像会自动更新）")
+        sam3_invoke_row.addWidget(QLabel("u"))
+        sam3_invoke_row.addWidget(self.sam3_u_spin)
+        self.sam3_v_spin = QSpinBox()
+        self.sam3_v_spin.setRange(0, 9999)
+        self.sam3_v_spin.setToolTip("SAM3 点提示纵坐标 v（点击图像会自动更新）")
+        sam3_invoke_row.addWidget(QLabel("v"))
+        sam3_invoke_row.addWidget(self.sam3_v_spin)
+        self.sam3_invoke_btn = QPushButton("调用 SAM3")
+        self.sam3_invoke_btn.setToolTip(
+            "对当前彩色图像调用 SAM3 分割，并在下方显示结果；"
+            "成功时会在图像上叠加 mask"
+        )
+        self.sam3_invoke_btn.clicked.connect(self._on_sam3_invoke_clicked)
+        sam3_invoke_row.addWidget(self.sam3_invoke_btn)
+        sam3_invoke_row.addStretch()
+        segment_outer.addLayout(sam3_invoke_row)
+
+        self.sam3_result_edit = QTextEdit()
+        self.sam3_result_edit.setReadOnly(True)
+        self.sam3_result_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sam3_result_edit.setMaximumHeight(108)
+        self.sam3_result_edit.setPlaceholderText("SAM3 调用结果将显示在这里…")
+        self.sam3_result_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        segment_outer.addWidget(self.sam3_result_edit)
+
+        pose_row = QHBoxLayout()
+        pose_row.setSpacing(6)
+        pose_row.addWidget(QLabel("位姿"))
+        self.pose_backend_combo = QComboBox()
+        self.pose_backend_combo.addItem("PCA(点云)", POSE_BACKEND_PCA)
+        self.pose_backend_combo.addItem("FoundationPose", POSE_BACKEND_FOUNDATIONPOSE)
+        self.pose_backend_combo.setToolTip(
+            "FoundationPose 需 CAD mesh + 彩色/深度/分割 mask；"
+            "推荐宿主机运行 run_foundationpose.sh"
+        )
+        self.pose_backend_combo.currentIndexChanged.connect(self._on_pose_settings_changed)
+        pose_row.addWidget(self.pose_backend_combo)
+        self.fp_mesh_edit = QLineEdit()
+        self.fp_mesh_edit.setPlaceholderText("物体 mesh (.obj)")
+        self.fp_mesh_edit.setMinimumWidth(180)
+        self.fp_mesh_edit.setText(FP_MESH_DEFAULT)
+        self.fp_mesh_edit.textChanged.connect(self._on_pose_settings_changed)
+        pose_row.addWidget(self.fp_mesh_edit, 1)
+        self.fp_mesh_browse_btn = QPushButton("…")
+        self.fp_mesh_browse_btn.setFixedWidth(28)
+        self.fp_mesh_browse_btn.setToolTip("选择 mesh 文件")
+        self.fp_mesh_browse_btn.clicked.connect(self._on_fp_mesh_browse_clicked)
+        pose_row.addWidget(self.fp_mesh_browse_btn)
+        self.fp_http_check = QCheckBox("FP HTTP")
+        self.fp_http_check.setChecked(FP_USE_HTTP_DEFAULT)
+        self.fp_http_check.setToolTip(
+            f"勾选后走 FoundationPose 常驻服务 ({FP_SERVER_URL_DEFAULT})"
+        )
+        self.fp_http_check.toggled.connect(self._on_pose_settings_changed)
+        pose_row.addWidget(self.fp_http_check)
+        self.fp_status_label = QLabel("FP: --")
+        self.fp_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.fp_status_label.setMinimumWidth(72)
+        pose_row.addWidget(self.fp_status_label)
+        self.fp_avail_detail_label = QLabel("")
+        self.fp_avail_detail_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.fp_avail_detail_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.fp_avail_detail_label.setToolTip("FoundationPose 可用性明细")
+        pose_row.addWidget(self.fp_avail_detail_label, 1)
+        self.fp_invoke_btn = QPushButton("调用 FP")
+        self.fp_invoke_btn.setToolTip(
+            "对当前彩色+深度图像调用 FoundationPose：先分割再估计 6D 位姿。\n"
+            "mesh 可在 worker 侧配置（run_foundationpose.sh --mesh）；"
+            "Docker viewer 本地无 mesh 时仍可使用 worker 默认 mesh"
+        )
+        self.fp_invoke_btn.clicked.connect(self._on_fp_invoke_clicked)
+        pose_row.addWidget(self.fp_invoke_btn)
+        segment_outer.addLayout(pose_row)
+
+        self.fp_result_edit = QTextEdit()
+        self.fp_result_edit.setReadOnly(True)
+        self.fp_result_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.fp_result_edit.setMaximumHeight(120)
+        self.fp_result_edit.setPlaceholderText("FoundationPose 调用结果将显示在这里…")
+        self.fp_result_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        segment_outer.addWidget(self.fp_result_edit)
+
         control_tabs.addTab(segment_tab, "分割")
+
+        train_tab = QWidget()
+        train_outer = QVBoxLayout(train_tab)
+        train_outer.setContentsMargins(8, 6, 8, 6)
+        train_outer.setSpacing(6)
+
+        train_path_row = QHBoxLayout()
+        train_path_row.setSpacing(6)
+        train_path_row.addWidget(QLabel("psi-policy"))
+        self.train_policy_dir_edit = QLineEdit()
+        self.train_policy_dir_edit.setReadOnly(True)
+        self.train_policy_dir_edit.setPlaceholderText("点击「选择路径」指定 psi-policy 仓库")
+        self.train_policy_dir_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        train_path_row.addWidget(self.train_policy_dir_edit, 1)
+        self.train_browse_policy_btn = QPushButton("选择路径")
+        self.train_browse_policy_btn.setToolTip(
+            "选择 psi-policy 仓库根目录（需包含 psi_policy/train.py）"
+        )
+        self.train_browse_policy_btn.clicked.connect(self._on_train_browse_policy_clicked)
+        train_path_row.addWidget(self.train_browse_policy_btn)
+        train_outer.addLayout(train_path_row)
+
+        train_row1 = QHBoxLayout()
+        train_row1.setSpacing(6)
+        train_row1.addWidget(QLabel("配置"))
+        self.train_config_combo = QComboBox()
+        self.train_config_combo.setMinimumWidth(220)
+        self.train_config_combo.setToolTip("psi-policy Hydra workspace 配置 (example_workspace_*)")
+        psi_repo = resolve_psi_policy_dir()
+        train_configs = list_psi_policy_workspace_configs(psi_repo) if psi_repo else []
+        if not train_configs:
+            train_configs = [PSI_POLICY_CONFIG_DEFAULT]
+        for cfg_name in train_configs:
+            self.train_config_combo.addItem(cfg_name, cfg_name)
+        default_idx = self.train_config_combo.findData(PSI_POLICY_CONFIG_DEFAULT)
+        if default_idx >= 0:
+            self.train_config_combo.setCurrentIndex(default_idx)
+        train_row1.addWidget(self.train_config_combo)
+        train_row1.addWidget(QLabel("datahouse_id"))
+        self.train_datahouse_edit = QLineEdit()
+        self.train_datahouse_edit.setPlaceholderText("数据仓库 ID")
+        self.train_datahouse_edit.setMinimumWidth(120)
+        train_row1.addWidget(self.train_datahouse_edit, 1)
+        train_row1.addWidget(QLabel("view_id"))
+        self.train_view_edit = QLineEdit()
+        self.train_view_edit.setPlaceholderText("训练视图 ID")
+        self.train_view_edit.setMinimumWidth(120)
+        train_row1.addWidget(self.train_view_edit, 1)
+        train_outer.addLayout(train_row1)
+
+        train_row2 = QHBoxLayout()
+        train_row2.setSpacing(6)
+        train_row2.addWidget(QLabel("epochs"))
+        self.train_epochs_spin = QSpinBox()
+        self.train_epochs_spin.setRange(0, 9999)
+        self.train_epochs_spin.setValue(0)
+        self.train_epochs_spin.setSpecialValueText("默认")
+        self.train_epochs_spin.setToolTip("0 表示使用配置文件默认值")
+        self.train_epochs_spin.setFixedWidth(72)
+        train_row2.addWidget(self.train_epochs_spin)
+        train_row2.addWidget(QLabel("batch"))
+        self.train_batch_spin = QSpinBox()
+        self.train_batch_spin.setRange(0, 4096)
+        self.train_batch_spin.setValue(0)
+        self.train_batch_spin.setSpecialValueText("默认")
+        self.train_batch_spin.setToolTip("0 表示使用配置文件默认值")
+        self.train_batch_spin.setFixedWidth(72)
+        train_row2.addWidget(self.train_batch_spin)
+        train_row2.addWidget(QLabel("WandB"))
+        self.train_logging_combo = QComboBox()
+        for mode in PSI_POLICY_LOGGING_MODES:
+            self.train_logging_combo.addItem(mode, mode)
+        self.train_logging_combo.setCurrentIndex(
+            self.train_logging_combo.findData("offline")
+        )
+        self.train_logging_combo.setToolTip("logging.mode：offline / online / disabled")
+        train_row2.addWidget(self.train_logging_combo)
+        train_row2.addWidget(QLabel("GPU数"))
+        self.train_gpu_spin = QSpinBox()
+        self.train_gpu_spin.setRange(1, 16)
+        self.train_gpu_spin.setValue(1)
+        self.train_gpu_spin.setToolTip(">1 时使用 accelerate launch 多卡训练")
+        self.train_gpu_spin.setFixedWidth(52)
+        train_row2.addWidget(self.train_gpu_spin)
+        self.train_status_label = QLabel("训练: 空闲")
+        self.train_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        repo_hint = psi_repo or "(未找到 psi-policy，请设置 PSI_POLICY_DIR)"
+        self.train_status_label.setToolTip(
+            f"psi-policy 目录: {repo_hint}\n"
+            "训练日志实时显示在下方"
+        )
+        train_row2.addWidget(self.train_status_label, 1)
+        self.train_start_btn = QPushButton("开始训练")
+        self.train_start_btn.setToolTip("启动 psi_policy/train.py")
+        self.train_start_btn.clicked.connect(self._on_train_start_clicked)
+        train_row2.addWidget(self.train_start_btn)
+        self.train_stop_btn = QPushButton("停止")
+        self.train_stop_btn.setToolTip("终止当前训练进程")
+        self.train_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.train_stop_btn.setEnabled(False)
+        self.train_stop_btn.clicked.connect(self._on_train_stop_clicked)
+        train_row2.addWidget(self.train_stop_btn)
+        self.train_clear_log_btn = QPushButton("清空日志")
+        self.train_clear_log_btn.clicked.connect(self._on_train_clear_log_clicked)
+        train_row2.addWidget(self.train_clear_log_btn)
+        train_outer.addLayout(train_row2)
+
+        self.train_log_edit = QTextEdit()
+        self.train_log_edit.setReadOnly(True)
+        self.train_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.train_log_edit.setMinimumHeight(140)
+        self.train_log_edit.setMaximumHeight(220)
+        self.train_log_edit.setPlaceholderText("训练日志将在此实时显示…")
+        self.train_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        train_outer.addWidget(self.train_log_edit)
+
+        self._train_launcher = PsiPolicyTrainLauncher(self)
+        self._update_train_path_ui()
+        if self._get_psi_policy_dir() is None:
+            self.train_log_edit.setPlainText(
+                "未找到 psi-policy 仓库。\n"
+                "请点击「选择路径」指定 psi-policy 目录。"
+            )
+        control_tabs.addTab(train_tab, "训练")
 
         control_tab = QWidget()
         control_layout = QVBoxLayout(control_tab)
@@ -5621,7 +7261,7 @@ class CameraTopicWindow(QMainWindow):
         self.left_hand_slider_a.valueChanged.connect(self._on_left_hand_sliders_changed)
         hand_row.addWidget(self.left_hand_slider_a)
         self.left_hand_label_a = QLabel(format_hand_angle_label(LEFT_HAND_ANGLE_A_DEFAULT))
-        self.left_hand_label_a.setFont(QFont("Monospace", 8))
+        self.left_hand_label_a.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.left_hand_label_a.setMinimumWidth(56)
         hand_row.addWidget(self.left_hand_label_a)
 
@@ -5634,7 +7274,7 @@ class CameraTopicWindow(QMainWindow):
         self.left_hand_slider_b.valueChanged.connect(self._on_left_hand_sliders_changed)
         hand_row.addWidget(self.left_hand_slider_b)
         self.left_hand_label_b = QLabel(format_hand_angle_label(LEFT_HAND_ANGLE_B_DEFAULT))
-        self.left_hand_label_b.setFont(QFont("Monospace", 8))
+        self.left_hand_label_b.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.left_hand_label_b.setMinimumWidth(56)
         hand_row.addWidget(self.left_hand_label_b)
 
@@ -5650,18 +7290,42 @@ class CameraTopicWindow(QMainWindow):
         hand_row.addStretch()
         control_layout.addLayout(hand_row)
 
-        arm_row1 = QHBoxLayout()
-        arm_row1.setSpacing(6)
+        enable_row = QHBoxLayout()
+        enable_row.setSpacing(6)
+        self.hand_enable_label = QLabel("手: --")
+        self.hand_enable_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.hand_enable_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        self.hand_enable_btn = QPushButton("启用手")
+        self.hand_enable_btn.setToolTip(
+            "等同踏板 F1 开启手部控制（F1 为开关，按一次开、再按一次关）"
+        )
+        self.hand_enable_btn.clicked.connect(self._on_hand_enable_clicked)
+        enable_row.addWidget(self.hand_enable_label)
+        enable_row.addWidget(self.hand_enable_btn)
+        enable_row.addSpacing(12)
         self.arm_enable_label = QLabel("手臂: --")
-        self.arm_enable_label.setFont(QFont("Monospace", 8))
-        self.arm_enable_label.setStyleSheet("color: #ff8888;")
+        self.arm_enable_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.arm_enable_label.setStyleSheet(f"color: {UI_ACCENT_RED};")
         self.arm_enable_btn = QPushButton("启用手臂")
         self.arm_enable_btn.setToolTip(
             "等同踏板 F2 开启手臂控制（F2 为开关，按一次开、再按一次关）"
         )
         self.arm_enable_btn.clicked.connect(self._on_arm_enable_clicked)
-        arm_row1.addWidget(self.arm_enable_label)
-        arm_row1.addWidget(self.arm_enable_btn)
+        enable_row.addWidget(self.arm_enable_label)
+        enable_row.addWidget(self.arm_enable_btn)
+        enable_row.addSpacing(12)
+        self.control_mode_label = QLabel("mode: --")
+        self.control_mode_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.control_mode_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        self.control_mode_label.setToolTip(
+            f"当前 {CONTROL_MODE_TOPIC}，模型控制/回放需为 {MODEL_CONTROL_MODE}"
+        )
+        enable_row.addWidget(self.control_mode_label)
+        enable_row.addStretch()
+        control_layout.addLayout(enable_row)
+
+        arm_row1 = QHBoxLayout()
+        arm_row1.setSpacing(6)
         arm_row1.addWidget(QLabel("移动速度"))
         self.arm_move_speed_slider = QSlider(Qt.Horizontal)
         self.arm_move_speed_slider.setRange(10, 100)
@@ -5682,7 +7346,7 @@ class CameraTopicWindow(QMainWindow):
         self.arm_move_speed_slider.valueChanged.connect(self._on_arm_move_speed_changed)
         arm_row1.addWidget(self.arm_move_speed_slider)
         self.arm_move_speed_label = QLabel(format_arm_move_speed_label(default_speed_slider))
-        self.arm_move_speed_label.setFont(QFont("Monospace", 8))
+        self.arm_move_speed_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.arm_move_speed_label.setMinimumWidth(72)
         arm_row1.addWidget(self.arm_move_speed_label)
         arm_row1.addStretch()
@@ -5704,11 +7368,11 @@ class CameraTopicWindow(QMainWindow):
         pose_info_box.setSpacing(0)
         pose_info_box.setContentsMargins(6, 0, 0, 0)
         self.arm_pose_current_label = QLabel("当前  左臂 TCP: --")
-        self.arm_pose_current_label.setFont(QFont("Monospace", 8))
-        self.arm_pose_current_label.setStyleSheet("color: #7ec8ff;")
+        self.arm_pose_current_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.arm_pose_current_label.setStyleSheet(f"color: {UI_ACCENT_BLUE};")
         self.arm_pose_target_label = QLabel("目标  左臂 TCP: --")
-        self.arm_pose_target_label.setFont(QFont("Monospace", 8))
-        self.arm_pose_target_label.setStyleSheet("color: #ffb86c;")
+        self.arm_pose_target_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.arm_pose_target_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
         pose_info_box.addWidget(self.arm_pose_current_label)
         pose_info_box.addWidget(self.arm_pose_target_label)
         arm_row2.addLayout(pose_info_box, 1)
@@ -5752,7 +7416,7 @@ class CameraTopicWindow(QMainWindow):
         control_tabs.addTab(control_tab, "手臂/手")
 
         self._left_arm_move_btn_idle_style = ""
-        self._left_arm_move_btn_cancel_style = "color: #ff8888;"
+        self._left_arm_move_btn_cancel_style = f"color: {UI_ACCENT_RED};"
 
         root_layout.addWidget(control_tabs)
 
@@ -5761,8 +7425,10 @@ class CameraTopicWindow(QMainWindow):
         bridge.slow_motion_finished.connect(self._on_slow_motion_finished)
         bridge.robot_state_updated.connect(self._schedule_robot_ui_refresh)
         bridge.arm_enable_changed.connect(self._on_arm_enable_ui_changed)
+        bridge.hand_enable_changed.connect(self._on_hand_enable_ui_changed)
+        bridge.control_mode_changed.connect(self._on_control_mode_ui_changed)
         self._update_left_hand_toggle_ui(self.node.is_left_hand_at_a())
-        self._update_arm_enable_ui()
+        self._update_enable_status_ui()
         self._on_arm_move_speed_changed(self.arm_move_speed_slider.value())
         self._update_left_arm_move_btn_ui(force=True)
 
@@ -5819,6 +7485,11 @@ class CameraTopicWindow(QMainWindow):
         )
         self._replay_launcher.status_message.connect(self.status_bar.showMessage)
         self._replay_launcher.node_active_changed.connect(self._update_replay_ui)
+        self._local_ai_launcher.status_message.connect(self.status_bar.showMessage)
+        self._local_ai_launcher.running_changed.connect(self._update_local_ai_deploy_btn)
+        self._train_launcher.log_line.connect(self._append_train_log)
+        self._train_launcher.status_message.connect(self.status_bar.showMessage)
+        self._train_launcher.running_changed.connect(self._update_train_ui)
         bridge.replay_state_changed.connect(self._update_replay_ui)
 
         bridge.topics_updated.connect(self._on_topics_updated)
@@ -5828,21 +7499,184 @@ class CameraTopicWindow(QMainWindow):
 
         self._ui_timer = QTimer(self)
         self._ui_timer.timeout.connect(self._update_waiting_hint)
+        self._ui_timer.timeout.connect(self._update_robot_enable_status_ui)
         self._ui_timer.start(2000)
         self._sam3_health_timer = QTimer(self)
         self._sam3_health_timer.timeout.connect(self._refresh_sam3_status)
         self._sam3_health_timer.start(5000)
+        self._fp_health_timer = QTimer(self)
+        self._fp_health_timer.timeout.connect(self._refresh_fp_status)
+        self._fp_health_timer.start(5000)
         self._on_segment_settings_changed()
+        self._on_pose_settings_changed()
         self._received_topics: Dict[str, int] = {}
         robot, base = self._stack_launcher.get_cached_status()
         self._update_robot_stack_ui(robot, base)
         self._update_replay_ui()
+        self._update_local_ai_deploy_btn()
+        self._update_train_ui()
+
+    def _get_psi_policy_dir(self) -> Optional[str]:
+        if self._psi_policy_dir_override:
+            return resolve_psi_policy_dir(self._psi_policy_dir_override)
+        return resolve_psi_policy_dir()
+
+    def _update_train_path_ui(self) -> None:
+        repo = self._get_psi_policy_dir()
+        if repo:
+            self.train_policy_dir_edit.setText(repo)
+            self.train_policy_dir_edit.setToolTip(repo)
+        else:
+            self.train_policy_dir_edit.clear()
+            self.train_policy_dir_edit.setToolTip("未找到 psi-policy 仓库")
+        self.train_status_label.setToolTip(
+            f"psi-policy 目录: {repo or '(未设置)'}\n训练日志实时显示在下方"
+        )
+        running = self._train_launcher.is_running()
+        self.train_start_btn.setEnabled(not running and repo is not None)
+        self.train_browse_policy_btn.setEnabled(not running)
+
+    def _refresh_train_config_combo(self) -> None:
+        repo = self._get_psi_policy_dir()
+        current = str(self.train_config_combo.currentData() or PSI_POLICY_CONFIG_DEFAULT)
+        self.train_config_combo.blockSignals(True)
+        self.train_config_combo.clear()
+        configs = list_psi_policy_workspace_configs(repo) if repo else []
+        if not configs:
+            configs = [PSI_POLICY_CONFIG_DEFAULT]
+        for cfg_name in configs:
+            self.train_config_combo.addItem(cfg_name, cfg_name)
+        idx = self.train_config_combo.findData(current)
+        if idx < 0:
+            idx = self.train_config_combo.findData(PSI_POLICY_CONFIG_DEFAULT)
+        if idx >= 0:
+            self.train_config_combo.setCurrentIndex(idx)
+        self.train_config_combo.blockSignals(False)
+
+    def _on_train_browse_policy_clicked(self) -> None:
+        if self._train_launcher.is_running():
+            return
+        current = self._get_psi_policy_dir()
+        initial = current if current and os.path.isdir(current) else os.path.expanduser("~")
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "选择 psi-policy 仓库目录",
+            initial,
+        )
+        if not selected:
+            return
+        if not is_valid_psi_policy_dir(selected):
+            QMessageBox.warning(
+                self,
+                "无效目录",
+                f"所选目录不是有效的 psi-policy 仓库：\n{selected}\n\n"
+                "请确认目录下存在 psi_policy/train.py",
+            )
+            return
+        self._psi_policy_dir_override = os.path.abspath(selected)
+        self._refresh_train_config_combo()
+        self._update_train_path_ui()
+        self.status_bar.showMessage(f"已选择 psi-policy: {self._psi_policy_dir_override}")
+
+    def _append_train_log(self, line: str) -> None:
+        self.train_log_edit.append(line)
+        scrollbar = self.train_log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _update_train_ui(self, *_args) -> None:
+        running = self._train_launcher.is_running()
+        self.train_stop_btn.setEnabled(running)
+        if running:
+            self.train_status_label.setText("训练: 运行中")
+            self.train_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.train_status_label.setText("训练: 空闲")
+            self.train_status_label.setStyleSheet("")
+        self._update_train_path_ui()
+
+    def _on_train_start_clicked(self) -> None:
+        config_name = str(self.train_config_combo.currentData() or PSI_POLICY_CONFIG_DEFAULT)
+        self._train_launcher.start(
+            config_name,
+            self.train_datahouse_edit.text(),
+            self.train_view_edit.text(),
+            repo_dir=self._get_psi_policy_dir(),
+            num_epochs=self.train_epochs_spin.value(),
+            batch_size=self.train_batch_spin.value(),
+            logging_mode=str(self.train_logging_combo.currentData() or "offline"),
+            num_processes=self.train_gpu_spin.value(),
+        )
+        self._update_train_ui()
+
+    def _on_train_stop_clicked(self) -> None:
+        self._train_launcher.stop()
+
+    def _on_train_clear_log_clicked(self) -> None:
+        self.train_log_edit.clear()
+
+    def _update_local_ai_deploy_btn(self, *_args) -> None:
+        running = self._local_ai_launcher.is_sam3_running()
+        if running:
+            self.local_ai_deploy_btn.setText("停止 AI")
+            self.local_ai_deploy_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        else:
+            self.local_ai_deploy_btn.setText("本地部署 AI")
+            self.local_ai_deploy_btn.setStyleSheet("")
+
+    def _configure_sam3_for_local_http(self) -> None:
+        url = resolve_sam3_viewer_server_url()
+        idx = self.segment_backend_combo.findData(SAM3_BACKEND_POINT)
+        if idx >= 0:
+            self.segment_backend_combo.setCurrentIndex(idx)
+        self.sam3_http_check.setChecked(True)
+        set_segment_settings(
+            backend=SAM3_BACKEND_POINT,
+            sam3_text=self.sam3_text_edit.text().strip(),
+            sam3_use_http=True,
+            sam3_server_url=url,
+        )
+        self._on_segment_settings_changed()
+
+    def _on_local_ai_deploy_clicked(self) -> None:
+        if self._local_ai_launcher.is_sam3_running():
+            self._local_ai_launcher.stop()
+            self._update_local_ai_deploy_btn()
+            self._refresh_sam3_status()
+            return
+
+        if resolve_sam3_run_script() is None and is_running_in_docker():
+            QMessageBox.information(
+                self,
+                "本地部署 AI",
+                "当前 viewer 在 Docker 内运行，无法直接启动宿主机 SAM3。\n\n"
+                "请在宿主机终端执行：\n"
+                "  cd ~/workspace_liyichao/eai\n"
+                "  bash run_sam3.sh --host 0.0.0.0\n\n"
+                "启动后本界面会自动通过 HTTP 连接 SAM3，并尝试启动 Ollama。",
+            )
+
+        self._local_ai_launcher.start_deploy()
+        self._configure_sam3_for_local_http()
+        self.chat_panel.apply_local_ollama_preset(silent=True)
+        QTimer.singleShot(2500, self._after_local_ai_deploy)
+
+    def _after_local_ai_deploy(self) -> None:
+        self._update_local_ai_deploy_btn()
+        self._refresh_sam3_status()
+        url = resolve_sam3_viewer_server_url()
+        if check_sam3_server_health(url):
+            self.status_bar.showMessage(f"本地 SAM3 已在线: {url}")
+        elif self._local_ai_launcher.is_sam3_running():
+            self.status_bar.showMessage(f"SAM3 启动中，请稍候… ({url})")
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._ui_timer.stop()
         self._sam3_health_timer.stop()
+        self._fp_health_timer.stop()
         self._stack_launcher.shutdown()
         self._replay_launcher.shutdown()
+        self._local_ai_launcher.shutdown()
+        self._train_launcher.shutdown()
         for panel in self.panels.values():
             if isinstance(panel, DepthPanel3D):
                 panel.stop_robot_timer()
@@ -5895,18 +7729,39 @@ class CameraTopicWindow(QMainWindow):
             )
             return
 
-        warnings = self.node.get_replay_prerequisite_warnings()
+        robot, stack = self._stack_launcher.get_cached_status()
+        if stack != "运行中":
+            if self.node.is_hal_arm_ready() or robot in ("就绪", "启动中"):
+                self._stack_launcher.start_stack()
+                self.status_bar.showMessage(
+                    "手/臂服务栈启动中，回放将自动切 model 模式并使能手/臂…",
+                    8000,
+                )
+            else:
+                reply = QMessageBox.warning(
+                    self,
+                    "回放前置条件",
+                    "手/臂服务栈未运行，且 HAL 未就绪。\n\n"
+                    "请先点击「启动机器人栈」，或仍要继续仅启动回放节点？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
+
+        warnings = self.node.prepare_for_rrd_replay()
         if warnings:
             reply = QMessageBox.warning(
                 self,
                 "回放前置条件",
-                "当前未满足回放条件：\n\n"
+                "当前未完全满足回放条件（将自动重试使能/切模式）：\n\n"
                 + "\n".join(f"• {w}" for w in warnings)
-                + "\n\n请先手动 F1/F2 使能，或仍要继续启动回放节点？",
+                + "\n\n仍要继续启动回放节点？",
                 QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+                QMessageBox.Yes,
             )
             if reply != QMessageBox.Yes:
+                self.node._stop_replay_prep_mode_timer()
                 return
 
         self._replay_launcher.start(
@@ -5954,10 +7809,354 @@ class CameraTopicWindow(QMainWindow):
         elif state in (2, 0) and node_running:
             color = "#ffb86c"
         elif state in (3, 4):
-            color = "#888888"
+            color = UI_TEXT_MUTED
         else:
             color = "#7ec8ff"
         self.replay_status_label.setStyleSheet(f"color: {color};")
+
+    def _set_sam3_result_text(self, text: str) -> None:
+        self.sam3_result_edit.setPlainText(text)
+
+    def _on_sam3_click_uv(self, topic: str, u: int, v: int) -> None:
+        self._last_sam3_topic = topic
+        self.sam3_u_spin.setValue(max(0, int(u)))
+        self.sam3_v_spin.setValue(max(0, int(v)))
+
+    def _pick_sam3_color_source(
+        self,
+    ) -> Optional[Tuple[str, np.ndarray, Optional[CameraPanel]]]:
+        if self._last_sam3_topic:
+            panel = self.panels.get(self._last_sam3_topic)
+            if isinstance(panel, CameraPanel) and panel._latest_image is not None:
+                return (
+                    self._last_sam3_topic,
+                    panel._latest_image.copy(),
+                    panel,
+                )
+        for topic, panel in sorted(self.panels.items()):
+            if is_depth_topic(topic) or not isinstance(panel, CameraPanel):
+                continue
+            if panel._latest_image is not None:
+                return topic, panel._latest_image.copy(), panel
+        for topic in sorted(self._frame_cache.keys()):
+            if is_depth_topic(topic):
+                continue
+            image = self._frame_cache.get(topic)
+            if image is None or np.asarray(image).ndim < 2:
+                continue
+            panel = self.panels.get(topic)
+            return (
+                topic,
+                np.asarray(image).copy(),
+                panel if isinstance(panel, CameraPanel) else None,
+            )
+        return None
+
+    def _on_sam3_invoke_clicked(self) -> None:
+        if self._sam3_call_busy:
+            return
+        source = self._pick_sam3_color_source()
+        if source is None:
+            self._set_sam3_result_text(
+                "错误: 无可用彩色图像\n请勾选 color topic 并等待图像到达"
+            )
+            self.status_bar.showMessage("SAM3: 无可用彩色图像")
+            return
+
+        topic, image, _panel = source
+        h, w = image.shape[:2]
+        u = max(0, min(w - 1, self.sam3_u_spin.value()))
+        v = max(0, min(h - 1, self.sam3_v_spin.value()))
+        self.sam3_u_spin.setMaximum(max(u, w - 1))
+        self.sam3_v_spin.setMaximum(max(v, h - 1))
+        self.sam3_u_spin.setValue(u)
+        self.sam3_v_spin.setValue(v)
+
+        backend = self.segment_backend_combo.currentData()
+        if not isinstance(backend, str):
+            backend = SAM3_BACKEND_POINT
+        if backend == SAM3_BACKEND_GEOMETRY:
+            backend = SAM3_BACKEND_POINT
+
+        self._on_segment_settings_changed()
+        cfg = get_segment_settings()
+        text = self.sam3_text_edit.text().strip() if backend == SAM3_BACKEND_TEXT else ""
+        transport = "HTTP" if cfg.sam3_use_http else "子进程"
+
+        self._sam3_call_busy = True
+        self.sam3_invoke_btn.setEnabled(False)
+        self.sam3_invoke_btn.setText("SAM3 调用中…")
+        self._set_sam3_result_text(
+            f"正在调用 SAM3…\n图像: {topic}\n"
+            f"模型: {cfg.sam3_model}\n"
+            + (f"文本: {text}\n" if text else f"点: ({u}, {v})\n")
+            + f"传输: {transport}"
+        )
+
+        def _work() -> None:
+            t0 = time.time()
+            try:
+                mask, method = run_sam3_segmentation(
+                    image, u, v, text=text or None, settings=cfg, tag="invoke_btn"
+                )
+                if not mask.any():
+                    raise RuntimeError("SAM3 返回空 mask")
+                if int(mask.sum()) < SEGMENT_MIN_AREA:
+                    raise RuntimeError(
+                        f"SAM3 mask 过小 ({int(mask.sum())} px < {SEGMENT_MIN_AREA})"
+                    )
+                ys, xs = np.where(mask)
+                centroid = (
+                    (float(np.mean(xs)), float(np.mean(ys)))
+                    if len(xs) > 0
+                    else (float(u), float(v))
+                )
+                result = Sam3CallResult(
+                    ok=True,
+                    topic=topic,
+                    u=u,
+                    v=v,
+                    text=text,
+                    method=method,
+                    pixel_count=int(mask.sum()),
+                    mask_shape=(mask.shape[0], mask.shape[1]),
+                    centroid_uv=centroid,
+                    transport=transport,
+                    elapsed_s=time.time() - t0,
+                    mask=mask,
+                )
+            except Exception as exc:
+                result = Sam3CallResult(
+                    ok=False,
+                    topic=topic,
+                    u=u,
+                    v=v,
+                    text=text,
+                    transport=transport,
+                    elapsed_s=time.time() - t0,
+                    error=str(exc),
+                )
+            self._sam3_call_bridge.finished.emit(result)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_sam3_call_finished(self, result: object) -> None:
+        self._sam3_call_busy = False
+        self.sam3_invoke_btn.setEnabled(True)
+        self.sam3_invoke_btn.setText("调用 SAM3")
+        if not isinstance(result, Sam3CallResult):
+            return
+
+        self._set_sam3_result_text(format_sam3_call_result_text(result))
+        if result.ok and result.mask is not None:
+            panel = self.panels.get(result.topic)
+            if isinstance(panel, CameraPanel):
+                panel.show_sam3_mask(result.mask, result.u, result.v)
+            self.status_bar.showMessage(
+                f"SAM3 成功: {result.pixel_count} px ({result.method})"
+            )
+        elif result.ok:
+            self.status_bar.showMessage("SAM3 成功")
+        else:
+            self.status_bar.showMessage(f"SAM3 失败: {result.error[:120]}")
+
+    def _set_fp_result_text(self, text: str) -> None:
+        self.fp_result_edit.setPlainText(text)
+
+    def _pick_fp_stereo_source(
+        self,
+    ) -> Optional[Tuple[str, np.ndarray, str, np.ndarray, int, int]]:
+        color_source = self._pick_sam3_color_source()
+        if color_source is None:
+            return None
+        color_topic, color_bgr, _panel = color_source
+        if not self._is_paired_depth_enabled(color_topic):
+            return None
+        depth_topic = self._get_paired_depth_topic_name(color_topic)
+        if not depth_topic:
+            return None
+        depth = self._get_paired_depth_frame(color_topic)
+        if depth is None or np.asarray(depth).ndim < 2:
+            return None
+        depth = np.asarray(depth)
+        ch, cw = color_bgr.shape[:2]
+        u = max(0, min(cw - 1, self.sam3_u_spin.value()))
+        v = max(0, min(ch - 1, self.sam3_v_spin.value()))
+        return color_topic, color_bgr, depth_topic, depth, u, v
+
+    def _on_fp_invoke_clicked(self) -> None:
+        if self._fp_call_busy:
+            return
+        self._on_pose_settings_changed()
+        pcfg = get_pose_settings()
+        mesh_path, mesh_source = resolve_fp_mesh_for_call(
+            pcfg.fp_mesh,
+            pcfg.fp_use_http,
+            pcfg.fp_server_url,
+        )
+        mesh_display = mesh_path if mesh_source != "local" else pcfg.fp_mesh
+
+        source = self._pick_fp_stereo_source()
+        if source is None:
+            self._set_fp_result_text(
+                "错误: 需要彩色图 + 已勾选的配对 depth topic\n"
+                "请勾选 color 与对应 depth，并在图像上设置提示点 (u,v)"
+            )
+            self.status_bar.showMessage("FoundationPose: 缺少彩色/深度数据")
+            return
+
+        color_topic, color_bgr, depth_topic, depth, u, v = source
+        dh, dw = depth.shape[:2]
+        u_d, v_d = scale_uv_to_shape(u, v, color_bgr.shape[:2], (dh, dw))
+        fx, fy, cx, cy = self.node.get_intrinsics(depth_topic, dw, dh)
+        transport = "HTTP" if pcfg.fp_use_http else "子进程"
+
+        self._fp_call_busy = True
+        self.fp_invoke_btn.setEnabled(False)
+        self.fp_invoke_btn.setText("FP 调用中…")
+        self._set_fp_result_text(
+            f"正在调用 FoundationPose…\n"
+            f"彩色: {color_topic}\n"
+            f"深度: {depth_topic}\n"
+            f"点: color({u},{v}) depth({u_d},{v_d})\n"
+            f"mesh: {mesh_display} ({mesh_source})\n"
+            f"传输: {transport}"
+        )
+        scfg = get_segment_settings()
+
+        def _work() -> None:
+            t0 = time.time()
+            try:
+                mask, seg_method = segment_object_at_click_with_backend(
+                    u_d,
+                    v_d,
+                    depth,
+                    color_bgr=color_bgr,
+                    settings=scfg,
+                )
+                if not mask.any():
+                    raise RuntimeError("分割失败（无有效 mask）")
+                fp_body = run_foundationpose_estimation(
+                    color_bgr,
+                    depth,
+                    mask,
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    settings=pcfg,
+                    tag="invoke_btn",
+                )
+                pose_result = object6d_from_foundationpose(
+                    mask,
+                    depth,
+                    u_d,
+                    v_d,
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    fp_body,
+                    segment_method=seg_method,
+                )
+                if pose_result is None:
+                    raise RuntimeError("FoundationPose 响应无效")
+                result = FpCallResult(
+                    ok=True,
+                    color_topic=color_topic,
+                    depth_topic=depth_topic,
+                    u=u,
+                    v=v,
+                    mesh=mesh_display,
+                    segment_method=seg_method,
+                    pose_method=str(fp_body.get("method") or "foundationpose"),
+                    transport=transport,
+                    elapsed_s=time.time() - t0,
+                    mask=mask,
+                    pose_result=pose_result,
+                )
+            except Exception as exc:
+                result = FpCallResult(
+                    ok=False,
+                    color_topic=color_topic,
+                    depth_topic=depth_topic,
+                    u=u,
+                    v=v,
+                    mesh=mesh_display,
+                    transport=transport,
+                    elapsed_s=time.time() - t0,
+                    error=str(exc),
+                )
+            self._fp_call_bridge.finished.emit(result)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_fp_call_finished(self, result: object) -> None:
+        self._fp_call_busy = False
+        self.fp_invoke_btn.setText("调用 FP")
+        if not isinstance(result, FpCallResult):
+            self._refresh_fp_status()
+            return
+
+        self._set_fp_result_text(format_fp_call_result_text(result))
+        if not result.ok or result.pose_result is None:
+            if result.ok:
+                self.status_bar.showMessage("FoundationPose 成功")
+            else:
+                self.status_bar.showMessage(f"FoundationPose 失败: {result.error[:120]}")
+            self._refresh_fp_status()
+            return
+
+        pose = result.pose_result
+        color_panel = self.panels.get(result.color_topic)
+        if isinstance(color_panel, CameraPanel) and color_panel._latest_image is not None:
+            dh, dw = pose.mask.shape[:2]
+            intrinsics = self.node.get_intrinsics(result.depth_topic, dw, dh)
+            overlay = build_pose_overlay_image(
+                color_panel._latest_image,
+                pose,
+                intrinsics,
+                max_dim=SEGMENT_OVERLAY_MAX_DIM,
+            )
+            if overlay is not None:
+                color_panel.image_label.set_precomposed_display(overlay)
+            elif result.mask is not None:
+                color_panel.show_sam3_mask(result.mask, result.u, result.v)
+
+        depth_panel = self.panels.get(result.depth_topic)
+        if isinstance(depth_panel, DepthPanel3D):
+            dh, dw = depth_panel._depth_full_shape
+            mask_p = resize_mask_to_shape(pose.mask, depth_panel._preview_shape)
+            cu, cv_pt = scale_uv_to_shape(
+                int(round(pose.centroid_uv[0])),
+                int(round(pose.centroid_uv[1])),
+                (dh, dw),
+                depth_panel._preview_shape,
+            )
+            contact_u, contact_v = scale_uv_to_shape(
+                int(round(pose.contact_uv[0])),
+                int(round(pose.contact_uv[1])),
+                (dh, dw),
+                depth_panel._preview_shape,
+            )
+            depth_panel.depth_preview.set_segment_overlay(
+                mask_p,
+                (float(cu), float(cv_pt)),
+                obb_corners=pose.obb_corners,
+                intrinsics=depth_panel._preview_intrinsics,
+                contact_uv=(float(contact_u), float(contact_v)),
+            )
+            depth_panel._show_pose_6d(pose)
+
+        camera_frame = self.node.resolve_segment_camera_frame(
+            result.color_topic, result.depth_topic
+        )
+        if camera_frame:
+            self._last_segment_target = SegmentPoseTarget.from_pose_result(
+                pose, camera_frame, result.color_topic
+            )
+        self.status_bar.showMessage(f"FoundationPose 成功 ({result.pose_method})")
+        self._refresh_fp_status()
 
     def _on_segment_settings_changed(self, *_args) -> None:
         backend = self.segment_backend_combo.currentData()
@@ -5970,7 +8169,10 @@ class CameraTopicWindow(QMainWindow):
             backend=backend,
             sam3_text=self.sam3_text_edit.text().strip(),
             sam3_use_http=self.sam3_http_check.isChecked() and use_sam3,
-            sam3_server_url=SAM3_SERVER_URL_DEFAULT,
+            sam3_server_url=resolve_sam3_viewer_server_url()
+            if (self.sam3_http_check.isChecked() and use_sam3)
+            else SAM3_SERVER_URL_DEFAULT,
+            sam3_model=resolve_sam3_model_path(),
         )
         self._refresh_sam3_status()
 
@@ -5978,22 +8180,86 @@ class CameraTopicWindow(QMainWindow):
         cfg = get_segment_settings()
         if cfg.backend == SAM3_BACKEND_GEOMETRY:
             self.sam3_status_label.setText("SAM3: 关")
-            self.sam3_status_label.setStyleSheet("color: #888;")
+            self.sam3_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
             return
         if cfg.sam3_use_http:
             ok = check_sam3_server_health(cfg.sam3_server_url)
             if ok:
                 self.sam3_status_label.setText("SAM3: 在线")
-                self.sam3_status_label.setStyleSheet("color: #50fa7b;")
+                self.sam3_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
             else:
                 self.sam3_status_label.setText("SAM3: 离线")
-                self.sam3_status_label.setStyleSheet("color: #ff5555;")
+                self.sam3_status_label.setStyleSheet(f"color: {UI_ACCENT_RED};")
         else:
             self.sam3_status_label.setText("SAM3: 子进程")
-            self.sam3_status_label.setStyleSheet("color: #ffb86c;")
+            self.sam3_status_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+
+    def _on_pose_settings_changed(self, *_args) -> None:
+        backend = self.pose_backend_combo.currentData()
+        if not isinstance(backend, str):
+            backend = POSE_BACKEND_PCA
+        self.fp_mesh_edit.setEnabled(True)
+        self.fp_mesh_browse_btn.setEnabled(True)
+        self.fp_http_check.setEnabled(True)
+        self.fp_invoke_btn.setEnabled(not self._fp_call_busy)
+        mesh_path = self.fp_mesh_edit.text().strip() or resolve_fp_mesh_path()
+        use_http = self.fp_http_check.isChecked()
+        server_url = (
+            resolve_fp_viewer_server_url()
+            if use_http
+            else FP_SERVER_URL_DEFAULT
+        )
+        set_pose_settings(
+            backend=backend,
+            fp_use_http=use_http,
+            fp_server_url=server_url,
+            fp_mesh=mesh_path,
+        )
+        self._refresh_fp_status()
+
+    def _refresh_fp_status(self) -> None:
+        cfg = get_pose_settings()
+        use_http = self.fp_http_check.isChecked()
+        server_url = (
+            resolve_fp_viewer_server_url() if use_http else cfg.fp_server_url
+        )
+        status = evaluate_fp_availability(
+            cfg.fp_mesh,
+            use_http=use_http,
+            server_url=server_url,
+        )
+        self.fp_status_label.setText(f"FP: {status.label}")
+        self.fp_status_label.setStyleSheet(f"color: {status.color};")
+        self.fp_status_label.setToolTip(status.tooltip)
+        self.fp_avail_detail_label.setText(status.detail)
+        self.fp_avail_detail_label.setToolTip(status.tooltip)
+        if not self._fp_call_busy:
+            self.fp_invoke_btn.setEnabled(status.can_invoke)
+        pose_hint = ""
+        if cfg.backend == POSE_BACKEND_FOUNDATIONPOSE:
+            pose_hint = "点击分割将使用 FoundationPose"
+        elif status.can_invoke:
+            pose_hint = "点击分割用 PCA；「调用 FP」按钮可用"
+        if pose_hint and not self._fp_call_busy:
+            self.fp_avail_detail_label.setToolTip(f"{status.tooltip}\n{pose_hint}")
+
+    def _on_fp_mesh_browse_clicked(self) -> None:
+        initial = self.fp_mesh_edit.text().strip()
+        if not initial or not os.path.isfile(initial):
+            initial = os.path.dirname(resolve_fp_mesh_path())
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择物体 mesh",
+            initial if os.path.isdir(initial) else os.path.expanduser("~"),
+            "Mesh (*.obj *.OBJ);;All Files (*)",
+        )
+        if path:
+            self.fp_mesh_edit.setText(path)
+            self._on_pose_settings_changed()
 
     def _on_stack_status_changed(self, robot: str, base: str) -> None:
         self._update_robot_stack_ui(robot, base)
+        self._update_robot_enable_status_ui()
 
     def _update_robot_stack_ui(
         self,
@@ -6002,13 +8268,13 @@ class CameraTopicWindow(QMainWindow):
     ) -> None:
         if robot is None or base is None:
             robot, base = self._stack_launcher.get_cached_status()
-        self.robot_stack_status.setText(f"robot: {robot} | base: {base}")
+        self.robot_stack_status.setText(f"robot: {robot} | stack: {base}")
         if base == "运行中":
             self.robot_stack_status.setStyleSheet("color: #88ff88;")
         elif base == "启动中" or robot == "启动中":
             self.robot_stack_status.setStyleSheet("color: #ffcc66;")
         else:
-            self.robot_stack_status.setStyleSheet("color: #aaaaaa;")
+            self.robot_stack_status.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
         busy = base in ("运行中", "启动中") or robot == "启动中"
         self.robot_stack_btn.setEnabled(not busy)
         if base == "运行中":
@@ -6016,7 +8282,7 @@ class CameraTopicWindow(QMainWindow):
         elif robot == "启动中":
             self.robot_stack_btn.setText("robot 启动中…")
         elif base == "启动中":
-            self.robot_stack_btn.setText("base 启动中…")
+            self.robot_stack_btn.setText("服务栈启动中…")
         else:
             self.robot_stack_btn.setText("启动机器人栈")
 
@@ -6039,8 +8305,8 @@ class CameraTopicWindow(QMainWindow):
         next_preset = "B" if at_a else "A"
         next_pos = pos_b if at_a else pos_a
         self.left_hand_toggle_btn.setText(f"左手: 切到{next_preset} ({next_pos:.2f})")
-        active_style = "font-weight: bold; color: #7ec8ff;"
-        idle_style = "color: #888;"
+        active_style = f"font-weight: bold; color: {UI_ACCENT_BLUE};"
+        idle_style = f"color: {UI_TEXT_MUTED};"
         self.left_hand_label_a.setStyleSheet(active_style if at_a else idle_style)
         self.left_hand_label_b.setStyleSheet(active_style if not at_a else idle_style)
 
@@ -6095,10 +8361,82 @@ class CameraTopicWindow(QMainWindow):
         msg = self.node.request_arm_enable(enable=enable)
         self.status_bar.showMessage(msg)
 
+    def _on_hand_enable_clicked(self) -> None:
+        enable = not self.node.is_hand_enabled()
+        msg = self.node.request_hand_enable(enable=enable)
+        self.status_bar.showMessage(msg)
+
     def _on_arm_enable_ui_changed(self, enabled: bool) -> None:
-        self._update_arm_enable_ui()
+        self._update_enable_status_ui()
         if enabled:
             self._try_finish_pending_arm_move()
+
+    def _on_hand_enable_ui_changed(self, _enabled: bool) -> None:
+        self._update_enable_status_ui()
+
+    def _on_control_mode_ui_changed(self, _mode: int) -> None:
+        self._update_enable_status_ui()
+
+    @staticmethod
+    def _style_enable_label(label: QLabel, received: bool, enabled: bool) -> None:
+        if not received:
+            label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        elif enabled:
+            label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            label.setStyleSheet(f"color: {UI_ACCENT_RED};")
+
+    def _update_robot_enable_status_ui(self) -> None:
+        arm_received = self.node._arm_enable_received_at > 0
+        hand_received = self.node._hand_enable_received_at > 0
+        arm_enabled = self.node.is_arm_enabled()
+        hand_enabled = self.node.is_hand_enabled()
+
+        if not arm_received:
+            arm_text = "手臂: 等待"
+        else:
+            arm_text = f"手臂: {'已使能' if arm_enabled else '未使能'}"
+        self.robot_arm_enable_label.setText(arm_text)
+        self._style_enable_label(self.robot_arm_enable_label, arm_received, arm_enabled)
+
+        if not hand_received:
+            hand_text = "手: 等待"
+        else:
+            hand_text = f"手: {'已使能' if hand_enabled else '未使能'}"
+        self.robot_hand_enable_label.setText(hand_text)
+        self._style_enable_label(self.robot_hand_enable_label, hand_received, hand_enabled)
+
+        mode_label = self.node.get_control_mode_label()
+        self.robot_control_mode_label.setText(mode_label)
+        if self.node._control_mode_received_at <= 0:
+            self.robot_control_mode_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        elif self.node._control_mode == MODEL_CONTROL_MODE:
+            self.robot_control_mode_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.robot_control_mode_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+
+    def _update_hand_enable_ui(self) -> None:
+        self.hand_enable_label.setText(self.node.get_hand_enable_label())
+        received = self.node._hand_enable_received_at > 0
+        enabled = self.node.is_hand_enabled()
+        self._style_enable_label(self.hand_enable_label, received, enabled)
+        btn_text = "关闭手" if enabled else "启用手"
+        self.hand_enable_btn.setText(btn_text)
+        if hasattr(self, "robot_hand_enable_btn"):
+            self.robot_hand_enable_btn.setText(btn_text)
+
+    def _update_enable_status_ui(self) -> None:
+        self._update_arm_enable_ui()
+        self._update_hand_enable_ui()
+        self._update_robot_enable_status_ui()
+        mode_text = self.node.get_control_mode_label()
+        self.control_mode_label.setText(mode_text)
+        if self.node._control_mode_received_at <= 0:
+            self.control_mode_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        elif self.node._control_mode == MODEL_CONTROL_MODE:
+            self.control_mode_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.control_mode_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
 
     def _try_finish_pending_arm_move(self) -> None:
         if self._pending_arm_move_goal is None or not self.node.is_arm_enabled():
@@ -6128,13 +8466,13 @@ class CameraTopicWindow(QMainWindow):
 
     def _update_arm_enable_ui(self) -> None:
         self.arm_enable_label.setText(self.node.get_arm_enable_label())
+        received = self.node._arm_enable_received_at > 0
         enabled = self.node.is_arm_enabled()
-        if enabled:
-            self.arm_enable_label.setStyleSheet("color: #50fa7b;")
-            self.arm_enable_btn.setText("关闭手臂")
-        else:
-            self.arm_enable_label.setStyleSheet("color: #ff8888;")
-            self.arm_enable_btn.setText("启用手臂")
+        self._style_enable_label(self.arm_enable_label, received, enabled)
+        btn_text = "关闭手臂" if enabled else "启用手臂"
+        self.arm_enable_btn.setText(btn_text)
+        if hasattr(self, "robot_arm_enable_btn"):
+            self.robot_arm_enable_btn.setText(btn_text)
 
     def _can_start_arm_move(self) -> bool:
         if self.node.is_slow_motion_busy():
@@ -6359,7 +8697,7 @@ class CameraTopicWindow(QMainWindow):
 
         if not topics:
             empty = QLabel("未发现匹配的 topic")
-            empty.setStyleSheet("color: #888; padding: 8px;")
+            empty.setStyleSheet(f"color: {UI_TEXT_MUTED}; padding: 8px;")
             self.topic_list_layout.addWidget(empty)
             self._rebuild_panels(set())
             return
@@ -6440,6 +8778,7 @@ class CameraTopicWindow(QMainWindow):
                     resolve_segment_camera_frame=self.node.resolve_segment_camera_frame,
                     get_tf_buffer=self.node.get_tf_buffer,
                     on_segment_pose=self._store_segment_target,
+                    on_click_uv=self._on_sam3_click_uv,
                     status_callback=self.status_bar.showMessage,
                 )
 
@@ -6536,12 +8875,105 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def apply_viewer_theme(app: QApplication) -> None:
+    """统一深色主题，提高标签/输入框/标签页文字对比度。"""
+    palette = QPalette()
+    palette.setColor(QPalette.Window, QColor("#2b2b2b"))
+    palette.setColor(QPalette.WindowText, QColor(UI_TEXT_PRIMARY))
+    palette.setColor(QPalette.Base, QColor("#1e1e1e"))
+    palette.setColor(QPalette.AlternateBase, QColor("#353535"))
+    palette.setColor(QPalette.Text, QColor(UI_TEXT_PRIMARY))
+    palette.setColor(QPalette.Button, QColor("#3a3a3a"))
+    palette.setColor(QPalette.ButtonText, QColor(UI_TEXT_PRIMARY))
+    palette.setColor(QPalette.Highlight, QColor("#3d6ea8"))
+    palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
+    palette.setColor(QPalette.ToolTipBase, QColor("#2d2d2d"))
+    palette.setColor(QPalette.ToolTipText, QColor(UI_TEXT_PRIMARY))
+    palette.setColor(QPalette.PlaceholderText, QColor(UI_TEXT_PLACEHOLDER))
+    app.setPalette(palette)
+    app.setStyleSheet(
+        f"""
+        QWidget {{
+            font-size: {UI_MONO_SIZE_NORMAL}pt;
+        }}
+        QLabel {{
+            color: {UI_TEXT_PRIMARY};
+        }}
+        QTabWidget::pane {{
+            border: 1px solid #555;
+            background: #2b2b2b;
+        }}
+        QTabBar::tab {{
+            color: {UI_TEXT_SECONDARY};
+            background: #333333;
+            padding: 6px 14px;
+            margin-right: 2px;
+            border: 1px solid #555;
+        }}
+        QTabBar::tab:selected {{
+            color: #ffffff;
+            background: #3d3d3d;
+            font-weight: bold;
+        }}
+        QGroupBox {{
+            color: {UI_TEXT_PRIMARY};
+            border: 1px solid #555;
+            margin-top: 8px;
+            padding-top: 8px;
+        }}
+        QGroupBox::title {{
+            subcontrol-origin: margin;
+            left: 8px;
+            padding: 0 4px;
+            color: #f5f5f5;
+        }}
+        QCheckBox, QRadioButton {{
+            color: {UI_TEXT_PRIMARY};
+            spacing: 6px;
+        }}
+        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+            color: {UI_TEXT_PRIMARY};
+            background-color: #2d2d2d;
+            border: 1px solid #555;
+            padding: 2px 4px;
+            selection-background-color: #3d6ea8;
+        }}
+        QComboBox QAbstractItemView {{
+            color: {UI_TEXT_PRIMARY};
+            background-color: #2d2d2d;
+            selection-background-color: #3d6ea8;
+        }}
+        QPushButton {{
+            color: {UI_TEXT_PRIMARY};
+            background-color: #3a3a3a;
+            border: 1px solid #555;
+            padding: 4px 10px;
+        }}
+        QPushButton:hover {{
+            background-color: #454545;
+        }}
+        QPushButton:disabled {{
+            color: {UI_TEXT_MUTED};
+            background-color: #2a2a2a;
+        }}
+        QStatusBar {{
+            color: {UI_TEXT_PRIMARY};
+            background: #252525;
+        }}
+        QScrollArea {{
+            border: none;
+        }}
+        """
+    )
+
+
 def main() -> int:
     args = parse_args()
     rclpy.init()
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    apply_viewer_theme(app)
     app.setQuitOnLastWindowClosed(True)
 
     bridge = RosBridge()

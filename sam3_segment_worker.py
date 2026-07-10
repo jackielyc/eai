@@ -23,6 +23,7 @@ import base64
 import json
 import sys
 import tempfile
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -32,6 +33,26 @@ import numpy as np
 
 _MODEL = None
 _MODEL_PATH = ""
+_SERVER_DEFAULT_MODEL = ""
+
+
+def _resolve_model_path(requested: Any) -> str:
+    """优先使用已加载模型或存在的权重文件，避免请求里写死 sam3.pt。"""
+    global _MODEL_PATH, _SERVER_DEFAULT_MODEL
+    req = str(requested or "").strip()
+    candidates: list[Path] = []
+    if req:
+        candidates.append(Path(req).expanduser())
+    if _MODEL_PATH:
+        candidates.append(Path(_MODEL_PATH).expanduser())
+    if _SERVER_DEFAULT_MODEL:
+        candidates.append(Path(_SERVER_DEFAULT_MODEL).expanduser())
+    for path in candidates:
+        if path.is_file():
+            return str(path.resolve())
+    if _MODEL is not None and _MODEL_PATH:
+        return _MODEL_PATH
+    return req or "sam3.pt"
 
 
 def _load_sam(model_path: str):
@@ -149,24 +170,89 @@ def segment_with_text(
     return _resize_mask(mask, h, w), f"sam3-text:{text.strip()}"
 
 
-def segment_request(payload: Dict[str, Any]) -> Dict[str, Any]:
-    model_path = str(payload.get("model") or "sam3.pt")
-    image_b64 = payload.get("image_b64")
-    if not image_b64:
-        raise ValueError("缺少 image_b64")
-    image = _decode_image_b64(str(image_b64))
-    text = str(payload.get("text") or "").strip()
-    if text:
-        mask, method = segment_with_text(image, text, model_path)
-    else:
-        if "u" not in payload or "v" not in payload:
-            raise ValueError("点提示需要 u, v；或提供 text")
-        mask, method = segment_with_point(
-            image, int(payload["u"]), int(payload["v"]), model_path
-        )
-    if not mask.any():
-        raise RuntimeError("SAM3 返回空 mask")
-    return {"ok": True, "method": method, "mask": _encode_mask(mask)}
+def _summarize_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {}
+    for key, value in payload.items():
+        if key == "image_b64":
+            text = str(value)
+            summary["image_b64"] = f"<base64 {len(text)} chars>"
+        else:
+            summary[key] = value
+    return summary
+
+
+def _summarize_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    if not result.get("ok"):
+        return {"ok": False, "error": result.get("error")}
+    summary: Dict[str, Any] = {
+        "ok": True,
+        "method": result.get("method"),
+    }
+    mask_payload = result.get("mask")
+    if isinstance(mask_payload, dict):
+        h = int(mask_payload.get("h", 0))
+        w = int(mask_payload.get("w", 0))
+        try:
+            mask = decode_mask_payload(mask_payload)
+            summary["mask"] = {
+                "h": h,
+                "w": w,
+                "pixels": int(mask.sum()),
+            }
+        except Exception as exc:
+            summary["mask"] = {"h": h, "w": w, "decode_error": str(exc)}
+    return summary
+
+
+def _log_request_result(
+    tag: str,
+    request_summary: Dict[str, Any],
+    result_summary: Dict[str, Any],
+    elapsed_s: float,
+) -> None:
+    print(
+        f"[SAM3 {tag}] request: {json.dumps(request_summary, ensure_ascii=False)}",
+        file=sys.stderr,
+        flush=True,
+    )
+    print(
+        f"[SAM3 {tag}] result ({elapsed_s:.3f}s): "
+        f"{json.dumps(result_summary, ensure_ascii=False)}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def segment_request(payload: Dict[str, Any], *, tag: str = "segment") -> Dict[str, Any]:
+    t0 = time.time()
+    request_summary = _summarize_payload(payload)
+    try:
+        model_path = _resolve_model_path(payload.get("model"))
+        request_summary["model_resolved"] = model_path
+        image_b64 = payload.get("image_b64")
+        if not image_b64:
+            raise ValueError("缺少 image_b64")
+        image = _decode_image_b64(str(image_b64))
+        h, w = image.shape[:2]
+        request_summary["image_shape"] = [int(h), int(w), int(image.shape[2])]
+        text = str(payload.get("text") or "").strip()
+        if text:
+            mask, method = segment_with_text(image, text, model_path)
+        else:
+            if "u" not in payload or "v" not in payload:
+                raise ValueError("点提示需要 u, v；或提供 text")
+            mask, method = segment_with_point(
+                image, int(payload["u"]), int(payload["v"]), model_path
+            )
+        if not mask.any():
+            raise RuntimeError("SAM3 返回空 mask")
+        result = {"ok": True, "method": method, "mask": _encode_mask(mask)}
+        _log_request_result(tag, request_summary, _summarize_result(result), time.time() - t0)
+        return result
+    except Exception as exc:
+        error_result = {"ok": False, "error": str(exc)}
+        _log_request_result(tag, request_summary, error_result, time.time() - t0)
+        raise
 
 
 def run_once() -> int:
@@ -176,7 +262,7 @@ def run_once() -> int:
         return 1
     try:
         payload = json.loads(raw)
-        result = segment_request(payload)
+        result = segment_request(payload, tag="once")
         print(json.dumps(result), flush=True)
         return 0
     except Exception as exc:
@@ -213,7 +299,8 @@ class _Handler(BaseHTTPRequestHandler):
         raw = self.rfile.read(length)
         try:
             payload = json.loads(raw.decode("utf-8"))
-            result = segment_request(payload)
+            client = self.address_string()
+            result = segment_request(payload, tag=f"http:{client}")
             body = json.dumps(result).encode("utf-8")
             code = 200
         except Exception as exc:
@@ -227,10 +314,13 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def run_serve(host: str, port: int, model_path: str) -> None:
-    _load_sam(model_path)
+    global _SERVER_DEFAULT_MODEL
+    resolved = _resolve_model_path(model_path)
+    _SERVER_DEFAULT_MODEL = resolved
+    _load_sam(resolved)
     server = HTTPServer((host, port), _Handler)
     print(
-        f"SAM3 worker listening on http://{host}:{port}  model={model_path}",
+        f"SAM3 worker listening on http://{host}:{port}  model={resolved}",
         file=sys.stderr,
         flush=True,
     )

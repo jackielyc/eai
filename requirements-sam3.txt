@@ -1,16 +1,19 @@
-# SAM3 本地分割（独立 Python 环境安装，勿与 ROS2 Python 3.10 混用）
+# SAM3 本地分割（独立 Conda 环境，勿与 ROS2 Python 3.10 混用）
 # 参考: https://docs.ultralytics.com/models/sam-3/
 #
 # 安装示例:
-#   python3.10 -m venv ~/.venvs/sam3
-#   source ~/.venvs/sam3/bin/activate
+#   bash run_sam3.sh --install
+#   # 或手动:
+#   conda create -n sam3 python=3.10 -y
+#   conda activate sam3
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 #   pip install -r requirements-sam3.txt
-#   # 下载 sam3.pt 到 robotics/ 或指定 SAM3_MODEL
+#   # 下载 sam3.pt 到 eai/ 或指定 SAM3_MODEL
 #   huggingface-cli login   # 需先在 HF 申请 facebook/sam3 访问
 #
 # 启动常驻服务:
-#   python sam3_segment_worker.py --serve --port 8765 --model sam3.pt
+#   bash run_sam3.sh
+#   # 或: python sam3_segment_worker.py --serve --port 8765 --model sam3.pt
 
 ultralytics>=8.3.237
 opencv-python-headless>=4.8.0
