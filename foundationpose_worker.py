@@ -76,20 +76,51 @@ def _resolve_fp_root() -> Path:
     )
 
 
-def _probe_fp_root() -> Tuple[bool, str]:
+def _probe_fp_dependencies() -> Tuple[bool, str, list[str], list[str]]:
+    """返回 (ready, root_or_error, missing_modules, install_hints)。"""
     try:
         root = str(_resolve_fp_root())
     except Exception as exc:
-        return False, str(exc)
+        return False, str(exc), [], ["git clone NVlabs/FoundationPose 到 eai/FoundationPose"]
+
     missing: list[str] = []
-    for mod in ("trimesh", "torch", "nvdiffrast"):
+    checks = (
+        ("trimesh", "trimesh"),
+        ("torch", "torch"),
+        ("nvdiffrast.torch", "nvdiffrast"),
+        ("pytorch3d", "pytorch3d"),
+    )
+    for import_path, label in checks:
         try:
-            __import__(mod)
+            __import__(import_path)
         except ImportError:
-            missing.append(mod)
+            missing.append(label)
+
+    hints: list[str] = []
+    if any(m in missing for m in ("nvdiffrast", "pytorch3d", "torch")):
+        hints.append(
+            "cd eai && bash run_foundationpose.sh --install-gpu  "
+            "# 安装 torch / nvdiffrast / pytorch3d"
+        )
+        hints.append(
+            "bash run_foundationpose.sh --mesh <object.obj>  "
+            "# 安装完成后重启 FP 服务"
+        )
+    if not missing:
+        weights_dir = Path(root) / "weights"
+        if not weights_dir.is_dir():
+            hints.append(f"下载模型权重到 {weights_dir}（见 FoundationPose/readme.md）")
+
+    return len(missing) == 0, root, missing, hints
+
+
+def _probe_fp_root() -> Tuple[bool, str]:
+    ready, root, missing, _hints = _probe_fp_dependencies()
+    if ready:
+        return True, root
     if missing:
         return False, f"{root}  |  缺少: {', '.join(missing)}"
-    return True, root
+    return False, root
 
 
 def _ensure_fp_imports():
@@ -370,7 +401,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path.rstrip("/") == "/health":
             mesh = _SERVER_DEFAULT_MESH or "not_set"
-            fp_ready, root = _probe_fp_root()
+            fp_ready, root, missing, hints = _probe_fp_dependencies()
             mesh_resolved = ""
             mesh_ok = False
             if mesh and mesh != "not_set":
@@ -383,6 +414,8 @@ class _Handler(BaseHTTPRequestHandler):
                 {
                     "ok": True,
                     "fp_ready": fp_ready,
+                    "missing_deps": missing,
+                    "install_hints": hints,
                     "mesh": mesh,
                     "mesh_resolved": mesh_resolved,
                     "mesh_ok": mesh_ok,
@@ -425,6 +458,15 @@ def run_serve(host: str, port: int, mesh_path: str) -> None:
     global _SERVER_DEFAULT_MESH
     resolved = _resolve_mesh_path(mesh_path)
     _SERVER_DEFAULT_MESH = resolved
+    fp_ready, root, missing, hints = _probe_fp_dependencies()
+    if not fp_ready:
+        print(
+            f"WARNING: FoundationPose 依赖未就绪 ({', '.join(missing) or root})",
+            file=sys.stderr,
+            flush=True,
+        )
+        for line in hints:
+            print(f"  → {line}", file=sys.stderr, flush=True)
     server = HTTPServer((host, port), _Handler)
     print(
         f"FoundationPose worker listening on http://{host}:{port}  mesh={resolved}",

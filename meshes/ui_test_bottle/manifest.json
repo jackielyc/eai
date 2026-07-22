@@ -1,0 +1,21 @@
+{
+  "source_mesh": "/home/psibot/workspace_liyichao/eai/meshes/demo_bottle.obj",
+  "output_obj": "/home/psibot/workspace_liyichao/eai/meshes/ui_test_bottle/reconstructed.obj",
+  "centroid_removed": [
+    0.0036081294957920934,
+    -0.0004039373411884933,
+    0.06957965254017338
+  ],
+  "scale_to_meters": 1.0714285714285714,
+  "target_extent_m": 0.15,
+  "final_extents_m": [
+    0.07500000000000001,
+    0.07500000000000001,
+    0.15000000000000002
+  ],
+  "vertex_count": 65,
+  "face_count": 128,
+  "method": "import_mesh",
+  "name": "ui_test_bottle",
+  "import_path": "/home/psibot/workspace_liyichao/eai/meshes/demo_bottle.obj"
+}

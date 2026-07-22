@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,8 @@ LOG = logging.getLogger("mesh_reconstruct")
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 MESH_SUFFIXES = {".obj", ".ply", ".glb", ".stl", ".off"}
+DEPTH_SUFFIX = "_depth.png"
+INTRINSICS_NAME = "intrinsics.json"
 
 
 def _setup_logging(verbose: bool) -> None:
@@ -46,7 +49,11 @@ def list_images(images_dir: Path) -> List[Path]:
     files = [
         p
         for p in sorted(images_dir.iterdir())
-        if p.is_file() and p.suffix.lower() in IMAGE_SUFFIXES
+        if p.is_file()
+        and p.suffix.lower() in IMAGE_SUFFIXES
+        and not p.name.endswith(DEPTH_SUFFIX)
+        and p.name != INTRINSICS_NAME
+        and "_depth." not in p.name.lower()
     ]
     return files
 
@@ -63,8 +70,28 @@ def stage_images(images: List[Path], staging_dir: Path) -> Path:
     return staging_dir
 
 
+def _colmap_env() -> Dict[str, str]:
+    """Docker / 无显示器环境：避免 COLMAP 默认走 OpenGL/GPU 导致 libGL 失败。"""
+    env = dict(os.environ)
+    env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    env.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
+    if not env.get("XDG_RUNTIME_DIR"):
+        runtime = Path("/tmp") / f"runtime-{os.getuid()}"
+        runtime.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(runtime, 0o700)
+        except OSError:
+            pass
+        env["XDG_RUNTIME_DIR"] = str(runtime)
+    return env
+
+
+def _run_colmap(args: List[str]) -> None:
+    subprocess.run(args, check=True, env=_colmap_env())
+
+
 def run_colmap_sparse(images_dir: Path, work_dir: Path) -> Path:
-    """COLMAP SfM（CPU），返回 sparse/0 模型目录。"""
+    """COLMAP SfM（强制 CPU），返回 sparse/0 模型目录。"""
     colmap = find_colmap()
     if not colmap:
         raise RuntimeError(
@@ -76,8 +103,9 @@ def run_colmap_sparse(images_dir: Path, work_dir: Path) -> Path:
     sparse_dir = work_dir / "sparse"
     sparse_dir.mkdir(parents=True, exist_ok=True)
 
-    LOG.info("COLMAP feature_extractor …")
-    subprocess.run(
+    # Docker 内无 CUDA/GLX：必须关闭 SIFT GPU，否则会报 nouveau/libGL 失败
+    LOG.info("COLMAP feature_extractor（CPU）…")
+    _run_colmap(
         [
             colmap,
             "feature_extractor",
@@ -87,18 +115,26 @@ def run_colmap_sparse(images_dir: Path, work_dir: Path) -> Path:
             str(images_dir),
             "--ImageReader.single_camera",
             "1",
-        ],
-        check=True,
+            "--SiftExtraction.use_gpu",
+            "0",
+        ]
     )
 
-    LOG.info("COLMAP exhaustive_matcher …")
-    subprocess.run(
-        [colmap, "exhaustive_matcher", "--database_path", str(db_path)],
-        check=True,
+    LOG.info("COLMAP exhaustive_matcher（CPU）…")
+    _run_colmap(
+        [
+            colmap,
+            "exhaustive_matcher",
+            "--database_path",
+            str(db_path),
+            "--SiftMatching.use_gpu",
+            "0",
+        ]
     )
 
     LOG.info("COLMAP mapper …")
-    subprocess.run(
+    # 放宽初始化，适配桌面近距离、视角变化不大的拍摄
+    _run_colmap(
         [
             colmap,
             "mapper",
@@ -108,15 +144,28 @@ def run_colmap_sparse(images_dir: Path, work_dir: Path) -> Path:
             str(images_dir),
             "--output_path",
             str(sparse_dir),
-        ],
-        check=True,
+            "--Mapper.init_min_num_inliers",
+            "30",
+            "--Mapper.init_min_tri_angle",
+            "4",
+            "--Mapper.abs_pose_min_num_inliers",
+            "15",
+            "--Mapper.filter_min_tri_angle",
+            "0.5",
+            "--Mapper.ba_refine_focal_length",
+            "0",
+            "--Mapper.ba_refine_extra_params",
+            "0",
+        ]
     )
 
     models = sorted(sparse_dir.iterdir())
     model_dirs = [p for p in models if p.is_dir() and (p / "cameras.bin").exists()]
     if not model_dirs:
         raise RuntimeError(
-            "COLMAP mapper 未产生有效模型。请增加照片数量/重叠度（建议 ≥12 张、60%% 重叠）。"
+            "COLMAP mapper 未产生有效模型。\n"
+            "常见原因：相邻照片视角变化太小/重叠不足/模糊。\n"
+            "请用头部相机绕物体重拍：≥12 张、相邻约 60% 重叠，水平一圈 + 俯仰若干张。"
         )
     model_dir = model_dirs[0]
     LOG.info("使用 sparse 模型: %s", model_dir)
@@ -239,6 +288,192 @@ def postprocess_for_foundationpose(
     return meta
 
 
+def list_rgbd_pairs(images_dir: Path) -> List[Tuple[Path, Path]]:
+    """返回 [(color.jpg, color_depth.png), ...]。"""
+    pairs: List[Tuple[Path, Path]] = []
+    for color in sorted(images_dir.iterdir()):
+        if not color.is_file() or color.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+        if color.name.endswith(DEPTH_SUFFIX) or color.name == INTRINSICS_NAME:
+            continue
+        depth = color.with_name(f"{color.stem}{DEPTH_SUFFIX}")
+        if depth.is_file():
+            pairs.append((color, depth))
+    return pairs
+
+
+def load_intrinsics(images_dir: Path, width: int, height: int) -> Tuple[float, float, float, float, float]:
+    """返回 (fx, fy, cx, cy, depth_scale)。depth_scale: raw→米 的除数（uint16 mm 为 1000）。"""
+    meta_path = images_dir / INTRINSICS_NAME
+    if meta_path.is_file():
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        return (
+            float(meta["fx"]),
+            float(meta["fy"]),
+            float(meta["cx"]),
+            float(meta["cy"]),
+            float(meta.get("depth_scale", 1000.0)),
+        )
+    fx = fy = 0.9 * max(width, height)
+    return fx, fy, width / 2.0, height / 2.0, 1000.0
+
+
+def reconstruct_from_rgbd(
+    images_dir: Path,
+    out_dir: Path,
+    name: str,
+    target_extent_m: float,
+    min_images: int,
+) -> Dict[str, Any]:
+    """
+    头部 RGB-D → Open3D TSDF 网格（适合固定相机 + 转动物体 / 小幅运动）。
+    若帧间运动过小，退化为单帧深度网格，仍可给 FoundationPose 用。
+    """
+    import cv2
+    import open3d as o3d
+
+    pairs = list_rgbd_pairs(images_dir)
+    if len(pairs) < 1:
+        raise ValueError(f"未找到 RGB-D 对（img_xxxx.jpg + img_xxxx_depth.png）: {images_dir}")
+
+    work_dir = out_dir / name / "rgbd_work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    color0 = cv2.imread(str(pairs[0][0]), cv2.IMREAD_COLOR)
+    if color0 is None:
+        raise RuntimeError(f"无法读取彩色图: {pairs[0][0]}")
+    h, w = color0.shape[:2]
+    fx, fy, cx, cy, depth_scale = load_intrinsics(images_dir, w, h)
+    intrinsic = o3d.camera.PinholeCameraIntrinsic(w, h, fx, fy, cx, cy)
+
+    volume = o3d.pipelines.integration.ScalableTSDFVolume(
+        voxel_length=0.004,
+        sdf_trunc=0.02,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+    )
+
+    def load_rgbd(color_path: Path, depth_path: Path):
+        color_bgr = cv2.imread(str(color_path), cv2.IMREAD_COLOR)
+        depth_raw = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
+        if color_bgr is None or depth_raw is None:
+            raise RuntimeError(f"读取失败: {color_path.name} / {depth_path.name}")
+        if depth_raw.ndim == 3:
+            depth_raw = depth_raw[:, :, 0]
+        if depth_raw.shape[:2] != color_bgr.shape[:2]:
+            depth_raw = cv2.resize(
+                depth_raw,
+                (color_bgr.shape[1], color_bgr.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
+        color_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
+        depth_m = depth_raw.astype(np.float32)
+        if depth_raw.dtype == np.uint16 or depth_m.max() > 20:
+            depth_m = depth_m / float(depth_scale)
+        # 桌面抓取常见距离：裁掉过近/过远
+        depth_m[(depth_m < 0.15) | (depth_m > 2.0)] = 0.0
+        color_o3d = o3d.geometry.Image(np.ascontiguousarray(color_rgb))
+        # Open3D create_from_color_and_depth 默认 depth_scale=1000 表示 mm→m
+        depth_u16 = np.clip(depth_m * 1000.0, 0, 65535).astype(np.uint16)
+        depth_o3d = o3d.geometry.Image(np.ascontiguousarray(depth_u16))
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            color_o3d,
+            depth_o3d,
+            depth_scale=1000.0,
+            depth_trunc=2.0,
+            convert_rgb_to_intensity=False,
+        )
+        return rgbd, color_bgr
+
+    LOG.info("RGB-D TSDF：加载 %d 帧…", len(pairs))
+    prev_rgbd = None
+    pose = np.eye(4)
+    integrated = 0
+    motion_norms: List[float] = []
+
+    option = o3d.pipelines.odometry.OdometryOption()
+    option.depth_min = 0.15
+    option.depth_max = 2.0
+
+    for i, (c_path, d_path) in enumerate(pairs):
+        rgbd, _ = load_rgbd(c_path, d_path)
+        if prev_rgbd is None:
+            volume.integrate(rgbd, intrinsic, np.linalg.inv(pose))
+            prev_rgbd = rgbd
+            integrated += 1
+            continue
+        success, trans, _info = o3d.pipelines.odometry.compute_rgbd_odometry(
+            rgbd,
+            prev_rgbd,
+            intrinsic,
+            np.eye(4),
+            o3d.pipelines.odometry.RGBDOdometryJacobianFromHybridTerm(),
+            option,
+        )
+        if success:
+            pose = pose @ trans
+            tnorm = float(np.linalg.norm(trans[:3, 3]))
+            motion_norms.append(tnorm)
+            volume.integrate(rgbd, intrinsic, np.linalg.inv(pose))
+            integrated += 1
+            prev_rgbd = rgbd
+            LOG.info("帧 %d/%d odometry ok, Δt=%.4fm", i + 1, len(pairs), tnorm)
+        else:
+            LOG.warning("帧 %d/%d odometry 失败，跳过", i + 1, len(pairs))
+
+    mesh = volume.extract_triangle_mesh()
+    mesh.compute_vertex_normals()
+    method = "rgbd_tsdf"
+    if len(mesh.vertices) < 50 or (motion_norms and max(motion_norms) < 0.005 and integrated <= 2):
+        LOG.warning(
+            "多帧运动过小或网格过稀，改用单帧深度点云 Poisson（请转动物体后再拍）"
+        )
+        rgbd, _ = load_rgbd(pairs[0][0], pairs[0][1])
+        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, intrinsic)
+        pcd = pcd.voxel_down_sample(0.003)
+        if len(pcd.points) < 100:
+            raise RuntimeError(
+                "RGB-D 点云过少。请确认 /camera/head_depth 有数据，"
+                "且物体在 0.15~2.0 m 深度范围内。"
+            )
+        pcd.estimate_normals(
+            search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30)
+        )
+        mesh, _densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+            pcd, depth=8
+        )
+        dens = np.asarray(_densities)
+        if len(dens) == len(mesh.vertices):
+            mesh.remove_vertices_by_mask(dens < np.quantile(dens, 0.08))
+        mesh.compute_vertex_normals()
+        method = "rgbd_single_poisson"
+        integrated = 1
+
+    if len(mesh.vertices) < 50:
+        raise RuntimeError("RGB-D 重建网格过稀，请转动物体后重新采集")
+
+    raw_mesh = work_dir / "tsdf_raw.ply"
+    o3d.io.write_triangle_mesh(str(raw_mesh), mesh)
+    obj_out = out_dir / name / "reconstructed.obj"
+    meta = postprocess_for_foundationpose(raw_mesh, obj_out, target_extent_m)
+    meta.update(
+        {
+            "method": method,
+            "name": name,
+            "image_count": len(pairs),
+            "integrated_frames": integrated,
+            "images_dir": str(images_dir.resolve()),
+            "max_motion_m": float(max(motion_norms) if motion_norms else 0.0),
+            "intrinsics": {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
+        }
+    )
+    if method == "rgbd_single_poisson":
+        LOG.warning(
+            "当前几乎为单视角网格。FoundationPose 可用，但建议清空后"
+            "转动物体再拍满多视角以得到更完整 CAD。"
+        )
+    return meta
+
+
 def reconstruct_from_images(
     images_dir: Path,
     out_dir: Path,
@@ -248,6 +483,15 @@ def reconstruct_from_images(
     min_images: int,
 ) -> Dict[str, Any]:
     images = list_images(images_dir)
+    rgbd_pairs = list_rgbd_pairs(images_dir)
+
+    # 优先 RGB-D（头部相机采集会写 depth）；否则走 COLMAP
+    if len(rgbd_pairs) >= 1:
+        LOG.info("检测到 %d 组 RGB-D，使用 Open3D TSDF 重建", len(rgbd_pairs))
+        return reconstruct_from_rgbd(
+            images_dir, out_dir, name, target_extent_m, min_images
+        )
+
     if len(images) < min_images:
         raise ValueError(
             f"至少需要 {min_images} 张照片，当前 {len(images)} 张: {images_dir}"

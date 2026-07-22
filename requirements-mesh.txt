@@ -1,7 +1,12 @@
 # 方案 A：多视角照片 → mesh → FoundationPose
 # 安装: python3 -m pip install -r requirements-mesh.txt
 # 系统还需 COLMAP: sudo apt install -y colmap
+# Web UI: bash run_cad_ui.sh
 
 trimesh>=4.0.0
 open3d>=0.17.0
 numpy>=1.23.5,<2.0.0
+matplotlib>=3.7.0
+typing_extensions>=4.5.0
+werkzeug>=2.0.0
+dash>=2.0.0

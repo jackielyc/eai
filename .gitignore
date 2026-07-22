@@ -1,0 +1,8 @@
+
+# FoundationPose weights (download from HuggingFace; see weights/README.md)
+weights/**/*.pth
+weights/.cache/
+
+# Python bytecode
+__pycache__/
+*.py[cod]

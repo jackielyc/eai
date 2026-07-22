@@ -1,0 +1,11 @@
+{
+  "fx": 1152.0,
+  "fy": 1152.0,
+  "cx": 640.0,
+  "cy": 400.0,
+  "width": 1280,
+  "height": 800,
+  "depth_scale": 1000.0,
+  "color_topic": "/camera/head_color",
+  "depth_topic": "/camera/head_depth"
+}

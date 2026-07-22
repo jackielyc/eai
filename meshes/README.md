@@ -4,6 +4,18 @@
 
 ## 快速开始
 
+### Web 界面（推荐）
+
+```bash
+cd eai
+bash run_cad_ui.sh --install-deps   # 首次
+bash run_cad_ui.sh                  # 打开 http://127.0.0.1:7860
+```
+
+在浏览器里上传多视角照片或外部 mesh，填写物体名与真实尺寸（最大边长），点生成即可。
+
+### 命令行
+
 ```bash
 cd eai
 

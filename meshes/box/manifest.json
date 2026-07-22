@@ -1,0 +1,30 @@
+{
+  "source_mesh": "/home/psibot/workspace_liyichao/eai/meshes/box/rgbd_work/tsdf_raw.ply",
+  "output_obj": "/home/psibot/workspace_liyichao/eai/meshes/box/reconstructed.obj",
+  "centroid_removed": [
+    0.0033302129619800606,
+    -0.09619893621034382,
+    0.6864991519040864
+  ],
+  "scale_to_meters": 0.11996887576598961,
+  "target_extent_m": 0.15,
+  "final_extents_m": [
+    0.09069647007908815,
+    0.08349833753312877,
+    0.15
+  ],
+  "vertex_count": 32370,
+  "face_count": 61071,
+  "method": "rgbd_tsdf",
+  "name": "box",
+  "image_count": 12,
+  "integrated_frames": 12,
+  "images_dir": "/home/psibot/workspace_liyichao/eai/meshes/box/photos",
+  "max_motion_m": 0.0007834056681499201,
+  "intrinsics": {
+    "fx": 1152.0,
+    "fy": 1152.0,
+    "cx": 640.0,
+    "cy": 400.0
+  }
+}

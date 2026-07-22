@@ -2,7 +2,7 @@
 """
 PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容。
 深度 topic（名称含 depth）以 3D 点云方式显示，支持鼠标旋转/缩放。
-点击图像可进行立体分割（3D 点云聚类 refine）并估计 6D 位姿（位置 + RPY + OBB）。
+点击图像仅选择提示点 (u,v)；需再点「调用分割 / SAM3 / FP」确认执行。
 深度 3D 面板叠加显示左右手臂 TCP 与关节状态（/hal/arm_joint_state、/ry_hand/*/joint_states、/mink_fk/*_tcp_pose）。
 
 用法:
@@ -10,7 +10,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run.sh                    # ROS 在宿主机直接运行时用此方式
   python3.10 show_camera_topics.py --prefix /camera
 
-顶部控制区按功能分为标签页：相机 / 回放 / 分割 / 训练 / 手臂·手。
+顶部控制区按功能分为标签页：相机 / 回放 / 分割 / CAD / 训练 / 手臂·手。
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
 """
 
@@ -95,6 +95,11 @@ from std_srvs.srv import SetBool, Trigger
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, JointState
 from geometry_msgs.msg import PoseStamped
 from tf2_ros import Buffer, TransformListener
+
+try:
+    from a2d_head_camera_tf import attach_to_node as attach_head_camera_tf
+except Exception:  # pragma: no cover - optional helper
+    attach_head_camera_tf = None  # type: ignore
 
 ENABLE_STATE_QOS = QoSProfile(
     history=HistoryPolicy.KEEP_LAST,
@@ -286,7 +291,54 @@ def resolve_fp_mesh_path() -> str:
 
 
 FP_MESH_DEFAULT = resolve_fp_mesh_path()
+EAI_DIR = os.path.dirname(os.path.abspath(__file__))
+CAD_MESHES_DIR = os.path.join(EAI_DIR, "meshes")
+CAD_PHOTOGRAMMETRY_PY = os.path.join(EAI_DIR, "photogrammetry_reconstruct.py")
+CAD_TARGET_EXTENT_DEFAULT_M = 0.15
+CAD_POISSON_DEPTH_DEFAULT = 9
+CAD_MIN_IMAGES_DEFAULT = 8
+CAD_CAPTURE_COUNT_DEFAULT = 12
+CAD_CAPTURE_TOPIC_DEFAULT = "/camera/head_color"
+CAD_CAPTURE_DEPTH_DEFAULT = "/camera/head_depth"
+CAD_CAPTURE_TOPIC_CANDIDATES = (
+    "/camera/head_color",
+    "/camera/head_rgb",
+    "/camera/head/color",
+)
+CAD_CAPTURE_MIN_DIFF_CORR = 0.97  # 几乎不动才拒绝；头部相机转物通常 corr≈0.87~0.95
+CAD_CAPTURE_MIN_DIFF_MAE = 3.0
 PSI_POLICY_DIR_ENV = "PSI_POLICY_DIR"
+
+
+def resolve_cad_mesh_python() -> str:
+    env = os.environ.get("MESH_PYTHON", "").strip()
+    if env and os.path.isfile(env) and os.access(env, os.X_OK):
+        return env
+    candidates = [
+        os.path.expanduser("~/miniconda3/envs/foundationpose/bin/python"),
+        os.path.expanduser("~/anaconda3/envs/foundationpose/bin/python"),
+        "/home/psibot/miniconda3/envs/foundationpose/bin/python",
+    ]
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return shutil.which("python3") or "python3"
+
+
+def list_reconstructed_meshes(meshes_dir: Optional[str] = None) -> List[Tuple[str, str]]:
+    """返回 [(显示名, reconstructed.obj 绝对路径), ...]，按修改时间新→旧。"""
+    root = meshes_dir or CAD_MESHES_DIR
+    if not os.path.isdir(root):
+        return []
+    items: List[Tuple[float, str, str]] = []
+    for name in os.listdir(root):
+        obj = os.path.join(root, name, "reconstructed.obj")
+        if os.path.isfile(obj):
+            items.append((os.path.getmtime(obj), name, os.path.abspath(obj)))
+    items.sort(key=lambda x: x[0], reverse=True)
+    return [(name, path) for _, name, path in items]
+
+
 PSI_POLICY_CONFIG_DEFAULT = "example_workspace_imle_rgb"
 PSI_POLICY_LOGGING_MODES = ("offline", "online", "disabled")
 MAX_GL_SEGMENT_POINTS = 4000
@@ -370,7 +422,9 @@ ARM_MOVE_IK_HZ = 20.0
 ARM_MOVE_JOINT_HZ = 100.0
 ARM_MOVE_WARMUP_STEPS = 4
 ARM_MOVE_MODE_BURST = 5
-ARM_MOVE_GOAL_SAMPLE_TICKS = 2
+ARM_MOVE_GOAL_SAMPLE_TICKS = 20  # ~1s @ 20Hz，大范围绝对目标需等 IK 收敛
+ARM_MOVE_GOAL_MIN_JOINT_DELTA = 1e-3  # 低于此认为 IK 未给出新解
+ARM_MOVE_CART_NEAR_M = 0.03  # 笛卡尔已接近则允许关节几乎不变
 ARM_MOVE_IK_RELEASE_TICKS = 3
 
 LLM_API_BASE_DEFAULT = os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")
@@ -433,6 +487,34 @@ def is_color_image_topic(topic: str, types: List[str]) -> bool:
     if not any(t in IMAGE_TYPES for t in types):
         return False
     return "color" in topic.lower()
+
+
+def is_head_color_topic(topic: str) -> bool:
+    """头部彩色相机（排除 hand_* / wrist 等）。"""
+    name = topic.lower().rstrip("/")
+    if is_depth_topic(name):
+        return False
+    if name in {t.lower() for t in CAD_CAPTURE_TOPIC_CANDIDATES}:
+        return True
+    if "head" not in name:
+        return False
+    if "hand" in name or "wrist" in name or "fisheye" in name:
+        return False
+    return "color" in name or name.endswith("/rgb") or name.endswith("_rgb")
+
+
+def resolve_head_color_topic(available: List[str]) -> Optional[str]:
+    """在可用 topic 中优先解析头部彩色相机。"""
+    lowered = {t.lower(): t for t in available}
+    for pref in CAD_CAPTURE_TOPIC_CANDIDATES:
+        hit = lowered.get(pref.lower())
+        if hit is not None:
+            return hit
+    heads = [t for t in available if is_head_color_topic(t)]
+    if not heads:
+        return None
+    heads.sort(key=lambda t: (0 if "head_color" in t.lower() else 1, t))
+    return heads[0]
 
 
 def default_viewer_geometry() -> Tuple[int, int, int, int]:
@@ -866,6 +948,9 @@ def build_pose_overlay_image(
         obb_corners=result.obb_corners,
         intrinsics=(fx, fy, cx, cy),
         contact_uv=(contact_u, contact_v),
+        pose_position=np.asarray(result.position_xyz, dtype=np.float32),
+        pose_rotation=np.asarray(result.rotation_matrix, dtype=np.float32),
+        pose_axis_len=float(max(result.obb_extents) * 0.55),
     )
 
 
@@ -1301,7 +1386,8 @@ def format_fp_call_result_text(result: FpCallResult) -> str:
     elif result.ok:
         lines.extend(["状态: 成功", f"耗时: {result.elapsed_s:.2f}s"])
     else:
-        lines.extend(["状态: 失败", f"错误: {result.error}"])
+        err = format_foundationpose_error(result.error)
+        lines.extend(["状态: 失败", f"错误: {err}"])
     return "\n".join(lines)
 
 
@@ -1469,6 +1555,27 @@ def check_foundationpose_server_health(url: str, timeout_s: float = 1.5) -> bool
     return fetch_foundationpose_health(url, timeout_s).get("online", False)
 
 
+def format_foundationpose_error(message: str) -> str:
+    msg = (message or "").strip()
+    if "nvdiffrast" in msg:
+        return (
+            f"{msg}\n\n"
+            "缺少 nvdiffrast（需在宿主机 foundationpose conda 环境安装）。\n"
+            "请在本机终端执行：\n"
+            "  cd ~/workspace_liyichao/eai\n"
+            "  bash run_foundationpose.sh --install-gpu\n"
+            "  bash run_foundationpose.sh --mesh "
+            "FoundationPose/demo_data/mustard0/mesh/textured_simple.obj\n"
+            "然后 viewer 中重试「调用 FP」。"
+        )
+    if "pytorch3d" in msg:
+        return (
+            f"{msg}\n\n"
+            "请运行: bash run_foundationpose.sh --install-gpu"
+        )
+    return msg
+
+
 def fetch_foundationpose_health(url: str, timeout_s: float = 1.5) -> Dict[str, object]:
     health_url = url.rstrip("/") + "/health"
     try:
@@ -1476,12 +1583,16 @@ def fetch_foundationpose_health(url: str, timeout_s: float = 1.5) -> Dict[str, o
             body = json.loads(resp.read().decode("utf-8"))
         online = resp.status == 200 and bool(body.get("ok", True))
         fp_ready = bool(body.get("fp_ready", body.get("ok", False)))
+        missing_deps = body.get("missing_deps") or []
+        install_hints = body.get("install_hints") or []
         return {
             "online": online,
             "fp_ready": fp_ready,
             "foundationpose_root": str(body.get("foundationpose_root") or ""),
             "mesh": str(body.get("mesh") or ""),
             "mesh_resolved": str(body.get("mesh_resolved") or ""),
+            "missing_deps": list(missing_deps),
+            "install_hints": list(install_hints),
         }
     except Exception as exc:
         return {"online": False, "fp_ready": False, "error": str(exc)}
@@ -1557,13 +1668,20 @@ def evaluate_fp_availability(
                 worker_ok=worker_ok,
             )
         if http_online:
+            missing = health.get("missing_deps") or []
+            hints = health.get("install_hints") or []
+            hint_text = "\n".join(hints) if hints else (
+                "bash run_foundationpose.sh --install-gpu"
+            )
+            missing_text = ", ".join(missing) if missing else "未知"
             return FpAvailabilityStatus(
                 label="未就绪",
                 detail=detail,
                 tooltip=(
-                    "HTTP 服务已启动，但 FoundationPose 源码未就绪。\n"
-                    f"检测: {fp_root or '未找到 eai/FoundationPose'}\n"
-                    "请设置 FOUNDATIONPOSE_ROOT 并重启 worker"
+                    "HTTP 服务已启动，但 FoundationPose 依赖未就绪。\n"
+                    f"缺少: {missing_text}\n"
+                    f"检测: {fp_root or '未找到 eai/FoundationPose'}\n\n"
+                    f"请执行:\n{hint_text}"
                 ),
                 color=UI_ACCENT_ORANGE,
                 can_invoke=False,
@@ -1743,7 +1861,14 @@ def _fp_pose_via_http(
             body = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"FoundationPose HTTP {exc.code}: {detail[:400]}") from exc
+        try:
+            err_body = json.loads(detail)
+            err_msg = str(err_body.get("error") or detail)
+        except json.JSONDecodeError:
+            err_msg = detail
+        raise RuntimeError(
+            format_foundationpose_error(f"FoundationPose HTTP {exc.code}: {err_msg[:400]}")
+        ) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(
             f"FoundationPose 服务不可达 ({server_url})，请先运行: "
@@ -1848,14 +1973,17 @@ def object6d_from_foundationpose(
         return None
     pose = np.asarray(pose_flat, dtype=np.float64).reshape(4, 4)
     rotation = pose[:3, :3].astype(np.float32)
-    position = pose[:3, 3]
+    mesh_origin = pose[:3, 3]
     rpy = rotation_matrix_to_euler_xyz(rotation)
     quat = rotation_matrix_to_quaternion(rotation)
 
     corners_flat = fp_body.get("obb_corners")
     if isinstance(corners_flat, list) and len(corners_flat) == 24:
         corners = np.asarray(corners_flat, dtype=np.float32).reshape(8, 3)
+        # OBB 几何中心（mesh 原点经 to_origin 后可能偏离包围盒中心）
+        position = corners.mean(axis=0).astype(np.float64)
     else:
+        position = mesh_origin
         half = np.array(fp_body.get("obb_extents") or [0.05, 0.05, 0.05], dtype=np.float32) * 0.5
         corners = obb_corners(position, rotation, half)
 
@@ -1899,7 +2027,7 @@ def object6d_from_foundationpose(
         obb_center=(float(position[0]), float(position[1]), float(position[2])),
         obb_extents=extents,
         obb_corners=corners,
-        depth_m=float(position[2]),
+        depth_m=float(mesh_origin[2]),
         pixel_count=int(refined_mask.sum()),
         point_count=len(points),
         method=method,
@@ -2115,23 +2243,35 @@ def rotation_matrix_to_quaternion(R: np.ndarray) -> Tuple[float, float, float, f
 
 
 def obb_corners(center: np.ndarray, rotation: np.ndarray, half_extents: np.ndarray) -> np.ndarray:
+    """8 corners in a fixed order matching draw_obb_on_image / FoundationPose worker."""
+    signs = (
+        (-1.0, -1.0, -1.0),
+        (1.0, -1.0, -1.0),
+        (1.0, 1.0, -1.0),
+        (-1.0, 1.0, -1.0),
+        (-1.0, -1.0, 1.0),
+        (1.0, -1.0, 1.0),
+        (1.0, 1.0, 1.0),
+        (-1.0, 1.0, 1.0),
+    )
     corners = []
-    for sx in (-1.0, 1.0):
-        for sy in (-1.0, 1.0):
-            for sz in (-1.0, 1.0):
-                local = np.array([sx, sy, sz], dtype=np.float32) * half_extents
-                corners.append(center + rotation @ local)
+    for sx, sy, sz in signs:
+        local = np.array([sx, sy, sz], dtype=np.float32) * half_extents
+        corners.append(center + rotation @ local)
     return np.stack(corners, axis=0).astype(np.float32)
 
 
+# Cube edge pairs for corner order in obb_corners / FoundationPose worker.
+OBB_EDGE_PAIRS = (
+    (0, 1), (1, 2), (2, 3), (3, 0),  # z-min face
+    (4, 5), (5, 6), (6, 7), (7, 4),  # z-max face
+    (0, 4), (1, 5), (2, 6), (3, 7),  # verticals
+)
+
+
 def obb_wireframe_edges(corners: np.ndarray) -> np.ndarray:
-    edge_pairs = [
-        (0, 1), (1, 3), (3, 2), (2, 0),
-        (4, 5), (5, 7), (7, 6), (6, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
-    ]
     lines = []
-    for a, b in edge_pairs:
+    for a, b in OBB_EDGE_PAIRS:
         lines.append(corners[a])
         lines.append(corners[b])
     return np.stack(lines, axis=0).astype(np.float32)
@@ -2356,6 +2496,8 @@ class SegmentPoseTarget:
     label: str = ""
     contact_uv: Tuple[float, float] = (0.0, 0.0)
     obb_center_xyz: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # FoundationPose 物体姿态通常不可直接作为 TCP 姿态；位置绝对、姿态保持当前 TCP
+    keep_tcp_orientation: bool = False
 
     @classmethod
     def from_pose_result(
@@ -2364,17 +2506,30 @@ class SegmentPoseTarget:
         camera_frame: str,
         source_topic: str,
     ) -> SegmentPoseTarget:
+        method = (result.method or "").lower()
+        # FoundationPose：物体中心绝对位置；几何分割：点击处接触点
+        use_object_pose = "foundationpose" in method
+        if use_object_pose:
+            position = result.obb_center
+            label = (
+                f"{source_topic.split('/')[-1]} FoundationPose "
+                f"({result.point_count} pts)"
+            )
+        else:
+            position = result.contact_xyz
+            label = (
+                f"{source_topic.split('/')[-1]} 接触TCP "
+                f"({result.point_count} pts)"
+            )
         return cls(
             camera_frame=camera_frame,
-            position_xyz=result.contact_xyz,
+            position_xyz=position,
             quaternion_xyzw=result.quaternion_xyzw,
             source_topic=source_topic,
             contact_uv=result.contact_uv,
-            obb_center_xyz=result.position_xyz,
-            label=(
-                f"{source_topic.split('/')[-1]} 接触TCP "
-                f"({result.point_count} pts)"
-            ),
+            obb_center_xyz=result.obb_center,
+            label=label,
+            keep_tcp_orientation=use_object_pose,
         )
 
 
@@ -2523,62 +2678,128 @@ def draw_obb_on_image(
     fy: float,
     cx: float,
     cy: float,
+    color: Tuple[int, int, int] = (0, 220, 255),
+    thickness: int = 2,
 ) -> None:
     if len(corners_3d) == 0:
         return
     uv = project_points_to_uv(corners_3d, fx, fy, cx, cy).astype(np.int32)
-    edge_pairs = [
-        (0, 1), (1, 3), (3, 2), (2, 0),
-        (4, 5), (5, 7), (7, 6), (6, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
-    ]
     h, w = image.shape[:2]
-    for a, b in edge_pairs:
+    for a, b in OBB_EDGE_PAIRS:
         if corners_3d[a, 2] <= 0.01 or corners_3d[b, 2] <= 0.01:
             continue
         pa = (int(np.clip(uv[a, 0], 0, w - 1)), int(np.clip(uv[a, 1], 0, h - 1)))
         pb = (int(np.clip(uv[b, 0], 0, w - 1)), int(np.clip(uv[b, 1], 0, h - 1)))
-        cv2.line(image, pa, pb, (0, 220, 255), 2, cv2.LINE_AA)
+        cv2.line(image, pa, pb, color, thickness, cv2.LINE_AA)
+
+
+def draw_pose_axes_on_image(
+    image: np.ndarray,
+    position_xyz: np.ndarray,
+    rotation: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    axis_len: float,
+) -> None:
+    """在图像上画 RGB = XYZ 坐标轴。"""
+    if float(position_xyz[2]) <= 0.01:
+        return
+    origin = np.asarray(position_xyz, dtype=np.float32).reshape(3)
+    R = np.asarray(rotation, dtype=np.float32).reshape(3, 3)
+    # BGR: X红 Y绿 Z蓝
+    axis_bgr = ((0, 0, 255), (0, 220, 0), (255, 120, 0))
+    labels = ("X", "Y", "Z")
+    h, w = image.shape[:2]
+    pts = [origin] + [origin + R[:, i] * axis_len for i in range(3)]
+    uv = project_points_to_uv(np.stack(pts, axis=0), fx, fy, cx, cy).astype(np.int32)
+    o = (int(np.clip(uv[0, 0], 0, w - 1)), int(np.clip(uv[0, 1], 0, h - 1)))
+    cv2.circle(image, o, 5, (255, 255, 255), -1, cv2.LINE_AA)
+    for i in range(3):
+        if pts[i + 1][2] <= 0.01:
+            continue
+        p = (int(np.clip(uv[i + 1, 0], 0, w - 1)), int(np.clip(uv[i + 1, 1], 0, h - 1)))
+        cv2.arrowedLine(image, o, p, axis_bgr[i], 3, cv2.LINE_AA, tipLength=0.2)
+        cv2.putText(
+            image,
+            labels[i],
+            (p[0] + 4, p[1] - 4),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            axis_bgr[i],
+            2,
+            cv2.LINE_AA,
+        )
 
 
 def apply_segment_overlay(
     image: np.ndarray,
-    mask: np.ndarray,
+    mask: Optional[np.ndarray] = None,
     centroid_uv: Optional[Tuple[float, float]] = None,
     obb_corners: Optional[np.ndarray] = None,
     intrinsics: Optional[Tuple[float, float, float, float]] = None,
     contact_uv: Optional[Tuple[float, float]] = None,
+    seed_uv: Optional[Tuple[float, float]] = None,
+    pose_position: Optional[np.ndarray] = None,
+    pose_rotation: Optional[np.ndarray] = None,
+    pose_axis_len: Optional[float] = None,
 ) -> np.ndarray:
     if image.ndim == 2:
         display = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     else:
         display = image.copy()
 
-    if mask.shape[:2] != display.shape[:2]:
-        mask = resize_mask_to_shape(mask, display.shape[:2])
+    mask_bool: Optional[np.ndarray] = None
+    if mask is not None:
+        if mask.shape[:2] != display.shape[:2]:
+            mask = resize_mask_to_shape(mask, display.shape[:2])
+        mask_bool = np.asarray(mask).astype(bool)
 
-    if not mask.any():
-        return display
+    if mask_bool is not None and mask_bool.any():
+        ys, xs = np.where(mask_bool)
+        pad = 12
+        h, w = display.shape[:2]
+        v0 = max(0, int(ys.min()) - pad)
+        v1 = min(h, int(ys.max()) + pad + 1)
+        u0 = max(0, int(xs.min()) - pad)
+        u1 = min(w, int(xs.max()) + pad + 1)
 
-    ys, xs = np.where(mask)
-    pad = 12
-    h, w = display.shape[:2]
-    v0 = max(0, int(ys.min()) - pad)
-    v1 = min(h, int(ys.max()) + pad + 1)
-    u0 = max(0, int(xs.min()) - pad)
-    u1 = min(w, int(xs.max()) + pad + 1)
+        roi = display[v0:v1, u0:u1]
+        roi_mask = mask_bool[v0:v1, u0:u1]
+        tint = np.array([40, 220, 80], dtype=np.float32)
+        blended = roi.astype(np.float32)
+        blended[roi_mask] = blended[roi_mask] * 0.42 + tint * 0.58
+        display[v0:v1, u0:u1] = np.clip(blended, 0, 255).astype(np.uint8)
 
-    roi = display[v0:v1, u0:u1].copy()
-    roi_mask = mask[v0:v1, u0:u1]
-    overlay = roi.copy()
-    green = np.array([0, 220, 80], dtype=np.uint8)
-    overlay[roi_mask] = (overlay[roi_mask].astype(np.float32) * 0.45 + green * 0.55).astype(np.uint8)
-    roi = cv2.addWeighted(roi, 0.35, overlay, 0.65, 0)
-    display[v0:v1, u0:u1] = roi
+        mask_u8 = (mask_bool.astype(np.uint8) * 255)
+        contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            cv2.drawContours(display, contours, -1, (0, 255, 255), 2, cv2.LINE_AA)
 
     if obb_corners is not None and intrinsics is not None:
         fx, fy, cx, cy = intrinsics
-        draw_obb_on_image(display, obb_corners, fx, fy, cx, cy)
+        draw_obb_on_image(display, obb_corners, fx, fy, cx, cy, color=(0, 220, 255), thickness=2)
+
+    if (
+        pose_position is not None
+        and pose_rotation is not None
+        and intrinsics is not None
+    ):
+        fx, fy, cx, cy = intrinsics
+        axis_len = float(pose_axis_len) if pose_axis_len is not None else 0.05
+        if axis_len <= 1e-4:
+            axis_len = 0.05
+        draw_pose_axes_on_image(
+            display,
+            np.asarray(pose_position, dtype=np.float32),
+            np.asarray(pose_rotation, dtype=np.float32),
+            fx,
+            fy,
+            cx,
+            cy,
+            axis_len,
+        )
 
     if centroid_uv is not None:
         cu, cv_pt = int(round(centroid_uv[0])), int(round(centroid_uv[1]))
@@ -2593,6 +2814,13 @@ def apply_segment_overlay(
             display, (tu, tv), (0, 128, 255), cv2.MARKER_TILTED_CROSS, 18, 2, cv2.LINE_AA
         )
         cv2.circle(display, (tu, tv), 8, (0, 128, 255), 2, cv2.LINE_AA)
+
+    if seed_uv is not None:
+        su, sv = int(round(seed_uv[0])), int(round(seed_uv[1]))
+        cv2.drawMarker(
+            display, (su, sv), (0, 80, 255), cv2.MARKER_STAR, 18, 2, cv2.LINE_AA
+        )
+        cv2.circle(display, (su, sv), 10, (0, 80, 255), 2, cv2.LINE_AA)
     return display
 
 
@@ -3476,8 +3704,12 @@ class ClickableImageLabel(QLabel):
         self._segment_mask: Optional[np.ndarray] = None
         self._segment_centroid: Optional[Tuple[float, float]] = None
         self._segment_contact_uv: Optional[Tuple[float, float]] = None
+        self._segment_seed_uv: Optional[Tuple[float, float]] = None
         self._segment_obb: Optional[np.ndarray] = None
         self._segment_intrinsics: Optional[Tuple[float, float, float, float]] = None
+        self._pose_position: Optional[np.ndarray] = None
+        self._pose_rotation: Optional[np.ndarray] = None
+        self._pose_axis_len: Optional[float] = None
 
     def set_source_image(self, cv_image: np.ndarray, pixmap: Optional[QPixmap] = None) -> None:
         self._source_image = cv_image
@@ -3490,36 +3722,66 @@ class ClickableImageLabel(QLabel):
         obb_corners: Optional[np.ndarray] = None,
         intrinsics: Optional[Tuple[float, float, float, float]] = None,
         contact_uv: Optional[Tuple[float, float]] = None,
+        seed_uv: Optional[Tuple[float, float]] = None,
+        pose_position: Optional[np.ndarray] = None,
+        pose_rotation: Optional[np.ndarray] = None,
+        pose_axis_len: Optional[float] = None,
     ) -> None:
         self._segment_mask = mask.copy() if mask is not None else None
         self._segment_centroid = centroid_uv
         self._segment_contact_uv = contact_uv
+        self._segment_seed_uv = seed_uv
         self._segment_obb = obb_corners.copy() if obb_corners is not None else None
         self._segment_intrinsics = intrinsics
+        self._pose_position = (
+            np.asarray(pose_position, dtype=np.float32).reshape(3).copy()
+            if pose_position is not None
+            else None
+        )
+        self._pose_rotation = (
+            np.asarray(pose_rotation, dtype=np.float32).reshape(3, 3).copy()
+            if pose_rotation is not None
+            else None
+        )
+        self._pose_axis_len = pose_axis_len
         self._refresh_display()
 
     def clear_segment_overlay(self) -> None:
         self._segment_mask = None
         self._segment_centroid = None
         self._segment_contact_uv = None
+        self._segment_seed_uv = None
         self._segment_obb = None
         self._segment_intrinsics = None
+        self._pose_position = None
+        self._pose_rotation = None
+        self._pose_axis_len = None
         self._refresh_display()
 
     def set_precomposed_display(self, overlay_bgr: np.ndarray) -> None:
         """直接显示后台线程已合成好的叠加图，避免 UI 线程重复计算。"""
+        # 保留为源图，这样后续帧更新前至少还能看到一次；
+        # 真正持久化请用 set_segment_overlay（随视频流重绘）。
+        self._source_image = overlay_bgr.copy()
         self._segment_mask = None
         self._segment_centroid = None
         self._segment_contact_uv = None
+        self._segment_seed_uv = None
         self._segment_obb = None
         self._segment_intrinsics = None
+        self._pose_position = None
+        self._pose_rotation = None
+        self._pose_axis_len = None
         self._latest_pixmap = cv2_to_qpixmap(overlay_bgr)
         self._render_pixmap()
 
     def _compose_display_image(self) -> np.ndarray:
         if self._source_image is None:
             return np.zeros((1, 1, 3), dtype=np.uint8)
-        if self._segment_mask is not None and self._segment_mask.any():
+        has_mask = self._segment_mask is not None and np.asarray(self._segment_mask).any()
+        has_pose = self._segment_obb is not None or self._pose_position is not None
+        has_seed = self._segment_seed_uv is not None
+        if has_mask or has_pose or has_seed:
             return apply_segment_overlay(
                 self._source_image,
                 self._segment_mask,
@@ -3527,13 +3789,23 @@ class ClickableImageLabel(QLabel):
                 obb_corners=self._segment_obb,
                 intrinsics=self._segment_intrinsics,
                 contact_uv=self._segment_contact_uv,
+                seed_uv=self._segment_seed_uv,
+                pose_position=self._pose_position,
+                pose_rotation=self._pose_rotation,
+                pose_axis_len=self._pose_axis_len,
             )
         return self._source_image
 
     def _refresh_display(self, pixmap: Optional[QPixmap] = None) -> None:
         if self._source_image is None:
             return
-        if pixmap is not None and self._segment_mask is None:
+        overlay_active = (
+            self._segment_mask is not None
+            or self._segment_seed_uv is not None
+            or self._segment_obb is not None
+            or self._pose_position is not None
+        )
+        if pixmap is not None and not overlay_active:
             self._latest_pixmap = pixmap
         else:
             self._latest_pixmap = cv2_to_qpixmap(self._compose_display_image())
@@ -3635,7 +3907,7 @@ class CameraPanel(QWidget):
         self.title_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout.addWidget(self.title_label)
 
-        self.image_label = ClickableImageLabel("等待图像...（勾选 depth 后点击物体进行立体分割）")
+        self.image_label = ClickableImageLabel("等待图像...（点击选点，再按「调用分割」确认）")
         self.image_label.clicked_pixel.connect(self._on_pixel_clicked)
         layout.addWidget(self.image_label, stretch=1)
 
@@ -3646,7 +3918,7 @@ class CameraPanel(QWidget):
         self.info_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout.addWidget(self.info_label)
 
-        self.coord_label = QLabel("点击图像：需勾选配对 depth topic 后才可进行立体分割")
+        self.coord_label = QLabel("点击图像选择提示点；再点「调用分割 / SAM3 / FP」执行")
         self.coord_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.coord_label.setAlignment(Qt.AlignCenter)
         self.coord_label.setStyleSheet(f"color: {UI_ACCENT_BLUE_BRIGHT};")
@@ -3658,6 +3930,48 @@ class CameraPanel(QWidget):
         self._pose_bridge = PoseComputeBridge()
         self._pose_bridge.finished.connect(self._on_pose_compute_finished)
         self._pose_busy = False
+        self._pending_seed_uv: Optional[Tuple[int, int]] = None
+
+    def _show_seed_marker(self, u: int, v: int, hint: str) -> None:
+        self._pending_seed_uv = (u, v)
+        self.image_label.set_segment_overlay(None, seed_uv=(float(u), float(v)))
+        self.coord_label.setText(hint)
+
+    def invoke_segment_at_seed(
+        self,
+        u: Optional[int] = None,
+        v: Optional[int] = None,
+    ) -> str:
+        """按提示点启动立体分割+位姿（由按钮触发，不自动在点击时执行）。"""
+        if self._pose_busy:
+            return f"[{self.topic}] 分割进行中，请稍候"
+        if self._latest_image is None:
+            return f"[{self.topic}] 尚无彩色图像"
+        if u is None or v is None:
+            if self._pending_seed_uv is None:
+                return f"[{self.topic}] 请先点击图像选择提示点"
+            u, v = self._pending_seed_uv
+        h, w = self._latest_image.shape[:2]
+        u = max(0, min(w - 1, int(u)))
+        v = max(0, min(h - 1, int(v)))
+        self._pending_seed_uv = (u, v)
+        self.image_label.set_segment_overlay(None, seed_uv=(float(u), float(v)))
+
+        if self._is_paired_depth_enabled is not None and not self._is_paired_depth_enabled(
+            self.topic
+        ):
+            return f"[{self.topic}] 未勾选配对 depth，无法分割"
+        depth = self._get_paired_depth(self.topic) if self._get_paired_depth else None
+        depth_topic = self._get_depth_topic(self.topic) if self._get_depth_topic else None
+        if depth is None or not depth_topic or self._get_intrinsics_for_depth is None:
+            return f"[{self.topic}] 无 depth 数据，无法分割"
+        dh, dw = depth.shape[:2]
+        fx, fy, cx, cy = self._get_intrinsics_for_depth(depth_topic, dw, dh)
+        u_d, v_d = scale_uv_to_shape(u, v, self._latest_image.shape[:2], (dh, dw))
+        self._start_pose_compute(
+            depth, self._latest_image, u_d, v_d, fx, fy, cx, cy, display_u=u
+        )
+        return f"[{self.topic}] 已开始分割 @ ({u}, {v})"
 
     def _start_pose_compute(
         self,
@@ -3706,34 +4020,41 @@ class CameraPanel(QWidget):
         if result is None:
             self.image_label.clear_segment_overlay()
         else:
-            if overlay is not None:
-                self.image_label.set_precomposed_display(overlay)
-            else:
-                display_mask = resize_mask_to_shape(result.mask, self._latest_image.shape[:2])
-                dh, dw = result.mask.shape[:2]
-                ch, cw = self._latest_image.shape[:2]
-                cu, cv_pt = scale_uv_to_shape(
-                    int(round(result.centroid_uv[0])),
-                    int(round(result.centroid_uv[1])),
-                    (dh, dw),
-                    (ch, cw),
-                )
-                contact_u, contact_v = scale_uv_to_shape(
-                    int(round(result.contact_uv[0])),
-                    int(round(result.contact_uv[1])),
-                    (dh, dw),
-                    (ch, cw),
-                )
-                depth_topic = self._get_depth_topic(self.topic) if self._get_depth_topic else None
-                if depth_topic and self._get_intrinsics_for_depth:
-                    fx, fy, cx, cy = self._get_intrinsics_for_depth(depth_topic, dw, dh)
-                    self.image_label.set_segment_overlay(
-                        display_mask,
-                        (float(cu), float(cv_pt)),
-                        obb_corners=result.obb_corners,
-                        intrinsics=(fx, fy, cx, cy),
-                        contact_uv=(float(contact_u), float(contact_v)),
-                    )
+            # 用 mask 叠加（随视频流持续重绘），避免 set_precomposed 下一帧被冲掉
+            display_mask = resize_mask_to_shape(result.mask, self._latest_image.shape[:2])
+            dh, dw = result.mask.shape[:2]
+            ch, cw = self._latest_image.shape[:2]
+            cu, cv_pt = scale_uv_to_shape(
+                int(round(result.centroid_uv[0])),
+                int(round(result.centroid_uv[1])),
+                (dh, dw),
+                (ch, cw),
+            )
+            contact_u, contact_v = scale_uv_to_shape(
+                int(round(result.contact_uv[0])),
+                int(round(result.contact_uv[1])),
+                (dh, dw),
+                (ch, cw),
+            )
+            depth_topic = self._get_depth_topic(self.topic) if self._get_depth_topic else None
+            intr = None
+            if depth_topic and self._get_intrinsics_for_depth:
+                fx, fy, cx, cy = self._get_intrinsics_for_depth(depth_topic, dw, dh)
+                # 内参按 color 尺寸缩放，便于画 OBB
+                sx = float(cw) / float(max(1, dw))
+                sy = float(ch) / float(max(1, dh))
+                intr = (fx * sx, fy * sy, cx * sx, cy * sy)
+            self.image_label.set_segment_overlay(
+                display_mask,
+                (float(cu), float(cv_pt)),
+                obb_corners=result.obb_corners,
+                intrinsics=intr,
+                contact_uv=(float(contact_u), float(contact_v)),
+                seed_uv=(float(display_u), float(display_v)),
+                pose_position=np.asarray(result.position_xyz, dtype=np.float32),
+                pose_rotation=np.asarray(result.rotation_matrix, dtype=np.float32),
+                pose_axis_len=float(max(result.obb_extents) * 0.55),
+            )
             self._emit_segment_pose(result)
         self.coord_label.setText(info)
         if self._status_callback:
@@ -3761,54 +4082,36 @@ class CameraPanel(QWidget):
         QTimer.singleShot(0, lambda t=target: self._on_segment_pose(t))
 
     def show_sam3_mask(self, mask: np.ndarray, seed_u: int, seed_v: int) -> None:
-        if self._latest_image is None or not mask.any():
+        if self._latest_image is None or not np.asarray(mask).any():
             self.image_label.clear_segment_overlay()
             return
         display_mask = resize_mask_to_shape(mask, self._latest_image.shape[:2])
-        ys, xs = np.where(mask)
+        ys, xs = np.where(display_mask)
         if len(xs) > 0:
             cu, cv = float(np.mean(xs)), float(np.mean(ys))
         else:
             cu, cv = float(seed_u), float(seed_v)
-        self.image_label.set_segment_overlay(display_mask, (cu, cv))
+        # 随视频流持续重绘（绿填充 + 黄轮廓 + 红星提示点）
+        self.image_label.set_segment_overlay(
+            display_mask,
+            (cu, cv),
+            seed_uv=(float(seed_u), float(seed_v)),
+        )
         self.coord_label.setText(
-            f"SAM3 {int(mask.sum())} px @ ({seed_u}, {seed_v})  "
+            f"SAM3 {int(display_mask.sum())} px @ ({seed_u}, {seed_v})  "
             f"质心 ({cu:.0f}, {cv:.0f})"
         )
 
     def _on_pixel_clicked(self, u: int, v: int) -> None:
         if self._on_click_uv is not None:
             self._on_click_uv(self.topic, u, v)
-        if self._latest_image is None or self._pose_busy:
+        if self._latest_image is None:
             return
-
-        if self._is_paired_depth_enabled is not None and not self._is_paired_depth_enabled(
-            self.topic
-        ):
-            info = format_color_pixel_info(u, v, self._latest_image)
-            self.image_label.clear_segment_overlay()
-            self.coord_label.setText(f"{info}  |  未勾选 depth，跳过分割")
-            if self._status_callback:
-                self._status_callback(f"[{self.topic}] 未勾选 depth，跳过分割")
-            return
-
-        depth = self._get_paired_depth(self.topic) if self._get_paired_depth else None
-        depth_topic = self._get_depth_topic(self.topic) if self._get_depth_topic else None
-
-        if depth is not None and depth_topic and self._get_intrinsics_for_depth:
-            dh, dw = depth.shape[:2]
-            fx, fy, cx, cy = self._get_intrinsics_for_depth(depth_topic, dw, dh)
-            u_d, v_d = scale_uv_to_shape(u, v, self._latest_image.shape[:2], (dh, dw))
-            self._start_pose_compute(
-                depth, self._latest_image, u_d, v_d, fx, fy, cx, cy, display_u=u
-            )
-            return
-
         info = format_color_pixel_info(u, v, self._latest_image)
-        self.image_label.clear_segment_overlay()
-        self.coord_label.setText(f"{info}  |  无 depth 数据，无法分割")
+        hint = f"{info}  |  已选提示点，请点「调用分割 / SAM3 / FP」确认"
+        self._show_seed_marker(u, v, hint)
         if self._status_callback:
-            self._status_callback(f"[{self.topic}] {info}")
+            self._status_callback(f"[{self.topic}] 已选提示点 ({u}, {v})")
 
     def update_frame(self, cv_image: np.ndarray) -> None:
         self._latest_image = cv_image.copy()
@@ -3841,6 +4144,7 @@ class DepthPanel3D(QWidget):
         ] = None,
         get_tf_buffer: Optional[Callable[[], Optional[Buffer]]] = None,
         on_segment_pose: Optional[Callable[[SegmentPoseTarget], None]] = None,
+        on_click_uv: Optional[Callable[[str, int, int], None]] = None,
         status_callback: Optional[Callable[[str], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
@@ -3853,12 +4157,15 @@ class DepthPanel3D(QWidget):
         self._resolve_segment_camera_frame = resolve_segment_camera_frame
         self._get_tf_buffer = get_tf_buffer
         self._on_segment_pose = on_segment_pose
+        self._on_click_uv = on_click_uv
         self._status_callback = status_callback
         self._frame_count = 0
         self._last_fps_time = time.time()
         self._last_display_time = 0.0
         self._last_robot_overlay_time = 0.0
         self._fps = 0.0
+        self._pending_seed_preview_uv: Optional[Tuple[int, int]] = None
+        self._pending_seed_full_uv: Optional[Tuple[int, int]] = None
         self._point_count = 0
         self._latest_depth: Optional[np.ndarray] = None
         self._intrinsics: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
@@ -3963,7 +4270,7 @@ class DepthPanel3D(QWidget):
         self.view.addItem(self.robot_left_axes)
         self.view.addItem(self.robot_right_axes)
 
-        self.depth_preview = ClickableImageLabel("点击深度图：立体分割 + 6D 位姿")
+        self.depth_preview = ClickableImageLabel("点击深度图选择提示点；再按「调用分割」确认")
         self.depth_preview.setMinimumHeight(48)
         self.depth_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.depth_preview.clicked_pixel.connect(self._on_depth_pixel_clicked)
@@ -3976,7 +4283,7 @@ class DepthPanel3D(QWidget):
         self.info_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout.addWidget(self.info_label)
 
-        self.coord_label = QLabel("点击深度图：立体分割 + 6D 位姿（位置 + RPY + OBB）")
+        self.coord_label = QLabel("点击深度图选择提示点；再点「调用分割 / SAM3 / FP」执行")
         self.coord_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.coord_label.setAlignment(Qt.AlignCenter)
         self.coord_label.setStyleSheet(f"color: {UI_ACCENT_BLUE_BRIGHT};")
@@ -4100,6 +4407,34 @@ class DepthPanel3D(QWidget):
             (0.25, 0.85, 1.0, 1.0),
         )
 
+    def invoke_segment_at_seed(
+        self,
+        u_full: Optional[int] = None,
+        v_full: Optional[int] = None,
+    ) -> str:
+        """按提示点启动立体分割+位姿（按钮触发）。"""
+        if self._latest_depth is None:
+            return f"[{self.topic}] 尚无深度图"
+        if self._pose_busy:
+            return f"[{self.topic}] 分割进行中，请稍候"
+        if u_full is None or v_full is None:
+            if self._pending_seed_full_uv is None:
+                return f"[{self.topic}] 请先点击深度图选择提示点"
+            u_full, v_full = self._pending_seed_full_uv
+        dh, dw = self._depth_full_shape
+        u_full = max(0, min(dw - 1, int(u_full)))
+        v_full = max(0, min(dh - 1, int(v_full)))
+        preview_u, preview_v = scale_uv_to_shape(
+            u_full, v_full, (dh, dw), self._preview_shape
+        )
+        self._pending_seed_full_uv = (u_full, v_full)
+        self._pending_seed_preview_uv = (preview_u, preview_v)
+        self.depth_preview.set_segment_overlay(
+            None, seed_uv=(float(preview_u), float(preview_v))
+        )
+        self._start_pose_compute(u_full, v_full, preview_u, preview_v)
+        return f"[{self.topic}] 已开始分割 @ depth({u_full}, {v_full})"
+
     def _start_pose_compute(self, u_full: int, v_full: int, preview_u: int, preview_v: int) -> None:
         if self._latest_depth is None or self._pose_busy:
             return
@@ -4141,11 +4476,32 @@ class DepthPanel3D(QWidget):
         threading.Thread(target=_work, daemon=True).start()
 
     def _on_depth_pixel_clicked(self, u: int, v: int) -> None:
-        if self._latest_depth is None or self._pose_busy:
+        if self._latest_depth is None:
             return
         dh, dw = self._depth_full_shape
         u_full, v_full = scale_uv_to_shape(u, v, self._preview_shape, (dh, dw))
-        self._start_pose_compute(u_full, v_full, u, v)
+        self._pending_seed_preview_uv = (u, v)
+        self._pending_seed_full_uv = (u_full, v_full)
+        self.depth_preview.set_segment_overlay(None, seed_uv=(float(u), float(v)))
+        self.coord_label.setText(
+            f"提示点 preview({u}, {v}) / depth({u_full}, {v_full})  |  "
+            "请点「调用分割 / SAM3 / FP」确认"
+        )
+        if self._on_click_uv is not None:
+            # 将深度点击映射到配对彩色图坐标，供 SAM3/FP 提示点使用
+            color_u, color_v = u_full, v_full
+            color_topic = self.topic
+            if self._get_paired_color is not None:
+                color = self._get_paired_color(self.topic)
+                if color is not None:
+                    color_u, color_v = scale_uv_to_shape(
+                        u_full, v_full, (dh, dw), color.shape[:2]
+                    )
+            self._on_click_uv(color_topic, int(color_u), int(color_v))
+        if self._status_callback:
+            self._status_callback(
+                f"[{self.topic}] 已选提示点 depth({u_full}, {v_full})"
+            )
 
     def _on_pose_compute_finished(
         self,
@@ -4163,29 +4519,30 @@ class DepthPanel3D(QWidget):
             self.depth_preview.clear_segment_overlay()
             self._clear_pose_visualization()
         else:
-            if overlay is not None:
-                self.depth_preview.set_precomposed_display(overlay)
-            else:
-                mask_p = resize_mask_to_shape(result.mask, self._preview_shape)
-                cu, cv_pt = scale_uv_to_shape(
-                    int(round(result.centroid_uv[0])),
-                    int(round(result.centroid_uv[1])),
-                    self._depth_full_shape,
-                    self._preview_shape,
-                )
-                contact_u, contact_v = scale_uv_to_shape(
-                    int(round(result.contact_uv[0])),
-                    int(round(result.contact_uv[1])),
-                    self._depth_full_shape,
-                    self._preview_shape,
-                )
-                self.depth_preview.set_segment_overlay(
-                    mask_p,
-                    (float(cu), float(cv_pt)),
-                    obb_corners=result.obb_corners,
-                    intrinsics=self._preview_intrinsics,
-                    contact_uv=(float(contact_u), float(contact_v)),
-                )
+            mask_p = resize_mask_to_shape(result.mask, self._preview_shape)
+            cu, cv_pt = scale_uv_to_shape(
+                int(round(result.centroid_uv[0])),
+                int(round(result.centroid_uv[1])),
+                self._depth_full_shape,
+                self._preview_shape,
+            )
+            contact_u, contact_v = scale_uv_to_shape(
+                int(round(result.contact_uv[0])),
+                int(round(result.contact_uv[1])),
+                self._depth_full_shape,
+                self._preview_shape,
+            )
+            self.depth_preview.set_segment_overlay(
+                mask_p,
+                (float(cu), float(cv_pt)),
+                obb_corners=result.obb_corners,
+                intrinsics=self._preview_intrinsics,
+                contact_uv=(float(contact_u), float(contact_v)),
+                seed_uv=(float(preview_u), float(preview_v)),
+                pose_position=np.asarray(result.position_xyz, dtype=np.float32),
+                pose_rotation=np.asarray(result.rotation_matrix, dtype=np.float32),
+                pose_axis_len=float(max(result.obb_extents) * 0.55),
+            )
             self._show_pose_6d(result)
             self._emit_segment_pose(result)
 
@@ -4356,6 +4713,7 @@ def create_camera_panel(
             resolve_segment_camera_frame=resolve_segment_camera_frame,
             get_tf_buffer=get_tf_buffer,
             on_segment_pose=on_segment_pose,
+            on_click_uv=on_click_uv,
             status_callback=status_callback,
         )
     return CameraPanel(
@@ -4404,6 +4762,10 @@ class CameraTopicNode(Node):
         self._last_robot_state_emit = 0.0
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
+        # A2D: image frame_id 是 camera_frame，但默认 TF 树没有它；自动补发 base_link->camera_frame
+        self._head_camera_tf = None
+        if attach_head_camera_tf is not None:
+            self._head_camera_tf = attach_head_camera_tf(self)
         self._left_hand_cmd_pub = self.create_publisher(
             JointState,
             ROBOT_LEFT_HAND_CMD_TOPIC,
@@ -4828,10 +5190,20 @@ class CameraTopicNode(Node):
         if goal is None:
             return None
         xyz, quat = goal
+        if segment.keep_tcp_orientation:
+            tcp = self._get_left_tcp_in_base(timeout_s=timeout_s)
+            if tcp is None:
+                return None
+            _, quat = tcp
+        kind = "FoundationPose" if "foundationpose" in (segment.label or "").lower() else "分割位姿"
+        orient_note = "位置绝对·姿态保持" if segment.keep_tcp_orientation else ""
+        label = f"{kind} ({segment.label or segment.source_topic})"
+        if orient_note:
+            label = f"{label} [{orient_note}]"
         return ResolvedArmMoveGoal(
             position_xyz=xyz,
             quaternion_xyzw=quat,
-            label=f"接触TCP ({segment.label or segment.source_topic})",
+            label=label,
         )
 
     def get_arm_move_pose_labels(
@@ -4902,6 +5274,17 @@ class CameraTopicNode(Node):
         msg.data = int(mode)
         self._control_mode_pub.publish(msg)
         self._control_mode = int(mode)
+
+    def request_model_control_mode(self) -> str:
+        """发布 control_mode=0（模型控制），便于左臂移动/回放。"""
+        prev = self._control_mode
+        self._burst_control_mode(MODEL_CONTROL_MODE)
+        self._control_mode_received_at = time.time()
+        self.ros_bridge.control_mode_changed.emit(MODEL_CONTROL_MODE)
+        self.get_logger().info(
+            f"手动切换 control_mode {prev} -> {MODEL_CONTROL_MODE}"
+        )
+        return f"已切换 control_mode -> {MODEL_CONTROL_MODE}（模型控制）"
 
     def _restore_control_mode_if_needed(self) -> None:
         if self._slow_motion_saved_control_mode is not None:
@@ -4980,15 +5363,34 @@ class CameraTopicNode(Node):
         duration_s = compute_arm_move_duration_s(
             start_joints, goal_joints, self._arm_move_joint_speed_rad_s
         )
-        if duration_s <= 0:
-            self._abort_slow_motion_prep("目标关节与当前几乎相同，无需移动")
-            return
         max_delta = max(abs(goal_joints[i] - start_joints[i]) for i in range(16))
+        start_xyz = prep.get("start_xyz")
+        goal_xyz = prep.get("goal_xyz")
+        cart_dist = 0.0
+        if (
+            isinstance(start_xyz, tuple)
+            and isinstance(goal_xyz, tuple)
+            and len(start_xyz) == 3
+            and len(goal_xyz) == 3
+        ):
+            cart_dist = float(
+                sum((float(goal_xyz[i]) - float(start_xyz[i])) ** 2 for i in range(3)) ** 0.5
+            )
+        if duration_s <= 0:
+            if cart_dist > ARM_MOVE_CART_NEAR_M:
+                self._abort_slow_motion_prep(
+                    f"IK 未求解到目标（笛卡尔距离 {cart_dist:.3f} m，关节变化 {max_delta:.5f} rad）。"
+                    "目标可能不可达，或 IK 未更新 /wbc/target_joints"
+                )
+            else:
+                self._abort_slow_motion_prep("目标关节与当前几乎相同，无需移动")
+            return
         steps = max(2, int(duration_s * ARM_MOVE_JOINT_HZ))
         joint_poses = build_interpolated_joints(start_joints, goal_joints, steps, linear=True)
         self.get_logger().info(
             f"关节轨迹: {steps} 步 @ {ARM_MOVE_JOINT_HZ:.0f}Hz / {duration_s:.1f}s, "
-            f"最大关节变化 {max_delta:.3f} rad, 发布 {WBC_TARGET_JOINTS_TOPIC}"
+            f"最大关节变化 {max_delta:.3f} rad, 笛卡尔 {cart_dist:.3f} m, "
+            f"发布 {WBC_TARGET_JOINTS_TOPIC}"
         )
         self._slow_motion_joint_poses = joint_poses
         self._slow_motion_final_joints = goal_joints
@@ -5005,8 +5407,8 @@ class CameraTopicNode(Node):
         self._slow_motion_timer = self.create_timer(
             1.0 / ARM_MOVE_JOINT_HZ, self._slow_motion_tick
         )
-        goal_xyz = prep["goal_xyz"]  # type: ignore[assignment]
-        gx, gy, gz = goal_xyz
+        goal_xyz_t = prep["goal_xyz"]  # type: ignore[assignment]
+        gx, gy, gz = goal_xyz_t
         saved_mode = int(prep.get("saved_mode", self._control_mode))
         self.get_logger().info(
             f"左臂移动开始 [{goal.label}]: mode {saved_mode}->"
@@ -5155,15 +5557,40 @@ class CameraTopicNode(Node):
                 self._publish_slow_motion_targets(goal_xyz, goal_quat)
                 prep["goal_published"] = True
                 prep["settle_ticks"] = ARM_MOVE_GOAL_SAMPLE_TICKS
+                prep["best_goal_joints"] = list(self._last_wbc_joints[:16])
+                prep["best_joint_delta"] = 0.0
+                sx, sy, sz = prep["start_xyz"]  # type: ignore[misc]
+                gx, gy, gz = goal_xyz
+                cart = ((gx - sx) ** 2 + (gy - sy) ** 2 + (gz - sz) ** 2) ** 0.5
+                self.get_logger().info(
+                    f"IK 目标已发布: start=({sx:.3f},{sy:.3f},{sz:.3f}) "
+                    f"goal=({gx:.3f},{gy:.3f},{gz:.3f}) 距离={cart:.3f}m，"
+                    f"等待最多 {ARM_MOVE_GOAL_SAMPLE_TICKS} ticks"
+                )
                 return
             settle_ticks = int(prep.get("settle_ticks", 0)) - 1
             prep["settle_ticks"] = settle_ticks
+            if self._last_wbc_joints is not None and len(self._last_wbc_joints) >= 16:
+                motion_start: List[float] = prep["motion_start_joints"]  # type: ignore[assignment]
+                cur = list(self._last_wbc_joints[:16])
+                delta = max(abs(cur[i] - motion_start[i]) for i in range(16))
+                if delta > float(prep.get("best_joint_delta", 0.0)):
+                    prep["best_joint_delta"] = delta
+                    prep["best_goal_joints"] = cur
+                # 关节已明显变化则提前结束等待
+                if delta >= ARM_MOVE_GOAL_MIN_JOINT_DELTA and settle_ticks > 2:
+                    settle_ticks = 0
+                    prep["settle_ticks"] = 0
             if settle_ticks > 0:
                 return
             if self._last_wbc_joints is None or len(self._last_wbc_joints) < 16:
                 self._abort_slow_motion_prep("IK 未返回目标关节角")
                 return
-            prep["goal_joints"] = list(self._last_wbc_joints[:16])
+            best = prep.get("best_goal_joints")
+            prep["goal_joints"] = (
+                list(best) if isinstance(best, list) and len(best) >= 16
+                else list(self._last_wbc_joints[:16])
+            )
             prep["handoff_tick"] = 0
             prep["phase"] = "handoff"
             self.ros_bridge.slow_motion_progress.emit(0.0, "规划完成，释放 IK 控制...")
@@ -6659,6 +7086,200 @@ class RrdReplayLauncher(QObject):
             self._process.kill()
 
 
+class CadMeshLauncher(QObject):
+    """启动照片/mesh → FoundationPose .obj 重建，日志转发到 UI。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    mesh_ready = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._last_mesh = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() == QProcess.Running
+
+    def last_mesh(self) -> str:
+        return self._last_mesh
+
+    def start_from_images(
+        self,
+        images_dir: str,
+        name: str,
+        *,
+        target_extent_m: float = CAD_TARGET_EXTENT_DEFAULT_M,
+        poisson_depth: int = CAD_POISSON_DEPTH_DEFAULT,
+        min_images: int = CAD_MIN_IMAGES_DEFAULT,
+        out_dir: Optional[str] = None,
+    ) -> None:
+        images_dir = os.path.abspath(os.path.expanduser(images_dir.strip()))
+        if not os.path.isdir(images_dir):
+            self.status_message.emit(f"照片目录不存在: {images_dir}")
+            return
+        self._start(
+            [
+                "--images",
+                images_dir,
+                "--name",
+                name,
+                "--target-extent-m",
+                str(float(target_extent_m)),
+                "--poisson-depth",
+                str(int(poisson_depth)),
+                "--min-images",
+                str(int(min_images)),
+            ],
+            out_dir=out_dir,
+            expected_name=name,
+        )
+
+    def start_from_mesh(
+        self,
+        mesh_path: str,
+        name: str,
+        *,
+        target_extent_m: float = CAD_TARGET_EXTENT_DEFAULT_M,
+        out_dir: Optional[str] = None,
+    ) -> None:
+        mesh_path = os.path.abspath(os.path.expanduser(mesh_path.strip()))
+        if not os.path.isfile(mesh_path):
+            self.status_message.emit(f"mesh 不存在: {mesh_path}")
+            return
+        self._start(
+            [
+                "--import-mesh",
+                mesh_path,
+                "--name",
+                name,
+                "--target-extent-m",
+                str(float(target_extent_m)),
+            ],
+            out_dir=out_dir,
+            expected_name=name,
+        )
+
+    def _start(
+        self,
+        extra_args: List[str],
+        *,
+        out_dir: Optional[str],
+        expected_name: str,
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("CAD 重建已在运行")
+            return
+
+        name = (expected_name or "").strip().replace(" ", "_")
+        if not name or "/" in name or "\\" in name:
+            self.status_message.emit("请填写有效的物体名称")
+            return
+
+        out = os.path.abspath(os.path.expanduser(out_dir or CAD_MESHES_DIR))
+        os.makedirs(out, exist_ok=True)
+        self._expected_obj = os.path.join(out, name, "reconstructed.obj")
+        self._last_mesh = ""
+
+        if not os.path.isfile(CAD_PHOTOGRAMMETRY_PY):
+            self.status_message.emit(f"未找到重建脚本: {CAD_PHOTOGRAMMETRY_PY}")
+            return
+
+        mesh_python = resolve_cad_mesh_python()
+        launch_args = [
+            CAD_PHOTOGRAMMETRY_PY,
+            "--name",
+            name,
+            "--out-dir",
+            out,
+        ] + extra_args
+        quoted = " ".join(shlex.quote(a) for a in launch_args)
+        cmd = (
+            f"export PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1 "
+            f"MESH_PYTHON={shlex.quote(mesh_python)} "
+            f"QT_QPA_PLATFORM=offscreen LIBGL_ALWAYS_SOFTWARE=1 && "
+            f"cd {shlex.quote(EAI_DIR)} && "
+            f"exec {shlex.quote(mesh_python)} {quoted}"
+        )
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(EAI_DIR)
+        proc.start("setsid", ["bash", "-lc", cmd])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ {mesh_python} {' '.join(launch_args)}")
+        self.status_message.emit(f"正在生成 CAD: {name}…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 CAD 重建")
+            return
+        self.status_message.emit("正在停止 CAD 重建…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(3000, self._force_kill_process)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.terminate()
+            self._process.waitForFinished(2000)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            self.log_line.emit(text)
+            if text.startswith("{") and '"mesh"' in text:
+                try:
+                    payload = json.loads(text)
+                    mesh = str(payload.get("mesh") or "").strip()
+                    if mesh and os.path.isfile(mesh):
+                        self._last_mesh = os.path.abspath(mesh)
+                except Exception:
+                    pass
+
+    def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        self._process = None
+        self.running_changed.emit(False)
+        mesh = self._last_mesh
+        if not mesh and getattr(self, "_expected_obj", "") and os.path.isfile(self._expected_obj):
+            mesh = os.path.abspath(self._expected_obj)
+            self._last_mesh = mesh
+        if exit_code == 0 and mesh:
+            self.log_line.emit(f"--- CAD 完成: {mesh} ---")
+            self.status_message.emit(f"CAD 已生成: {os.path.basename(os.path.dirname(mesh))}")
+            self.mesh_ready.emit(mesh)
+        elif exit_code == 0:
+            self.log_line.emit("--- CAD 进程正常退出（未找到输出 mesh）---")
+            self.status_message.emit("CAD 完成但未找到 reconstructed.obj")
+        else:
+            self.log_line.emit(f"--- CAD 进程退出 (code={exit_code}) ---")
+            self.status_message.emit(f"CAD 重建失败 (code={exit_code})")
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error != QProcess.Crashed:
+            self.status_message.emit(f"CAD 重建进程错误: {error}")
+
+    def _force_kill_process(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.kill()
+            self._process = None
+            self.running_changed.emit(False)
+            self.log_line.emit("--- CAD 进程已被强制终止 ---")
+            self.status_message.emit("CAD 重建已强制停止")
+
+
 class PsiPolicyTrainLauncher(QObject):
     """启动/停止 psi-policy 训练，并将 stdout/stderr 实时转发到 UI。"""
 
@@ -6829,6 +7450,9 @@ class CameraTopicWindow(QMainWindow):
         self._arm_enable_wait_timer.setInterval(200)
         self._arm_enable_wait_timer.timeout.connect(self._on_arm_enable_wait_tick)
         self._psi_policy_dir_override: Optional[str] = None
+        self._cad_capture_dir = ""
+        self._cad_capture_saved = 0
+        self._cad_last_capture_gray: Optional[np.ndarray] = None
 
         self.setWindowTitle("Camera Topic Viewer")
         win_x, win_y, win_w, win_h = default_viewer_geometry()
@@ -6916,6 +7540,12 @@ class CameraTopicWindow(QMainWindow):
         enable_row.addWidget(self.robot_hand_enable_btn)
         enable_row.addSpacing(8)
         enable_row.addWidget(self.robot_control_mode_label)
+        self.robot_mode0_btn = QPushButton("切 mode=0")
+        self.robot_mode0_btn.setToolTip(
+            f"发布 {CONTROL_MODE_TOPIC}={MODEL_CONTROL_MODE}（模型控制，左臂移动/回放需要）"
+        )
+        self.robot_mode0_btn.clicked.connect(self._on_model_mode_clicked)
+        enable_row.addWidget(self.robot_mode0_btn)
         enable_row.addStretch()
         robot_layout.addLayout(enable_row)
 
@@ -7027,14 +7657,21 @@ class CameraTopicWindow(QMainWindow):
         sam3_invoke_row.addWidget(QLabel("提示点"))
         self.sam3_u_spin = QSpinBox()
         self.sam3_u_spin.setRange(0, 9999)
-        self.sam3_u_spin.setToolTip("SAM3 点提示横坐标 u（点击图像会自动更新）")
+        self.sam3_u_spin.setToolTip("提示点横坐标 u（点击图像只更新此点，不自动分割）")
         sam3_invoke_row.addWidget(QLabel("u"))
         sam3_invoke_row.addWidget(self.sam3_u_spin)
         self.sam3_v_spin = QSpinBox()
         self.sam3_v_spin.setRange(0, 9999)
-        self.sam3_v_spin.setToolTip("SAM3 点提示纵坐标 v（点击图像会自动更新）")
+        self.sam3_v_spin.setToolTip("提示点纵坐标 v（点击图像只更新此点，不自动分割）")
         sam3_invoke_row.addWidget(QLabel("v"))
         sam3_invoke_row.addWidget(self.sam3_v_spin)
+        self.stereo_invoke_btn = QPushButton("调用分割")
+        self.stereo_invoke_btn.setToolTip(
+            "对当前提示点执行立体分割 + 6D 位姿（跟随上方分割/位姿后端设置）。\n"
+            "点击图像仅选点，不会自动分割。"
+        )
+        self.stereo_invoke_btn.clicked.connect(self._on_stereo_invoke_clicked)
+        sam3_invoke_row.addWidget(self.stereo_invoke_btn)
         self.sam3_invoke_btn = QPushButton("调用 SAM3")
         self.sam3_invoke_btn.setToolTip(
             "对当前彩色图像调用 SAM3 分割，并在下方显示结果；"
@@ -7054,7 +7691,19 @@ class CameraTopicWindow(QMainWindow):
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             "border: 1px solid #555; }}"
         )
-        segment_outer.addWidget(self.sam3_result_edit)
+        sam3_result_row = QHBoxLayout()
+        sam3_result_row.setSpacing(8)
+        sam3_result_row.addWidget(self.sam3_result_edit, 1)
+        self.sam3_preview_label = QLabel("分割预览")
+        self.sam3_preview_label.setAlignment(Qt.AlignCenter)
+        self.sam3_preview_label.setMinimumSize(160, 108)
+        self.sam3_preview_label.setMaximumSize(240, 160)
+        self.sam3_preview_label.setStyleSheet(
+            "QLabel { color: #888; background-color: #1a1a1a; border: 1px solid #555; }"
+        )
+        self.sam3_preview_label.setToolTip("分割 mask 叠加预览（相机画面上也会持续绘制）")
+        sam3_result_row.addWidget(self.sam3_preview_label)
+        segment_outer.addLayout(sam3_result_row)
 
         pose_row = QHBoxLayout()
         pose_row.setSpacing(6)
@@ -7098,6 +7747,7 @@ class CameraTopicWindow(QMainWindow):
         self.fp_invoke_btn = QPushButton("调用 FP")
         self.fp_invoke_btn.setToolTip(
             "对当前彩色+深度图像调用 FoundationPose：先分割再估计 6D 位姿。\n"
+            "点击图像仅选点，需点本按钮确认。\n"
             "mesh 可在 worker 侧配置（run_foundationpose.sh --mesh）；"
             "Docker viewer 本地无 mesh 时仍可使用 worker 默认 mesh"
         )
@@ -7117,6 +7767,152 @@ class CameraTopicWindow(QMainWindow):
         segment_outer.addWidget(self.fp_result_edit)
 
         control_tabs.addTab(segment_tab, "分割")
+
+        cad_tab = QWidget()
+        cad_outer = QVBoxLayout(cad_tab)
+        cad_outer.setContentsMargins(8, 6, 8, 6)
+        cad_outer.setSpacing(6)
+
+        cad_mode_row = QHBoxLayout()
+        cad_mode_row.setSpacing(6)
+        cad_mode_row.addWidget(QLabel("模式"))
+        self.cad_mode_combo = QComboBox()
+        self.cad_mode_combo.addItem("多视角照片", "photos")
+        self.cad_mode_combo.addItem("导入 Mesh", "mesh")
+        self.cad_mode_combo.setToolTip(
+            "照片：COLMAP + Poisson 重建（需本机 colmap）。\n"
+            "导入：Meshroom / 扫描 / 已有 .obj/.ply 后处理。"
+        )
+        self.cad_mode_combo.currentIndexChanged.connect(self._on_cad_mode_changed)
+        cad_mode_row.addWidget(self.cad_mode_combo)
+        cad_mode_row.addWidget(QLabel("名称"))
+        self.cad_name_edit = QLineEdit("my_object")
+        self.cad_name_edit.setMinimumWidth(120)
+        self.cad_name_edit.setToolTip("输出到 meshes/<名称>/reconstructed.obj")
+        self.cad_name_edit.editingFinished.connect(self._sync_cad_capture_from_disk)
+        cad_mode_row.addWidget(self.cad_name_edit)
+        cad_mode_row.addWidget(QLabel("边长(m)"))
+        self.cad_extent_spin = QDoubleSpinBox()
+        self.cad_extent_spin.setRange(0.01, 2.0)
+        self.cad_extent_spin.setSingleStep(0.01)
+        self.cad_extent_spin.setDecimals(3)
+        self.cad_extent_spin.setValue(CAD_TARGET_EXTENT_DEFAULT_M)
+        self.cad_extent_spin.setFixedWidth(80)
+        self.cad_extent_spin.setToolTip("后处理：mesh 最大边长缩放到该值（米）")
+        cad_mode_row.addWidget(self.cad_extent_spin)
+        cad_mode_row.addWidget(QLabel("Poisson"))
+        self.cad_poisson_spin = QSpinBox()
+        self.cad_poisson_spin.setRange(6, 11)
+        self.cad_poisson_spin.setValue(CAD_POISSON_DEPTH_DEFAULT)
+        self.cad_poisson_spin.setFixedWidth(52)
+        self.cad_poisson_spin.setToolTip("仅照片模式：越大越细越慢")
+        cad_mode_row.addWidget(self.cad_poisson_spin)
+        cad_mode_row.addStretch()
+        cad_outer.addLayout(cad_mode_row)
+
+        cad_src_row = QHBoxLayout()
+        cad_src_row.setSpacing(6)
+        self.cad_src_label = QLabel("照片目录:")
+        cad_src_row.addWidget(self.cad_src_label)
+        self.cad_src_edit = QLineEdit()
+        self.cad_src_edit.setPlaceholderText("选择多视角照片目录，或导入 .obj/.ply")
+        self.cad_src_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        cad_src_row.addWidget(self.cad_src_edit, 1)
+        self.cad_src_browse_btn = QPushButton("选择…")
+        self.cad_src_browse_btn.setToolTip("选择照片目录或 mesh 文件")
+        self.cad_src_browse_btn.clicked.connect(self._on_cad_src_browse_clicked)
+        cad_src_row.addWidget(self.cad_src_browse_btn)
+        cad_outer.addLayout(cad_src_row)
+
+        cad_capture_row = QHBoxLayout()
+        cad_capture_row.setSpacing(6)
+        cad_capture_row.addWidget(QLabel("采集"))
+        self.cad_capture_target_spin = QSpinBox()
+        self.cad_capture_target_spin.setRange(CAD_MIN_IMAGES_DEFAULT, 48)
+        self.cad_capture_target_spin.setValue(CAD_CAPTURE_COUNT_DEFAULT)
+        self.cad_capture_target_spin.setFixedWidth(52)
+        self.cad_capture_target_spin.setToolTip("目标张数；绕物体换视角后逐张拍摄")
+        self.cad_capture_target_spin.valueChanged.connect(self._update_cad_capture_btn)
+        cad_capture_row.addWidget(self.cad_capture_target_spin)
+        self.cad_capture_btn = QPushButton("拍一张 (0/12)")
+        self.cad_capture_btn.setToolTip(
+            f"固定使用头部 RGB-D：{CAD_CAPTURE_TOPIC_DEFAULT} + {CAD_CAPTURE_DEPTH_DEFAULT}\n"
+            "保存彩色+深度到 meshes/<名称>/photos/，并用 TSDF 生成 CAD。\n"
+            "重要：每拍一张请明显转动物体（或移动相机），相邻帧不能几乎一样。"
+        )
+        self.cad_capture_btn.clicked.connect(self._on_cad_capture_clicked)
+        cad_capture_row.addWidget(self.cad_capture_btn)
+        self.cad_capture_reset_btn = QPushButton("清空采集")
+        self.cad_capture_reset_btn.setToolTip("清空当前物体的 photos 目录与计数")
+        self.cad_capture_reset_btn.clicked.connect(self._on_cad_capture_reset_clicked)
+        cad_capture_row.addWidget(self.cad_capture_reset_btn)
+        self.cad_auto_gen_check = QCheckBox("满额后自动生成")
+        self.cad_auto_gen_check.setChecked(True)
+        self.cad_auto_gen_check.setToolTip("拍满目标张数后自动启动 RGB-D / COLMAP 重建")
+        cad_capture_row.addWidget(self.cad_auto_gen_check)
+        self.cad_capture_hint = QLabel(
+            "头部 RGB-D：每拍一张请转动物体，视角差太小会被拒绝"
+        )
+        self.cad_capture_hint.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.cad_capture_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        cad_capture_row.addWidget(self.cad_capture_hint, 1)
+        cad_outer.addLayout(cad_capture_row)
+
+        cad_action_row = QHBoxLayout()
+        cad_action_row.setSpacing(6)
+        self.cad_status_label = QLabel("CAD: 空闲")
+        self.cad_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.cad_status_label.setToolTip(
+            f"输出目录: {CAD_MESHES_DIR}\n"
+            f"Python: {resolve_cad_mesh_python()}\n"
+            "照片重建需安装 COLMAP"
+        )
+        cad_action_row.addWidget(self.cad_status_label, 1)
+        self.cad_existing_combo = QComboBox()
+        self.cad_existing_combo.setMinimumWidth(160)
+        self.cad_existing_combo.setToolTip("已有 meshes/<name>/reconstructed.obj")
+        cad_action_row.addWidget(self.cad_existing_combo)
+        self.cad_refresh_btn = QPushButton("刷新")
+        self.cad_refresh_btn.clicked.connect(self._refresh_cad_mesh_combo)
+        cad_action_row.addWidget(self.cad_refresh_btn)
+        self.cad_apply_fp_btn = QPushButton("应用到 FP")
+        self.cad_apply_fp_btn.setToolTip("将所选/刚生成的 mesh 填入「分割」页 FoundationPose mesh 路径")
+        self.cad_apply_fp_btn.clicked.connect(self._on_cad_apply_fp_clicked)
+        cad_action_row.addWidget(self.cad_apply_fp_btn)
+        self.cad_start_btn = QPushButton("生成 CAD")
+        self.cad_start_btn.setToolTip("开始照片重建或 mesh 后处理")
+        self.cad_start_btn.clicked.connect(self._on_cad_start_clicked)
+        cad_action_row.addWidget(self.cad_start_btn)
+        self.cad_stop_btn = QPushButton("停止")
+        self.cad_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.cad_stop_btn.setEnabled(False)
+        self.cad_stop_btn.clicked.connect(self._on_cad_stop_clicked)
+        cad_action_row.addWidget(self.cad_stop_btn)
+        self.cad_clear_log_btn = QPushButton("清空日志")
+        self.cad_clear_log_btn.clicked.connect(self._on_cad_clear_log_clicked)
+        cad_action_row.addWidget(self.cad_clear_log_btn)
+        cad_outer.addLayout(cad_action_row)
+
+        self.cad_log_edit = QTextEdit()
+        self.cad_log_edit.setReadOnly(True)
+        self.cad_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.cad_log_edit.setMinimumHeight(120)
+        self.cad_log_edit.setMaximumHeight(200)
+        self.cad_log_edit.setPlaceholderText(
+            "CAD 重建日志…\n"
+            "建议：≥12 张照片、相邻约 60% 重叠；哑光非透明物体更稳。"
+        )
+        self.cad_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        cad_outer.addWidget(self.cad_log_edit)
+
+        self._cad_launcher = CadMeshLauncher(self)
+        self._on_cad_mode_changed()
+        self._refresh_cad_mesh_combo()
+        self._sync_cad_capture_from_disk()
+        control_tabs.addTab(cad_tab, "CAD")
 
         train_tab = QWidget()
         train_outer = QVBoxLayout(train_tab)
@@ -7321,6 +8117,12 @@ class CameraTopicWindow(QMainWindow):
             f"当前 {CONTROL_MODE_TOPIC}，模型控制/回放需为 {MODEL_CONTROL_MODE}"
         )
         enable_row.addWidget(self.control_mode_label)
+        self.mode0_btn = QPushButton("切 mode=0")
+        self.mode0_btn.setToolTip(
+            f"发布 {CONTROL_MODE_TOPIC}={MODEL_CONTROL_MODE}（模型控制，左臂移动/回放需要）"
+        )
+        self.mode0_btn.clicked.connect(self._on_model_mode_clicked)
+        enable_row.addWidget(self.mode0_btn)
         enable_row.addStretch()
         control_layout.addLayout(enable_row)
 
@@ -7391,19 +8193,23 @@ class CameraTopicWindow(QMainWindow):
             "目标 = 当前 TCP 位置 + 偏移（base_link：X前/后，Y左/右，Z上/下）"
         )
         self.move_target_segment_radio.setToolTip(
-            "使用图像点击处的接触 TCP（橙色标记）作为左臂目标，分割完成后自动移动"
+            "使用分割/FoundationPose 得到的绝对位姿作为左臂目标（base_link），"
+            "不是相对当前 TCP 的偏移。FoundationPose 成功后会自动选中此项。"
         )
         target_row.addWidget(self.move_target_relative_radio)
         target_row.addWidget(self.move_target_segment_radio)
-        target_row.addWidget(QLabel("前ΔX"))
+        self.offset_x_label = QLabel("前ΔX")
+        target_row.addWidget(self.offset_x_label)
         self.offset_x_spin = make_manual_offset_spinbox()
         self.offset_x_spin.setToolTip("沿 base_link X 轴偏移（正=前，负=后）")
         target_row.addWidget(self.offset_x_spin)
-        target_row.addWidget(QLabel("左ΔY"))
+        self.offset_y_label = QLabel("左ΔY")
+        target_row.addWidget(self.offset_y_label)
         self.offset_y_spin = make_manual_offset_spinbox()
         self.offset_y_spin.setToolTip("沿 base_link Y 轴偏移（正=左，负=右）")
         target_row.addWidget(self.offset_y_spin)
-        target_row.addWidget(QLabel("上ΔZ"))
+        self.offset_z_label = QLabel("上ΔZ")
+        target_row.addWidget(self.offset_z_label)
         self.offset_z_spin = make_manual_offset_spinbox()
         self.offset_z_spin.setToolTip("沿 base_link Z 轴偏移（正=上，负=下）")
         target_row.addWidget(self.offset_z_spin)
@@ -7412,6 +8218,7 @@ class CameraTopicWindow(QMainWindow):
         self._move_target_group.buttonToggled.connect(self._on_move_target_params_changed)
         for spin in (self.offset_x_spin, self.offset_y_spin, self.offset_z_spin):
             spin.valueChanged.connect(self._on_move_target_params_changed)
+        self._update_move_offset_ui_visibility()
         control_layout.addLayout(target_row)
         control_tabs.addTab(control_tab, "手臂/手")
 
@@ -7490,6 +8297,10 @@ class CameraTopicWindow(QMainWindow):
         self._train_launcher.log_line.connect(self._append_train_log)
         self._train_launcher.status_message.connect(self.status_bar.showMessage)
         self._train_launcher.running_changed.connect(self._update_train_ui)
+        self._cad_launcher.log_line.connect(self._append_cad_log)
+        self._cad_launcher.status_message.connect(self.status_bar.showMessage)
+        self._cad_launcher.running_changed.connect(self._update_cad_ui)
+        self._cad_launcher.mesh_ready.connect(self._on_cad_mesh_ready)
         bridge.replay_state_changed.connect(self._update_replay_ui)
 
         bridge.topics_updated.connect(self._on_topics_updated)
@@ -7515,6 +8326,7 @@ class CameraTopicWindow(QMainWindow):
         self._update_replay_ui()
         self._update_local_ai_deploy_btn()
         self._update_train_ui()
+        self._update_cad_ui()
 
     def _get_psi_policy_dir(self) -> Optional[str]:
         if self._psi_policy_dir_override:
@@ -7614,6 +8426,445 @@ class CameraTopicWindow(QMainWindow):
     def _on_train_clear_log_clicked(self) -> None:
         self.train_log_edit.clear()
 
+    def _on_cad_mode_changed(self, *_args) -> None:
+        mode = str(self.cad_mode_combo.currentData() or "photos")
+        if mode == "mesh":
+            self.cad_src_label.setText("Mesh 文件:")
+            self.cad_src_edit.setPlaceholderText("选择 .obj / .ply / .glb / .stl")
+            self.cad_poisson_spin.setEnabled(False)
+            self.cad_capture_btn.setEnabled(False)
+            self.cad_capture_reset_btn.setEnabled(False)
+        else:
+            self.cad_src_label.setText("照片目录:")
+            self.cad_src_edit.setPlaceholderText("选择多视角照片目录，或用下方「拍一张」采集")
+            self.cad_poisson_spin.setEnabled(True)
+            self._update_cad_ui()
+
+    def _cad_photos_dir_for_name(self, name: Optional[str] = None) -> str:
+        obj = (name or self.cad_name_edit.text() or "my_object").strip().replace(" ", "_")
+        for ch in '/\\:*?"<>|':
+            obj = obj.replace(ch, "_")
+        if not obj:
+            obj = "my_object"
+        return os.path.join(CAD_MESHES_DIR, obj, "photos")
+
+    def _count_photos_in_dir(self, photos_dir: str) -> int:
+        if not os.path.isdir(photos_dir):
+            return 0
+        n = 0
+        for name in os.listdir(photos_dir):
+            lower = name.lower()
+            if "_depth" in lower:
+                continue
+            if lower.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+                n += 1
+        return n
+
+    def _sync_cad_capture_from_disk(self) -> None:
+        photos_dir = self._cad_photos_dir_for_name()
+        self._cad_capture_dir = photos_dir
+        self._cad_capture_saved = self._count_photos_in_dir(photos_dir)
+        if self._cad_capture_saved > 0 and str(
+            self.cad_mode_combo.currentData() or "photos"
+        ) == "photos":
+            self.cad_src_edit.setText(photos_dir)
+        self._update_cad_capture_btn()
+
+    def _update_cad_capture_btn(self, *_args) -> None:
+        target = int(self.cad_capture_target_spin.value())
+        saved = int(self._cad_capture_saved)
+        self.cad_capture_btn.setText(f"拍一张 ({saved}/{target})")
+        if saved >= target:
+            self.cad_capture_hint.setText(f"已满 {target} 张，可点「生成 CAD」或勾选自动生成")
+            self.cad_capture_hint.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        elif saved > 0:
+            self.cad_capture_hint.setText(
+                f"已拍 {saved} 张 — 请换视角后再拍（相邻约 60% 重叠）"
+            )
+            self.cad_capture_hint.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        else:
+            self.cad_capture_hint.setText(
+                "头部 RGB-D：每拍一张请转动物体，视角差太小会被拒绝"
+            )
+            self.cad_capture_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+
+    def _cad_frame_too_similar(self, bgr: np.ndarray) -> Tuple[bool, float, float]:
+        """与上一张比较，返回 (太相似?, corr, mae)。"""
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY) if bgr.ndim == 3 else bgr
+        gray = cv2.resize(gray, (320, 200), interpolation=cv2.INTER_AREA)
+        if self._cad_last_capture_gray is None:
+            return False, 0.0, 999.0
+        a = self._cad_last_capture_gray.astype(np.float32)
+        b = gray.astype(np.float32)
+        mae = float(np.mean(np.abs(a - b)))
+        aa = (a - a.mean()).ravel()
+        bb = (b - b.mean()).ravel()
+        corr = float((aa @ bb) / (np.linalg.norm(aa) * np.linalg.norm(bb) + 1e-9))
+        too_similar = corr >= CAD_CAPTURE_MIN_DIFF_CORR or (
+            corr >= 0.96 and mae < CAD_CAPTURE_MIN_DIFF_MAE
+        )
+        return too_similar, corr, mae
+
+    def _ensure_head_rgbd_subscribed(self) -> Tuple[Optional[str], Optional[str]]:
+        """确保头部彩色+深度已勾选，返回 (color_topic, depth_topic)。"""
+        known = list(self._topic_types.keys()) or list(self.topic_checks.keys())
+        color = resolve_head_color_topic(known) or CAD_CAPTURE_TOPIC_DEFAULT
+        depth = find_paired_depth_topic(color, known) or CAD_CAPTURE_DEPTH_DEFAULT
+
+        changed = False
+        for topic in (color, depth):
+            checkbox = self.topic_checks.get(topic)
+            if checkbox is not None and not checkbox.isChecked():
+                checkbox.blockSignals(True)
+                checkbox.setChecked(True)
+                checkbox.blockSignals(False)
+                changed = True
+                self._append_cad_log(f"已自动勾选: {topic}")
+        if changed:
+            enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
+            self._apply_selection(enabled)
+        return color, depth
+
+    def _pick_head_color_source(
+        self,
+    ) -> Optional[Tuple[str, np.ndarray, Optional[CameraPanel]]]:
+        """CAD 采集专用：只取头部彩色相机画面。"""
+        color_topic, _depth_topic = self._ensure_head_rgbd_subscribed()
+        if color_topic is None:
+            return None
+
+        panel = self.panels.get(color_topic)
+        if isinstance(panel, CameraPanel) and panel._latest_image is not None:
+            return color_topic, panel._latest_image.copy(), panel
+
+        image = self._frame_cache.get(color_topic)
+        if image is not None and np.asarray(image).ndim >= 2:
+            return (
+                color_topic,
+                np.asarray(image).copy(),
+                panel if isinstance(panel, CameraPanel) else None,
+            )
+
+        for name, cached in self._frame_cache.items():
+            if not is_head_color_topic(name):
+                continue
+            if cached is None or np.asarray(cached).ndim < 2:
+                continue
+            p = self.panels.get(name)
+            return (
+                name,
+                np.asarray(cached).copy(),
+                p if isinstance(p, CameraPanel) else None,
+            )
+        return None
+
+    def _pick_head_depth_frame(self, color_topic: str) -> Optional[np.ndarray]:
+        known = list(self._frame_cache.keys()) + list(self.topic_checks.keys())
+        depth_topic = find_paired_depth_topic(color_topic, known) or CAD_CAPTURE_DEPTH_DEFAULT
+        depth = self._frame_cache.get(depth_topic)
+        if depth is None:
+            panel = self.panels.get(depth_topic)
+            if isinstance(panel, DepthPanel3D) and getattr(panel, "_latest_depth", None) is not None:
+                depth = panel._latest_depth
+        if depth is None:
+            return None
+        arr = np.asarray(depth)
+        if arr.ndim == 3:
+            arr = arr[:, :, 0]
+        return arr
+
+    def _save_cad_intrinsics(self, photos_dir: str, color_topic: str, width: int, height: int) -> None:
+        depth_topic = find_paired_depth_topic(
+            color_topic, list(self._frame_cache.keys()) + list(self.topic_checks.keys())
+        ) or CAD_CAPTURE_DEPTH_DEFAULT
+        fx, fy, cx, cy = self.node.get_intrinsics(depth_topic, width, height)
+        # 若只有 color 的 CameraInfo，再试 color
+        if abs(fx - 0.9 * max(width, height)) < 1e-3:
+            fx, fy, cx, cy = self.node.get_intrinsics(color_topic, width, height)
+        meta = {
+            "fx": float(fx),
+            "fy": float(fy),
+            "cx": float(cx),
+            "cy": float(cy),
+            "width": int(width),
+            "height": int(height),
+            "depth_scale": 1000.0,
+            "color_topic": color_topic,
+            "depth_topic": depth_topic,
+        }
+        path = os.path.join(photos_dir, "intrinsics.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(meta, f, indent=2)
+
+    def _ensure_cad_capture_session(self) -> str:
+        photos_dir = self._cad_photos_dir_for_name()
+        if self._cad_capture_dir != photos_dir:
+            self._cad_capture_dir = photos_dir
+            self._cad_capture_saved = self._count_photos_in_dir(photos_dir)
+            self._cad_last_capture_gray = None
+        os.makedirs(photos_dir, exist_ok=True)
+        return photos_dir
+
+    def _on_cad_capture_clicked(self) -> None:
+        if self._cad_launcher.is_running():
+            self.status_bar.showMessage("CAD 重建进行中，请稍候再拍")
+            return
+        if str(self.cad_mode_combo.currentData() or "photos") != "photos":
+            self.cad_mode_combo.setCurrentIndex(self.cad_mode_combo.findData("photos"))
+
+        source = self._pick_head_color_source()
+        if source is None:
+            QMessageBox.information(
+                self,
+                "CAD 采集",
+                "未收到头部相机画面。\n\n"
+                f"请确认已发布 {CAD_CAPTURE_TOPIC_DEFAULT}，\n"
+                "并在左侧勾选该 topic 后等待图像到达。",
+            )
+            return
+
+        topic, image, _panel = source
+        bgr = np.asarray(image)
+        if bgr.ndim == 2:
+            bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+        elif bgr.ndim == 3 and bgr.shape[2] == 4:
+            bgr = cv2.cvtColor(bgr, cv2.COLOR_BGRA2BGR)
+
+        too_similar, corr, mae = self._cad_frame_too_similar(bgr)
+        if too_similar:
+            msg = (
+                f"视角变化太小（corr={corr:.3f}, mae={mae:.1f}），未保存。\n"
+                "请转动物体（或移动头部）后再拍一张。"
+            )
+            self._append_cad_log(msg.replace("\n", " "))
+            self.status_bar.showMessage(msg.split("\n")[0])
+            self.cad_capture_hint.setText(msg.split("\n")[0])
+            self.cad_capture_hint.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+            return
+
+        depth = self._pick_head_depth_frame(topic)
+        if depth is None:
+            QMessageBox.information(
+                self,
+                "CAD 采集",
+                "未收到头部深度图。\n\n"
+                f"请确认已发布并勾选 {CAD_CAPTURE_DEPTH_DEFAULT}。\n"
+                "RGB-D 重建需要彩色+深度。",
+            )
+            return
+
+        photos_dir = self._ensure_cad_capture_session()
+        idx = self._cad_capture_saved + 1
+        color_path = os.path.join(photos_dir, f"img_{idx:04d}.jpg")
+        depth_path = os.path.join(photos_dir, f"img_{idx:04d}_depth.png")
+        while os.path.isfile(color_path):
+            idx += 1
+            color_path = os.path.join(photos_dir, f"img_{idx:04d}.jpg")
+            depth_path = os.path.join(photos_dir, f"img_{idx:04d}_depth.png")
+
+        # 深度对齐到彩色分辨率
+        depth_arr = np.asarray(depth)
+        if depth_arr.shape[:2] != bgr.shape[:2]:
+            depth_arr = cv2.resize(
+                depth_arr, (bgr.shape[1], bgr.shape[0]), interpolation=cv2.INTER_NEAREST
+            )
+        if depth_arr.dtype == np.float32 or depth_arr.dtype == np.float64:
+            # 米 → mm
+            depth_u16 = np.clip(depth_arr * 1000.0, 0, 65535).astype(np.uint16)
+        else:
+            depth_u16 = depth_arr.astype(np.uint16)
+
+        ok_c = cv2.imwrite(color_path, bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        ok_d = cv2.imwrite(depth_path, depth_u16)
+        if not ok_c or not ok_d:
+            QMessageBox.warning(self, "CAD 采集", f"保存失败: {color_path}")
+            return
+
+        self._save_cad_intrinsics(photos_dir, topic, bgr.shape[1], bgr.shape[0])
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        self._cad_last_capture_gray = cv2.resize(gray, (320, 200), interpolation=cv2.INTER_AREA)
+        self._cad_capture_saved = self._count_photos_in_dir(photos_dir)
+        self.cad_src_edit.setText(photos_dir)
+        self._update_cad_capture_btn()
+        self._append_cad_log(
+            f"头部 RGB-D [{self._cad_capture_saved}/{int(self.cad_capture_target_spin.value())}] "
+            f"{os.path.basename(color_path)} + depth  ← {topic}  "
+            f"({bgr.shape[1]}x{bgr.shape[0]}, Δcorr={corr:.3f})"
+        )
+        self.status_bar.showMessage(
+            f"头部 RGB-D 已拍 {self._cad_capture_saved}/{int(self.cad_capture_target_spin.value())} 张"
+        )
+
+        target = int(self.cad_capture_target_spin.value())
+        if self._cad_capture_saved >= target and self.cad_auto_gen_check.isChecked():
+            self._append_cad_log(f"已满 {target} 张，开始自动生成 CAD（RGB-D TSDF）…")
+            self._on_cad_start_clicked()
+
+    def _on_cad_capture_reset_clicked(self) -> None:
+        photos_dir = self._cad_photos_dir_for_name()
+        if os.path.isdir(photos_dir):
+            removed = 0
+            for name in os.listdir(photos_dir):
+                lower = name.lower()
+                if lower.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp", ".json")):
+                    try:
+                        os.remove(os.path.join(photos_dir, name))
+                        removed += 1
+                    except OSError:
+                        pass
+            self._append_cad_log(f"已清空采集目录 ({removed} 文件): {photos_dir}")
+        self._cad_capture_dir = photos_dir
+        self._cad_capture_saved = 0
+        self._cad_last_capture_gray = None
+        self._update_cad_capture_btn()
+        self.status_bar.showMessage("采集已清空")
+
+    def _on_cad_src_browse_clicked(self) -> None:
+        mode = str(self.cad_mode_combo.currentData() or "photos")
+        current = self.cad_src_edit.text().strip()
+        if mode == "mesh":
+            initial = current if os.path.isfile(current) else (
+                os.path.dirname(current) if current else CAD_MESHES_DIR
+            )
+            if not os.path.isdir(initial):
+                initial = os.path.expanduser("~")
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择 mesh 文件",
+                initial,
+                "Mesh (*.obj *.ply *.glb *.stl *.off);;All Files (*)",
+            )
+            if path:
+                self.cad_src_edit.setText(path)
+                base = os.path.splitext(os.path.basename(path))[0]
+                if not self.cad_name_edit.text().strip() or self.cad_name_edit.text() in (
+                    "my_object",
+                    "imported_object",
+                ):
+                    self.cad_name_edit.setText(base or "imported_object")
+        else:
+            initial = current if os.path.isdir(current) else os.path.expanduser("~")
+            path = QFileDialog.getExistingDirectory(self, "选择多视角照片目录", initial)
+            if path:
+                self.cad_src_edit.setText(path)
+                base = os.path.basename(path.rstrip(os.sep))
+                if not self.cad_name_edit.text().strip() or self.cad_name_edit.text() == "my_object":
+                    self.cad_name_edit.setText(base or "my_object")
+                self._cad_capture_dir = path
+                self._cad_capture_saved = self._count_photos_in_dir(path)
+                self._update_cad_capture_btn()
+
+    def _refresh_cad_mesh_combo(self) -> None:
+        current = self.cad_existing_combo.currentData()
+        self.cad_existing_combo.blockSignals(True)
+        self.cad_existing_combo.clear()
+        meshes = list_reconstructed_meshes()
+        if not meshes:
+            self.cad_existing_combo.addItem("(暂无 reconstructed.obj)", "")
+        else:
+            for name, path in meshes:
+                self.cad_existing_combo.addItem(f"{name}", path)
+        if current:
+            idx = self.cad_existing_combo.findData(current)
+            if idx >= 0:
+                self.cad_existing_combo.setCurrentIndex(idx)
+        self.cad_existing_combo.blockSignals(False)
+
+    def _append_cad_log(self, line: str) -> None:
+        self.cad_log_edit.append(line)
+        scrollbar = self.cad_log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _update_cad_ui(self, *_args) -> None:
+        running = self._cad_launcher.is_running()
+        mode_photos = str(self.cad_mode_combo.currentData() or "photos") == "photos"
+        self.cad_stop_btn.setEnabled(running)
+        self.cad_start_btn.setEnabled(not running)
+        self.cad_capture_btn.setEnabled(not running and mode_photos)
+        self.cad_capture_reset_btn.setEnabled(not running and mode_photos)
+        if running:
+            self.cad_status_label.setText("CAD: 运行中")
+            self.cad_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.cad_status_label.setText("CAD: 空闲")
+            self.cad_status_label.setStyleSheet("")
+        self._update_cad_capture_btn()
+
+    def _on_cad_start_clicked(self) -> None:
+        name = self.cad_name_edit.text().strip() or "my_object"
+        src = self.cad_src_edit.text().strip()
+        extent = float(self.cad_extent_spin.value())
+        mode = str(self.cad_mode_combo.currentData() or "photos")
+        if not src:
+            # 若已采集照片，自动用 photos 目录
+            photos_dir = self._cad_photos_dir_for_name(name)
+            if self._count_photos_in_dir(photos_dir) > 0:
+                src = photos_dir
+                self.cad_src_edit.setText(src)
+        if not src:
+            QMessageBox.information(
+                self,
+                "CAD",
+                "请先用「拍一张」采集照片，或选择照片目录 / mesh 文件。",
+            )
+            return
+        if mode == "mesh":
+            self._cad_launcher.start_from_mesh(src, name, target_extent_m=extent)
+        else:
+            n_photos = self._count_photos_in_dir(src) if os.path.isdir(src) else 0
+            if 0 < n_photos < CAD_MIN_IMAGES_DEFAULT:
+                QMessageBox.information(
+                    self,
+                    "CAD",
+                    f"当前仅 {n_photos} 张照片，至少需要 {CAD_MIN_IMAGES_DEFAULT} 张。\n"
+                    f"请继续点「拍一张」换视角采集。",
+                )
+                return
+            self._cad_launcher.start_from_images(
+                src,
+                name,
+                target_extent_m=extent,
+                poisson_depth=int(self.cad_poisson_spin.value()),
+                min_images=CAD_MIN_IMAGES_DEFAULT,
+            )
+        self._update_cad_ui()
+
+    def _on_cad_stop_clicked(self) -> None:
+        self._cad_launcher.stop()
+
+    def _on_cad_clear_log_clicked(self) -> None:
+        self.cad_log_edit.clear()
+
+    def _on_cad_apply_fp_clicked(self) -> None:
+        mesh = str(self.cad_existing_combo.currentData() or "").strip()
+        if not mesh:
+            mesh = self._cad_launcher.last_mesh()
+        if not mesh or not os.path.isfile(mesh):
+            QMessageBox.information(self, "CAD", "没有可用的 reconstructed.obj。")
+            return
+        self.fp_mesh_edit.setText(mesh)
+        idx = self.pose_backend_combo.findData(POSE_BACKEND_FOUNDATIONPOSE)
+        if idx >= 0:
+            self.pose_backend_combo.setCurrentIndex(idx)
+        self._on_pose_settings_changed()
+        self.status_bar.showMessage(f"已应用到 FP mesh: {mesh}")
+
+    def _on_cad_mesh_ready(self, mesh_path: str) -> None:
+        self._refresh_cad_mesh_combo()
+        idx = self.cad_existing_combo.findData(mesh_path)
+        if idx < 0:
+            # findData 可能因路径规范化不一致失败
+            abs_mesh = os.path.abspath(mesh_path)
+            for i in range(self.cad_existing_combo.count()):
+                if os.path.abspath(str(self.cad_existing_combo.itemData(i) or "")) == abs_mesh:
+                    idx = i
+                    break
+        if idx >= 0:
+            self.cad_existing_combo.setCurrentIndex(idx)
+        self.fp_mesh_edit.setText(mesh_path)
+        self._on_pose_settings_changed()
+        self._append_cad_log(f"已自动填入分割页 FP mesh: {mesh_path}")
+
     def _update_local_ai_deploy_btn(self, *_args) -> None:
         running = self._local_ai_launcher.is_sam3_running()
         if running:
@@ -7677,6 +8928,7 @@ class CameraTopicWindow(QMainWindow):
         self._replay_launcher.shutdown()
         self._local_ai_launcher.shutdown()
         self._train_launcher.shutdown()
+        self._cad_launcher.shutdown()
         for panel in self.panels.values():
             if isinstance(panel, DepthPanel3D):
                 panel.stop_robot_timer()
@@ -7817,10 +9069,114 @@ class CameraTopicWindow(QMainWindow):
     def _set_sam3_result_text(self, text: str) -> None:
         self.sam3_result_edit.setPlainText(text)
 
+    def _set_segment_preview(
+        self,
+        image_bgr: Optional[np.ndarray],
+        mask: Optional[np.ndarray],
+        seed_uv: Optional[Tuple[float, float]] = None,
+        centroid_uv: Optional[Tuple[float, float]] = None,
+        obb_corners: Optional[np.ndarray] = None,
+        intrinsics: Optional[Tuple[float, float, float, float]] = None,
+        pose_position: Optional[np.ndarray] = None,
+        pose_rotation: Optional[np.ndarray] = None,
+        pose_axis_len: Optional[float] = None,
+    ) -> None:
+        """在分割 Tab 右侧显示 mask / 位姿叠加缩略图。"""
+        if image_bgr is None:
+            self.sam3_preview_label.clear()
+            self.sam3_preview_label.setText("分割预览")
+            return
+        has_mask = mask is not None and np.asarray(mask).any()
+        has_pose = obb_corners is not None or pose_position is not None
+        if not has_mask and not has_pose:
+            self.sam3_preview_label.clear()
+            self.sam3_preview_label.setText("分割预览")
+            return
+        overlay = apply_segment_overlay(
+            image_bgr,
+            mask,
+            centroid_uv=centroid_uv,
+            seed_uv=seed_uv,
+            obb_corners=obb_corners,
+            intrinsics=intrinsics,
+            pose_position=pose_position,
+            pose_rotation=pose_rotation,
+            pose_axis_len=pose_axis_len,
+        )
+        max_w, max_h = 240, 160
+        h, w = overlay.shape[:2]
+        scale = min(max_w / max(1, w), max_h / max(1, h), 1.0)
+        if scale < 0.999:
+            overlay = cv2.resize(
+                overlay,
+                (max(1, int(w * scale)), max(1, int(h * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+        self.sam3_preview_label.setPixmap(cv2_to_qpixmap(overlay))
+        self.sam3_preview_label.setText("")
+
     def _on_sam3_click_uv(self, topic: str, u: int, v: int) -> None:
+        if is_depth_topic(topic):
+            color_topic = find_paired_color_topic(topic, self._cached_topic_names())
+            if color_topic:
+                topic = color_topic
         self._last_sam3_topic = topic
         self.sam3_u_spin.setValue(max(0, int(u)))
         self.sam3_v_spin.setValue(max(0, int(v)))
+        panel = self.panels.get(topic)
+        if isinstance(panel, CameraPanel) and panel._latest_image is not None:
+            h, w = panel._latest_image.shape[:2]
+            self.sam3_u_spin.setMaximum(max(u, w - 1))
+            self.sam3_v_spin.setMaximum(max(v, h - 1))
+
+    def _on_stereo_invoke_clicked(self) -> None:
+        """按钮确认：按提示点执行立体分割 + 6D 位姿。"""
+        u = self.sam3_u_spin.value()
+        v = self.sam3_v_spin.value()
+        topic = self._last_sam3_topic or ""
+        panel = self.panels.get(topic) if topic else None
+
+        if isinstance(panel, CameraPanel):
+            msg = panel.invoke_segment_at_seed(u, v)
+            self.status_bar.showMessage(msg)
+            return
+
+        # 深度面板：把彩色提示点映射到 depth 坐标
+        if topic and not is_depth_topic(topic):
+            depth_topic = self._get_paired_depth_topic_name(topic)
+            if depth_topic:
+                depth_panel = self.panels.get(depth_topic)
+                if isinstance(depth_panel, DepthPanel3D):
+                    color = None
+                    cam = self.panels.get(topic)
+                    if isinstance(cam, CameraPanel) and cam._latest_image is not None:
+                        color = cam._latest_image
+                    if color is not None and depth_panel._latest_depth is not None:
+                        dh, dw = depth_panel._depth_full_shape
+                        u_d, v_d = scale_uv_to_shape(
+                            u, v, color.shape[:2], (dh, dw)
+                        )
+                        msg = depth_panel.invoke_segment_at_seed(u_d, v_d)
+                        self.status_bar.showMessage(msg)
+                        return
+
+        if isinstance(panel, DepthPanel3D):
+            msg = panel.invoke_segment_at_seed()
+            self.status_bar.showMessage(msg)
+            return
+
+        # 回退：任一面板上有待处理提示点
+        for p in self.panels.values():
+            if isinstance(p, CameraPanel) and p._pending_seed_uv is not None:
+                msg = p.invoke_segment_at_seed()
+                self.status_bar.showMessage(msg)
+                return
+            if isinstance(p, DepthPanel3D) and p._pending_seed_full_uv is not None:
+                msg = p.invoke_segment_at_seed()
+                self.status_bar.showMessage(msg)
+                return
+
+        self.status_bar.showMessage("请先点击彩色/深度图像选择提示点，再点「调用分割」")
 
     def _pick_sam3_color_source(
         self,
@@ -7952,12 +9308,22 @@ class CameraTopicWindow(QMainWindow):
             panel = self.panels.get(result.topic)
             if isinstance(panel, CameraPanel):
                 panel.show_sam3_mask(result.mask, result.u, result.v)
+                src = panel._latest_image
+            else:
+                src = None
+            self._set_segment_preview(
+                src,
+                result.mask,
+                seed_uv=(float(result.u), float(result.v)),
+                centroid_uv=result.centroid_uv,
+            )
             self.status_bar.showMessage(
                 f"SAM3 成功: {result.pixel_count} px ({result.method})"
             )
         elif result.ok:
             self.status_bar.showMessage("SAM3 成功")
         else:
+            self._set_segment_preview(None, None)
             self.status_bar.showMessage(f"SAM3 失败: {result.error[:120]}")
 
     def _set_fp_result_text(self, text: str) -> None:
@@ -8110,18 +9476,50 @@ class CameraTopicWindow(QMainWindow):
         pose = result.pose_result
         color_panel = self.panels.get(result.color_topic)
         if isinstance(color_panel, CameraPanel) and color_panel._latest_image is not None:
+            src = color_panel._latest_image
+            display_mask = resize_mask_to_shape(pose.mask, src.shape[:2])
             dh, dw = pose.mask.shape[:2]
-            intrinsics = self.node.get_intrinsics(result.depth_topic, dw, dh)
-            overlay = build_pose_overlay_image(
-                color_panel._latest_image,
-                pose,
-                intrinsics,
-                max_dim=SEGMENT_OVERLAY_MAX_DIM,
+            ch, cw = src.shape[:2]
+            cu, cv_pt = scale_uv_to_shape(
+                int(round(pose.centroid_uv[0])),
+                int(round(pose.centroid_uv[1])),
+                (dh, dw),
+                (ch, cw),
             )
-            if overlay is not None:
-                color_panel.image_label.set_precomposed_display(overlay)
-            elif result.mask is not None:
-                color_panel.show_sam3_mask(result.mask, result.u, result.v)
+            contact_u, contact_v = scale_uv_to_shape(
+                int(round(pose.contact_uv[0])),
+                int(round(pose.contact_uv[1])),
+                (dh, dw),
+                (ch, cw),
+            )
+            # 位姿在 depth 相机坐标系；用 depth 内参并缩放到彩色图尺寸
+            fx, fy, cx, cy = self.node.get_intrinsics(result.depth_topic, dw, dh)
+            sx = float(cw) / float(max(1, dw))
+            sy = float(ch) / float(max(1, dh))
+            intr = (fx * sx, fy * sy, cx * sx, cy * sy)
+            axis_len = float(max(pose.obb_extents) * 0.55)
+            color_panel.image_label.set_segment_overlay(
+                display_mask,
+                (float(cu), float(cv_pt)),
+                obb_corners=pose.obb_corners,
+                intrinsics=intr,
+                contact_uv=(float(contact_u), float(contact_v)),
+                seed_uv=(float(result.u), float(result.v)),
+                pose_position=np.asarray(pose.position_xyz, dtype=np.float32),
+                pose_rotation=np.asarray(pose.rotation_matrix, dtype=np.float32),
+                pose_axis_len=axis_len,
+            )
+            self._set_segment_preview(
+                src,
+                display_mask,
+                seed_uv=(float(result.u), float(result.v)),
+                centroid_uv=(float(cu), float(cv_pt)),
+                obb_corners=pose.obb_corners,
+                intrinsics=intr,
+                pose_position=np.asarray(pose.position_xyz, dtype=np.float32),
+                pose_rotation=np.asarray(pose.rotation_matrix, dtype=np.float32),
+                pose_axis_len=axis_len,
+            )
 
         depth_panel = self.panels.get(result.depth_topic)
         if isinstance(depth_panel, DepthPanel3D):
@@ -8145,6 +9543,10 @@ class CameraTopicWindow(QMainWindow):
                 obb_corners=pose.obb_corners,
                 intrinsics=depth_panel._preview_intrinsics,
                 contact_uv=(float(contact_u), float(contact_v)),
+                seed_uv=(float(result.u), float(result.v)),
+                pose_position=np.asarray(pose.position_xyz, dtype=np.float32),
+                pose_rotation=np.asarray(pose.rotation_matrix, dtype=np.float32),
+                pose_axis_len=float(max(pose.obb_extents) * 0.55),
             )
             depth_panel._show_pose_6d(pose)
 
@@ -8152,10 +9554,20 @@ class CameraTopicWindow(QMainWindow):
             result.color_topic, result.depth_topic
         )
         if camera_frame:
-            self._last_segment_target = SegmentPoseTarget.from_pose_result(
-                pose, camera_frame, result.color_topic
+            # 切换到「分割位姿」绝对目标（FP 物体 6D），不要走「相对当前」
+            self._store_segment_target(
+                SegmentPoseTarget.from_pose_result(
+                    pose, camera_frame, result.color_topic
+                )
             )
-        self.status_bar.showMessage(f"FoundationPose 成功 ({result.pose_method})")
+            self.status_bar.showMessage(
+                f"FoundationPose 成功 ({result.pose_method})，已设为左臂绝对目标"
+            )
+        else:
+            self.status_bar.showMessage(
+                f"FoundationPose 成功 ({result.pose_method})，"
+                "但缺少相机 frame_id，无法设为左臂绝对目标"
+            )
         self._refresh_fp_status()
 
     def _on_segment_settings_changed(self, *_args) -> None:
@@ -8237,9 +9649,9 @@ class CameraTopicWindow(QMainWindow):
             self.fp_invoke_btn.setEnabled(status.can_invoke)
         pose_hint = ""
         if cfg.backend == POSE_BACKEND_FOUNDATIONPOSE:
-            pose_hint = "点击分割将使用 FoundationPose"
+            pose_hint = "选点后点「调用分割」或「调用 FP」将使用 FoundationPose"
         elif status.can_invoke:
-            pose_hint = "点击分割用 PCA；「调用 FP」按钮可用"
+            pose_hint = "选点后点「调用分割」用 PCA；「调用 FP」按钮可用"
         if pose_hint and not self._fp_call_busy:
             self.fp_avail_detail_label.setToolTip(f"{status.tooltip}\n{pose_hint}")
 
@@ -8321,9 +9733,24 @@ class CameraTopicWindow(QMainWindow):
             f"左手已切到状态{preset} position={sent_pos:.3f} -> {ROBOT_LEFT_HAND_CMD_TOPIC}"
         )
 
+    def _update_move_offset_ui_visibility(self) -> None:
+        """「分割位姿」时隐藏相对 ΔXYZ；仅「相对当前」显示偏移控件。"""
+        show_offset = self.move_target_relative_radio.isChecked()
+        for widget in (
+            self.offset_x_label,
+            self.offset_x_spin,
+            self.offset_y_label,
+            self.offset_y_spin,
+            self.offset_z_label,
+            self.offset_z_spin,
+        ):
+            widget.setVisible(show_offset)
+            widget.setEnabled(show_offset)
+
     def _on_move_target_params_changed(self, *_args) -> None:
         if self._last_segment_target is None and self.move_target_segment_radio.isChecked():
             self.move_target_relative_radio.setChecked(True)
+        self._update_move_offset_ui_visibility()
         self._update_arm_pose_display()
         self._update_left_arm_move_btn_ui()
 
@@ -8360,6 +9787,11 @@ class CameraTopicWindow(QMainWindow):
         enable = not self.node.is_arm_enabled()
         msg = self.node.request_arm_enable(enable=enable)
         self.status_bar.showMessage(msg)
+
+    def _on_model_mode_clicked(self) -> None:
+        msg = self.node.request_model_control_mode()
+        self.status_bar.showMessage(msg)
+        self._update_enable_status_ui()
 
     def _on_hand_enable_clicked(self) -> None:
         enable = not self.node.is_hand_enabled()
@@ -8497,7 +9929,7 @@ class CameraTopicWindow(QMainWindow):
             hints.append("等待双臂 TCP（/mink_fk/* 或 /tele/fk/*）")
         if self.move_target_segment_radio.isChecked():
             if self._last_segment_target is None:
-                hints.append("请先点击图像完成分割")
+                hints.append("请先点击图像选点，再点「调用分割」")
             elif self._resolve_move_goal() is None:
                 frame = self._last_segment_target.camera_frame or "未知"
                 hints.append(f"分割 TF 不可用 ({frame} -> {IK_TARGET_FRAME})")
@@ -8517,7 +9949,7 @@ class CameraTopicWindow(QMainWindow):
             )
         elif self.move_target_segment_radio.isChecked():
             if self._last_segment_target is None:
-                self.arm_pose_target_label.setText("目标  左臂 TCP: (请先点击图像分割)")
+                self.arm_pose_target_label.setText("目标  左臂 TCP: (请先选点并调用分割/FP)")
             else:
                 frame = self._last_segment_target.camera_frame or "未知"
                 self.arm_pose_target_label.setText(
@@ -8592,15 +10024,21 @@ class CameraTopicWindow(QMainWindow):
         self._last_segment_target = target
         self.move_target_segment_radio.setEnabled(True)
         self.move_target_segment_radio.setChecked(True)
+        # 选中绝对位姿目标时，偏移量不参与目标计算；清零并隐藏 ΔXYZ
+        for spin in (self.offset_x_spin, self.offset_y_spin, self.offset_z_spin):
+            spin.blockSignals(True)
+            spin.setValue(0.0)
+            spin.blockSignals(False)
+        self._update_move_offset_ui_visibility()
         self._update_left_arm_move_btn_ui()
         self._update_arm_pose_display()
         self.status_bar.showMessage(
-            f"已记录接触 TCP 目标: {target.label or target.source_topic}"
+            f"已记录绝对位姿目标: {target.label or target.source_topic}"
         )
         QTimer.singleShot(0, self._try_auto_move_to_segment_target)
 
     def _try_auto_move_to_segment_target(self) -> None:
-        """分割完成后将接触 TCP 自动传给左臂移动。"""
+        """分割/FP 完成后，按绝对位姿目标移动左臂（非相对当前）。"""
         if self.node.is_slow_motion_busy():
             return
         if not self.move_target_segment_radio.isChecked():
@@ -8610,7 +10048,7 @@ class CameraTopicWindow(QMainWindow):
             blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
             if blockers:
                 self.status_bar.showMessage(
-                    "接触 TCP 已记录，暂无法移动: " + "；".join(blockers)
+                    "绝对位姿已记录，暂无法移动: " + "；".join(blockers)
                 )
             return
         if not self.node.is_arm_enabled():
@@ -8618,7 +10056,7 @@ class CameraTopicWindow(QMainWindow):
             msg = self.node.request_arm_enable(True)
             self._arm_enable_wait_deadline = time.time() + 15.0
             self._arm_enable_wait_timer.start()
-            self.status_bar.showMessage(f"{msg}，使能后将自动移向接触 TCP…")
+            self.status_bar.showMessage(f"{msg}，使能后将自动移向绝对目标…")
             self._update_left_arm_move_btn_ui()
             return
         msg = self.node.request_slow_move_to_goal(goal)
@@ -8637,7 +10075,7 @@ class CameraTopicWindow(QMainWindow):
         if goal is None:
             if self.move_target_segment_radio.isChecked():
                 if self._last_segment_target is None:
-                    self.status_bar.showMessage("请先点击图像完成分割与 6D 位姿估计")
+                    self.status_bar.showMessage("请先选点并点「调用分割 / FP」完成位姿估计")
                 else:
                     frame = self._last_segment_target.camera_frame or "未知"
                     self.status_bar.showMessage(
