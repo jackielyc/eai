@@ -180,9 +180,50 @@ fi
 DISPLAY="${DISPLAY:-:0}"
 echo ">>> DISPLAY=${DISPLAY}"
 
+# Docker 内 GUI 需要宿主机 X11 授权。GDM 常用 /run/user/$UID/gdm/Xauthority，
+# 而容器常挂载的 ~/.Xauthority 可能过期或被误建成目录。
+if command -v xhost >/dev/null 2>&1; then
+    if xhost +local: >/dev/null 2>&1; then
+        echo ">>> 已执行: xhost +local: （允许容器访问本机显示）"
+    else
+        echo "警告: xhost +local: 失败，若出现 Qt/xcb 无法连接 DISPLAY，请在宿主机终端手动执行:" >&2
+        echo "  xhost +local:" >&2
+    fi
+fi
+
+XAUTH_HOST="${XAUTHORITY:-}"
+if [[ -z "${XAUTH_HOST}" || ! -f "${XAUTH_HOST}" ]]; then
+    for cand in "/run/user/$(id -u)/gdm/Xauthority" "${HOME}/.Xauthority"; do
+        if [[ -f "${cand}" ]]; then
+            XAUTH_HOST="${cand}"
+            break
+        fi
+    done
+fi
+if [[ -d "${HOME}/.Xauthority" ]]; then
+    echo "警告: ${HOME}/.Xauthority 是目录（应为文件），容器内 X cookie 挂载无效。" >&2
+    echo "  可在宿主机用 sudo 修复: sudo rm -rf ${HOME}/.Xauthority" >&2
+    echo "  然后: cp \"\${XAUTHORITY:-/run/user/\$(id -u)/gdm/Xauthority}\" ${HOME}/.Xauthority && chmod 600 ${HOME}/.Xauthority" >&2
+fi
+
+DOCKER_XAUTH_ENV=()
+if [[ -n "${XAUTH_HOST}" && -f "${XAUTH_HOST}" ]]; then
+    # 复制到容器可读写路径，避免仅 root 可读或路径未挂载
+    XAUTH_COPY="${PSIBOT_HOME}/.cache/a2d_xauth"
+    mkdir -p "${PSIBOT_HOME}/.cache"
+    cp -f "${XAUTH_HOST}" "${XAUTH_COPY}" 2>/dev/null || true
+    chmod 644 "${XAUTH_COPY}" 2>/dev/null || true
+    if [[ -f "${XAUTH_COPY}" ]]; then
+        DOCKER_XAUTH_ENV+=(-e "XAUTHORITY=${XAUTH_COPY}")
+        echo ">>> XAUTHORITY=${XAUTH_HOST} → 容器内 ${XAUTH_COPY}"
+    fi
+fi
+
 docker exec \
     -e DISPLAY="${DISPLAY}" \
     -e QT_X11_NO_MITSHM=1 \
+    -e XDG_RUNTIME_DIR=/tmp/runtime-psibot \
+    "${DOCKER_XAUTH_ENV[@]}" \
     -e FASTRTPS_DEFAULT_PROFILES_FILE="${FASTDDS_IN_CONTAINER}" \
     -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
     -e ROS_DOMAIN_ID=0 \
@@ -192,6 +233,7 @@ docker exec \
     -it "${CONTAINER}" \
     bash -lc "
 set -eo pipefail
+mkdir -p /tmp/runtime-psibot
 source /opt/ros/humble/setup.bash
 if [[ -f /opt/psi/rt/a2d-tele/install/setup.bash ]]; then
     source /opt/psi/rt/a2d-tele/install/setup.bash

@@ -10,7 +10,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run.sh                    # ROS 在宿主机直接运行时用此方式
   python3.10 show_camera_topics.py --prefix /camera
 
-顶部控制区按功能分为标签页：相机 / 回放 / 分割 / CAD / 训练 / 手臂·手。
+顶部控制区按功能分为标签页：相机 / 回放 / 分割 / CAD / 训练 / 手臂·手 / 手骨架遥控。
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
 """
 
@@ -49,7 +49,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -370,6 +370,7 @@ ROBOT_TCP_SOURCE_TOPICS = {
     "right": (ROBOT_TELE_RIGHT_TCP_TOPIC, ROBOT_RIGHT_TCP_TOPIC),
 }
 ROBOT_LEFT_HAND_CMD_TOPIC = "/ry_hand/left/set_angles"
+ROBOT_RIGHT_HAND_CMD_TOPIC = "/ry_hand/right/set_angles"
 BASE_LINK_FRAME = "base_link"
 LEFT_IK_TARGET_TOPIC = "/ik/left_target"
 RIGHT_IK_TARGET_TOPIC = "/ik/right_target"
@@ -436,6 +437,24 @@ LLM_CHAT_SYSTEM_PROMPT = (
     "你是机器人相机可视化工具中的对话助手，可回答编程、机器人、视觉感知相关问题。"
     "请用用户使用的语言简洁作答。"
 )
+HY_EMBODIED_VLM_API_BASE = os.environ.get(
+    "HY_EMBODIED_VLM_API_BASE", "http://127.0.0.1:8080/v1"
+)
+HY_EMBODIED_VLM_MODEL = os.environ.get("HY_EMBODIED_VLM_MODEL", "hy_a3b")
+HY_RXBRAIN_API_BASE = os.environ.get(
+    "HY_RXBRAIN_API_BASE", "http://127.0.0.1:8090/v1"
+)
+HY_RXBRAIN_MODEL = os.environ.get("HY_RXBRAIN_MODEL", "hy-rxbrain")
+# 支持附带相机图的预设（OpenAI 兼容 vision / chat completions）
+LLM_VISION_PROVIDER_NAMES = {
+    "本地 Ollama · Qwen3-VL-4B",
+    "Hy-Embodied-VLM-1.0",
+    "Hy-Embodied-RxBrain-1.0",
+}
+# 支持 chat_template_kwargs.enable_thinking 的预设
+LLM_THINKING_PROVIDER_NAMES = {
+    "Hy-Embodied-VLM-1.0",
+}
 LLM_PROVIDER_PRESETS: Dict[str, Tuple[str, str, str]] = {
     "本地 Ollama · Qwen3.5-4B": (
         "http://127.0.0.1:11434/v1",
@@ -446,6 +465,16 @@ LLM_PROVIDER_PRESETS: Dict[str, Tuple[str, str, str]] = {
         "http://127.0.0.1:11434/v1",
         "qwen3-vl:4b",
         "ollama",
+    ),
+    "Hy-Embodied-VLM-1.0": (
+        HY_EMBODIED_VLM_API_BASE,
+        HY_EMBODIED_VLM_MODEL,
+        "EMPTY",
+    ),
+    "Hy-Embodied-RxBrain-1.0": (
+        HY_RXBRAIN_API_BASE,
+        HY_RXBRAIN_MODEL,
+        "EMPTY",
     ),
     "百炼兼容 · Qwen-Plus": (
         "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -459,7 +488,7 @@ IK_SYNC_TIMEOUT_S = 3.0
 MANUAL_OFFSET_MAX_M = 0.5
 MANUAL_OFFSET_STEP_M = 0.01
 
-LEFT_HAND_JOINT_NAMES = [
+HAND_JOINT_NAMES = [
     "thumb_rotation",
     "thumb_bend",
     "index",
@@ -467,10 +496,16 @@ LEFT_HAND_JOINT_NAMES = [
     "ring",
     "pinky",
 ]
-LEFT_HAND_CMD_VELOCITY = [2000.0] * 6
-LEFT_HAND_CMD_EFFORT = [1200.0] * 6
+LEFT_HAND_JOINT_NAMES = list(HAND_JOINT_NAMES)
+RIGHT_HAND_JOINT_NAMES = list(HAND_JOINT_NAMES)
+HAND_CMD_VELOCITY = [2000.0] * 6
+HAND_CMD_EFFORT = [1200.0] * 6
+LEFT_HAND_CMD_VELOCITY = HAND_CMD_VELOCITY
+LEFT_HAND_CMD_EFFORT = HAND_CMD_EFFORT
 LEFT_HAND_ANGLE_A_DEFAULT = 0
 LEFT_HAND_ANGLE_B_DEFAULT = 45
+RIGHT_HAND_ANGLE_A_DEFAULT = 0
+RIGHT_HAND_ANGLE_B_DEFAULT = 45
 
 LEFT_ARM_JOINT_NAMES = [f"joint{i}_l" for i in range(1, 8)]
 RIGHT_ARM_JOINT_NAMES = [f"joint{i}_r" for i in range(1, 8)]
@@ -2538,6 +2573,11 @@ class ResolvedArmMoveGoal:
     position_xyz: Tuple[float, float, float]
     quaternion_xyzw: Tuple[float, float, float, float]
     label: str
+    arm_side: str = "left"  # "left" | "right"
+
+
+def arm_side_label(side: str) -> str:
+    return "左臂" if side == "left" else "右臂"
 
 
 def make_manual_offset_spinbox() -> QDoubleSpinBox:
@@ -2556,14 +2596,17 @@ def compute_relative_move_goal(
     dx: float,
     dy: float,
     dz: float,
+    arm_side: str = "left",
 ) -> Optional[ResolvedArmMoveGoal]:
     if abs(dx) + abs(dy) + abs(dz) < 1e-6:
         return None
     goal_xyz = (current_xyz[0] + dx, current_xyz[1] + dy, current_xyz[2] + dz)
+    side_name = arm_side_label(arm_side)
     return ResolvedArmMoveGoal(
         position_xyz=goal_xyz,
         quaternion_xyzw=current_quat,
-        label=f"相对偏移 Δ({dx:+.3f}, {dy:+.3f}, {dz:+.3f}) m",
+        label=f"{side_name}相对偏移 Δ({dx:+.3f}, {dy:+.3f}, {dz:+.3f}) m",
+        arm_side=arm_side,
     )
 
 
@@ -3331,16 +3374,38 @@ def format_hand_angle_label(slider_pct: int) -> str:
     return f"角度 {pos:.2f}"
 
 
-def make_left_hand_command(position: float) -> JointState:
-    """构建睿研左手控制命令，position 由游标直接确定 (0=张, 1=合)。"""
+def make_hand_command(
+    side: str,
+    position: float | Sequence[float],
+) -> JointState:
+    """构建睿研灵巧手控制命令。
+
+    position: 标量则六指同开合；序列则按 HAND_JOINT_NAMES 顺序逐关节 (0=张, 1=合)。
+    """
+    side = "right" if side == "right" else "left"
     msg = JointState()
-    msg.header.frame_id = "left_hand"
-    msg.name = list(LEFT_HAND_JOINT_NAMES)
-    pos = max(0.0, min(1.0, float(position)))
-    msg.position = [pos] * len(LEFT_HAND_JOINT_NAMES)
-    msg.velocity = list(LEFT_HAND_CMD_VELOCITY)
-    msg.effort = list(LEFT_HAND_CMD_EFFORT)
+    msg.header.frame_id = f"{side}_hand"
+    names = RIGHT_HAND_JOINT_NAMES if side == "right" else LEFT_HAND_JOINT_NAMES
+    msg.name = list(names)
+    if isinstance(position, (int, float)):
+        pos = max(0.0, min(1.0, float(position)))
+        msg.position = [pos] * len(names)
+    else:
+        vals = [max(0.0, min(1.0, float(v))) for v in position]
+        if len(vals) < len(names):
+            vals = vals + [vals[-1] if vals else 0.0] * (len(names) - len(vals))
+        msg.position = vals[: len(names)]
+    msg.velocity = list(HAND_CMD_VELOCITY)
+    msg.effort = list(HAND_CMD_EFFORT)
     return msg
+
+
+def make_left_hand_command(position: float | Sequence[float]) -> JointState:
+    return make_hand_command("left", position)
+
+
+def make_right_hand_command(position: float | Sequence[float]) -> JointState:
+    return make_hand_command("right", position)
 
 
 @dataclass
@@ -3348,6 +3413,8 @@ class LlmChatConfig:
     api_base: str = LLM_API_BASE_DEFAULT
     model: str = LLM_MODEL_DEFAULT
     api_key: str = ""
+    enable_thinking: bool = False
+    max_tokens: int = 1024
 
     @classmethod
     def from_env(cls) -> LlmChatConfig:
@@ -3358,29 +3425,51 @@ class LlmChatConfig:
         )
 
 
+def encode_bgr_image_jpeg_b64(image_bgr: np.ndarray, max_side: int = 1280) -> str:
+    """BGR 图像 → JPEG base64（供 OpenAI vision image_url）。"""
+    img = np.asarray(image_bgr)
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    h, w = img.shape[:2]
+    scale = min(1.0, float(max_side) / float(max(h, w, 1)))
+    if scale < 0.999:
+        img = cv2.resize(
+            img,
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    if not ok:
+        raise RuntimeError("JPEG 编码失败")
+    return base64.b64encode(buf.tobytes()).decode("ascii")
+
+
 class LlmChatClient:
-    """OpenAI 兼容 Chat Completions API 客户端（支持 OpenAI / Ollama / 本地代理等）。"""
+    """OpenAI 兼容 Chat Completions API 客户端（支持 OpenAI / Ollama / Hy-Embodied 等）。"""
 
     def __init__(self, config: LlmChatConfig) -> None:
         self.config = config
 
     def chat(
         self,
-        messages: List[Dict[str, str]],
+        messages: List[Dict[str, object]],
         timeout_s: float = LLM_CHAT_TIMEOUT_S,
     ) -> str:
         api_key = self.config.api_key.strip()
         if not api_key:
             raise RuntimeError(
                 f"未配置 API Key，请设置环境变量 {LLM_API_KEY_ENV}，"
-                "或在对话面板中填写（Ollama 等本地服务可填任意非空字符串）"
+                "或在对话面板中填写（Ollama / Hy-Embodied 本地服务可填 EMPTY）"
             )
         url = self.config.api_base.rstrip("/") + "/chat/completions"
-        payload = {
+        payload: Dict[str, object] = {
             "model": self.config.model,
             "messages": messages,
             "temperature": 0.7,
+            "max_tokens": int(self.config.max_tokens),
         }
+        if self.config.enable_thinking:
+            payload["chat_template_kwargs"] = {"enable_thinking": True}
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -3404,9 +3493,15 @@ class LlmChatClient:
             raise RuntimeError(f"API 无有效回复: {body}")
         message = choices[0].get("message") or {}
         content = message.get("content")
-        if not content:
+        reasoning = message.get("reasoning_content")
+        parts: List[str] = []
+        if reasoning:
+            parts.append(f"[thinking]\n{str(reasoning).strip()}")
+        if content:
+            parts.append(str(content).strip() if not reasoning else f"[answer]\n{str(content).strip()}")
+        if not parts:
             raise RuntimeError(f"API 返回空内容: {body}")
-        return str(content).strip()
+        return "\n\n".join(parts).strip()
 
 
 class LlmChatBridge(QObject):
@@ -3423,7 +3518,7 @@ def _html_escape(text: str) -> str:
 
 
 class ChatPanelWidget(QWidget):
-    """文本对话面板：输入问题，后台调用大模型并显示回复。"""
+    """文本/视觉对话面板：OpenAI 兼容 API（含 Hy-Embodied-VLM / RxBrain）。"""
 
     status_message = pyqtSignal(str)
 
@@ -3435,12 +3530,15 @@ class ChatPanelWidget(QWidget):
         super().__init__(parent)
         self._config = config or LlmChatConfig.from_env()
         self._client = LlmChatClient(self._config)
-        self._messages: List[Dict[str, str]] = [
+        self._messages: List[Dict[str, object]] = [
             {"role": "system", "content": LLM_CHAT_SYSTEM_PROMPT}
         ]
         self._busy = False
         self._bridge = LlmChatBridge()
         self._bridge.finished.connect(self._on_llm_finished)
+        self._camera_frame_provider: Optional[
+            Callable[[], Optional[Tuple[str, np.ndarray]]]
+        ] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -3451,13 +3549,16 @@ class ChatPanelWidget(QWidget):
         self.provider_combo = QComboBox()
         self.provider_combo.addItems(list(LLM_PROVIDER_PRESETS.keys()))
         self.provider_combo.setToolTip(
-            "Qwen-Robot 三模型权重暂未公开；此处可选本地 Qwen 骨干或百炼 API"
+            "含腾讯混元 Hy-Embodied-VLM / RxBrain（需先 bash run_hy_embodied_vlm.sh "
+            "或 run_hy_rxbrain.sh 启动服务）、本地 Ollama、百炼 API"
         )
         self.provider_combo.currentTextChanged.connect(self._on_provider_preset_changed)
         header.addWidget(self.provider_combo)
         self.model_edit = QLineEdit(self._config.model)
         self.model_edit.setPlaceholderText("模型名")
-        self.model_edit.setToolTip("LLM 模型名称，如 gpt-4o-mini 或 qwen2.5")
+        self.model_edit.setToolTip(
+            "模型名：hy_a3b (VLM) / hy-rxbrain / qwen3-vl:4b / gpt-4o-mini"
+        )
         self.model_edit.setFixedWidth(140)
         header.addWidget(self.model_edit)
         header.addStretch()
@@ -3471,7 +3572,7 @@ class ChatPanelWidget(QWidget):
         self.api_base_edit = QLineEdit(self._config.api_base)
         self.api_base_edit.setPlaceholderText("https://api.openai.com/v1")
         self.api_base_edit.setToolTip(
-            "OpenAI 兼容 API 地址（Ollama: http://127.0.0.1:11434/v1）"
+            "OpenAI 兼容 API：Ollama :11434/v1；Hy-VLM :8080/v1；RxBrain :8090/v1"
         )
         settings_row.addWidget(self.api_base_edit, stretch=1)
         layout.addLayout(settings_row)
@@ -3482,10 +3583,26 @@ class ChatPanelWidget(QWidget):
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setPlaceholderText(f"或设置 ${LLM_API_KEY_ENV}")
         self.api_key_edit.setToolTip(
-            f"API Key；本地 Ollama 可填 ollama。也可 export {LLM_API_KEY_ENV}=..."
+            f"API Key；Ollama/Hy-Embodied 本地可填 ollama 或 EMPTY。"
+            f"也可 export {LLM_API_KEY_ENV}=..."
         )
         key_row.addWidget(self.api_key_edit, stretch=1)
         layout.addLayout(key_row)
+
+        opt_row = QHBoxLayout()
+        self.attach_camera_check = QCheckBox("附带相机图")
+        self.attach_camera_check.setChecked(True)
+        self.attach_camera_check.setToolTip(
+            "发送时附带当前彩色相机帧（Hy-Embodied / Qwen3-VL 等多模态模型需要）"
+        )
+        opt_row.addWidget(self.attach_camera_check)
+        self.thinking_check = QCheckBox("thinking")
+        self.thinking_check.setToolTip(
+            "Hy-Embodied-VLM：chat_template_kwargs.enable_thinking=true（慢但推理更强）"
+        )
+        opt_row.addWidget(self.thinking_check)
+        opt_row.addStretch()
+        layout.addLayout(opt_row)
 
         self.history_view = QTextEdit()
         self.history_view.setReadOnly(True)
@@ -3517,8 +3634,8 @@ class ChatPanelWidget(QWidget):
             f"模型: {self._config.model}  |  API: {self._config.api_base}"
         )
         self._append_system_line(
-            "Qwen-RobotManip/Nav/World 权重尚未开源；"
-            "可先用 Ollama 部署 Qwen3.5 / Qwen3-VL 骨干，或百炼 API"
+            "具身模型: Hy-Embodied-VLM-1.0 / RxBrain-1.0 — "
+            "见 HY_EMBODIED.md；先启动对应服务再选预设"
         )
         if not self._config.api_key:
             self._append_system_line(
@@ -3536,6 +3653,12 @@ class ChatPanelWidget(QWidget):
             self.provider_combo.blockSignals(False)
             if idx != self.provider_combo.findText("自定义"):
                 self._apply_provider_preset(self.provider_combo.currentText(), silent=True)
+
+    def set_camera_frame_provider(
+        self,
+        provider: Optional[Callable[[], Optional[Tuple[str, np.ndarray]]]],
+    ) -> None:
+        self._camera_frame_provider = provider
 
     def apply_local_ollama_preset(self, silent: bool = False) -> None:
         """切换到本地 Ollama 预设（供「本地部署 AI」按钮调用）。"""
@@ -3558,8 +3681,21 @@ class ChatPanelWidget(QWidget):
             self.model_edit.setText(model)
         if default_key and not self.api_key_edit.text().strip():
             self.api_key_edit.setText(default_key)
+        vision = name in LLM_VISION_PROVIDER_NAMES
+        thinking = name in LLM_THINKING_PROVIDER_NAMES
+        self.attach_camera_check.setEnabled(True)
+        if vision:
+            self.attach_camera_check.setChecked(True)
+        self.thinking_check.setEnabled(thinking)
+        if not thinking:
+            self.thinking_check.setChecked(False)
         if not silent:
-            self._append_system_line(f"已切换预设: {name}")
+            hint = ""
+            if name == "Hy-Embodied-VLM-1.0":
+                hint = "（需: bash run_hy_embodied_vlm.sh，约 4×80GB GPU）"
+            elif name == "Hy-Embodied-RxBrain-1.0":
+                hint = "（需: bash run_hy_rxbrain.sh，约 1×GPU + 权重）"
+            self._append_system_line(f"已切换预设: {name}{hint}")
 
     def _on_provider_preset_changed(self, name: str) -> None:
         self._apply_provider_preset(name)
@@ -3580,6 +3716,7 @@ class ChatPanelWidget(QWidget):
         if not key:
             key = os.environ.get(LLM_API_KEY_ENV, "").strip()
         self._config.api_key = key
+        self._config.enable_thinking = bool(self.thinking_check.isChecked())
         self._client = LlmChatClient(self._config)
 
     def _append_system_line(self, text: str) -> None:
@@ -3615,6 +3752,31 @@ class ChatPanelWidget(QWidget):
         self.input_edit.setEnabled(not busy)
         self.send_btn.setText("思考中…" if busy else "发送")
 
+    def _build_api_messages(self, user_text: str) -> List[Dict[str, object]]:
+        """历史保持纯文本；当前轮可附带相机 JPEG（vision）。"""
+        api_messages: List[Dict[str, object]] = list(self._messages[:-1])
+        content: object = user_text
+        if self.attach_camera_check.isChecked() and self._camera_frame_provider is not None:
+            frame = self._camera_frame_provider()
+            if frame is not None:
+                topic, image = frame
+                try:
+                    b64 = encode_bgr_image_jpeg_b64(image)
+                    content = [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                        },
+                        {"type": "text", "text": user_text},
+                    ]
+                    self._append_system_line(f"已附带相机帧: {topic}")
+                except Exception as exc:
+                    self._append_system_line(f"附带相机帧失败，仅发送文本: {exc}")
+            else:
+                self._append_system_line("未获取到相机帧，仅发送文本")
+        api_messages.append({"role": "user", "content": content})
+        return api_messages
+
     def _on_send_clicked(self) -> None:
         if self._busy:
             return
@@ -3626,13 +3788,13 @@ class ChatPanelWidget(QWidget):
         self._append_user_line(text)
         self._messages.append({"role": "user", "content": text})
         self._trim_history()
+        api_messages = self._build_api_messages(text)
         self._set_busy(True)
         self.status_message.emit("正在调用大模型…")
-        snapshot = list(self._messages)
 
         def _work() -> None:
             try:
-                reply = self._client.chat(snapshot)
+                reply = self._client.chat(api_messages)
                 self._bridge.finished.emit(reply, True)
             except Exception as exc:
                 self._bridge.finished.emit(str(exc), False)
@@ -3669,6 +3831,7 @@ class RosBridge(QObject):
     control_mode_changed = pyqtSignal(int)
     replay_state_changed = pyqtSignal(int)
     left_hand_preset_changed = pyqtSignal(bool)
+    right_hand_preset_changed = pyqtSignal(bool)
     slow_motion_progress = pyqtSignal(float, str)
     slow_motion_finished = pyqtSignal(bool, str)
 
@@ -4771,6 +4934,11 @@ class CameraTopicNode(Node):
             ROBOT_LEFT_HAND_CMD_TOPIC,
             10,
         )
+        self._right_hand_cmd_pub = self.create_publisher(
+            JointState,
+            ROBOT_RIGHT_HAND_CMD_TOPIC,
+            10,
+        )
         self._left_ik_pub = self.create_publisher(
             PoseStamped,
             LEFT_IK_TARGET_TOPIC,
@@ -4818,6 +4986,7 @@ class CameraTopicNode(Node):
             ),
         )
         self._left_hand_at_a = True
+        self._right_hand_at_a = True
         self._slow_motion_active = False
         self._slow_motion_preparing = False
         self._slow_motion_prep: Optional[Dict[str, object]] = None
@@ -4833,10 +5002,12 @@ class CameraTopicNode(Node):
         self._slow_motion_mode_timer = None
         self._replay_prep_mode_timer = None
         self._slow_motion_saved_control_mode: Optional[int] = None
-        self._slow_motion_right_pose: Optional[
+        self._slow_motion_moving_side = "left"
+        # 移动时保持另一侧手臂的位姿（IK 双臂目标需要同时发布）
+        self._slow_motion_hold_pose: Optional[
             Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]
         ] = None
-        self._slow_motion_final_left_pose: Optional[
+        self._slow_motion_final_moving_pose: Optional[
             Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]
         ] = None
         self._slow_motion_final_joints: Optional[List[float]] = None
@@ -4888,6 +5059,9 @@ class CameraTopicNode(Node):
 
     def is_left_hand_at_a(self) -> bool:
         return self._left_hand_at_a
+
+    def is_right_hand_at_a(self) -> bool:
+        return self._right_hand_at_a
 
     def is_arm_enabled(self) -> bool:
         return self._arm_enabled
@@ -5158,26 +5332,35 @@ class CameraTopicNode(Node):
             )
         return blockers
 
-    def get_arm_move_current_label(self) -> str:
+    def _format_arm_tcp_current_line(self, side: str) -> str:
         state = self.get_robot_state()
-        hand_line = format_left_hand_state_line(state)
-        tcp = self._get_left_tcp_in_base()
+        side_name = arm_side_label(side)
+        tcp = self._tcp_pose_in_ik_frame(side)
         if tcp is not None:
             xyz, quat = tcp
-            return f"当前  {hand_line}  |  {format_xyz_rpy_line('左臂', xyz, quat)}"
-        if state.left_tcp and state.left_tcp.valid:
-            xyz, quat = state.left_tcp.xyz, state.left_tcp.quat_xyzw
-            frame = state.left_tcp.frame_id or BASE_LINK_FRAME
-            return (
-                f"当前  {hand_line}  |  {format_xyz_rpy_line('左臂', xyz, quat)}"
-                f"  [{frame}]"
-            )
-        return f"当前  {hand_line}  |  左臂 TCP: (无数据)"
+            return format_xyz_rpy_line(side_name, xyz, quat)
+        raw = state.left_tcp if side == "left" else state.right_tcp
+        if raw is not None and raw.valid:
+            frame = raw.frame_id or BASE_LINK_FRAME
+            return f"{format_xyz_rpy_line(side_name, raw.xyz, raw.quat_xyzw)}  [{frame}]"
+        return f"{side_name} TCP: (无数据)"
+
+    def get_arm_move_current_label(self, arm_side: str = "left") -> str:
+        state = self.get_robot_state()
+        hand_line = format_left_hand_state_line(state)
+        return f"当前  {hand_line}  |  {self._format_arm_tcp_current_line(arm_side)}"
+
+    def get_arm_move_current_label_both(self) -> str:
+        return (
+            f"当前  左: {self._format_arm_tcp_current_line('left')}  |  "
+            f"右: {self._format_arm_tcp_current_line('right')}"
+        )
 
     def resolve_segment_move_goal(
         self,
         segment: SegmentPoseTarget,
         timeout_s: float = UI_TF_LOOKUP_TIMEOUT_S,
+        arm_side: str = "left",
     ) -> Optional[ResolvedArmMoveGoal]:
         goal = transform_pose_to_base(
             segment.position_xyz,
@@ -5191,38 +5374,42 @@ class CameraTopicNode(Node):
             return None
         xyz, quat = goal
         if segment.keep_tcp_orientation:
-            tcp = self._get_left_tcp_in_base(timeout_s=timeout_s)
+            tcp = self._tcp_pose_in_ik_frame(arm_side, timeout_s=timeout_s)
             if tcp is None:
                 return None
             _, quat = tcp
         kind = "FoundationPose" if "foundationpose" in (segment.label or "").lower() else "分割位姿"
         orient_note = "位置绝对·姿态保持" if segment.keep_tcp_orientation else ""
-        label = f"{kind} ({segment.label or segment.source_topic})"
+        side_name = arm_side_label(arm_side)
+        label = f"{side_name}{kind} ({segment.label or segment.source_topic})"
         if orient_note:
             label = f"{label} [{orient_note}]"
         return ResolvedArmMoveGoal(
             position_xyz=xyz,
             quaternion_xyzw=quat,
             label=label,
+            arm_side=arm_side,
         )
 
     def get_arm_move_pose_labels(
         self,
         segment: Optional[SegmentPoseTarget],
+        arm_side: str = "left",
     ) -> Tuple[str, str]:
         """保留兼容：仅在没有 window 侧解析时使用。"""
-        current_line = self.get_arm_move_current_label()
-        target_line = "目标  左臂 TCP: (请先设置)"
+        side_name = arm_side_label(arm_side)
+        current_line = self.get_arm_move_current_label(arm_side)
+        target_line = f"目标  {side_name} TCP: (请先设置)"
         if segment is not None:
-            resolved = self.resolve_segment_move_goal(segment)
+            resolved = self.resolve_segment_move_goal(segment, arm_side=arm_side)
             if resolved is not None:
                 target_line = (
                     f"目标  [{resolved.label}]  "
-                    f"{format_xyz_rpy_line('左臂', resolved.position_xyz, resolved.quaternion_xyzw)}"
+                    f"{format_xyz_rpy_line(side_name, resolved.position_xyz, resolved.quaternion_xyzw)}"
                 )
             else:
                 target_line = (
-                    f"目标  左臂 TCP: TF 不可用 "
+                    f"目标  {side_name} TCP: TF 不可用 "
                     f"({segment.camera_frame} -> {BASE_LINK_FRAME})"
                 )
         return current_line, target_line
@@ -5276,7 +5463,7 @@ class CameraTopicNode(Node):
         self._control_mode = int(mode)
 
     def request_model_control_mode(self) -> str:
-        """发布 control_mode=0（模型控制），便于左臂移动/回放。"""
+        """发布 control_mode=0（模型控制），便于手臂移动/回放。"""
         prev = self._control_mode
         self._burst_control_mode(MODEL_CONTROL_MODE)
         self._control_mode_received_at = time.time()
@@ -5328,14 +5515,17 @@ class CameraTopicNode(Node):
 
     def _publish_slow_motion_targets(
         self,
-        left_xyz: Tuple[float, float, float],
-        left_quat: Tuple[float, float, float, float],
+        moving_xyz: Tuple[float, float, float],
+        moving_quat: Tuple[float, float, float, float],
     ) -> None:
-        right_pose = self._slow_motion_right_pose
-        if right_pose is None:
+        hold_pose = self._slow_motion_hold_pose
+        if hold_pose is None:
             return
-        right_xyz, right_quat = right_pose
-        self._publish_ik_arm_targets(left_xyz, left_quat, right_xyz, right_quat)
+        hold_xyz, hold_quat = hold_pose
+        if self._slow_motion_moving_side == "right":
+            self._publish_ik_arm_targets(hold_xyz, hold_quat, moving_xyz, moving_quat)
+        else:
+            self._publish_ik_arm_targets(moving_xyz, moving_quat, hold_xyz, hold_quat)
 
     def _make_wbc_joint_msg(self, positions: List[float]) -> JointState:
         msg = JointState()
@@ -5410,8 +5600,9 @@ class CameraTopicNode(Node):
         goal_xyz_t = prep["goal_xyz"]  # type: ignore[assignment]
         gx, gy, gz = goal_xyz_t
         saved_mode = int(prep.get("saved_mode", self._control_mode))
+        side_name = arm_side_label(goal.arm_side)
         self.get_logger().info(
-            f"左臂移动开始 [{goal.label}]: mode {saved_mode}->"
+            f"{side_name}移动开始 [{goal.label}]: mode {saved_mode}->"
             f"{self._control_mode if self._slow_motion_saved_control_mode is not None else saved_mode}, "
             f"{steps} 关节步 / {duration_s:.1f}s -> {WBC_TARGET_JOINTS_TOPIC}, "
             f"目标 XYZ=({gx:.3f}, {gy:.3f}, {gz:.3f}) [{IK_TARGET_FRAME}]"
@@ -5432,8 +5623,8 @@ class CameraTopicNode(Node):
     def _abort_slow_motion_prep(self, message: str) -> None:
         self._slow_motion_preparing = False
         self._slow_motion_prep = None
-        self._slow_motion_right_pose = None
-        self._slow_motion_final_left_pose = None
+        self._slow_motion_hold_pose = None
+        self._slow_motion_final_moving_pose = None
         self._slow_motion_wbc_baseline = None
         self._slow_motion_wbc_changed = False
         self._stop_slow_motion_prep_timer()
@@ -5450,11 +5641,14 @@ class CameraTopicNode(Node):
             msg = "无法移动: " + "；".join(blockers)
             self.get_logger().warn(msg)
             return msg
+        moving_side = goal.arm_side if goal.arm_side in ("left", "right") else "left"
+        self._slow_motion_moving_side = moving_side
         self._slow_motion_preparing = True
         self._slow_motion_prep = {
             "goal": goal,
             "phase": "validate",
             "warmup_step": 0,
+            "moving_side": moving_side,
         }
         self._slow_motion_poses = []
         self._slow_motion_joint_poses = []
@@ -5475,16 +5669,23 @@ class CameraTopicNode(Node):
         phase = str(prep.get("phase", ""))
 
         if phase == "validate":
-            start_pose = self._get_left_tcp_in_base(timeout_s=MOVE_TF_LOOKUP_TIMEOUT_S)
+            left_pose = self._get_left_tcp_in_base(timeout_s=MOVE_TF_LOOKUP_TIMEOUT_S)
             right_pose = self._get_right_tcp_in_base(timeout_s=MOVE_TF_LOOKUP_TIMEOUT_S)
-            if start_pose is None or right_pose is None:
+            if left_pose is None or right_pose is None:
                 self._abort_slow_motion_prep("无法获取双臂 TCP（IK 目标坐标系 transform 失败）")
                 return
+            moving_side = goal.arm_side if goal.arm_side in ("left", "right") else "left"
+            if moving_side == "right":
+                start_pose, hold_pose = right_pose, left_pose
+            else:
+                start_pose, hold_pose = left_pose, right_pose
+            prep["moving_side"] = moving_side
             prep["start_xyz"], prep["start_quat"] = start_pose
             prep["goal_xyz"] = goal.position_xyz
             prep["goal_quat"] = goal.quaternion_xyzw
-            prep["right_pose"] = right_pose
+            prep["hold_pose"] = hold_pose
             prep["saved_mode"] = self._control_mode
+            self._slow_motion_moving_side = moving_side
             self._enter_model_mode_for_motion()
             prep["phase"] = "sync_ik"
             self.ros_bridge.slow_motion_progress.emit(0.0, "正在同步 IK 关节状态...")
@@ -5515,9 +5716,10 @@ class CameraTopicNode(Node):
             except Exception as exc:
                 self._abort_slow_motion_prep(f"IK sync 异常: {exc}")
                 return
-            right_xyz, right_quat = prep["right_pose"]  # type: ignore[misc]
-            self._slow_motion_right_pose = (right_xyz, right_quat)
-            self._slow_motion_final_left_pose = (prep["goal_xyz"], prep["goal_quat"])  # type: ignore[index]
+            hold_xyz, hold_quat = prep["hold_pose"]  # type: ignore[misc]
+            self._slow_motion_hold_pose = (hold_xyz, hold_quat)
+            self._slow_motion_moving_side = str(prep.get("moving_side", "left"))
+            self._slow_motion_final_moving_pose = (prep["goal_xyz"], prep["goal_quat"])  # type: ignore[index]
             prep["warmup_step"] = 0
             prep["phase"] = "warmup"
             self.ros_bridge.slow_motion_progress.emit(0.0, "正在预热 IK 目标...")
@@ -5648,9 +5850,10 @@ class CameraTopicNode(Node):
 
     def _enter_model_mode_for_motion(self) -> None:
         self._slow_motion_saved_control_mode = self._control_mode
+        side_name = arm_side_label(self._slow_motion_moving_side)
         if self._control_mode != MODEL_CONTROL_MODE:
             self.get_logger().info(
-                f"左臂移动: 切换 control_mode {self._slow_motion_saved_control_mode} -> "
+                f"{side_name}移动: 切换 control_mode {self._slow_motion_saved_control_mode} -> "
                 f"{MODEL_CONTROL_MODE}（暂停 tracker→IK 转发，避免覆盖目标）"
             )
         self._start_slow_motion_mode_lock()
@@ -5659,8 +5862,12 @@ class CameraTopicNode(Node):
         for _ in range(count):
             self._publish_control_mode(mode)
 
-    def start_slow_move_to_segment(self, target: SegmentPoseTarget) -> str:
-        resolved = self.resolve_segment_move_goal(target, timeout_s=MOVE_TF_LOOKUP_TIMEOUT_S)
+    def start_slow_move_to_segment(
+        self, target: SegmentPoseTarget, arm_side: str = "left"
+    ) -> str:
+        resolved = self.resolve_segment_move_goal(
+            target, timeout_s=MOVE_TF_LOOKUP_TIMEOUT_S, arm_side=arm_side
+        )
         if resolved is None:
             return (
                 f"无法将分割位姿从 {target.camera_frame or '未知'} "
@@ -5690,8 +5897,8 @@ class CameraTopicNode(Node):
         self._slow_motion_joint_poses = []
         self._slow_motion_step = 0
         self._slow_motion_hold_steps = 0
-        self._slow_motion_right_pose = None
-        self._slow_motion_final_left_pose = None
+        self._slow_motion_hold_pose = None
+        self._slow_motion_final_moving_pose = None
         self._slow_motion_final_joints = None
         self._slow_motion_wbc_baseline = None
         self._slow_motion_wbc_changed = False
@@ -5747,6 +5954,36 @@ class CameraTopicNode(Node):
         )
         return pos
 
+    def apply_right_hand_angle(self, slider_pct: int) -> float:
+        """按游标位置发送右手角度命令，返回实际 position。"""
+        pos = slider_to_hand_position(slider_pct)
+        msg = make_right_hand_command(pos)
+        msg.header.stamp = self.get_clock().now().to_msg()
+        self._right_hand_cmd_pub.publish(msg)
+        self.get_logger().info(
+            f"右手命令 -> position={pos:.3f} (游标={slider_pct}): {ROBOT_RIGHT_HAND_CMD_TOPIC}"
+        )
+        return pos
+
+    def apply_hand_joint_positions(
+        self, side: str, positions: Sequence[float]
+    ) -> List[float]:
+        """按 6 关节开合量发送手部命令，返回裁剪后的 position 列表。"""
+        side = "right" if side == "right" else "left"
+        msg = make_hand_command(side, positions)
+        msg.header.stamp = self.get_clock().now().to_msg()
+        if side == "right":
+            self._right_hand_cmd_pub.publish(msg)
+            topic = ROBOT_RIGHT_HAND_CMD_TOPIC
+        else:
+            self._left_hand_cmd_pub.publish(msg)
+            topic = ROBOT_LEFT_HAND_CMD_TOPIC
+        vals = [float(v) for v in msg.position]
+        self.get_logger().debug(
+            f"{'右' if side == 'right' else '左'}手关节命令 {vals} -> {topic}"
+        )
+        return vals
+
     def toggle_left_hand_between(self, slider_a: int, slider_b: int) -> Tuple[bool, float]:
         """在游标 A/B 两个状态间切换，返回 (当前是否为 A, 发送的 position)。"""
         self._left_hand_at_a = not self._left_hand_at_a
@@ -5756,6 +5993,16 @@ class CameraTopicNode(Node):
         self.get_logger().info(f"左手切换 -> 状态{preset}")
         self.ros_bridge.left_hand_preset_changed.emit(self._left_hand_at_a)
         return self._left_hand_at_a, pos
+
+    def toggle_right_hand_between(self, slider_a: int, slider_b: int) -> Tuple[bool, float]:
+        """在游标 A/B 两个状态间切换，返回 (当前是否为 A, 发送的 position)。"""
+        self._right_hand_at_a = not self._right_hand_at_a
+        slider = slider_a if self._right_hand_at_a else slider_b
+        preset = "A" if self._right_hand_at_a else "B"
+        pos = self.apply_right_hand_angle(slider)
+        self.get_logger().info(f"右手切换 -> 状态{preset}")
+        self.ros_bridge.right_hand_preset_changed.emit(self._right_hand_at_a)
+        return self._right_hand_at_a, pos
 
     def _setup_robot_subscriptions(self) -> None:
         hand_qos = QoSProfile(
@@ -7542,7 +7789,7 @@ class CameraTopicWindow(QMainWindow):
         enable_row.addWidget(self.robot_control_mode_label)
         self.robot_mode0_btn = QPushButton("切 mode=0")
         self.robot_mode0_btn.setToolTip(
-            f"发布 {CONTROL_MODE_TOPIC}={MODEL_CONTROL_MODE}（模型控制，左臂移动/回放需要）"
+            f"发布 {CONTROL_MODE_TOPIC}={MODEL_CONTROL_MODE}（模型控制，手臂移动/回放需要）"
         )
         self.robot_mode0_btn.clicked.connect(self._on_model_mode_clicked)
         enable_row.addWidget(self.robot_mode0_btn)
@@ -8086,6 +8333,46 @@ class CameraTopicWindow(QMainWindow):
         hand_row.addStretch()
         control_layout.addLayout(hand_row)
 
+        right_hand_row = QHBoxLayout()
+        right_hand_row.setSpacing(6)
+        right_hand_row.addWidget(QLabel("右手 A:"))
+        self.right_hand_slider_a = QSlider(Qt.Horizontal)
+        self.right_hand_slider_a.setRange(0, 100)
+        self.right_hand_slider_a.setValue(RIGHT_HAND_ANGLE_A_DEFAULT)
+        self.right_hand_slider_a.setFixedWidth(120)
+        self.right_hand_slider_a.setToolTip("右手状态 A 的角度 (0=张, 100=合)")
+        self.right_hand_slider_a.valueChanged.connect(self._on_right_hand_sliders_changed)
+        right_hand_row.addWidget(self.right_hand_slider_a)
+        self.right_hand_label_a = QLabel(format_hand_angle_label(RIGHT_HAND_ANGLE_A_DEFAULT))
+        self.right_hand_label_a.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.right_hand_label_a.setMinimumWidth(56)
+        right_hand_row.addWidget(self.right_hand_label_a)
+
+        right_hand_row.addWidget(QLabel("B:"))
+        self.right_hand_slider_b = QSlider(Qt.Horizontal)
+        self.right_hand_slider_b.setRange(0, 100)
+        self.right_hand_slider_b.setValue(RIGHT_HAND_ANGLE_B_DEFAULT)
+        self.right_hand_slider_b.setFixedWidth(120)
+        self.right_hand_slider_b.setToolTip("右手状态 B 的角度 (0=张, 100=合)")
+        self.right_hand_slider_b.valueChanged.connect(self._on_right_hand_sliders_changed)
+        right_hand_row.addWidget(self.right_hand_slider_b)
+        self.right_hand_label_b = QLabel(format_hand_angle_label(RIGHT_HAND_ANGLE_B_DEFAULT))
+        self.right_hand_label_b.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.right_hand_label_b.setMinimumWidth(56)
+        right_hand_row.addWidget(self.right_hand_label_b)
+
+        self.right_hand_toggle_btn = QPushButton("切换")
+        self.right_hand_toggle_btn.setToolTip("在游标 A 与 B 设定的两个角度之间切换")
+        self.right_hand_toggle_btn.clicked.connect(self._on_right_hand_toggle)
+        right_hand_row.addWidget(self.right_hand_toggle_btn)
+
+        self.right_hand_apply_btn = QPushButton("应用当前")
+        self.right_hand_apply_btn.setToolTip("将主游标（当前激活状态 A 或 B）的角度立即发送")
+        self.right_hand_apply_btn.clicked.connect(self._on_right_hand_apply_active)
+        right_hand_row.addWidget(self.right_hand_apply_btn)
+        right_hand_row.addStretch()
+        control_layout.addLayout(right_hand_row)
+
         enable_row = QHBoxLayout()
         enable_row.setSpacing(6)
         self.hand_enable_label = QLabel("手: --")
@@ -8119,7 +8406,7 @@ class CameraTopicWindow(QMainWindow):
         enable_row.addWidget(self.control_mode_label)
         self.mode0_btn = QPushButton("切 mode=0")
         self.mode0_btn.setToolTip(
-            f"发布 {CONTROL_MODE_TOPIC}={MODEL_CONTROL_MODE}（模型控制，左臂移动/回放需要）"
+            f"发布 {CONTROL_MODE_TOPIC}={MODEL_CONTROL_MODE}（模型控制，手臂移动/回放需要）"
         )
         self.mode0_btn.clicked.connect(self._on_model_mode_clicked)
         enable_row.addWidget(self.mode0_btn)
@@ -8163,16 +8450,30 @@ class CameraTopicWindow(QMainWindow):
             f"目标可为分割位姿，或相对当前位置的手动偏移。\n"
             f"未使能时会自动启用手臂；同时发布左右臂 IK 目标。"
         )
-        self.left_arm_move_btn.clicked.connect(self._on_left_arm_move_clicked)
+        self.left_arm_move_btn.clicked.connect(
+            lambda: self._on_arm_move_clicked("left")
+        )
         arm_row2.addWidget(self.left_arm_move_btn)
+
+        self.right_arm_move_btn = QPushButton("右臂: 移动")
+        self.right_arm_move_btn.setEnabled(False)
+        self.right_arm_move_btn.setToolTip(
+            "将右臂 TCP 移动到目标位姿（时长随距离与「移动速度」滑块自适应）。\n"
+            f"目标可为分割位姿，或相对当前位置的手动偏移。\n"
+            f"未使能时会自动启用手臂；同时发布左右臂 IK 目标。"
+        )
+        self.right_arm_move_btn.clicked.connect(
+            lambda: self._on_arm_move_clicked("right")
+        )
+        arm_row2.addWidget(self.right_arm_move_btn)
 
         pose_info_box = QVBoxLayout()
         pose_info_box.setSpacing(0)
         pose_info_box.setContentsMargins(6, 0, 0, 0)
-        self.arm_pose_current_label = QLabel("当前  左臂 TCP: --")
+        self.arm_pose_current_label = QLabel("当前  左臂/右臂 TCP: --")
         self.arm_pose_current_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.arm_pose_current_label.setStyleSheet(f"color: {UI_ACCENT_BLUE};")
-        self.arm_pose_target_label = QLabel("目标  左臂 TCP: --")
+        self.arm_pose_target_label = QLabel("目标  TCP: --")
         self.arm_pose_target_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.arm_pose_target_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
         pose_info_box.addWidget(self.arm_pose_current_label)
@@ -8193,7 +8494,7 @@ class CameraTopicWindow(QMainWindow):
             "目标 = 当前 TCP 位置 + 偏移（base_link：X前/后，Y左/右，Z上/下）"
         )
         self.move_target_segment_radio.setToolTip(
-            "使用分割/FoundationPose 得到的绝对位姿作为左臂目标（base_link），"
+            "使用分割/FoundationPose 得到的绝对位姿作为手臂目标（base_link），"
             "不是相对当前 TCP 的偏移。FoundationPose 成功后会自动选中此项。"
         )
         target_row.addWidget(self.move_target_relative_radio)
@@ -8222,12 +8523,100 @@ class CameraTopicWindow(QMainWindow):
         control_layout.addLayout(target_row)
         control_tabs.addTab(control_tab, "手臂/手")
 
+        skeleton_tab = QWidget()
+        skeleton_layout = QVBoxLayout(skeleton_tab)
+        skeleton_layout.setContentsMargins(8, 6, 8, 6)
+        skeleton_layout.setSpacing(6)
+
+        sk_row1 = QHBoxLayout()
+        sk_row1.setSpacing(6)
+        sk_row1.addWidget(QLabel("相机:"))
+        self.skeleton_cam_combo = QComboBox()
+        self.skeleton_cam_combo.setMinimumWidth(220)
+        self.skeleton_cam_combo.setToolTip("选择用于手骨架识别的彩色图像 topic（需先在左侧勾选订阅）")
+        sk_row1.addWidget(self.skeleton_cam_combo, 1)
+        self.skeleton_refresh_cam_btn = QPushButton("刷新列表")
+        self.skeleton_refresh_cam_btn.clicked.connect(self._refresh_skeleton_camera_list)
+        sk_row1.addWidget(self.skeleton_refresh_cam_btn)
+        skeleton_layout.addLayout(sk_row1)
+
+        sk_row2 = QHBoxLayout()
+        sk_row2.setSpacing(8)
+        self.skeleton_flip_check = QCheckBox("水平翻转预览")
+        self.skeleton_flip_check.setChecked(True)
+        self.skeleton_flip_check.setToolTip("自拍/面对相机时建议开启，便于对照屏幕")
+        sk_row2.addWidget(self.skeleton_flip_check)
+        self.skeleton_mirror_map_check = QCheckBox("镜像映射到机器人")
+        self.skeleton_mirror_map_check.setChecked(True)
+        self.skeleton_mirror_map_check.setToolTip(
+            "开启：人物左手→机器人右手（面对机器人更自然）\n关闭：人物左手→机器人左手"
+        )
+        sk_row2.addWidget(self.skeleton_mirror_map_check)
+        self.skeleton_ctrl_left_check = QCheckBox("控左手")
+        self.skeleton_ctrl_left_check.setChecked(True)
+        sk_row2.addWidget(self.skeleton_ctrl_left_check)
+        self.skeleton_ctrl_right_check = QCheckBox("控右手")
+        self.skeleton_ctrl_right_check.setChecked(True)
+        sk_row2.addWidget(self.skeleton_ctrl_right_check)
+        sk_row2.addStretch()
+        skeleton_layout.addLayout(sk_row2)
+
+        sk_row3 = QHBoxLayout()
+        sk_row3.setSpacing(6)
+        self.skeleton_track_btn = QPushButton("开始识别")
+        self.skeleton_track_btn.setToolTip("启动 MediaPipe Hands 识别（仅预览骨架，不发送命令）")
+        self.skeleton_track_btn.clicked.connect(self._on_skeleton_track_toggled)
+        sk_row3.addWidget(self.skeleton_track_btn)
+        self.skeleton_teleop_check = QCheckBox("开启遥控")
+        self.skeleton_teleop_check.setToolTip(
+            "勾选后将骨架开合量实时发布到 /ry_hand/*/set_angles。\n请先「启用手」，并注意周围安全。"
+        )
+        self.skeleton_teleop_check.toggled.connect(self._on_skeleton_teleop_toggled)
+        sk_row3.addWidget(self.skeleton_teleop_check)
+        sk_row3.addWidget(QLabel("平滑"))
+        self.skeleton_smooth_slider = QSlider(Qt.Horizontal)
+        self.skeleton_smooth_slider.setRange(10, 90)
+        self.skeleton_smooth_slider.setValue(35)
+        self.skeleton_smooth_slider.setFixedWidth(100)
+        self.skeleton_smooth_slider.setToolTip("跟踪平滑：左小右大（越大越跟手、越抖）")
+        sk_row3.addWidget(self.skeleton_smooth_slider)
+        self.skeleton_status_label = QLabel("手骨架: 未启动")
+        self.skeleton_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.skeleton_status_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        sk_row3.addWidget(self.skeleton_status_label, 1)
+        skeleton_layout.addLayout(sk_row3)
+
+        self.skeleton_preview_label = QLabel("勾选彩色相机 topic → 刷新列表 → 开始识别")
+        self.skeleton_preview_label.setAlignment(Qt.AlignCenter)
+        self.skeleton_preview_label.setMinimumHeight(220)
+        self.skeleton_preview_label.setStyleSheet(
+            "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #aaa; }"
+        )
+        skeleton_layout.addWidget(self.skeleton_preview_label, 1)
+
+        self.skeleton_joints_label = QLabel("关节: --")
+        self.skeleton_joints_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.skeleton_joints_label.setWordWrap(True)
+        skeleton_layout.addWidget(self.skeleton_joints_label)
+
+        control_tabs.addTab(skeleton_tab, "手骨架遥控")
+
+        self._hand_skeleton_detector = None
+        self._skeleton_tracking = False
+        self._skeleton_busy = False
+        self._skeleton_timer = QTimer(self)
+        self._skeleton_timer.setInterval(66)  # ~15 Hz
+        self._skeleton_timer.timeout.connect(self._on_skeleton_tick)
+
         self._left_arm_move_btn_idle_style = ""
         self._left_arm_move_btn_cancel_style = f"color: {UI_ACCENT_RED};"
+        self._right_arm_move_btn_idle_style = ""
+        self._right_arm_move_btn_cancel_style = f"color: {UI_ACCENT_RED};"
 
         root_layout.addWidget(control_tabs)
 
         bridge.left_hand_preset_changed.connect(self._update_left_hand_toggle_ui)
+        bridge.right_hand_preset_changed.connect(self._update_right_hand_toggle_ui)
         bridge.slow_motion_progress.connect(self._on_slow_motion_progress)
         bridge.slow_motion_finished.connect(self._on_slow_motion_finished)
         bridge.robot_state_updated.connect(self._schedule_robot_ui_refresh)
@@ -8235,9 +8624,10 @@ class CameraTopicWindow(QMainWindow):
         bridge.hand_enable_changed.connect(self._on_hand_enable_ui_changed)
         bridge.control_mode_changed.connect(self._on_control_mode_ui_changed)
         self._update_left_hand_toggle_ui(self.node.is_left_hand_at_a())
+        self._update_right_hand_toggle_ui(self.node.is_right_hand_at_a())
         self._update_enable_status_ui()
         self._on_arm_move_speed_changed(self.arm_move_speed_slider.value())
-        self._update_left_arm_move_btn_ui(force=True)
+        self._update_arm_move_btns_ui(force=True)
 
         self._main_splitter = QSplitter(Qt.Horizontal)
 
@@ -8271,6 +8661,7 @@ class CameraTopicWindow(QMainWindow):
         chat_layout = QVBoxLayout(chat_group)
         chat_layout.setContentsMargins(4, 8, 4, 4)
         self.chat_panel = ChatPanelWidget(config=llm_config)
+        self.chat_panel.set_camera_frame_provider(self._pick_chat_camera_frame)
         chat_layout.addWidget(self.chat_panel)
         chat_group.setMinimumWidth(280)
         chat_group.setMaximumWidth(420)
@@ -8921,6 +9312,7 @@ class CameraTopicWindow(QMainWindow):
             self.status_bar.showMessage(f"SAM3 启动中，请稍候… ({url})")
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._stop_skeleton_tracking()
         self._ui_timer.stop()
         self._sam3_health_timer.stop()
         self._fp_health_timer.stop()
@@ -9177,6 +9569,14 @@ class CameraTopicWindow(QMainWindow):
                 return
 
         self.status_bar.showMessage("请先点击彩色/深度图像选择提示点，再点「调用分割」")
+
+    def _pick_chat_camera_frame(self) -> Optional[Tuple[str, np.ndarray]]:
+        """供 AI 对话附带视觉输入：优先最近点击的彩色 topic / 头部彩色。"""
+        source = self._pick_sam3_color_source()
+        if source is None:
+            return None
+        topic, image, _panel = source
+        return topic, image
 
     def _pick_sam3_color_source(
         self,
@@ -9733,6 +10133,33 @@ class CameraTopicWindow(QMainWindow):
             f"左手已切到状态{preset} position={sent_pos:.3f} -> {ROBOT_LEFT_HAND_CMD_TOPIC}"
         )
 
+    def _on_right_hand_sliders_changed(self, _value: int = 0) -> None:
+        self.right_hand_label_a.setText(format_hand_angle_label(self.right_hand_slider_a.value()))
+        self.right_hand_label_b.setText(format_hand_angle_label(self.right_hand_slider_b.value()))
+        self._update_right_hand_toggle_ui(self.node.is_right_hand_at_a())
+
+    def _update_right_hand_toggle_ui(self, at_a: bool) -> None:
+        pos_a = slider_to_hand_position(self.right_hand_slider_a.value())
+        pos_b = slider_to_hand_position(self.right_hand_slider_b.value())
+        next_preset = "B" if at_a else "A"
+        next_pos = pos_b if at_a else pos_a
+        self.right_hand_toggle_btn.setText(f"右手: 切到{next_preset} ({next_pos:.2f})")
+        active_style = f"font-weight: bold; color: {UI_ACCENT_BLUE};"
+        idle_style = f"color: {UI_TEXT_MUTED};"
+        self.right_hand_label_a.setStyleSheet(active_style if at_a else idle_style)
+        self.right_hand_label_b.setStyleSheet(active_style if not at_a else idle_style)
+
+    def _on_right_hand_toggle(self) -> None:
+        at_a, sent_pos = self.node.toggle_right_hand_between(
+            self.right_hand_slider_a.value(),
+            self.right_hand_slider_b.value(),
+        )
+        self._update_right_hand_toggle_ui(at_a)
+        preset = "A" if at_a else "B"
+        self.status_bar.showMessage(
+            f"右手已切到状态{preset} position={sent_pos:.3f} -> {ROBOT_RIGHT_HAND_CMD_TOPIC}"
+        )
+
     def _update_move_offset_ui_visibility(self) -> None:
         """「分割位姿」时隐藏相对 ΔXYZ；仅「相对当前」显示偏移控件。"""
         show_offset = self.move_target_relative_radio.isChecked()
@@ -9752,19 +10179,28 @@ class CameraTopicWindow(QMainWindow):
             self.move_target_relative_radio.setChecked(True)
         self._update_move_offset_ui_visibility()
         self._update_arm_pose_display()
-        self._update_left_arm_move_btn_ui()
+        self._update_arm_move_btns_ui()
 
-    def _resolve_move_goal(self) -> Optional[ResolvedArmMoveGoal]:
+    def _tcp_for_relative_goal(
+        self, arm_side: str
+    ) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]]:
+        tcp = self.node._tcp_pose_in_ik_frame(arm_side, timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
+        if tcp is not None:
+            return tcp
+        state = self.node.get_robot_state()
+        raw = state.left_tcp if arm_side == "left" else state.right_tcp
+        if raw is not None and raw.valid:
+            frame = normalize_frame_id(raw.frame_id)
+            if frame == normalize_frame_id(IK_TARGET_FRAME) or frame in MINK_FK_FRAME_ALIASES:
+                return (raw.xyz, raw.quat_xyzw)
+        return None
+
+    def _resolve_move_goal(self, arm_side: str = "left") -> Optional[ResolvedArmMoveGoal]:
         if self.move_target_segment_radio.isChecked() and self._last_segment_target is not None:
-            return self.node.resolve_segment_move_goal(self._last_segment_target)
-        tcp = self.node._get_left_tcp_in_base(timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
-        if tcp is None:
-            state = self.node.get_robot_state()
-            raw = state.left_tcp
-            if raw is not None and raw.valid:
-                frame = normalize_frame_id(raw.frame_id)
-                if frame == normalize_frame_id(IK_TARGET_FRAME) or frame in MINK_FK_FRAME_ALIASES:
-                    tcp = (raw.xyz, raw.quat_xyzw)
+            return self.node.resolve_segment_move_goal(
+                self._last_segment_target, arm_side=arm_side
+            )
+        tcp = self._tcp_for_relative_goal(arm_side)
         if tcp is None:
             return None
         xyz, quat = tcp
@@ -9774,6 +10210,7 @@ class CameraTopicWindow(QMainWindow):
             self.offset_x_spin.value(),
             self.offset_y_spin.value(),
             self.offset_z_spin.value(),
+            arm_side=arm_side,
         )
 
     def _on_arm_move_speed_changed(self, value: int) -> None:
@@ -9781,7 +10218,7 @@ class CameraTopicWindow(QMainWindow):
         self.node.set_arm_move_joint_speed(speed)
         self.arm_move_speed_label.setText(format_arm_move_speed_label(value))
         if not self.node.is_slow_motion_busy():
-            self._update_left_arm_move_btn_ui()
+            self._update_arm_move_btns_ui()
 
     def _on_arm_enable_clicked(self) -> None:
         enable = not self.node.is_arm_enabled()
@@ -9878,7 +10315,7 @@ class CameraTopicWindow(QMainWindow):
         self._arm_enable_wait_timer.stop()
         msg = self.node.request_slow_move_to_goal(goal)
         self.status_bar.showMessage(msg)
-        self._update_left_arm_move_btn_ui()
+        self._update_arm_move_btns_ui()
 
     def _on_arm_enable_wait_tick(self) -> None:
         if self._pending_arm_move_goal is None:
@@ -9893,8 +10330,8 @@ class CameraTopicWindow(QMainWindow):
             self.status_bar.showMessage(
                 "自动启用手臂超时，请确认 topic_router 已运行，或手动按 F2 / 点「启用手臂」"
             )
-            self._update_left_arm_move_btn_ui()
-        self._update_left_arm_move_btn_ui()
+            self._update_arm_move_btns_ui()
+        self._update_arm_move_btns_ui()
 
     def _update_arm_enable_ui(self) -> None:
         self.arm_enable_label.setText(self.node.get_arm_enable_label())
@@ -9906,17 +10343,17 @@ class CameraTopicWindow(QMainWindow):
         if hasattr(self, "robot_arm_enable_btn"):
             self.robot_arm_enable_btn.setText(btn_text)
 
-    def _can_start_arm_move(self) -> bool:
+    def _can_start_arm_move(self, arm_side: str = "left") -> bool:
         if self.node.is_slow_motion_busy():
             return True
         if self.move_target_segment_radio.isChecked():
-            return self._resolve_move_goal() is not None
+            return self._resolve_move_goal(arm_side) is not None
         state = self.node.get_robot_state()
         left_ok = state.left_tcp is not None and state.left_tcp.valid
         right_ok = state.right_tcp is not None and state.right_tcp.valid
         return left_ok and right_ok
 
-    def _disabled_move_btn_tooltip(self) -> str:
+    def _disabled_move_btn_tooltip(self, arm_side: str = "left") -> str:
         blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
         hints: List[str] = []
         if blockers:
@@ -9927,37 +10364,56 @@ class CameraTopicWindow(QMainWindow):
         right_ok = state.right_tcp is not None and state.right_tcp.valid
         if not left_ok or not right_ok:
             hints.append("等待双臂 TCP（/mink_fk/* 或 /tele/fk/*）")
+        side_name = arm_side_label(arm_side)
         if self.move_target_segment_radio.isChecked():
             if self._last_segment_target is None:
                 hints.append("请先点击图像选点，再点「调用分割」")
-            elif self._resolve_move_goal() is None:
+            elif self._resolve_move_goal(arm_side) is None:
                 frame = self._last_segment_target.camera_frame or "未知"
                 hints.append(f"分割 TF 不可用 ({frame} -> {IK_TARGET_FRAME})")
-        elif self._resolve_move_goal() is None:
-            hints.append("相对当前模式：请设置非零偏移（如 ΔX=0.05 m）")
+        elif self._resolve_move_goal(arm_side) is None:
+            hints.append(f"相对当前模式：请为{side_name}设置非零偏移（如 ΔX=0.05 m）")
         if not hints:
             hints.append("未使能时点击「移动」将自动启用手臂")
         return "\n".join(hints)
 
     def _update_arm_pose_display(self) -> None:
-        self.arm_pose_current_label.setText(self.node.get_arm_move_current_label())
-        resolved = self._resolve_move_goal()
-        if resolved is not None:
+        self.arm_pose_current_label.setText(self.node.get_arm_move_current_label_both())
+        left_goal = self._resolve_move_goal("left")
+        right_goal = self._resolve_move_goal("right")
+        if left_goal is not None or right_goal is not None:
+            parts: List[str] = []
+            if left_goal is not None:
+                parts.append(
+                    format_xyz_rpy_line(
+                        "左", left_goal.position_xyz, left_goal.quaternion_xyzw
+                    )
+                )
+            if right_goal is not None:
+                parts.append(
+                    format_xyz_rpy_line(
+                        "右", right_goal.position_xyz, right_goal.quaternion_xyzw
+                    )
+                )
+            label_hint = ""
+            if left_goal is not None:
+                label_hint = left_goal.label
+            elif right_goal is not None:
+                label_hint = right_goal.label
             self.arm_pose_target_label.setText(
-                f"目标  [{resolved.label}]  "
-                f"{format_xyz_rpy_line('左臂', resolved.position_xyz, resolved.quaternion_xyzw)}"
+                f"目标  [{label_hint}]  " + "  |  ".join(parts)
             )
         elif self.move_target_segment_radio.isChecked():
             if self._last_segment_target is None:
-                self.arm_pose_target_label.setText("目标  左臂 TCP: (请先选点并调用分割/FP)")
+                self.arm_pose_target_label.setText("目标  TCP: (请先选点并调用分割/FP)")
             else:
                 frame = self._last_segment_target.camera_frame or "未知"
                 self.arm_pose_target_label.setText(
-                    f"目标  左臂 TCP: TF 不可用 ({frame} -> {IK_TARGET_FRAME})"
+                    f"目标  TCP: TF 不可用 ({frame} -> {IK_TARGET_FRAME})"
                 )
         else:
             self.arm_pose_target_label.setText(
-                "目标  左臂 TCP: (设置前/后/左/右/上/下偏移，base_link 系)"
+                "目标  TCP: (设置前/后/左/右/上/下偏移，base_link 系)"
             )
 
     def _schedule_robot_ui_refresh(self, *_args) -> None:
@@ -9967,40 +10423,70 @@ class CameraTopicWindow(QMainWindow):
         self._robot_ui_last_update = now
         self._update_arm_pose_display()
         if not self.node.is_slow_motion_busy():
-            can_move = self._can_start_arm_move()
-            if self.left_arm_move_btn.isEnabled() != can_move:
-                self.left_arm_move_btn.setEnabled(can_move)
-                if not can_move:
-                    self.left_arm_move_btn.setToolTip(self._disabled_move_btn_tooltip())
+            for side, btn in (
+                ("left", self.left_arm_move_btn),
+                ("right", self.right_arm_move_btn),
+            ):
+                can_move = self._can_start_arm_move(side)
+                if btn.isEnabled() != can_move:
+                    btn.setEnabled(can_move)
+                    if not can_move:
+                        btn.setToolTip(self._disabled_move_btn_tooltip(side))
 
-    def _update_left_arm_move_btn_ui(self, force: bool = False) -> None:
-        speed_busy = self.node.is_slow_motion_busy()
-        self.arm_move_speed_slider.setEnabled(not speed_busy)
-        if self._pending_arm_move_goal is not None and not self.node.is_arm_enabled():
-            self.left_arm_move_btn.setText("使能中…")
-            self.left_arm_move_btn.setEnabled(True)
-            self.left_arm_move_btn.setStyleSheet(self._left_arm_move_btn_idle_style)
-            self.left_arm_move_btn.setToolTip("正在自动启用手臂，完成后将开始移动")
-            self._update_arm_pose_display()
+    def _update_one_arm_move_btn_ui(self, arm_side: str, force: bool = False) -> None:
+        btn = self.left_arm_move_btn if arm_side == "left" else self.right_arm_move_btn
+        idle_style = (
+            self._left_arm_move_btn_idle_style
+            if arm_side == "left"
+            else self._right_arm_move_btn_idle_style
+        )
+        cancel_style = (
+            self._left_arm_move_btn_cancel_style
+            if arm_side == "left"
+            else self._right_arm_move_btn_cancel_style
+        )
+        side_name = arm_side_label(arm_side)
+        pending = self._pending_arm_move_goal
+        if pending is not None and not self.node.is_arm_enabled():
+            if pending.arm_side == arm_side:
+                btn.setText("使能中…")
+                btn.setEnabled(True)
+                btn.setStyleSheet(idle_style)
+                btn.setToolTip("正在自动启用手臂，完成后将开始移动")
+            else:
+                btn.setText(f"{side_name}: 移动")
+                btn.setEnabled(False)
+                btn.setStyleSheet(idle_style)
+                btn.setToolTip("另一侧手臂正在等待使能")
             return
         if self.node.is_slow_motion_preparing():
-            self.left_arm_move_btn.setText("取消准备")
-            self.left_arm_move_btn.setEnabled(True)
-            self.left_arm_move_btn.setStyleSheet(self._left_arm_move_btn_cancel_style)
-            self.left_arm_move_btn.setToolTip("取消正在进行的 IK 同步与轨迹规划")
-            self._update_arm_pose_display()
+            if self.node._slow_motion_moving_side == arm_side:
+                btn.setText("取消准备")
+                btn.setEnabled(True)
+                btn.setStyleSheet(cancel_style)
+                btn.setToolTip("取消正在进行的 IK 同步与轨迹规划")
+            else:
+                btn.setText(f"{side_name}: 移动")
+                btn.setEnabled(False)
+                btn.setStyleSheet(idle_style)
+                btn.setToolTip("另一侧手臂正在准备移动")
             return
         if self.node.is_slow_motion_active():
-            self.left_arm_move_btn.setText("取消移动")
-            self.left_arm_move_btn.setEnabled(True)
-            self.left_arm_move_btn.setStyleSheet(self._left_arm_move_btn_cancel_style)
-            self.left_arm_move_btn.setToolTip("停止当前移动")
-            self._update_arm_pose_display()
+            if self.node._slow_motion_moving_side == arm_side:
+                btn.setText("取消移动")
+                btn.setEnabled(True)
+                btn.setStyleSheet(cancel_style)
+                btn.setToolTip("停止当前移动")
+            else:
+                btn.setText(f"{side_name}: 移动")
+                btn.setEnabled(False)
+                btn.setStyleSheet(idle_style)
+                btn.setToolTip("另一侧手臂正在移动")
             return
-        self.left_arm_move_btn.setText("左臂: 移动")
-        self.left_arm_move_btn.setStyleSheet(self._left_arm_move_btn_idle_style)
-        can_move = self._can_start_arm_move()
-        self.left_arm_move_btn.setEnabled(can_move)
+        btn.setText(f"{side_name}: 移动")
+        btn.setStyleSheet(idle_style)
+        can_move = self._can_start_arm_move(arm_side)
+        btn.setEnabled(can_move)
         if can_move:
             blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
             extra = ""
@@ -10008,17 +10494,27 @@ class CameraTopicWindow(QMainWindow):
                 extra = "\n注意: " + "；".join(blockers)
             elif (
                 not self.move_target_segment_radio.isChecked()
-                and self._resolve_move_goal() is None
+                and self._resolve_move_goal(arm_side) is None
             ):
                 extra = "\n请设置非零偏移后再点击"
-            self.left_arm_move_btn.setToolTip(
-                "将左臂 TCP 移动到目标位姿（时长随距离与「移动速度」滑块自适应）。\n"
+            btn.setToolTip(
+                f"将{side_name} TCP 移动到目标位姿（时长随距离与「移动速度」滑块自适应）。\n"
                 f"目标可为分割位姿，或相对当前位置的手动偏移。\n"
                 f"未使能时将自动启用手臂；同时发布左右臂 IK 目标。{extra}"
             )
         else:
-            self.left_arm_move_btn.setToolTip(self._disabled_move_btn_tooltip())
+            btn.setToolTip(self._disabled_move_btn_tooltip(arm_side))
+
+    def _update_arm_move_btns_ui(self, force: bool = False) -> None:
+        speed_busy = self.node.is_slow_motion_busy()
+        self.arm_move_speed_slider.setEnabled(not speed_busy)
+        self._update_one_arm_move_btn_ui("left", force=force)
+        self._update_one_arm_move_btn_ui("right", force=force)
         self._update_arm_pose_display()
+
+    def _update_left_arm_move_btn_ui(self, force: bool = False) -> None:
+        """兼容旧调用点。"""
+        self._update_arm_move_btns_ui(force=force)
 
     def _store_segment_target(self, target: SegmentPoseTarget) -> None:
         self._last_segment_target = target
@@ -10030,7 +10526,7 @@ class CameraTopicWindow(QMainWindow):
             spin.setValue(0.0)
             spin.blockSignals(False)
         self._update_move_offset_ui_visibility()
-        self._update_left_arm_move_btn_ui()
+        self._update_arm_move_btns_ui()
         self._update_arm_pose_display()
         self.status_bar.showMessage(
             f"已记录绝对位姿目标: {target.label or target.source_topic}"
@@ -10043,7 +10539,7 @@ class CameraTopicWindow(QMainWindow):
             return
         if not self.move_target_segment_radio.isChecked():
             return
-        goal = self._resolve_move_goal()
+        goal = self._resolve_move_goal("left")
         if goal is None:
             blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
             if blockers:
@@ -10057,21 +10553,24 @@ class CameraTopicWindow(QMainWindow):
             self._arm_enable_wait_deadline = time.time() + 15.0
             self._arm_enable_wait_timer.start()
             self.status_bar.showMessage(f"{msg}，使能后将自动移向绝对目标…")
-            self._update_left_arm_move_btn_ui()
+            self._update_arm_move_btns_ui()
             return
         msg = self.node.request_slow_move_to_goal(goal)
         self.status_bar.showMessage(msg)
-        self._update_left_arm_move_btn_ui()
+        self._update_arm_move_btns_ui()
 
-    def _on_left_arm_move_clicked(self) -> None:
+    def _on_arm_move_clicked(self, arm_side: str) -> None:
+        side_name = arm_side_label(arm_side)
         if self.node.is_slow_motion_busy():
+            if self.node._slow_motion_moving_side != arm_side:
+                return
             self._pending_arm_move_goal = None
             self._arm_enable_wait_timer.stop()
             msg = self.node.cancel_slow_motion()
             self.status_bar.showMessage(msg)
-            self._update_left_arm_move_btn_ui()
+            self._update_arm_move_btns_ui()
             return
-        goal = self._resolve_move_goal()
+        goal = self._resolve_move_goal(arm_side)
         if goal is None:
             if self.move_target_segment_radio.isChecked():
                 if self._last_segment_target is None:
@@ -10083,7 +10582,9 @@ class CameraTopicWindow(QMainWindow):
                         f"请检查 {frame} 的 TF"
                     )
             else:
-                self.status_bar.showMessage("请设置非零偏移量，或等待左臂 TCP 数据")
+                self.status_bar.showMessage(
+                    f"请设置非零偏移量，或等待{side_name} TCP 数据"
+                )
             return
         if not self.node.is_arm_enabled():
             self._pending_arm_move_goal = goal
@@ -10091,20 +10592,23 @@ class CameraTopicWindow(QMainWindow):
             self._arm_enable_wait_deadline = time.time() + 15.0
             self._arm_enable_wait_timer.start()
             self.status_bar.showMessage(f"{msg}，使能后将自动开始移动…")
-            self._update_left_arm_move_btn_ui()
+            self._update_arm_move_btns_ui()
             return
         msg = self.node.request_slow_move_to_goal(goal)
         self.status_bar.showMessage(msg)
-        self._update_left_arm_move_btn_ui()
+        self._update_arm_move_btns_ui()
+
+    def _on_left_arm_move_clicked(self) -> None:
+        self._on_arm_move_clicked("left")
 
     def _on_slow_motion_progress(self, progress: float, text: str) -> None:
         self.status_bar.showMessage(text)
-        self._update_left_arm_move_btn_ui()
+        self._update_arm_move_btns_ui()
         self._update_arm_pose_display()
 
     def _on_slow_motion_finished(self, ok: bool, text: str) -> None:
         self.status_bar.showMessage(text)
-        self._update_left_arm_move_btn_ui()
+        self._update_arm_move_btns_ui()
 
     def _on_left_hand_apply_active(self) -> None:
         at_a = self.node.is_left_hand_at_a()
@@ -10114,6 +10618,176 @@ class CameraTopicWindow(QMainWindow):
         self.status_bar.showMessage(
             f"左手状态{preset} 已应用 position={sent_pos:.3f} -> {ROBOT_LEFT_HAND_CMD_TOPIC}"
         )
+
+    def _on_right_hand_apply_active(self) -> None:
+        at_a = self.node.is_right_hand_at_a()
+        slider = self.right_hand_slider_a.value() if at_a else self.right_hand_slider_b.value()
+        sent_pos = self.node.apply_right_hand_angle(slider)
+        preset = "A" if at_a else "B"
+        self.status_bar.showMessage(
+            f"右手状态{preset} 已应用 position={sent_pos:.3f} -> {ROBOT_RIGHT_HAND_CMD_TOPIC}"
+        )
+
+    def _refresh_skeleton_camera_list(self) -> None:
+        current = self.skeleton_cam_combo.currentData()
+        self.skeleton_cam_combo.blockSignals(True)
+        self.skeleton_cam_combo.clear()
+        topics = []
+        for topic, types in sorted(self._topic_types.items()):
+            if not self._is_image_topic(types):
+                continue
+            if is_depth_topic(topic):
+                continue
+            topics.append(topic)
+        if not topics:
+            for topic in sorted(self._frame_cache.keys()):
+                if not is_depth_topic(topic):
+                    topics.append(topic)
+        for topic in topics:
+            self.skeleton_cam_combo.addItem(topic, topic)
+        if current:
+            idx = self.skeleton_cam_combo.findData(current)
+            if idx >= 0:
+                self.skeleton_cam_combo.setCurrentIndex(idx)
+        self.skeleton_cam_combo.blockSignals(False)
+        if self.skeleton_cam_combo.count() == 0:
+            self.skeleton_status_label.setText("手骨架: 无可用彩色相机（请先勾选并订阅）")
+
+    def _stop_skeleton_tracking(self) -> None:
+        self._skeleton_tracking = False
+        self._skeleton_timer.stop()
+        self.skeleton_teleop_check.setChecked(False)
+        if self._hand_skeleton_detector is not None:
+            try:
+                self._hand_skeleton_detector.close()
+            except Exception:
+                pass
+            self._hand_skeleton_detector = None
+        self.skeleton_track_btn.setText("开始识别")
+        self.skeleton_status_label.setText("手骨架: 已停止")
+
+    def _on_skeleton_track_toggled(self) -> None:
+        if self._skeleton_tracking:
+            self._stop_skeleton_tracking()
+            return
+        try:
+            from hand_skeleton_teleop import HandSkeletonDetector, mediapipe_available
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "手骨架遥控",
+                f"无法加载 hand_skeleton_teleop:\n{exc}",
+            )
+            return
+        if not mediapipe_available():
+            QMessageBox.warning(
+                self,
+                "手骨架遥控",
+                "未安装 mediapipe。请执行:\n"
+                "  python3.10 -m pip install 'mediapipe==0.10.14'\n"
+                "并保持 numpy<2（与 ROS2 cv_bridge 兼容）。",
+            )
+            return
+        self._refresh_skeleton_camera_list()
+        if self.skeleton_cam_combo.count() == 0:
+            self.status_bar.showMessage("请先在左侧勾选彩色相机 topic")
+            return
+        try:
+            self._hand_skeleton_detector = HandSkeletonDetector(max_num_hands=2)
+        except Exception as exc:
+            QMessageBox.warning(self, "手骨架遥控", f"初始化 MediaPipe Hands 失败:\n{exc}")
+            self._hand_skeleton_detector = None
+            return
+        self._skeleton_tracking = True
+        self.skeleton_track_btn.setText("停止识别")
+        self.skeleton_status_label.setText("手骨架: 识别中…")
+        self._skeleton_timer.start()
+
+    def _on_skeleton_teleop_toggled(self, checked: bool) -> None:
+        if checked and not self._skeleton_tracking:
+            self.skeleton_teleop_check.blockSignals(True)
+            self.skeleton_teleop_check.setChecked(False)
+            self.skeleton_teleop_check.blockSignals(False)
+            self.status_bar.showMessage("请先点击「开始识别」")
+            return
+        if checked and not self.node.is_hand_enabled():
+            msg = self.node.request_hand_enable(True)
+            self.status_bar.showMessage(f"{msg}（遥控需要手部使能）")
+        if checked:
+            self.skeleton_status_label.setText("手骨架: 识别中 + 遥控中")
+            self.skeleton_status_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        elif self._skeleton_tracking:
+            self.skeleton_status_label.setText("手骨架: 识别中（仅预览）")
+            self.skeleton_status_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+
+    def _on_skeleton_tick(self) -> None:
+        if not self._skeleton_tracking or self._skeleton_busy:
+            return
+        if self._hand_skeleton_detector is None:
+            return
+        topic = self.skeleton_cam_combo.currentData()
+        if not topic:
+            return
+        frame = self._frame_cache.get(topic)
+        if frame is None or getattr(frame, "size", 0) == 0:
+            self.skeleton_status_label.setText(f"手骨架: 等待图像 {topic}")
+            return
+        self._skeleton_busy = True
+        try:
+            from hand_skeleton_teleop import (
+                draw_hand_skeleton,
+                map_person_hand_to_robot_side,
+            )
+
+            flip = self.skeleton_flip_check.isChecked()
+            alpha = self.skeleton_smooth_slider.value() / 100.0
+            hands = self._hand_skeleton_detector.detect(
+                frame, flip_horizontal=flip, smooth_alpha=alpha
+            )
+            vis = draw_hand_skeleton(frame, hands, flip_horizontal=flip)
+            # 预览缩放到合适宽度
+            max_w = max(320, self.skeleton_preview_label.width() - 8)
+            h, w = vis.shape[:2]
+            if w > max_w:
+                scale = max_w / float(w)
+                vis = cv2.resize(
+                    vis,
+                    (max_w, max(1, int(h * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            self.skeleton_preview_label.setPixmap(cv2_to_qpixmap(vis))
+
+            mirror = self.skeleton_mirror_map_check.isChecked()
+            lines: List[str] = []
+            teleop = self.skeleton_teleop_check.isChecked()
+            ctrl_left = self.skeleton_ctrl_left_check.isChecked()
+            ctrl_right = self.skeleton_ctrl_right_check.isChecked()
+            for hand in hands:
+                robot_side = map_person_hand_to_robot_side(hand.handedness, mirror)
+                j = hand.joints
+                lines.append(
+                    f"人{hand.handedness}→机{robot_side}: "
+                    f"rot={j[0]:.2f} bend={j[1]:.2f} "
+                    f"I={j[2]:.2f} M={j[3]:.2f} R={j[4]:.2f} P={j[5]:.2f}"
+                )
+                if teleop:
+                    if robot_side == "left" and ctrl_left:
+                        self.node.apply_hand_joint_positions("left", j)
+                    elif robot_side == "right" and ctrl_right:
+                        self.node.apply_hand_joint_positions("right", j)
+            if lines:
+                self.skeleton_joints_label.setText(" | ".join(lines))
+                mode = "遥控" if teleop else "预览"
+                self.skeleton_status_label.setText(
+                    f"手骨架: {mode} 检测到 {len(hands)} 只手 @ {topic}"
+                )
+            else:
+                self.skeleton_joints_label.setText("关节: (未检测到手)")
+                self.skeleton_status_label.setText(f"手骨架: 未检测到手 @ {topic}")
+        except Exception as exc:
+            self.skeleton_status_label.setText(f"手骨架错误: {exc}")
+        finally:
+            self._skeleton_busy = False
 
     def _normalize_prefix(self, prefix: str) -> str:
         prefix = prefix.strip() or "/camera"
@@ -10138,6 +10812,7 @@ class CameraTopicWindow(QMainWindow):
             empty.setStyleSheet(f"color: {UI_TEXT_MUTED}; padding: 8px;")
             self.topic_list_layout.addWidget(empty)
             self._rebuild_panels(set())
+            self._refresh_skeleton_camera_list()
             return
 
         default_enabled: set[str] = set()
@@ -10155,10 +10830,12 @@ class CameraTopicWindow(QMainWindow):
 
         self.topic_list_layout.addStretch()
         self._apply_selection(default_enabled)
+        self._refresh_skeleton_camera_list()
 
     def _on_selection_changed(self) -> None:
         enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
         self._apply_selection(enabled)
+        self._refresh_skeleton_camera_list()
 
     def _apply_selection(self, enabled: set[str]) -> None:
         self.node.set_enabled_topics(enabled)

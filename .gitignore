@@ -3,6 +3,11 @@
 weights/**/*.pth
 weights/.cache/
 
+# Hy-Embodied local clones / checkpoints (very large)
+weights/Hy-Embodied-*/
+third_party/HY-Embodied/
+third_party/Hy-Embodied-RxBrain-1.0/
+
 # Python bytecode
 __pycache__/
 *.py[cod]
