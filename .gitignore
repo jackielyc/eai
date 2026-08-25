@@ -11,3 +11,11 @@ third_party/Hy-Embodied-RxBrain-1.0/
 # Python bytecode
 __pycache__/
 *.py[cod]
+train/cortex_qwen35/output/*
+# Full Cortex SFT dumps exceed GitHub's 100MB limit; keep 20k/2k subsets tracked
+train/cortex_qwen35/data/cortex_sys2_train.json
+train/cortex_qwen35/data/cortex_sys2_val.json
+train/lake_qwen35/data/images/*
+train/lake_qwen35/data/.convert_checkpoint/train.clip_ids
+train/lake_qwen35/data/.convert_checkpoint/val.clip_ids
+train/lake_qwen35/output/*

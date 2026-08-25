@@ -1,0 +1,52 @@
+### LLaMA-Factory style config for Qwen3.5-35B-A3B + Cortex
+### NOTE: Current local LLaMA-Factory does not yet register model_type=qwen3_5 / qwen3_5_moe.
+### Prefer: eai/train/cortex_qwen35/scripts/run_train_35b.sh
+
+### model
+model_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-35B-A3B
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target: all
+deepspeed: examples/deepspeed/ds_z3_config.json
+
+### dataset
+dataset_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/cortex_qwen35/data
+dataset: cortex_sys2_train_20k
+eval_dataset: cortex_sys2_val_2k
+template: qwen3_vl
+cutoff_len: 2048
+overwrite_cache: true
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/cortex_qwen35/output/lf-qwen35-35b-a3b-lora-cortex
+logging_steps: 10
+save_steps: 500
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-5
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_steps: 100
+bf16: true
+ddp_timeout: 180000000
+flash_attn: auto
+
+### eval
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 500

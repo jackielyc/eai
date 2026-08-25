@@ -1,0 +1,31 @@
+### Cortex System-2 LoRA SFT — Qwen3.5-4B
+model_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-4B
+dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/cortex_qwen35/data/cortex_sys2_train_20k.json
+eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/cortex_qwen35/data/cortex_sys2_val_2k.json
+output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/cortex_qwen35/output/qwen35-4b-lora-cortex
+
+max_seq_length: 2048
+max_samples: null
+eval_max_samples: 512
+
+num_train_epochs: 2.0
+learning_rate: 1.0e-4
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+gradient_accumulation_steps: 4
+warmup_steps: 100
+logging_steps: 10
+save_steps: 500
+eval_steps: 500
+
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
+
+bf16: true
+gradient_checkpointing: true
+dataloader_num_workers: 4
+save_total_limit: 3
+report_to: none
+seed: 42

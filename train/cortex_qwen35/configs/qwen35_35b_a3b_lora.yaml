@@ -1,0 +1,36 @@
+### Cortex System-2 LoRA SFT — Qwen3.5-35B-A3B (MoE)
+model_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-35B-A3B
+dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/cortex_qwen35/data/cortex_sys2_train_20k.json
+eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/cortex_qwen35/data/cortex_sys2_val_2k.json
+output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/cortex_qwen35/output/qwen35-35b-a3b-lora-cortex
+
+max_seq_length: 2048
+max_samples: null
+eval_max_samples: 256
+
+num_train_epochs: 1.0
+learning_rate: 5.0e-5
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+warmup_steps: 100
+logging_steps: 10
+save_steps: 500
+eval_steps: 500
+
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
+
+bf16: true
+gradient_checkpointing: true
+dataloader_num_workers: 4
+save_total_limit: 3
+report_to: none
+seed: 42
+
+# Prefer single-process multi-GPU sharding for MoE
+device_map: auto
+fsdp: none
+fsdp_transformer_layer_cls_to_wrap: Qwen3_5MoeDecoderLayer
