@@ -22,20 +22,46 @@ from PIL import Image
 
 
 SYSTEM_PROMPT = (
-    "You are a robot cognitive orchestrator for manipulation tasks. "
-    "Given the scene image, task name, and progress memory, predict the current "
-    "executable subtask and updated language memory. "
-    "Respond with Skill, Subtask, and Memory on separate lines."
+    "你是机器人操作任务编排器。"
+    "给定场景图像、高层任务名称和上一个子任务，预测该任务下的全部子任务列表，"
+    "以及当前可执行的子任务。"
+    "请先输出「所有子任务」编号列表，再分别用「技能」「当前子任务」「上一个子任务」「下一个子任务」四行作答。"
 )
 
-INDEX_COLUMNS = ("task", "volume_id", "start_idx", "end_idx", "clip_id", "zarr_path")
+DEFAULT_MEMORY = "这是第一个子任务，尚未完成任何子任务。"
+LAST_MEMORY = "这是最后一个子任务，没有下一个子任务。"
+
+SKILL_ZH = {
+    "Pick": "抓取",
+    "Place": "放置",
+    "Push": "推动",
+    "Manipulate": "操作",
+}
+
+# clip_index rows are layer-2 clips; text_embedding_content is the fine-grained (EN) label.
+# Chinese layer-2 is produced via translation cache / online map; task is layer-1 Chinese name.
+INDEX_COLUMNS = (
+    "task",
+    "volume_id",
+    "start_idx",
+    "end_idx",
+    "clip_id",
+    "zarr_path",
+    "text_embedding_content",
+    "upper_text_embedding_content",
+)
 _ZARR_CACHE: dict[str, tuple[Any, str]] = {}
+_LAYER2_ZH_CACHE: dict[str, str] | None = None
+_LAYER2_ZH_CACHE_PATH: Path | None = None
+_LAYER2_CLIP_ZH_CACHE: dict[str, str] | None = None
+_LAYER2_ALL_SUBTASKS_CACHE: dict[str, list[str]] | None = None
 
 
 @dataclass(frozen=True)
 class ClipJob:
     split: str
     task: str
+    subtask: str
     start_idx: int
     end_idx: int
     clip_id: str
@@ -199,48 +225,206 @@ def _save_rgb_jpg(frame: np.ndarray, out_path: Path) -> None:
 def _task_to_instruction(task: str) -> str:
     text = task.replace("_", " ").replace("-", " ").strip()
     if not text:
-        return "Execute the manipulation task."
+        return "执行操作任务。"
     if any("\u4e00" <= ch <= "\u9fff" for ch in text):
         return text
     return text[0].upper() + text[1:]
 
 
+def _has_chinese(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
+def _load_layer2_zh_cache(path: Path | None = None) -> dict[str, str]:
+    """EN phrase -> ZH (from data_hub.clip_description via layer2_en2zh.json)."""
+    global _LAYER2_ZH_CACHE, _LAYER2_ZH_CACHE_PATH
+    cache_path = path or _LAYER2_ZH_CACHE_PATH
+    if cache_path is None:
+        cache_path = Path(__file__).resolve().parents[1] / "data" / "layer2_en2zh.json"
+    if _LAYER2_ZH_CACHE is not None and _LAYER2_ZH_CACHE_PATH == cache_path:
+        return _LAYER2_ZH_CACHE
+    _LAYER2_ZH_CACHE_PATH = cache_path
+    if cache_path.exists():
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        _LAYER2_ZH_CACHE = {str(k): str(v) for k, v in raw.items() if str(v).strip()}
+    else:
+        _LAYER2_ZH_CACHE = {}
+    return _LAYER2_ZH_CACHE
+
+
+def _load_layer2_clip_zh_cache() -> dict[str, str]:
+    """clip_id -> official description_zh from data_hub.clip_description."""
+    global _LAYER2_CLIP_ZH_CACHE
+    if _LAYER2_CLIP_ZH_CACHE is not None:
+        return _LAYER2_CLIP_ZH_CACHE
+    cache_path = Path(__file__).resolve().parents[1] / "data" / "layer2_clip_id2zh.json"
+    if cache_path.exists():
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        _LAYER2_CLIP_ZH_CACHE = {str(k): str(v) for k, v in raw.items() if str(v).strip()}
+    else:
+        _LAYER2_CLIP_ZH_CACHE = {}
+    return _LAYER2_CLIP_ZH_CACHE
+
+
+def _load_all_subtasks_cache() -> dict[str, list[str]]:
+    """clip_id -> ordered list of all layer-2 ZH subtasks under the same upper clip."""
+    global _LAYER2_ALL_SUBTASKS_CACHE
+    if _LAYER2_ALL_SUBTASKS_CACHE is not None:
+        return _LAYER2_ALL_SUBTASKS_CACHE
+    cache_path = Path(__file__).resolve().parents[1] / "data" / "layer2_all_subtasks_by_clip.json"
+    out: dict[str, list[str]] = {}
+    if cache_path.exists():
+        raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        for cid, payload in raw.items():
+            if isinstance(payload, dict):
+                subs = payload.get("all_subtasks_zh") or []
+            elif isinstance(payload, list):
+                subs = payload
+            else:
+                subs = []
+            cleaned = [str(s).strip() for s in subs if str(s).strip()]
+            if cleaned:
+                out[str(cid)] = cleaned
+    _LAYER2_ALL_SUBTASKS_CACHE = out
+    return _LAYER2_ALL_SUBTASKS_CACHE
+
+
+def _format_all_subtasks(subtasks: list[str]) -> str:
+    return "\n".join(f"{i}. {s}" for i, s in enumerate(subtasks, 1))
+
+
+def _build_progress_memory(all_subtasks: list[str], current_idx: int) -> str:
+    """Language memory is the last completed layer-2 subtask."""
+    if current_idx <= 0:
+        return DEFAULT_MEMORY
+    return all_subtasks[current_idx - 1]
+
+
+def _next_subtask(all_subtasks: list[str], current_idx: int) -> str:
+    if 0 <= current_idx + 1 < len(all_subtasks):
+        return all_subtasks[current_idx + 1]
+    return LAST_MEMORY
+
+
+def _to_chinese_layer2(text: str, *, clip_id: str | None = None) -> str:
+    text = text.strip()
+    if not text:
+        return "执行操作任务。"
+    if clip_id:
+        zh = _load_layer2_clip_zh_cache().get(str(clip_id))
+        if zh:
+            return zh
+    if _has_chinese(text):
+        return text
+    cache = _load_layer2_zh_cache()
+    zh = cache.get(text)
+    if zh:
+        return zh
+    return text
+
+
 def _infer_skill(task: str) -> str:
     lower = task.lower()
-    if any(token in lower for token in ("pick", "grasp", "抓取", "拿", "取")):
-        return "Pick"
-    if any(token in task for token in ("place", "放", "归位", "放回", "安装", "插入")):
-        return "Place"
-    if any(token in task for token in ("push", "推", "移")):
-        return "Push"
-    return "Manipulate"
+    # Prefer Chinese lexical cues first (avoid bare「移」which appears in many place/move phrases).
+    if (
+        any(tok in task for tok in ("抓取", "拿起", "拿取", "握住", "握紧", "握持", "拾取", "夹取", "夹持"))
+        or task.startswith("握")
+        or any(tok in lower for tok in ("pick", "grasp", "grab"))
+    ):
+        return SKILL_ZH["Pick"]
+    if any(tok in task for tok in ("放置", "放回", "放入", "归位", "安装", "插入", "放下")) or any(
+        tok in lower for tok in ("place", "put", "insert", "install")
+    ):
+        return SKILL_ZH["Place"]
+    if any(tok in task for tok in ("推动", "推开", "推移")) or any(
+        tok in lower for tok in ("push", "slide")
+    ):
+        return SKILL_ZH["Push"]
+    if task.startswith("移") or "移动" in task or "move" in lower:
+        return SKILL_ZH["Push"]
+    return SKILL_ZH["Manipulate"]
 
 
-def _build_assistant(task: str, clip_length: int) -> str:
-    instruction = _task_to_instruction(task)
-    skill = _infer_skill(task)
-    subtask = instruction
-    memory = (
-        f"The robot is executing '{instruction}'. "
-        f"Current clip covers {clip_length} control steps at the sampled frame."
+def _layer2_subtask(row_dict: dict[str, Any]) -> str:
+    """Official layer-2 Chinese from clip_description; fall back to EN->ZH cache / task."""
+    clip_id = row_dict.get("clip_id")
+    clip_id_str = str(clip_id).strip() if clip_id is not None and not (isinstance(clip_id, float) and pd.isna(clip_id)) else None
+    if clip_id_str:
+        zh = _load_layer2_clip_zh_cache().get(clip_id_str)
+        if zh:
+            return zh
+    for key in ("text_embedding_content", "subtask", "task"):
+        value = row_dict.get(key)
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        text = str(value).strip()
+        if text:
+            return _to_chinese_layer2(text, clip_id=clip_id_str)
+    return "执行操作任务。"
+
+
+def _build_assistant(
+    subtask: str, all_subtasks: list[str], clip_length: int, memory: str, next_memory: str
+) -> str:
+    instruction = _task_to_instruction(subtask)
+    skill = _infer_skill(subtask)
+    return (
+        f"所有子任务：\n{_format_all_subtasks(all_subtasks)}\n"
+        f"技能：{skill}\n"
+        f"当前子任务：{instruction}\n"
+        f"上一个子任务：{memory}\n"
+        f"下一个子任务：{next_memory}"
     )
-    return f"Skill: {skill}\nSubtask: {subtask}\nMemory: {memory}"
 
 
 def _build_sample(
     image_path: Path,
     task: str,
+    subtask: str,
     clip_length: int,
     *,
-    memory: str = "This is the first subtask, and no subtasks have been completed yet.",
+    memory: str | None = None,
+    all_subtasks: list[str] | None = None,
+    clip_id: str | None = None,
+    current_idx: int | None = None,
 ) -> dict[str, Any]:
-    instruction = _task_to_instruction(task)
+    task_instruction = _task_to_instruction(task)
+    subtask_zh = _task_to_instruction(subtask)
+    if all_subtasks is None and clip_id is not None:
+        cache_path = Path(__file__).resolve().parents[1] / "data" / "layer2_all_subtasks_by_clip.json"
+        if cache_path.exists():
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
+            payload = raw.get(str(clip_id))
+            if isinstance(payload, dict):
+                siblings = [str(x) for x in (payload.get("sibling_clip_ids") or [])]
+                zh_list = [str(x) for x in (payload.get("all_subtasks_zh") or []) if str(x).strip()]
+                if zh_list:
+                    all_subtasks = zh_list
+                if current_idx is None and siblings and str(clip_id) in siblings:
+                    current_idx = siblings.index(str(clip_id))
+        if all_subtasks is None:
+            all_subtasks = _load_all_subtasks_cache().get(str(clip_id))
+    if not all_subtasks:
+        all_subtasks = [subtask_zh]
+    if memory is None:
+        if current_idx is None:
+            try:
+                current_idx = all_subtasks.index(subtask_zh)
+            except ValueError:
+                current_idx = 0
+        memory = _build_progress_memory(all_subtasks, current_idx)
+    if current_idx is None:
+        try:
+            current_idx = all_subtasks.index(subtask_zh)
+        except ValueError:
+            current_idx = 0
+    next_memory = _next_subtask(all_subtasks, current_idx)
     user_text = (
-        f"Task: {instruction}\n\n"
-        f"Language memory:\n{memory}\n\n"
-        "Output the current skill, subtask, and updated language memory."
+        f"任务：{task_instruction}\n\n"
+        f"上一个子任务：\n{memory}\n\n"
+        "请输出全部子任务，以及当前技能、当前子任务、上一个子任务与下一个子任务。"
     )
-    assistant = _build_assistant(task, clip_length)
+    assistant = _build_assistant(subtask_zh, all_subtasks, clip_length, memory, next_memory)
     return {
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -346,6 +530,7 @@ def _row_to_job(
     return ClipJob(
         split=split,
         task=str(row_dict["task"]),
+        subtask=_layer2_subtask(row_dict),
         start_idx=start_idx,
         end_idx=end_idx,
         clip_id=clip_id,
@@ -362,7 +547,9 @@ def _process_clip_job(job: ClipJob) -> dict[str, Any] | None:
     image_path = Path(job.image_path)
     clip_length = max(1, job.end_idx - job.start_idx + 1)
     if job.skip_existing and image_path.exists() and image_path.stat().st_size > 0:
-        return _build_sample(image_path, job.task, clip_length)
+        return _build_sample(
+            image_path, job.task, job.subtask, clip_length, clip_id=job.clip_id
+        )
 
     zarr_path = Path(job.zarr_path)
     frame_idx = job.start_idx + clip_length // 2
@@ -371,7 +558,9 @@ def _process_clip_job(job: ClipJob) -> dict[str, Any] | None:
         _export_frame(group, camera, frame_idx, image_path)
     except Exception:
         return None
-    return _build_sample(image_path, job.task, clip_length)
+    return _build_sample(
+        image_path, job.task, job.subtask, clip_length, clip_id=job.clip_id
+    )
 
 
 def _init_worker() -> None:
@@ -494,7 +683,7 @@ def export_view_split(
         print(f"[skip] missing/empty index: {index_path}")
         return 0
 
-    jsonl_path = output_dir / f"lake_sys2_{split}.jsonl"
+    jsonl_path = output_dir / f"hermas_sys2_{split}.jsonl"
     checkpoint = ClipCheckpoint(output_dir / ".convert_checkpoint" / f"{split}.clip_ids", resume=resume)
     writer = JsonlWriter(jsonl_path, resume=resume)
     if resume and max_samples is not None and writer.count >= max_samples:
@@ -701,10 +890,10 @@ def write_dataset_info(path: Path) -> None:
             "tags": tags,
         }
         for name, fname in [
-            ("lake_sys2_train", "lake_sys2_train.jsonl"),
-            ("lake_sys2_val", "lake_sys2_val.jsonl"),
-            ("lake_sys2_train_20k", "lake_sys2_train_20k.json"),
-            ("lake_sys2_val_2k", "lake_sys2_val_2k.json"),
+            ("hermas_sys2_train", "hermas_sys2_train.jsonl"),
+            ("hermas_sys2_val", "hermas_sys2_val.jsonl"),
+            ("hermas_sys2_train_20k", "hermas_sys2_train_20k.json"),
+            ("hermas_sys2_val_2k", "hermas_sys2_val_2k.json"),
         ]
     }
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -801,13 +990,13 @@ def main() -> None:
     subset_train = None if args.max_per_task else args.subset_train
     subset_val = None if args.max_per_task else args.subset_val
     jsonl_to_json_array(
-        args.output_dir / "lake_sys2_train.jsonl",
-        args.output_dir / "lake_sys2_train_20k.json",
+        args.output_dir / "hermas_sys2_train.jsonl",
+        args.output_dir / "hermas_sys2_train_20k.json",
         subset_train,
     )
     jsonl_to_json_array(
-        args.output_dir / "lake_sys2_val.jsonl",
-        args.output_dir / "lake_sys2_val_2k.json",
+        args.output_dir / "hermas_sys2_val.jsonl",
+        args.output_dir / "hermas_sys2_val_2k.json",
         subset_val,
     )
     print(

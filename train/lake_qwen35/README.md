@@ -59,7 +59,7 @@ bash scripts/run_convert.sh
 
 产物：
 
-- `data/lake_sys2_train_20k.json` / `lake_sys2_val_2k.json`
+- `data/hermas_sys2_train_20k.json` / `hermas_sys2_val_2k.json`
 - `data/images/<datahouse>/<view>/<split>/*.jpg`
 
 ### 按任务（task）导出
@@ -92,7 +92,7 @@ TASK_LIST_FILE=/path/to/tasks.txt MAX_PER_TASK=200 SKIP_FULL=1 bash scripts/run_
 
 ```bash
 TASKS='安装电动牙刷刷头' SKIP_FULL=0 bash scripts/run_convert.sh
-# 产出 data/lake_sys2_train.json（该 task 在 train split 的全部 clip）
+# 产出 data/hermas_sys2_train.json（该 task 在 train split 的全部 clip）
 ```
 
 **查看 task 种类与数量：**
@@ -116,7 +116,7 @@ PY
 ### 全量流式导出 + 断点续传
 
 全量导出（`SKIP_FULL=0`）默认：
-- **流式写** `data/lake_sys2_train.jsonl` / `lake_sys2_val.jsonl`（不把所有样本堆进内存）
+- **流式写** `data/hermas_sys2_train.jsonl` / `hermas_sys2_val.jsonl`（不把所有样本堆进内存）
 - **断点续传** `data/.convert_checkpoint/{train,val}.clip_ids` + 已有 jpg/jsonl
 - 分块读取 parquet（535 万 clip 不会一次性载入 RAM）
 
@@ -131,11 +131,11 @@ SKIP_FULL=0 RESUME=0 bash scripts/run_convert.sh
 全量训练请指向 jsonl：
 
 ```yaml
-dataset_path: .../data/lake_sys2_train.jsonl
-eval_dataset_path: .../data/lake_sys2_val.jsonl
+dataset_path: .../data/hermas_sys2_train.jsonl
+eval_dataset_path: .../data/hermas_sys2_val.jsonl
 ```
 
-子集兼容文件仍会自动生成：`lake_sys2_train_20k.json`（从 jsonl 流式截取前 N 行）。
+子集兼容文件仍会自动生成：`hermas_sys2_train_20k.json`（从 jsonl 流式截取前 N 行）。
 
 ### 加速导出
 
@@ -155,7 +155,12 @@ NUM_WORKERS=16 SKIP_EXISTING=1 bash scripts/run_convert.sh
 SKIP_EXISTING=0 bash scripts/run_convert.sh
 ```
 
-> assistant 标签目前由 `task` 名模板生成；若有平台语义标注，可在 `convert_lake_to_sft.py` 中替换 `_build_assistant()`。
+> assistant 预测目标包含：**所有子任务**（同一 `upper_clip_id` 下按时间排序的全部 layer-2 中文列表）、
+> **技能 / 当前子任务 / 上一个子任务 / 下一个子任务**。子任务文案来自官方 layer-2 中文（`data_hub.clip_description.description_zh`），
+> 本地缓存为 `data/layer2_clip_id2zh.json`、`data/layer2_en2zh.json`、`data/layer2_all_subtasks_by_clip.json`。
+> user 只给 **任务** + **上一个子任务**，不把全部子任务当作提示。
+> assistant 的 **上一个子任务** 与 user 输入相同（第一步为尚未完成）；**下一个子任务** 为列表中当前步的下一步（最后一步为尚未有下一步）。
+> **任务** 使用 layer-1 中文任务名（`task`）。训练样本的 system / user / assistant 模板均为中文。
 
 ## 2. 训练
 
@@ -163,12 +168,27 @@ SKIP_EXISTING=0 bash scripts/run_convert.sh
 # 冒烟（1 卡，16 条）
 GPU=0 bash scripts/run_smoke_4b.sh
 
-# 4B 多卡
+# 4B 单机多卡（默认 8 卡；不设 NNODES 时与原来相同）
+bash scripts/run_train_4b.sh
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 NPROC=6 bash scripts/run_train_4b.sh
 
-# 35B-A3B（device_map=auto）
+# 4B 多机：在一台机器上执行即可，脚本按 HOSTS ssh 到各节点。
+# 需要免密 ssh，且工程路径在各机相同（NFS）。第一个 IP 是 master。
+HOSTS=<node0-ip>,<node1-ip> bash scripts/run_train_4b.sh
+HOSTFILE=/path/to/hosts.txt bash scripts/run_train_4b.sh   # 每行一个 IP
+
+# 也可以不用 HOSTS，在每台机器上自己起（手动指定 rank）
+NNODES=2 NODE_RANK=0 MASTER_ADDR=<node0-ip> bash scripts/run_train_4b.sh   # 机器 0
+NNODES=2 NODE_RANK=1 MASTER_ADDR=<node0-ip> bash scripts/run_train_4b.sh   # 机器 1
+
+# 35B-A3B 单机（device_map=auto，单进程切多卡）
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 bash scripts/run_train_35b.sh
+
+# 35B 多机需 DEVICE_MAP=none（auto 不能和 torchrun 一起用）
+HOSTS=<node0-ip>,<node1-ip> DEVICE_MAP=none bash scripts/run_train_35b.sh
 ```
+
+多机环境变量：`HOSTS` / `HOSTFILE`（推荐，一台机器启动）、`SSH_USER`、`SSH_OPTS`、`NNODES`（默认 1）、`NODE_RANK`（默认 0）、`MASTER_ADDR`（默认 `127.0.0.1`）、`MASTER_PORT`（默认 29500）、`NPROC`（默认等于 `CUDA_VISIBLE_DEVICES` 个数）。缺数据时只在 `NODE_RANK=0` 上 convert，其它节点等待共享 `data/`。
 
 ## 与 cortex_qwen35 的区别
 

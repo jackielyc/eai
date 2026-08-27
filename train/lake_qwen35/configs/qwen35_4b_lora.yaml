@@ -1,7 +1,7 @@
 ### Multimodal LoRA SFT — Qwen3.5-4B on share_data_lake
 model_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-4B
-dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/lake_sys2_train_20k.json
-eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/lake_sys2_val_2k.json
+dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/hermas_sys2_train.jsonl
+eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/hermas_sys2_val.jsonl
 output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-lake
 
 max_seq_length: 2048
@@ -15,7 +15,7 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
 warmup_steps: 100
-logging_steps: 10
+logging_steps: 1
 save_steps: 500
 eval_steps: 500
 

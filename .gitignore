@@ -19,3 +19,12 @@ train/lake_qwen35/data/images/*
 train/lake_qwen35/data/.convert_checkpoint/train.clip_ids
 train/lake_qwen35/data/.convert_checkpoint/val.clip_ids
 train/lake_qwen35/output/*
+train/lake_qwen35/data/layer2_en2zh.shard*.json
+train/lake_qwen35/data/._clip_ids_for_zh.txt
+train/lake_qwen35/data/layer2_clip_zh.jsonl
+train/lake_qwen35/data/layer2_all_subtasks_by_clip.json
+# VN full dumps exceed GitHub's 100MB limit; keep local-only
+train/lake_qwen35/data/vn_sys2_train.noimage.jsonl
+train/lake_qwen35/data/vn_sys2_val.jsonl
+train/lake_qwen35/data/vn_sys2_val.noimage.jsonl
+train/lake_qwen35/data/vn_sys2_*.jsonl.tmp

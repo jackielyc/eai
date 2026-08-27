@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,11 +25,81 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
 )
+from transformers.trainer_callback import PrinterCallback
 
 
 IGNORE_INDEX = -100
+
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 0 or seconds != seconds or seconds == float("inf"):
+        return "?"
+    total = int(round(seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    if m:
+        return f"{m}m{s:02d}s"
+    return f"{s}s"
+
+
+class TerminalProgressCallback(TrainerCallback):
+    """Newline progress so logs survive tee/ssh (tqdm \\r is eaten by pipes)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._t0: float | None = None
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return
+        self._t0 = time.perf_counter()
+        print(
+            f"[train] start  max_steps={state.max_steps}  "
+            f"epochs={args.num_train_epochs}  log_every={args.logging_steps}",
+            flush=True,
+        )
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not state.is_world_process_zero or not logs:
+            return
+        step = state.global_step
+        total = state.max_steps or 0
+        pct = f"{100.0 * step / total:.1f}%" if total else "?"
+        bits = [f"[train] {step}/{total} ({pct})"]
+        elapsed = (time.perf_counter() - self._t0) if self._t0 is not None else 0.0
+        bits.append(f"elapsed={_fmt_duration(elapsed)}")
+        if step > 0 and total > 0:
+            bits.append(f"total≈{_fmt_duration(elapsed * total / step)}")
+        else:
+            bits.append("total≈?")
+        for key in ("loss", "eval_loss", "grad_norm", "learning_rate", "epoch"):
+            if key not in logs or logs[key] is None:
+                continue
+            val = logs[key]
+            if key == "learning_rate" and isinstance(val, float):
+                bits.append(f"lr={val:.2e}")
+            elif key == "epoch" and isinstance(val, float):
+                bits.append(f"epoch={val:.4f}")
+            elif isinstance(val, float):
+                bits.append(f"{key}={val:.4f}")
+            else:
+                bits.append(f"{key}={val}")
+        print("  ".join(bits), flush=True)
+
+    def on_train_end(self, args, state, control, **kwargs):
+        if not state.is_world_process_zero:
+            return
+        elapsed = (time.perf_counter() - self._t0) if self._t0 is not None else 0.0
+        print(
+            f"[train] done  steps={state.global_step}/{state.max_steps}  "
+            f"elapsed={_fmt_duration(elapsed)}",
+            flush=True,
+        )
 
 
 @dataclass
@@ -45,7 +117,7 @@ class TrainConfig:
     per_device_eval_batch_size: int = 1
     gradient_accumulation_steps: int = 8
     warmup_steps: int = 100
-    logging_steps: int = 10
+    logging_steps: int = 1
     save_steps: int = 500
     eval_steps: int = 500
     lora_rank: int = 16
@@ -320,12 +392,21 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     args = parse_args()
     cfg = build_config(args)
     os.makedirs(cfg.output_dir, exist_ok=True)
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if local_rank != 0:
+        import logging
+        logging.getLogger("transformers").setLevel(logging.ERROR)
+        logging.getLogger("accelerate").setLevel(logging.ERROR)
     use_device_map = cfg.device_map == "auto"
     use_fsdp = cfg.fsdp not in {"", "none", None}
 
@@ -354,9 +435,9 @@ def main() -> None:
 
     model = AutoModelForImageTextToText.from_pretrained(cfg.model_name_or_path, **load_kwargs)
     if cfg.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
         if hasattr(model, "config"):
             model.config.use_cache = False
+        model.gradient_checkpointing_enable()
 
     targets = [x.strip() for x in cfg.lora_target_modules.split(",") if x.strip()]
     lora = LoraConfig(
@@ -411,7 +492,9 @@ def main() -> None:
         seed=cfg.seed,
         remove_unused_columns=False,
         ddp_find_unused_parameters=False,
+        ddp_timeout=int(os.environ.get("DDP_TIMEOUT", "18000")),
         logging_first_step=True,
+        disable_tqdm=True,
         fsdp=fsdp_arg,
         fsdp_config=fsdp_config,
         dataloader_pin_memory=False,
@@ -426,7 +509,9 @@ def main() -> None:
             pad_token_id=processor.tokenizer.pad_token_id,
             model=model,
         ),
+        callbacks=[TerminalProgressCallback()],
     )
+    trainer.remove_callback(PrinterCallback)
     trainer.train()
     trainer.save_model(cfg.output_dir)
     processor.save_pretrained(cfg.output_dir)
