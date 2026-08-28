@@ -10,7 +10,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run.sh                    # ROS 在宿主机直接运行时用此方式
   python3.10 show_camera_topics.py --prefix /camera
 
-顶部控制区按功能分为标签页：相机 / 回放 / 分割 / CAD / 训练 / 手臂·手 / 手骨架遥控。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 测试。
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
 """
 
@@ -23,6 +23,7 @@ import math
 import signal
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 if sys.version_info[:2] != (3, 10):
@@ -45,10 +46,13 @@ os.environ.pop("QT_PLUGIN_PATH", None)
 import shlex
 import subprocess
 import shutil
+import tempfile
 import threading
 import time
+import uuid
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
@@ -58,18 +62,22 @@ import pyqtgraph.opengl as gl
 import rclpy
 from cv_bridge import CvBridge, CvBridgeError
 from PyQt5.QtCore import Qt, QProcess, QTimer, pyqtSignal, QObject, QPoint, QEvent
-from PyQt5.QtGui import QCloseEvent, QFont, QImage, QMouseEvent, QPixmap, QPalette, QColor
+from PyQt5.QtGui import QCloseEvent, QFont, QImage, QKeyEvent, QMouseEvent, QPixmap, QPalette, QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QGroupBox,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -82,6 +90,7 @@ from PyQt5.QtWidgets import (
     QSizePolicy,
     QTabWidget,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
     QFileDialog,
@@ -293,6 +302,71 @@ def resolve_fp_mesh_path() -> str:
 FP_MESH_DEFAULT = resolve_fp_mesh_path()
 EAI_DIR = os.path.dirname(os.path.abspath(__file__))
 CAD_MESHES_DIR = os.path.join(EAI_DIR, "meshes")
+TEST_IMAGES_DIR = os.path.join(EAI_DIR, "images")
+WORKSPACE_DIR = os.path.dirname(EAI_DIR)
+LOCAL_QWEN_MODELS_ROOT = os.path.join(WORKSPACE_DIR, "models", "Qwen")
+LAKE_QWEN35_OUTPUT_ROOT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output"
+)
+REMOTE_LAKE_QWEN_PYTHON = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/Qwen2.5-VL/bin/python"
+)
+# 可部署的 Qwen 模型：(key, 显示名, API model id, 权重目录名或绝对路径)
+LOCAL_QWEN_DEPLOY_MODELS: Tuple[Tuple[str, str, str, str], ...] = (
+    ("qwen3.5-4b", "Qwen3.5-4B", "qwen3.5-4b", "Qwen3.5-4B"),
+    ("qwen3.5-35b-a3b", "Qwen3.5-35B-A3B", "qwen3.5-35b-a3b", "Qwen3.5-35B-A3B"),
+    (
+        "lake-qwen35-4b-lora",
+        "Lake Qwen3.5-4B LoRA",
+        "lake-qwen35-4b-lora",
+        f"{LAKE_QWEN35_OUTPUT_ROOT}/qwen35-4b-lora-lake",
+    ),
+    (
+        "lake-qwen35-4b-lora-smoke",
+        "Lake Qwen3.5-4B LoRA (smoke)",
+        "lake-qwen35-4b-lora-smoke",
+        f"{LAKE_QWEN35_OUTPUT_ROOT}/qwen35-4b-lora-lake-smoke",
+    ),
+)
+LOCAL_QWEN_MODEL_DIR_DEFAULT = os.path.join(
+    LOCAL_QWEN_MODELS_ROOT, LOCAL_QWEN_DEPLOY_MODELS[0][3]
+)
+LOCAL_QWEN_OLLAMA_NAME = os.environ.get("LOCAL_QWEN_OLLAMA_NAME", "qwen3.5-4b-local")
+LOCAL_QWEN_OLLAMA_FALLBACK = os.environ.get("LOCAL_QWEN_OLLAMA_FALLBACK", "qwen3.5:4b")
+LOCAL_QWEN_RUN_SCRIPT_NAME = "run_local_qwen.sh"
+LOCAL_QWEN_PORT_DEFAULT = int(os.environ.get("LOCAL_QWEN_PORT", "8100"))
+LOCAL_QWEN_CTL_PORT_DEFAULT = int(os.environ.get("LOCAL_QWEN_CTL_PORT", "18101"))
+LOCAL_QWEN_CTL_URL_DEFAULT = os.environ.get(
+    "LOCAL_QWEN_CTL_URL", f"http://127.0.0.1:{LOCAL_QWEN_CTL_PORT_DEFAULT}"
+)
+LOCAL_QWEN_MODEL_ID = os.environ.get(
+    "LOCAL_QWEN_MODEL_ID", LOCAL_QWEN_DEPLOY_MODELS[0][2]
+)
+LOCAL_QWEN_API_BASE_DEFAULT = os.environ.get(
+    "LOCAL_QWEN_API_BASE", f"http://127.0.0.1:{LOCAL_QWEN_PORT_DEFAULT}/v1"
+)
+LOCAL_QWEN_PYTHON_DEFAULT = os.environ.get(
+    "LOCAL_QWEN_PYTHON",
+    "/home/psibot/miniconda3/envs/psi-policy/bin/python",
+)
+LOCAL_QWEN_CHAT_PRESET_NAME = "本地 Qwen 服务"
+# 远程部署主机列表：(id, 显示名)。路径细节在 remote_qwen_ctl.HOST_PROFILES
+REMOTE_QWEN_HOSTS: Tuple[Tuple[str, str], ...] = (
+    ("psi_motus_2_for_liyichao", "远程 psi_motus（8×A800）"),
+    ("tione-develop", "远程 tione-develop（7×A800）"),
+)
+REMOTE_QWEN_SSH_HOST = os.environ.get("REMOTE_QWEN_SSH_HOST", "psi_motus_2_for_liyichao")
+REMOTE_QWEN_LOCAL_PORT = int(os.environ.get("REMOTE_QWEN_LOCAL_PORT", "18100"))
+REMOTE_QWEN_API_BASE_DEFAULT = os.environ.get(
+    "REMOTE_QWEN_API_BASE", f"http://127.0.0.1:{REMOTE_QWEN_LOCAL_PORT}/v1"
+)
+REMOTE_QWEN_CHAT_PRESET_NAME = "远程 Qwen 服务"
+REMOTE_QWEN_CTL_SCRIPT = os.path.join(EAI_DIR, "remote_qwen_ctl.py")
+REMOTE_QWEN_HOSTCTL_PORT = int(os.environ.get("REMOTE_QWEN_CTL_PORT", "18103"))
+REMOTE_QWEN_HOSTCTL_URL = os.environ.get(
+    "REMOTE_QWEN_CTL_URL", f"http://127.0.0.1:{REMOTE_QWEN_HOSTCTL_PORT}"
+).rstrip("/")
+
 CAD_PHOTOGRAMMETRY_PY = os.path.join(EAI_DIR, "photogrammetry_reconstruct.py")
 CAD_TARGET_EXTENT_DEFAULT_M = 0.15
 CAD_POISSON_DEPTH_DEFAULT = 9
@@ -411,6 +485,807 @@ UI_MONO_SIZE_SMALL = 9
 UI_MONO_SIZE_NORMAL = 10
 UI_MONO_SIZE_TITLE = 11
 
+# 测试 Tab：场景示意图像框（2×4）
+TEST_SCENARIO_LABELS = (
+    "手机装配",
+    "商超零售拆盒子",
+    "真人数采",
+    "THT电容插件装配",
+    "叠盒子",
+    "麻将机器人",
+    "微波炉加热食品",
+    "飞机盒装物",
+)
+# 文件名与场景名不一致时的映射（默认找 images/{场景名}.png）
+TEST_SCENARIO_IMAGE_FILES: Dict[str, str] = {}
+
+
+def qwen_model_path_from_spec(dirname_or_path: str, *, root: str = "") -> str:
+    """将部署 spec 解析为绝对路径（相对名则拼到 root / 本地 models）。"""
+    if dirname_or_path.startswith("/"):
+        return dirname_or_path
+    base = root or LOCAL_QWEN_MODELS_ROOT
+    return os.path.join(base, dirname_or_path)
+
+
+def qwen_model_dir_valid(path: str) -> bool:
+    return os.path.isfile(os.path.join(path, "config.json")) or os.path.isfile(
+        os.path.join(path, "adapter_config.json")
+    )
+
+
+def qwen_model_is_lora(path: str) -> bool:
+    return os.path.isfile(os.path.join(path, "adapter_config.json"))
+
+
+def qwen_deploy_path_spec_for_key(model_key: str) -> str:
+    for key, _label, _mid, spec in LOCAL_QWEN_DEPLOY_MODELS:
+        if key == model_key:
+            return spec
+    return model_key
+
+
+def remote_qwen_python_for_key(model_key: str, host_id: str = "") -> Optional[str]:
+    if model_key.startswith("lake-"):
+        return REMOTE_LAKE_QWEN_PYTHON
+    return None
+
+
+def local_qwen_model_dir_for_key(model_key: str) -> Optional[str]:
+    """按部署 key 解析权重目录（全量需 config.json，LoRA 需 adapter_config.json）。"""
+    spec = qwen_deploy_path_spec_for_key(model_key)
+    if spec.startswith("/"):
+        return spec if qwen_model_dir_valid(spec) else None
+    for root in (
+        LOCAL_QWEN_MODELS_ROOT,
+        os.path.join(EAI_DIR, "models", "Qwen"),
+    ):
+        path = os.path.join(root, spec)
+        if qwen_model_dir_valid(path):
+            return path
+    return None
+
+
+def local_qwen_model_id_for_key(model_key: str) -> str:
+    for key, _label, mid, _dirname in LOCAL_QWEN_DEPLOY_MODELS:
+        if key == model_key:
+            return mid
+    return LOCAL_QWEN_MODEL_ID
+
+
+def local_qwen_label_for_key(model_key: str) -> str:
+    for key, label, _mid, _dirname in LOCAL_QWEN_DEPLOY_MODELS:
+        if key == model_key:
+            return label
+    return model_key
+
+
+def local_deploy_scan_roots() -> List[Tuple[str, str]]:
+    roots: List[Tuple[str, str]] = [
+        (LOCAL_QWEN_MODELS_ROOT, "本地 Qwen 基座"),
+    ]
+    if os.path.isdir(LAKE_QWEN35_OUTPUT_ROOT):
+        roots.append((LAKE_QWEN35_OUTPUT_ROOT, "Lake 训练 output"))
+    return roots
+
+
+def remote_deploy_scan_roots(host_id: str) -> List[Tuple[str, str]]:
+    try:
+        ctl = load_remote_qwen_ctl()
+        return [(r, lbl) for r, lbl in ctl.deploy_scan_roots(host_id)]
+    except Exception:
+        prof = remote_qwen_profile(host_id)
+        return [
+            (str(prof.get("model_root") or LOCAL_QWEN_MODELS_ROOT), "Qwen 基座"),
+            (LAKE_QWEN35_OUTPUT_ROOT, "Lake 训练 output"),
+        ]
+
+
+def deploy_model_kind_label(kind: str) -> str:
+    return "LoRA" if kind == "lora" else "全量"
+
+
+def fetch_deploy_model_dirs(
+    *,
+    target: str,
+    host_id: str = "",
+    root: str = "",
+) -> Tuple[bool, List[Dict[str, str]], str]:
+    scan_roots = [root.strip()] if root.strip() else None
+    try:
+        ctl = load_remote_qwen_ctl()
+        if target == "local":
+            scan = scan_roots or [r for r, _ in local_deploy_scan_roots()]
+            models = ctl.list_deploy_model_dirs_local(scan)
+            return True, models, ""
+
+        host = (host_id or REMOTE_QWEN_SSH_HOST).strip()
+
+        def _via_ctl() -> Tuple[bool, List[Dict[str, str]], str]:
+            if is_running_in_docker():
+                return (
+                    False,
+                    [],
+                    "Docker 内列举远程目录需宿主机 remote hostctl (:18103)。"
+                    "请重新执行 bash eai/run_in_docker.sh 以重启 hostctl。",
+                )
+            result = ctl.list_deploy_model_dirs(roots=scan_roots, host_id=host)
+            if result.get("ok"):
+                raw = result.get("models") or []
+                return True, [dict(x) for x in raw if isinstance(x, dict)], ""
+            return False, [], str(result.get("message") or "列举失败")
+
+        qs = f"?host={urllib.parse.quote(host)}"
+        if root.strip():
+            qs += f"&root={urllib.parse.quote(root.strip())}"
+        if check_remote_qwen_hostctl_health():
+            ok, body = remote_qwen_hostctl_request(
+                f"/list_models{qs}",
+                method="GET",
+                timeout_s=120.0,
+            )
+            if ok:
+                raw = body.get("models") or []
+                return True, [dict(x) for x in raw if isinstance(x, dict)], ""
+            msg = str(body.get("message") or "list_models 失败")
+            if "404" in msg or "unknown /list_models" in msg:
+                return _via_ctl()
+            return False, [], msg
+        return _via_ctl()
+    except Exception as exc:
+        return False, [], str(exc)
+
+
+def resolve_deploy_python_for_spec(
+    spec: Dict[str, str], *, target: str, host_id: str = ""
+) -> str:
+    path = str(spec.get("path") or "")
+    kind = str(spec.get("kind") or "")
+    if target == "local":
+        if kind == "lora" or LAKE_QWEN35_OUTPUT_ROOT in path:
+            return REMOTE_LAKE_QWEN_PYTHON
+        return LOCAL_QWEN_PYTHON_DEFAULT
+    if kind == "lora" or LAKE_QWEN35_OUTPUT_ROOT in path or "lake_qwen35" in path:
+        return REMOTE_LAKE_QWEN_PYTHON
+    prof = remote_qwen_profile(host_id or REMOTE_QWEN_SSH_HOST)
+    return str(prof.get("python") or LOCAL_QWEN_PYTHON_DEFAULT)
+
+
+def resolve_local_qwen_model_dir(model_key: Optional[str] = None) -> Optional[str]:
+    """解析本地 Qwen HuggingFace 权重目录。"""
+    if model_key:
+        found = local_qwen_model_dir_for_key(model_key)
+        if found:
+            return found
+    env = os.environ.get("LOCAL_QWEN_MODEL_DIR", "").strip()
+    candidates = []
+    if env:
+        candidates.append(os.path.abspath(os.path.expanduser(env)))
+    candidates.append(LOCAL_QWEN_MODEL_DIR_DEFAULT)
+    for _key, _label, _mid, dirname in LOCAL_QWEN_DEPLOY_MODELS:
+        candidates.append(os.path.join(LOCAL_QWEN_MODELS_ROOT, dirname))
+        candidates.append(os.path.join(EAI_DIR, "models", "Qwen", dirname))
+    for path in candidates:
+        if qwen_model_dir_valid(path):
+            return path
+    return None
+
+
+def resolve_local_qwen_run_script() -> Optional[str]:
+    path = os.path.join(EAI_DIR, LOCAL_QWEN_RUN_SCRIPT_NAME)
+    return path if os.path.isfile(path) else None
+
+
+def resolve_local_qwen_bind_host() -> str:
+    return "0.0.0.0" if is_running_in_docker() else "127.0.0.1"
+
+
+def resolve_local_qwen_viewer_api_base() -> str:
+    """viewer 访问推理服务的 API。容器为 host 网络时统一用 127.0.0.1。"""
+    env = os.environ.get("LOCAL_QWEN_API_BASE", "").strip()
+    if env:
+        return env.rstrip("/")
+    return f"http://127.0.0.1:{LOCAL_QWEN_PORT_DEFAULT}/v1"
+
+
+def resolve_local_qwen_ctl_url() -> str:
+    env = os.environ.get("LOCAL_QWEN_CTL_URL", "").strip()
+    if env:
+        return env.rstrip("/")
+    return LOCAL_QWEN_CTL_URL_DEFAULT.rstrip("/")
+
+
+def check_local_qwen_server_health(
+    api_base: Optional[str] = None, timeout_s: float = 2.0
+) -> bool:
+    info = fetch_local_qwen_server_info(api_base=api_base, timeout_s=timeout_s)
+    return bool(info and info.get("ok"))
+
+
+def fetch_local_qwen_server_info(
+    api_base: Optional[str] = None, timeout_s: float = 2.0
+) -> Optional[Dict[str, object]]:
+    base = (api_base or resolve_local_qwen_viewer_api_base()).rstrip("/")
+    root = base.removesuffix("/v1").rstrip("/")
+    url = f"{root}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            if isinstance(body, dict):
+                return body
+    except Exception:
+        return None
+    return None
+
+
+def check_local_qwen_hostctl_health(timeout_s: float = 1.0) -> bool:
+    url = resolve_local_qwen_ctl_url().rstrip("/") + "/health"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return bool(body.get("ok"))
+    except Exception:
+        return False
+
+
+def local_qwen_hostctl_request(
+    path: str,
+    method: str = "GET",
+    timeout_s: float = 10.0,
+    payload: Optional[Dict[str, object]] = None,
+) -> Tuple[bool, Dict[str, object]]:
+    url = resolve_local_qwen_ctl_url().rstrip("/") + path
+    data = None
+    if method == "POST":
+        data = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    if method == "POST":
+        req.add_header("Content-Type", "application/json; charset=utf-8")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return bool(body.get("ok", True)), body
+    except Exception as exc:
+        return False, {"ok": False, "message": str(exc)}
+
+
+class LocalQwenServiceLauncher(QObject):
+    """启动/停止本地 Qwen OpenAI 兼容推理服务。
+
+    Docker 内优先走宿主机 hostctl（:18101），以便使用宿主机 GPU / conda。
+    """
+
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    log_line = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._api_base = resolve_local_qwen_viewer_api_base()
+        self._via_hostctl = False
+        self._last_model_id = LOCAL_QWEN_MODEL_ID
+        self._last_model_label = LOCAL_QWEN_DEPLOY_MODELS[0][1]
+        self._starting = False
+        self._fail_notified = False
+
+    def api_base(self) -> str:
+        return self._api_base
+
+    def last_model_id(self) -> str:
+        return self._last_model_id
+
+    def last_model_label(self) -> str:
+        return self._last_model_label
+
+    def is_running(self) -> bool:
+        if check_local_qwen_server_health(self._api_base):
+            return True
+        if self._process is not None and self._process.state() == QProcess.Running:
+            return True
+        return False
+
+    def start(
+        self,
+        model_key: Optional[str] = None,
+        model_dir: Optional[str] = None,
+        model_id: Optional[str] = None,
+        model_label: Optional[str] = None,
+    ) -> None:
+        self._api_base = resolve_local_qwen_viewer_api_base()
+        key = model_key or LOCAL_QWEN_DEPLOY_MODELS[0][0]
+        resolved_dir = model_dir or resolve_local_qwen_model_dir(key)
+        resolved_id = model_id or local_qwen_model_id_for_key(key)
+        resolved_label = model_label or local_qwen_label_for_key(key)
+        self._last_model_id = resolved_id
+        self._last_model_label = resolved_label
+
+        if check_local_qwen_server_health(self._api_base):
+            info = fetch_local_qwen_server_info(self._api_base) or {}
+            running_id = str(info.get("model") or "")
+            self._starting = False
+            self.running_changed.emit(True)
+            if running_id and running_id != resolved_id:
+                self.status_message.emit(
+                    f"本地 Qwen 已在运行（{running_id}）: {self._api_base}。"
+                    f"若要换成 {resolved_label}，请先停止再启动。"
+                )
+            else:
+                self.status_message.emit(
+                    f"本地 Qwen 服务已在运行: {self._api_base} ({resolved_label})"
+                )
+            return
+
+        if resolved_dir is None:
+            self._starting = False
+            self.running_changed.emit(False)
+            self.status_message.emit(
+                f"未找到 {resolved_label} 权重（models/Qwen/…）"
+            )
+            return
+
+        start_payload: Dict[str, object] = {
+            "model_dir": resolved_dir,
+            "model_id": resolved_id,
+            "model_label": resolved_label,
+        }
+        self._starting = True
+        self._fail_notified = False
+
+        if check_local_qwen_hostctl_health():
+            self.log_line.emit(
+                f"经宿主机 hostctl 启动 {resolved_label}: "
+                f"{resolve_local_qwen_ctl_url()}"
+            )
+            ok, body = local_qwen_hostctl_request(
+                "/start",
+                method="POST",
+                timeout_s=30.0,
+                payload=start_payload,
+            )
+            msg = str(body.get("message") or body)
+            self.log_line.emit(msg)
+            if ok:
+                self._via_hostctl = True
+                self.running_changed.emit(True)
+                self.status_message.emit(
+                    f"已请求宿主机启动 {resolved_label} → {self._api_base}"
+                )
+            else:
+                self._starting = False
+                self.running_changed.emit(False)
+                self.status_message.emit(f"hostctl 启动失败: {msg}")
+            return
+
+        if is_running_in_docker():
+            self._starting = False
+            self.running_changed.emit(False)
+            self.status_message.emit(
+                "未检测到宿主机 hostctl。请在宿主机执行: "
+                f"python3 {os.path.join(EAI_DIR, 'local_qwen_hostctl.py')} "
+                "或重新 bash run_in_docker.sh"
+            )
+            self.log_line.emit(
+                "容器内无 NVIDIA 驱动库，不能直接加载 GPU 模型；"
+                "必须由宿主机 hostctl / run_local_qwen.sh 启动。"
+            )
+            return
+
+        script = resolve_local_qwen_run_script()
+        if script is None:
+            self.status_message.emit(
+                f"未找到 {LOCAL_QWEN_RUN_SCRIPT_NAME}，请确认与 show_camera_topics.py 同目录"
+            )
+            return
+
+        bind_host = resolve_local_qwen_bind_host()
+        script_dir = os.path.dirname(script)
+        py = LOCAL_QWEN_PYTHON_DEFAULT
+        cmd = (
+            f"exec bash {shlex.quote(os.path.basename(script))} "
+            f"--host {shlex.quote(bind_host)} "
+            f"--port {LOCAL_QWEN_PORT_DEFAULT} "
+            f"--model {shlex.quote(resolved_dir)} "
+            f"--model-id {shlex.quote(resolved_id)} "
+            f"--python {shlex.quote(py)}"
+        )
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(script_dir)
+        proc.start("bash", ["-lc", cmd])
+        self._process = proc
+        self._via_hostctl = False
+        self.running_changed.emit(True)
+        self.status_message.emit(
+            f"正在启动 {resolved_label} ({bind_host}:{LOCAL_QWEN_PORT_DEFAULT})，"
+            f"viewer API: {self._api_base}"
+        )
+        self.log_line.emit(f"启动: {cmd}")
+
+    def stop(self) -> None:
+        self._starting = False
+        if self._via_hostctl or check_local_qwen_hostctl_health():
+            ok, body = local_qwen_hostctl_request("/stop", method="POST", timeout_s=15.0)
+            msg = str(body.get("message") or body)
+            self.log_line.emit(msg)
+            self._via_hostctl = False
+            self.running_changed.emit(False)
+            self.status_message.emit(
+                "已停止本地 Qwen 推理服务" if ok else f"停止失败: {msg}"
+            )
+            return
+
+        if self._process is not None:
+            if self._process.state() == QProcess.Running:
+                self._process.terminate()
+                QTimer.singleShot(3000, self._force_kill_process)
+            else:
+                self._process = None
+        try:
+            subprocess.run(
+                ["pkill", "-f", "local_qwen_worker.py"],
+                capture_output=True,
+                timeout=2,
+                check=False,
+            )
+        except Exception:
+            pass
+        self.running_changed.emit(False)
+        self.status_message.emit("已停止本地 Qwen 推理服务")
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.terminate()
+            self._process.waitForFinished(2000)
+        self._process = None
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            line = line.strip()
+            if line:
+                self.log_line.emit(line)
+
+    def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        self._process = None
+        self._starting = False
+        self.running_changed.emit(False)
+        self.status_message.emit(f"本地 Qwen 服务已退出 (code={exit_code})")
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error != QProcess.Crashed:
+            self.status_message.emit(f"本地 Qwen 服务进程错误: {error}")
+
+    def _force_kill_process(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.kill()
+
+
+def load_remote_qwen_ctl():
+    """动态加载 remote_qwen_ctl.py（避免 ROS/Qt 环境下的包导入问题）。"""
+    import importlib.util
+
+    path = REMOTE_QWEN_CTL_SCRIPT
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"未找到 {path}")
+    spec = importlib.util.spec_from_file_location("remote_qwen_ctl", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载 {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def resolve_remote_qwen_hostctl_url() -> str:
+    return REMOTE_QWEN_HOSTCTL_URL.rstrip("/")
+
+
+def check_remote_qwen_hostctl_health(timeout_s: float = 1.0) -> bool:
+    url = resolve_remote_qwen_hostctl_url() + "/health"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return bool(body.get("ok"))
+    except Exception:
+        return False
+
+
+def remote_qwen_hostctl_request(
+    path: str,
+    method: str = "GET",
+    timeout_s: float = 180.0,
+    payload: Optional[Dict[str, object]] = None,
+) -> Tuple[bool, Dict[str, object]]:
+    url = resolve_remote_qwen_hostctl_url().rstrip("/") + path
+    data = None
+    if method == "POST":
+        data = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method=method)
+    if method == "POST":
+        req.add_header("Content-Type", "application/json; charset=utf-8")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            return bool(body.get("ok", True)), body if isinstance(body, dict) else {}
+    except Exception as exc:
+        return False, {"ok": False, "message": str(exc)}
+
+
+def remote_qwen_host_label(host_id: str) -> str:
+    for hid, label in REMOTE_QWEN_HOSTS:
+        if hid == host_id:
+            return label
+    return host_id
+
+
+def remote_qwen_api_base_for_host(host_id: str) -> str:
+    try:
+        ctl = load_remote_qwen_ctl()
+        prof = ctl.apply_host(host_id)
+        return str(prof.get("api_base") or REMOTE_QWEN_API_BASE_DEFAULT)
+    except Exception:
+        port = 18102 if host_id == "tione-develop" else REMOTE_QWEN_LOCAL_PORT
+        return f"http://127.0.0.1:{port}/v1"
+
+
+def remote_qwen_profile(host_id: str) -> Dict[str, object]:
+    try:
+        ctl = load_remote_qwen_ctl()
+        return dict(ctl.apply_host(host_id))
+    except Exception:
+        return {
+            "id": host_id,
+            "ssh_host": host_id,
+            "api_base": remote_qwen_api_base_for_host(host_id),
+            "local_port": 18102 if host_id == "tione-develop" else REMOTE_QWEN_LOCAL_PORT,
+            "model_root": "",
+            "python": "",
+            "remote_work": "",
+        }
+
+
+class RemoteQwenDeployBridge(QObject):
+    finished = pyqtSignal(object)
+
+
+class DeployModelListBridge(QObject):
+    finished = pyqtSignal(object)
+
+
+class RemoteQwenServiceLauncher(QObject):
+    """经 SSH 在远程机部署 Qwen，并通过本地端口转发连接。"""
+
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    log_line = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._starting = False
+        self._fail_notified = False
+        self._host_id = REMOTE_QWEN_SSH_HOST
+        self._last_model_id = "qwen3.5-35b-a3b"
+        self._last_model_label = "Qwen3.5-35B-A3B"
+        self._last_api_base = remote_qwen_api_base_for_host(self._host_id)
+        self._bridge = RemoteQwenDeployBridge()
+        self._bridge.finished.connect(self._on_action_finished)
+        self._pending_action = ""
+
+    def set_host(self, host_id: str) -> None:
+        hid = (host_id or REMOTE_QWEN_SSH_HOST).strip()
+        self._host_id = hid
+        self._last_api_base = remote_qwen_api_base_for_host(hid)
+
+    def host_id(self) -> str:
+        return self._host_id
+
+    def api_base(self) -> str:
+        return self._last_api_base or remote_qwen_api_base_for_host(self._host_id)
+
+    def last_model_id(self) -> str:
+        return self._last_model_id
+
+    def last_model_label(self) -> str:
+        return self._last_model_label
+
+    def is_healthy(self) -> bool:
+        return bool(check_local_qwen_server_health(self.api_base()))
+
+    def status(self) -> Dict[str, object]:
+        try:
+            ctl = load_remote_qwen_ctl()
+            ctl.apply_host(self._host_id)
+            return dict(ctl.status_payload())
+        except Exception as exc:
+            return {"ok": False, "message": str(exc)}
+
+    def start(
+        self,
+        model_key: Optional[str] = None,
+        host_id: Optional[str] = None,
+        model_dir: Optional[str] = None,
+        model_id: Optional[str] = None,
+        model_label: Optional[str] = None,
+    ) -> None:
+        if host_id:
+            self.set_host(host_id)
+        deploy_key = model_key or "qwen3.5-35b-a3b"
+        if model_dir:
+            self._last_model_id = str(model_id or os.path.basename(model_dir.rstrip("/")))
+            self._last_model_label = str(model_label or self._last_model_id)
+        # 先探测隧道：避免上次「等待中」把 _starting 卡死，挡住已就绪的服务
+        if self.is_healthy():
+            info = fetch_local_qwen_server_info(self.api_base()) or {}
+            mid = str(info.get("model") or self._last_model_id)
+            self._last_model_id = mid
+            self._starting = False
+            self._fail_notified = False
+            self.running_changed.emit(True)
+            self.status_message.emit(
+                f"远程 Qwen 已可通过隧道访问: {self.api_base()} ({mid})"
+            )
+            self.log_line.emit(
+                f"远程已就绪: host={self._host_id} model={mid} api={self.api_base()}"
+            )
+            return
+        if self._starting:
+            self.status_message.emit("远程部署进行中…")
+            return
+
+        self._starting = True
+        self._fail_notified = False
+        self._pending_action = "deploy"
+        self.running_changed.emit(True)
+        label = remote_qwen_host_label(self._host_id)
+        self.status_message.emit(f"正在远程部署（{label}）…")
+        self.log_line.emit(
+            f"远程部署开始: host={self._host_id} model_key={deploy_key} "
+            f"dir={model_dir or '-'} api={self.api_base()}"
+        )
+        host = self._host_id
+        deploy_payload: Dict[str, object] = {"host_id": host, "model_key": deploy_key}
+        if model_dir:
+            deploy_payload["model_dir"] = model_dir
+        if model_id:
+            deploy_payload["model_id"] = model_id
+        if model_label:
+            deploy_payload["model_label"] = model_label
+
+        def _work() -> None:
+            try:
+                if check_remote_qwen_hostctl_health():
+                    self.log_line.emit(
+                        f"经宿主机 remote hostctl 部署: {resolve_remote_qwen_hostctl_url()}"
+                    )
+                    _ok, result = remote_qwen_hostctl_request(
+                        "/deploy",
+                        method="POST",
+                        timeout_s=300.0,
+                        payload=deploy_payload,
+                    )
+                    if not isinstance(result, dict):
+                        result = {"ok": False, "message": str(result)}
+                    if not _ok and "ok" not in result:
+                        result = {"ok": False, "message": str(result.get("message") or result)}
+                else:
+                    if is_running_in_docker():
+                        result = {
+                            "ok": False,
+                            "message": (
+                                "未检测到宿主机 remote hostctl (:18103)。"
+                                "请重新 bash run_in_docker.sh，或在宿主机执行: "
+                                f"python3 {os.path.join(EAI_DIR, 'remote_qwen_hostctl.py')}"
+                            ),
+                        }
+                    else:
+                        ctl = load_remote_qwen_ctl()
+                        ctl.apply_host(host)
+                        result = ctl.deploy(
+                            model_key=deploy_key,
+                            model_dir=model_dir,
+                            model_id=model_id,
+                            model_label=model_label,
+                        )
+            except Exception as exc:
+                result = {"ok": False, "message": str(exc)}
+            self._bridge.finished.emit(result)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def stop(self, host_id: Optional[str] = None) -> None:
+        if host_id:
+            self.set_host(host_id)
+        self._starting = True
+        self._pending_action = "stop"
+        self.status_message.emit(f"正在停止远程服务与隧道（{self._host_id}）…")
+        host = self._host_id
+
+        def _work() -> None:
+            try:
+                if check_remote_qwen_hostctl_health():
+                    self.log_line.emit(
+                        f"经宿主机 remote hostctl 停止: {resolve_remote_qwen_hostctl_url()}"
+                    )
+                    _ok, result = remote_qwen_hostctl_request(
+                        "/stop",
+                        method="POST",
+                        timeout_s=120.0,
+                        payload={"host_id": host},
+                    )
+                    if not isinstance(result, dict):
+                        result = {"ok": False, "message": str(result)}
+                else:
+                    ctl = load_remote_qwen_ctl()
+                    ctl.apply_host(host)
+                    result = ctl.stop_all()
+            except Exception as exc:
+                result = {"ok": False, "message": str(exc)}
+            self._bridge.finished.emit(result)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_action_finished(self, result: object) -> None:
+        data = result if isinstance(result, dict) else {"ok": False, "message": str(result)}
+        ok = bool(data.get("ok"))
+        msg = str(data.get("message") or "")
+        action = self._pending_action
+        self._pending_action = ""
+        self.log_line.emit(msg)
+
+        if data.get("api_base"):
+            self._last_api_base = str(data.get("api_base"))
+        if data.get("host_id"):
+            self._host_id = str(data.get("host_id"))
+
+        if action == "deploy":
+            if data.get("model_id"):
+                self._last_model_id = str(data.get("model_id"))
+            if data.get("model_label"):
+                self._last_model_label = str(data.get("model_label"))
+            if ok:
+                # 模型加载中：隧道可能已通但 /health 尚未 ok
+                self._starting = True
+                self.status_message.emit(
+                    f"远程已启动，等待模型就绪 → {self.api_base()}"
+                )
+                self.running_changed.emit(True)
+            else:
+                self._starting = False
+                self._fail_notified = True
+                self.running_changed.emit(False)
+                self.status_message.emit(f"远程部署失败: {msg}")
+            return
+
+        # stop
+        self._starting = False
+        self.running_changed.emit(False)
+        self.status_message.emit(msg if ok else f"远程停止异常: {msg}")
+
+    def shutdown(self) -> None:
+        # 不在 viewer 退出时强杀远程模型，仅断开当前主机隧道
+        try:
+            if check_remote_qwen_hostctl_health():
+                remote_qwen_hostctl_request(
+                    "/stop_tunnel",
+                    method="POST",
+                    timeout_s=30.0,
+                    payload={"host_id": self._host_id},
+                )
+                return
+            ctl = load_remote_qwen_ctl()
+            ctl.apply_host(self._host_id)
+            ctl.stop_tunnel()
+        except Exception:
+            pass
+
+
 IDLE_CONTROL_MODE = 99
 MODEL_CONTROL_MODE = 0
 TELEOP_CONTROL_MODES = {1, 3}
@@ -433,10 +1308,120 @@ LLM_MODEL_DEFAULT = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 LLM_API_KEY_ENV = "LLM_API_KEY"
 LLM_CHAT_MAX_HISTORY = 24
 LLM_CHAT_TIMEOUT_S = 120.0
-LLM_CHAT_SYSTEM_PROMPT = (
-    "你是机器人相机可视化工具中的对话助手，可回答编程、机器人、视觉感知相关问题。"
-    "请用用户使用的语言简洁作答。"
+LLM_CHAT_VISION_TIMEOUT_S = float(os.environ.get("LLM_CHAT_VISION_TIMEOUT_S", "300"))
+
+# Lake Sys2 提示词（中文；user 输出要求随 system 自动对齐）
+LAKE_ORCHESTRATOR_SYSTEM_PROMPT = (
+    "你是机器人操作任务编排器。给定场景图像、高层任务名称和上一个子任务，"
+    "预测该任务下的全部子任务列表，以及当前可执行的子任务。"
+    "请先输出「所有子任务」编号列表，再分别用「技能」「当前子任务」「"
+    "上一个子任务」「下一个子任务」四行作答。"
 )
+LAKE_ORCHESTRATOR_SYSTEM_PROMPT_TRAINING = (
+    "你是机器人操作任务的认知编排器。给定场景图像、高层任务名称和进度记忆，"
+    "预测该任务下的全部二层（layer-2）子任务列表，以及当前可执行的子任务，并更新语言记忆。"
+    "请先输出「所有子任务」编号列表，再分别用「技能」「子任务」「记忆」三行作答。"
+)
+LAKE_DEFAULT_LANGUAGE_MEMORY = "尚无已完成子任务。"
+LAKE_USER_PROMPT_TEMPLATE = (
+    "任务：{task}\n"
+    "\n"
+    "语言记忆：\n"
+    "{memory}\n"
+    "\n"
+    "{output_instruction}"
+)
+
+
+def lake_user_output_instruction(system_prompt: str = "") -> str:
+    """根据 system prompt 生成与之匹配的 user 末尾输出要求。"""
+    sp = (system_prompt or LAKE_ORCHESTRATOR_SYSTEM_PROMPT).strip()
+    if "上一个子任务" in sp and "下一个子任务" in sp:
+        return (
+            "请输出全部子任务，以及当前技能、当前子任务、"
+            "上一个子任务与下一个子任务。"
+        )
+    if "记忆" in sp and "子任务" in sp:
+        return "请输出全部子任务，以及当前技能、子任务与更新后的语言记忆。"
+    return (
+        "请输出全部子任务，以及当前技能、当前子任务、"
+        "上一个子任务与下一个子任务。"
+    )
+
+
+def format_lake_user_prompt(
+    task: str,
+    memory: str = "",
+    *,
+    system_prompt: str = "",
+) -> str:
+    """把用户任务描述包装成与 system 对齐的 user 文本。"""
+    task_line = (task or "").strip()
+    # 若用户已手写完整训练模板（中/英），直接透传
+    if (
+        (task_line.startswith("任务：") or task_line.startswith("Task:"))
+        and ("语言记忆" in task_line or "Language memory" in task_line)
+    ):
+        return task_line
+    mem = (memory or "").strip() or LAKE_DEFAULT_LANGUAGE_MEMORY
+    output_instruction = lake_user_output_instruction(system_prompt)
+    return LAKE_USER_PROMPT_TEMPLATE.format(
+        task=task_line,
+        memory=mem,
+        output_instruction=output_instruction,
+    )
+
+
+def extract_lake_memory_from_assistant(text: str) -> Optional[str]:
+    """从模型回复中解析记忆字段，供下一轮「语言记忆」使用。"""
+    if not text:
+        return None
+    memory_line: Optional[str] = None
+    current_subtask: Optional[str] = None
+    previous_subtask: Optional[str] = None
+    for raw in str(text).splitlines():
+        line = raw.strip()
+        low = line.lower()
+        if line.startswith("记忆：") or line.startswith("记忆:"):
+            mem = line.split("：", 1)[-1] if "：" in line else line.split(":", 1)[-1]
+            memory_line = mem.strip() or None
+        elif line.startswith("当前子任务：") or line.startswith("当前子任务:"):
+            current_subtask = (
+                line.split("：", 1)[-1] if "：" in line else line.split(":", 1)[-1]
+            ).strip() or None
+        elif line.startswith("上一个子任务：") or line.startswith("上一个子任务:"):
+            previous_subtask = (
+                line.split("：", 1)[-1] if "：" in line else line.split(":", 1)[-1]
+            ).strip() or None
+        elif low.startswith("memory:"):
+            memory_line = line.split(":", 1)[-1].strip() or None
+    if memory_line:
+        return memory_line
+    if current_subtask:
+        parts: List[str] = []
+        empty_prev = {"", "无", "暂无", "—", "-", "none", "null", "n/a"}
+        if previous_subtask and previous_subtask.lower() not in empty_prev:
+            parts.append(f"机器人已完成：{previous_subtask}。")
+        parts.append(f"机器人正在执行：{current_subtask}")
+        return "".join(parts)
+    return None
+
+
+def should_use_lake_orchestrator_prompt(api_base: str, model: str) -> bool:
+    """本地/远程 Qwen（含 Lake LoRA）走训练对齐提示词。"""
+    mid = (model or "").lower()
+    base = (api_base or "").lower()
+    if "lake" in mid:
+        return True
+    if any(x in mid for x in ("qwen3.5", "qwen3", "qwen")) and any(
+        p in base for p in ("18100", "18102", "8100", "127.0.0.1")
+    ):
+        return True
+    return False
+
+
+CHAT_HISTORY_DIR = os.path.join(EAI_DIR, "chat_history")
+CHAT_USER_SETTINGS_PATH = os.path.join(EAI_DIR, "chat_user_settings.json")
 HY_EMBODIED_VLM_API_BASE = os.environ.get(
     "HY_EMBODIED_VLM_API_BASE", "http://127.0.0.1:8080/v1"
 )
@@ -447,6 +1432,8 @@ HY_RXBRAIN_API_BASE = os.environ.get(
 HY_RXBRAIN_MODEL = os.environ.get("HY_RXBRAIN_MODEL", "hy-rxbrain")
 # 支持附带相机图的预设（OpenAI 兼容 vision / chat completions）
 LLM_VISION_PROVIDER_NAMES = {
+    LOCAL_QWEN_CHAT_PRESET_NAME,
+    REMOTE_QWEN_CHAT_PRESET_NAME,
     "本地 Ollama · Qwen3-VL-4B",
     "Hy-Embodied-VLM-1.0",
     "Hy-Embodied-RxBrain-1.0",
@@ -456,6 +1443,16 @@ LLM_THINKING_PROVIDER_NAMES = {
     "Hy-Embodied-VLM-1.0",
 }
 LLM_PROVIDER_PRESETS: Dict[str, Tuple[str, str, str]] = {
+    LOCAL_QWEN_CHAT_PRESET_NAME: (
+        LOCAL_QWEN_API_BASE_DEFAULT,
+        LOCAL_QWEN_MODEL_ID,
+        "EMPTY",
+    ),
+    REMOTE_QWEN_CHAT_PRESET_NAME: (
+        REMOTE_QWEN_API_BASE_DEFAULT,
+        "qwen3.5-35b-a3b",
+        "EMPTY",
+    ),
     "本地 Ollama · Qwen3.5-4B": (
         "http://127.0.0.1:11434/v1",
         "qwen3.5:4b",
@@ -3414,14 +4411,20 @@ class LlmChatConfig:
     model: str = LLM_MODEL_DEFAULT
     api_key: str = ""
     enable_thinking: bool = False
-    max_tokens: int = 1024
+    max_tokens: int = 1536
+    system_prompt: str = LAKE_ORCHESTRATOR_SYSTEM_PROMPT
 
     @classmethod
     def from_env(cls) -> LlmChatConfig:
+        settings = load_chat_user_settings()
+        system_prompt = str(
+            settings.get("system_prompt") or LAKE_ORCHESTRATOR_SYSTEM_PROMPT
+        ).strip() or LAKE_ORCHESTRATOR_SYSTEM_PROMPT
         return cls(
             api_base=os.environ.get("LLM_API_BASE", LLM_API_BASE_DEFAULT),
             model=os.environ.get("LLM_MODEL", LLM_MODEL_DEFAULT),
             api_key=os.environ.get(LLM_API_KEY_ENV, "").strip(),
+            system_prompt=system_prompt,
         )
 
 
@@ -3444,16 +4447,266 @@ def encode_bgr_image_jpeg_b64(image_bgr: np.ndarray, max_side: int = 1280) -> st
     return base64.b64encode(buf.tobytes()).decode("ascii")
 
 
+def _http_get_json(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    timeout_s: float = 5.0,
+) -> Tuple[bool, object, str]:
+    req = urllib.request.Request(url, headers=headers or {}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            try:
+                return True, json.loads(raw), ""
+            except Exception:
+                return True, raw, ""
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        return False, None, f"HTTP {exc.code}: {detail[:200]}"
+    except Exception as exc:
+        return False, None, str(exc)
+
+
+def classify_llm_service_kind(
+    api_base: str,
+    model_ids: Sequence[str],
+    *,
+    ollama_ok: bool = False,
+    health: Optional[Dict[str, object]] = None,
+    configured_model: str = "",
+) -> str:
+    base = (api_base or "").lower()
+    ids = [str(x).strip() for x in model_ids if str(x).strip()]
+    ids_l = " ".join(ids).lower()
+    cfg = (configured_model or "").lower()
+    health = health or {}
+
+    if "dashscope.aliyuncs.com" in base or "compatible-mode" in base:
+        return "阿里云百炼 / DashScope"
+    if "api.openai.com" in base:
+        return "OpenAI 官方"
+    if "api.anthropic.com" in base:
+        return "Anthropic"
+    if ":8090" in base or "hy-rxbrain" in ids_l or "hy-rxbrain" in cfg:
+        return "Hy-Embodied-RxBrain"
+    if ":8080" in base or "hy_a3b" in ids_l or "hy_a3b" in cfg or "hy-embodied" in ids_l:
+        return "Hy-Embodied-VLM"
+    if ollama_ok or ":11434" in base:
+        if "qwen3-vl" in ids_l or "qwen3-vl" in cfg:
+            return "Ollama · Qwen3-VL"
+        if "qwen3.5" in ids_l or "qwen3.5" in cfg:
+            return "Ollama · Qwen3.5"
+        return "Ollama"
+    model_dir = str(health.get("model_dir") or "").lower()
+    live = str(health.get("model") or "").lower()
+    blob = f"{ids_l} {cfg} {model_dir} {live}"
+    if (
+        live
+        or model_dir
+        or "qwen3.5-4b" in blob
+        or "qwen3.5-35b" in blob
+        or "/models/qwen/" in model_dir
+    ):
+        if "35b" in blob or "a3b" in blob:
+            return "本地 Qwen3.5-35B-A3B 服务"
+        if "4b" in blob:
+            return "本地 Qwen3.5-4B 服务"
+        return "本地 Qwen 推理服务"
+    if ids:
+        return "OpenAI 兼容服务"
+    return "未知服务"
+
+
+def probe_llm_endpoint(
+    api_base: str,
+    api_key: str = "",
+    configured_model: str = "",
+    timeout_s: float = 6.0,
+) -> Dict[str, object]:
+    """探测 API 地址上的服务类型与可用模型列表。"""
+    base = (api_base or "").strip().rstrip("/") or LLM_API_BASE_DEFAULT
+    root = base.removesuffix("/v1").rstrip("/")
+    key = (api_key or "").strip() or "EMPTY"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}",
+    }
+    details: List[str] = []
+    model_ids: List[str] = []
+    health: Dict[str, object] = {}
+    ollama_ok = False
+    reachable = False
+
+    ok, body, err = _http_get_json(f"{root}/health", headers=headers, timeout_s=timeout_s)
+    if ok:
+        reachable = True
+        details.append("健康检查: /health 可达")
+        if isinstance(body, dict):
+            health = body
+            if body.get("model"):
+                mid = str(body.get("model"))
+                if mid not in model_ids:
+                    model_ids.append(mid)
+            if body.get("model_dir"):
+                details.append(f"model_dir={body.get('model_dir')}")
+            if body.get("device"):
+                details.append(f"device={body.get('device')}")
+            if body.get("ok") is False and body.get("error"):
+                details.append(f"服务未就绪: {body.get('error')}")
+    else:
+        details.append(f"健康检查: /health 不可用 ({err})")
+
+    ok, body, err = _http_get_json(
+        f"{base}/models", headers=headers, timeout_s=timeout_s
+    )
+    if ok:
+        reachable = True
+        details.append("模型列表: /models 可达")
+        if isinstance(body, dict):
+            for item in body.get("data") or []:
+                if isinstance(item, dict) and item.get("id"):
+                    mid = str(item["id"])
+                    if mid not in model_ids:
+                        model_ids.append(mid)
+        elif isinstance(body, list):
+            for item in body:
+                if isinstance(item, dict) and item.get("id"):
+                    mid = str(item["id"])
+                    if mid not in model_ids:
+                        model_ids.append(mid)
+    else:
+        details.append(f"模型列表: /models 不可用 ({err})")
+
+    ok, body, err = _http_get_json(f"{root}/api/tags", timeout_s=timeout_s)
+    if ok:
+        reachable = True
+        ollama_ok = True
+        details.append("Ollama: /api/tags 可达")
+        if isinstance(body, dict):
+            for item in body.get("models") or []:
+                if isinstance(item, dict):
+                    mid = str(item.get("name") or item.get("model") or "").strip()
+                    if mid and mid not in model_ids:
+                        model_ids.append(mid)
+    else:
+        details.append(f"Ollama: /api/tags 不可用 ({err})")
+
+    kind = classify_llm_service_kind(
+        base,
+        model_ids,
+        ollama_ok=ollama_ok,
+        health=health,
+        configured_model=configured_model,
+    )
+    matched = False
+    if configured_model:
+        cfg_l = configured_model.lower()
+        matched = any(cfg_l == m.lower() or cfg_l in m.lower() or m.lower() in cfg_l for m in model_ids)
+
+    return {
+        "ok": reachable,
+        "kind": kind,
+        "api_base": base,
+        "root": root,
+        "configured_model": configured_model,
+        "configured_model_matched": matched,
+        "models": model_ids,
+        "health": health,
+        "details": details,
+        "error": "" if reachable else "无法连接当前 API",
+    }
+
+
+def format_chat_prompt_dump(
+    messages: List[Dict[str, object]],
+    *,
+    api_base: str = "",
+    model: str = "",
+    temperature: float = 0.2,
+    max_tokens: int = 0,
+    enable_thinking: bool = False,
+    timeout_s: float = 0.0,
+) -> str:
+    """把即将发给 API 的提示词格式化为可读文本（图片 base64 截断）。"""
+    lines: List[str] = [
+        "======== 完整请求提示词 ========",
+        f"api_base: {api_base}",
+        f"model: {model}",
+        f"temperature: {temperature}",
+        f"max_tokens: {max_tokens}",
+        f"chat_template_kwargs.enable_thinking: {bool(enable_thinking)}",
+    ]
+    if timeout_s > 0:
+        lines.append(f"timeout_s: {timeout_s}")
+    lines.append(f"messages({len(messages)}):")
+    for i, msg in enumerate(messages):
+        role = str(msg.get("role") or "")
+        content = msg.get("content")
+        lines.append(f"----- [{i}] role={role} -----")
+        if isinstance(content, str):
+            lines.append(content if content.strip() else "(空文本)")
+        elif isinstance(content, list):
+            for j, part in enumerate(content):
+                if not isinstance(part, dict):
+                    lines.append(f"  part[{j}]: {part!r}")
+                    continue
+                ptype = str(part.get("type") or "")
+                if ptype == "text":
+                    lines.append(f"  part[{j}] text: {part.get('text') or ''}")
+                elif ptype in ("image_url", "image"):
+                    url = ""
+                    image_url = part.get("image_url")
+                    if isinstance(image_url, dict):
+                        url = str(image_url.get("url") or "")
+                    elif isinstance(image_url, str):
+                        url = image_url
+                    elif part.get("url"):
+                        url = str(part.get("url") or "")
+                    if url.startswith("data:"):
+                        header, _, rest = url.partition(",")
+                        lines.append(
+                            f"  part[{j}] image: {header},<base64 len={len(rest)}>"
+                        )
+                    elif url:
+                        lines.append(f"  part[{j}] image_url: {url[:200]}")
+                    else:
+                        lines.append(f"  part[{j}] image: (无 url)")
+                else:
+                    lines.append(f"  part[{j}] type={ptype}: {part!r}"[:500])
+        elif content is None:
+            lines.append("(无 content)")
+        else:
+            lines.append(repr(content)[:1000])
+    lines.append("======== 提示词结束 ========")
+    return "\n".join(lines)
+
+
 class LlmChatClient:
     """OpenAI 兼容 Chat Completions API 客户端（支持 OpenAI / Ollama / Hy-Embodied 等）。"""
 
     def __init__(self, config: LlmChatConfig) -> None:
         self.config = config
 
+    def _auth_headers(self) -> Dict[str, str]:
+        api_key = self.config.api_key.strip() or "EMPTY"
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+
+    def probe(self, timeout_s: float = 6.0) -> Dict[str, object]:
+        """探测当前 API 可达性与模型种类。"""
+        return probe_llm_endpoint(
+            api_base=self.config.api_base,
+            api_key=self.config.api_key,
+            configured_model=self.config.model,
+            timeout_s=timeout_s,
+        )
+
     def chat(
         self,
         messages: List[Dict[str, object]],
-        timeout_s: float = LLM_CHAT_TIMEOUT_S,
+        timeout_s: Optional[float] = None,
     ) -> str:
         api_key = self.config.api_key.strip()
         if not api_key:
@@ -3465,18 +4718,35 @@ class LlmChatClient:
         payload: Dict[str, object] = {
             "model": self.config.model,
             "messages": messages,
-            "temperature": 0.7,
+            "temperature": 0.2,
             "max_tokens": int(self.config.max_tokens),
+            # Qwen3.5 默认会进 <think>；未勾选 thinking 时显式关闭，避免长思考挤掉答案
+            "chat_template_kwargs": {
+                "enable_thinking": bool(self.config.enable_thinking)
+            },
         }
-        if self.config.enable_thinking:
-            payload["chat_template_kwargs"] = {"enable_thinking": True}
+        # 带图推理更慢（视觉编码 + 长输出），单独放宽超时
+        if timeout_s is None:
+            has_image = False
+            for msg in messages:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and str(part.get("type") or "") in (
+                            "image_url",
+                            "image",
+                        ):
+                            has_image = True
+                            break
+                if has_image:
+                    break
+            timeout_s = (
+                LLM_CHAT_VISION_TIMEOUT_S if has_image else LLM_CHAT_TIMEOUT_S
+            )
         req = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
+            headers=self._auth_headers(),
             method="POST",
         )
         try:
@@ -3508,6 +4778,10 @@ class LlmChatBridge(QObject):
     finished = pyqtSignal(str, bool)
 
 
+class LlmProbeBridge(QObject):
+    finished = pyqtSignal(object)
+
+
 def _html_escape(text: str) -> str:
     return (
         text.replace("&", "&amp;")
@@ -3517,10 +4791,410 @@ def _html_escape(text: str) -> str:
     )
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def ensure_chat_history_dir() -> str:
+    os.makedirs(CHAT_HISTORY_DIR, exist_ok=True)
+    return CHAT_HISTORY_DIR
+
+
+def load_chat_user_settings() -> Dict[str, object]:
+    """加载对话面板用户设置（system prompt 等）。"""
+    try:
+        with open(CHAT_USER_SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+def save_chat_user_settings(data: Dict[str, object]) -> str:
+    os.makedirs(os.path.dirname(CHAT_USER_SETTINGS_PATH), exist_ok=True)
+    with open(CHAT_USER_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return CHAT_USER_SETTINGS_PATH
+
+
+def chat_history_path(history_id: str) -> str:
+    safe = "".join(ch for ch in history_id if ch.isalnum() or ch in "-_")
+    if not safe:
+        raise ValueError("invalid history id")
+    return os.path.join(ensure_chat_history_dir(), f"{safe}.json")
+
+
+def default_chat_history_title(messages: List[Dict[str, object]]) -> str:
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            text = " ".join(content.strip().split())
+            return text[:40] + ("…" if len(text) > 40 else "")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text = str(part.get("text") or "").strip()
+                    if text:
+                        text = " ".join(text.split())
+                        return text[:40] + ("…" if len(text) > 40 else "")
+    return f"对话 {datetime.now().strftime('%m-%d %H:%M')}"
+
+
+def serialize_chat_messages(messages: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    """仅持久化可 JSON 化的文本轮次（含时间戳与耗时）。"""
+    out: List[Dict[str, object]] = []
+    for msg in messages:
+        role = str(msg.get("role") or "")
+        content = msg.get("content")
+        if role not in ("user", "assistant"):
+            continue
+        item: Optional[Dict[str, object]] = None
+        if isinstance(content, str):
+            item = {"role": role, "content": content}
+        elif isinstance(content, list):
+            texts = [
+                str(p.get("text") or "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            text = "\n".join(t for t in texts if t).strip()
+            if text:
+                item = {"role": role, "content": text}
+        if item is None:
+            continue
+        ts = msg.get("ts")
+        if isinstance(ts, str) and ts.strip():
+            item["ts"] = ts.strip()
+        latency = msg.get("latency_s")
+        if isinstance(latency, (int, float)):
+            item["latency_s"] = float(latency)
+        out.append(item)
+    return out
+
+
+def format_chat_timestamp(ts: Optional[str] = None) -> str:
+    """本地时间显示；ts 可为 ISO 字符串。"""
+    if ts:
+        raw = ts.strip()
+        try:
+            if raw.endswith("Z"):
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00")).astimezone()
+            else:
+                dt = datetime.fromisoformat(raw)
+                if dt.tzinfo is not None:
+                    dt = dt.astimezone()
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return raw
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_chat_latency(latency_s: Optional[float]) -> str:
+    if latency_s is None:
+        return ""
+    try:
+        val = float(latency_s)
+    except (TypeError, ValueError):
+        return ""
+    if val < 0:
+        return ""
+    if val < 1.0:
+        return f"{val * 1000.0:.0f} ms"
+    return f"{val:.2f} s"
+
+
+def list_chat_histories() -> List[Dict[str, object]]:
+    root = ensure_chat_history_dir()
+    items: List[Dict[str, object]] = []
+    for name in os.listdir(root):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(root, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                continue
+            hid = str(data.get("id") or os.path.splitext(name)[0])
+            items.append(
+                {
+                    "id": hid,
+                    "title": str(data.get("title") or hid),
+                    "updated_at": str(data.get("updated_at") or ""),
+                    "created_at": str(data.get("created_at") or ""),
+                    "model": str(data.get("model") or ""),
+                    "path": path,
+                    "message_count": len(data.get("messages") or []),
+                }
+            )
+        except Exception:
+            continue
+    items.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
+    return items
+
+
+def load_chat_history(history_id: str) -> Dict[str, object]:
+    path = chat_history_path(history_id)
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("invalid history file")
+    data["id"] = str(data.get("id") or history_id)
+    return data
+
+
+def save_chat_history_record(record: Dict[str, object]) -> str:
+    history_id = str(record.get("id") or "").strip() or uuid.uuid4().hex[:12]
+    record["id"] = history_id
+    record["updated_at"] = _utc_now_iso()
+    if not record.get("created_at"):
+        record["created_at"] = record["updated_at"]
+    path = chat_history_path(history_id)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    return path
+
+
+def delete_chat_history(history_id: str) -> None:
+    path = chat_history_path(history_id)
+    if os.path.isfile(path):
+        os.remove(path)
+
+
+def rename_chat_history(history_id: str, title: str) -> None:
+    data = load_chat_history(history_id)
+    data["title"] = title.strip() or str(data.get("title") or history_id)
+    save_chat_history_record(data)
+
+
+class ChatHistoryDialog(QDialog):
+    """管理已保存对话：加载 / 修改标题 / 删除。"""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("历史对话")
+        self.setMinimumSize(420, 360)
+        self.selected_id: str = ""
+        layout = QVBoxLayout(self)
+        tip = QLabel(
+            "选择一条历史对话：双击或点「加载」将把最后一轮问题放入输入框"
+            "（不自动请求，点「发送」后再调模型）；可修改标题或删除。"
+        )
+        tip.setWordWrap(True)
+        tip.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        layout.addWidget(tip)
+        self.list_widget = QListWidget()
+        self.list_widget.setStyleSheet(
+            "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+        )
+        self.list_widget.itemDoubleClicked.connect(self._on_load_clicked)
+        layout.addWidget(self.list_widget, 1)
+        btn_row = QHBoxLayout()
+        self.load_btn = QPushButton("加载")
+        self.load_btn.setDefault(False)
+        self.load_btn.setAutoDefault(False)
+        self.load_btn.clicked.connect(self._on_load_clicked)
+        btn_row.addWidget(self.load_btn)
+        self.rename_btn = QPushButton("修改标题")
+        self.rename_btn.setAutoDefault(False)
+        self.rename_btn.clicked.connect(self._on_rename_clicked)
+        btn_row.addWidget(self.rename_btn)
+        self.delete_btn = QPushButton("删除")
+        self.delete_btn.setAutoDefault(False)
+        self.delete_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.delete_btn.clicked.connect(self._on_delete_clicked)
+        btn_row.addWidget(self.delete_btn)
+        btn_row.addStretch(1)
+        close_btn = QPushButton("关闭")
+        close_btn.setAutoDefault(False)
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        self._reload()
+
+    def _reload(self) -> None:
+        self.list_widget.clear()
+        for item in list_chat_histories():
+            title = str(item.get("title") or "")
+            updated = str(item.get("updated_at") or "")
+            model = str(item.get("model") or "")
+            count = int(item.get("message_count") or 0)
+            label = f"{title}"
+            if updated:
+                label += f"  ·  {updated}"
+            if model:
+                label += f"  ·  {model}"
+            label += f"  ·  {count} 条"
+            row = QListWidgetItem(label)
+            row.setData(Qt.UserRole, str(item.get("id") or ""))
+            row.setToolTip(str(item.get("path") or ""))
+            self.list_widget.addItem(row)
+        if self.list_widget.count() == 0:
+            empty = QListWidgetItem("（暂无保存的对话）")
+            empty.setFlags(Qt.NoItemFlags)
+            self.list_widget.addItem(empty)
+
+    def _current_id(self) -> str:
+        item = self.list_widget.currentItem()
+        if item is None:
+            return ""
+        return str(item.data(Qt.UserRole) or "")
+
+    def _on_load_clicked(self, *_args) -> None:
+        hid = self._current_id()
+        if not hid:
+            QMessageBox.information(self, "历史对话", "请先选择一条对话")
+            return
+        self.selected_id = hid
+        self.accept()
+
+    def _on_rename_clicked(self) -> None:
+        hid = self._current_id()
+        if not hid:
+            QMessageBox.information(self, "修改标题", "请先选择一条对话")
+            return
+        try:
+            data = load_chat_history(hid)
+        except Exception as exc:
+            QMessageBox.warning(self, "修改标题", f"读取失败: {exc}")
+            return
+        old = str(data.get("title") or "")
+        new_title, ok = QInputDialog.getText(
+            self, "修改标题", "对话标题:", text=old
+        )
+        if not ok:
+            return
+        new_title = new_title.strip()
+        if not new_title:
+            QMessageBox.warning(self, "修改标题", "标题不能为空")
+            return
+        try:
+            rename_chat_history(hid, new_title)
+        except Exception as exc:
+            QMessageBox.warning(self, "修改标题", f"保存失败: {exc}")
+            return
+        self._reload()
+
+    def _on_delete_clicked(self) -> None:
+        hid = self._current_id()
+        if not hid:
+            QMessageBox.information(self, "删除", "请先选择一条对话")
+            return
+        try:
+            data = load_chat_history(hid)
+            title = str(data.get("title") or hid)
+        except Exception:
+            title = hid
+        reply = QMessageBox.question(
+            self,
+            "删除历史对话",
+            f"确认删除「{title}」？此操作不可恢复。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            delete_chat_history(hid)
+        except Exception as exc:
+            QMessageBox.warning(self, "删除", f"删除失败: {exc}")
+            return
+        self._reload()
+
+
+class ChatInputEdit(QTextEdit):
+    """对话输入框：获得焦点时主动唤醒 fcitx；Enter 发送但不打断中文组字。"""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self._chat_panel: Optional["ChatPanelWidget"] = None
+        self._ime_composing = False
+        self._ime_guard_until = 0.0
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        super().focusInEvent(event)
+        self._notify_input_method(full_query=True)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        super().mousePressEvent(event)
+        self._notify_input_method()
+
+    def inputMethodEvent(self, event) -> None:  # type: ignore[override]
+        # 必须在此跟踪组字；用 eventFilter 拦截 Enter 容易抢掉 fcitx 上屏键
+        try:
+            preedit = bool(event.preeditString())
+            commit = bool(event.commitString())
+            self._ime_composing = preedit
+            if preedit:
+                self._ime_guard_until = time.monotonic() + 0.6
+            elif commit:
+                # 提交后短保护，避免紧随其后的 Enter 被当成「发送」
+                self._ime_guard_until = time.monotonic() + 0.2
+        except Exception:
+            pass
+        super().inputMethodEvent(event)
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[override]
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not (
+            event.modifiers() & Qt.ShiftModifier
+        ):
+            if self._ime_composing or time.monotonic() < self._ime_guard_until:
+                super().keyPressEvent(event)
+                return
+            try:
+                app = QApplication.instance()
+                im = app.inputMethod() if app is not None else None
+                if im is not None and im.isVisible():
+                    super().keyPressEvent(event)
+                    return
+            except Exception:
+                pass
+            panel = self._chat_panel
+            if panel is not None:
+                if time.monotonic() < getattr(panel, "_suppress_send_until", 0.0):
+                    # 历史加载后短暂不发送，交给文本框（换行/IME）
+                    super().keyPressEvent(event)
+                    return
+                panel._on_send_clicked()
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def _notify_input_method(self, *, full_query: bool = False) -> None:
+        try:
+            app = QApplication.instance()
+            if app is None:
+                return
+            im = app.inputMethod()
+            if im is None:
+                return
+            if full_query:
+                im.update(Qt.ImQueryAll)
+            else:
+                im.update(
+                    Qt.ImEnabled
+                    | Qt.ImCursorRectangle
+                    | Qt.ImHints
+                    | Qt.ImInputItemClipRectangle
+                )
+        except Exception:
+            pass
+
+
 class ChatPanelWidget(QWidget):
     """文本/视觉对话面板：OpenAI 兼容 API（含 Hy-Embodied-VLM / RxBrain）。"""
 
     status_message = pyqtSignal(str)
+    # 附带图片变更：空字符串表示已清除
+    attached_image_changed = pyqtSignal(str)
 
     def __init__(
         self,
@@ -3529,23 +5203,32 @@ class ChatPanelWidget(QWidget):
     ) -> None:
         super().__init__(parent)
         self._config = config or LlmChatConfig.from_env()
+        saved_settings = load_chat_user_settings()
+        saved_system = str(saved_settings.get("system_prompt") or "").strip()
+        if saved_system:
+            self._config.system_prompt = saved_system
         self._client = LlmChatClient(self._config)
-        self._messages: List[Dict[str, object]] = [
-            {"role": "system", "content": LLM_CHAT_SYSTEM_PROMPT}
-        ]
+        self._messages: List[Dict[str, object]] = []
+        self._lake_language_memory: str = LAKE_DEFAULT_LANGUAGE_MEMORY
         self._busy = False
+        self._history_id: str = ""
+        self._history_title: str = ""
+        self._request_t0: Optional[float] = None
         self._bridge = LlmChatBridge()
         self._bridge.finished.connect(self._on_llm_finished)
+        self._probe_bridge = LlmProbeBridge()
+        self._probe_bridge.finished.connect(self._on_probe_finished)
         self._camera_frame_provider: Optional[
             Callable[[], Optional[Tuple[str, np.ndarray]]]
         ] = None
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(4)
 
+        # 紧凑顶栏：预设 / 模型 / 设置 / 清空 —— 把纵向空间留给对话区
         header = QHBoxLayout()
-        header.addWidget(QLabel("AI 对话"))
+        header.setSpacing(4)
         self.provider_combo = QComboBox()
         self.provider_combo.addItems(list(LLM_PROVIDER_PRESETS.keys()))
         self.provider_combo.setToolTip(
@@ -3553,20 +5236,57 @@ class ChatPanelWidget(QWidget):
             "或 run_hy_rxbrain.sh 启动服务）、本地 Ollama、百炼 API"
         )
         self.provider_combo.currentTextChanged.connect(self._on_provider_preset_changed)
-        header.addWidget(self.provider_combo)
+        header.addWidget(self.provider_combo, 1)
         self.model_edit = QLineEdit(self._config.model)
         self.model_edit.setPlaceholderText("模型名")
         self.model_edit.setToolTip(
             "模型名：hy_a3b (VLM) / hy-rxbrain / qwen3-vl:4b / gpt-4o-mini"
         )
-        self.model_edit.setFixedWidth(140)
+        self.model_edit.setMinimumWidth(90)
+        self.model_edit.setMaximumWidth(160)
         header.addWidget(self.model_edit)
-        header.addStretch()
+        self.settings_toggle_btn = QToolButton()
+        self.settings_toggle_btn.setText("设置")
+        self.settings_toggle_btn.setCheckable(True)
+        self.settings_toggle_btn.setChecked(False)
+        self.settings_toggle_btn.setToolTip("展开/收起 API、Key 与 System prompt 设置")
+        self.settings_toggle_btn.toggled.connect(self._on_settings_toggled)
+        header.addWidget(self.settings_toggle_btn)
+        self.probe_btn = QPushButton("探测")
+        self.probe_btn.setFixedWidth(44)
+        self.probe_btn.setToolTip(
+            "探测当前 API 地址上的服务类型与可用模型\n"
+            "（/health、/models、Ollama /api/tags）"
+        )
+        self.probe_btn.clicked.connect(self._on_probe_clicked)
+        header.addWidget(self.probe_btn)
+        self.save_btn = QPushButton("保存")
+        self.save_btn.setFixedWidth(44)
+        self.save_btn.setToolTip("保存当前对话到本地历史（eai/chat_history）")
+        self.save_btn.clicked.connect(self._on_save_chat_clicked)
+        header.addWidget(self.save_btn)
+        self.history_btn = QPushButton("历史")
+        self.history_btn.setFixedWidth(44)
+        self.history_btn.setToolTip(
+            "加载 / 修改标题 / 删除已保存的对话（加载后问题进输入框，点发送再请求）"
+        )
+        self.history_btn.clicked.connect(self._on_history_clicked)
+        header.addWidget(self.history_btn)
         self.clear_btn = QPushButton("清空")
+        self.clear_btn.setFixedWidth(44)
         self.clear_btn.clicked.connect(self._clear_chat)
         header.addWidget(self.clear_btn)
         layout.addLayout(header)
 
+        self.history_title_label = QLabel("当前: 新对话（未保存）")
+        self.history_title_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.history_title_label.setWordWrap(True)
+        layout.addWidget(self.history_title_label)
+
+        self.settings_panel = QWidget()
+        settings_layout = QVBoxLayout(self.settings_panel)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
+        settings_layout.setSpacing(3)
         settings_row = QHBoxLayout()
         settings_row.addWidget(QLabel("API"))
         self.api_base_edit = QLineEdit(self._config.api_base)
@@ -3575,8 +5295,7 @@ class ChatPanelWidget(QWidget):
             "OpenAI 兼容 API：Ollama :11434/v1；Hy-VLM :8080/v1；RxBrain :8090/v1"
         )
         settings_row.addWidget(self.api_base_edit, stretch=1)
-        layout.addLayout(settings_row)
-
+        settings_layout.addLayout(settings_row)
         key_row = QHBoxLayout()
         key_row.addWidget(QLabel("Key"))
         self.api_key_edit = QLineEdit(self._config.api_key)
@@ -3587,48 +5306,144 @@ class ChatPanelWidget(QWidget):
             f"也可 export {LLM_API_KEY_ENV}=..."
         )
         key_row.addWidget(self.api_key_edit, stretch=1)
-        layout.addLayout(key_row)
+        settings_layout.addLayout(key_row)
+        system_label = QLabel("System")
+        system_label.setToolTip("Lake / Qwen 推理时作为 system 角色发送；可编辑并保存到本地")
+        settings_layout.addWidget(system_label)
+        self.system_prompt_edit = QTextEdit()
+        self.system_prompt_edit.setPlainText(self._config.system_prompt)
+        self.system_prompt_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.system_prompt_edit.setPlaceholderText("System prompt…")
+        self.system_prompt_edit.setMinimumHeight(72)
+        self.system_prompt_edit.setMaximumHeight(140)
+        self.system_prompt_edit.setToolTip(
+            "认知编排器 system 提示词；Lake 模式下随请求发送。"
+            "点「保存 System」写入 eai/chat_user_settings.json"
+        )
+        self.system_prompt_edit.setStyleSheet(
+            "QTextEdit { background-color: #252525; color: #eee; border: 1px solid #555; }"
+        )
+        settings_layout.addWidget(self.system_prompt_edit)
+        system_btn_row = QHBoxLayout()
+        self.save_system_btn = QPushButton("保存 System")
+        self.save_system_btn.setToolTip(
+            f"保存 system prompt 到 {CHAT_USER_SETTINGS_PATH}"
+        )
+        self.save_system_btn.clicked.connect(self._on_save_system_prompt_clicked)
+        system_btn_row.addWidget(self.save_system_btn)
+        self.reset_system_btn = QPushButton("恢复默认")
+        self.reset_system_btn.setToolTip(
+            "恢复为 Lake 训练默认 system（技能/子任务/记忆 三行版）"
+        )
+        self.reset_system_btn.clicked.connect(self._on_reset_system_prompt_clicked)
+        system_btn_row.addWidget(self.reset_system_btn)
+        system_btn_row.addStretch(1)
+        settings_layout.addLayout(system_btn_row)
+        self.settings_panel.setVisible(False)
+        layout.addWidget(self.settings_panel)
 
         opt_row = QHBoxLayout()
+        opt_row.setSpacing(4)
         self.attach_camera_check = QCheckBox("附带相机图")
         self.attach_camera_check.setChecked(True)
         self.attach_camera_check.setToolTip(
-            "发送时附带当前彩色相机帧（Hy-Embodied / Qwen3-VL 等多模态模型需要）"
+            "发送时附带当前彩色相机帧（未在测试页点选场景图时生效；"
+            "Hy-Embodied / Qwen 等多模态模型需要）"
         )
         opt_row.addWidget(self.attach_camera_check)
+        self.clear_image_btn = QPushButton("清除场景图")
+        self.clear_image_btn.setEnabled(False)
+        self.clear_image_btn.setToolTip("清除已在测试页点选的场景图")
+        self.clear_image_btn.clicked.connect(
+            lambda _checked=False: self._on_clear_chat_image_clicked()
+        )
+        opt_row.addWidget(self.clear_image_btn)
         self.thinking_check = QCheckBox("thinking")
         self.thinking_check.setToolTip(
             "Hy-Embodied-VLM：chat_template_kwargs.enable_thinking=true（慢但推理更强）"
         )
         opt_row.addWidget(self.thinking_check)
-        opt_row.addStretch()
+        opt_row.addStretch(1)
+        self.chat_image_label = QLabel("未选场景图")
+        self.chat_image_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        self.chat_image_label.setWordWrap(False)
+        self.chat_image_label.setMinimumWidth(0)
+        self.chat_image_label.setToolTip(
+            "在「测试」页点击一张场景图，或勾选附带相机图"
+        )
+        opt_row.addWidget(self.chat_image_label, 1)
+        self.chat_image_preview = QLabel()
+        self.chat_image_preview.setFixedSize(56, 42)
+        self.chat_image_preview.setAlignment(Qt.AlignCenter)
+        self.chat_image_preview.setStyleSheet(
+            "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #888; }"
+        )
+        self.chat_image_preview.setText("预览")
+        opt_row.addWidget(self.chat_image_preview)
         layout.addLayout(opt_row)
+
+        self._chat_attach_image_bgr: Optional[np.ndarray] = None
+        self._chat_attach_image_path: str = ""
 
         self.history_view = QTextEdit()
         self.history_view.setReadOnly(True)
         self.history_view.setPlaceholderText("对话记录将显示在这里…")
+        self.history_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.history_view.setMinimumHeight(180)
+        # 避免点选历史记录抢走焦点，导致未点输入框时无法中文输入
+        self.history_view.setFocusPolicy(Qt.NoFocus)
         self.history_view.setStyleSheet(
             "QTextEdit { background-color: #1a1a1a; color: #ddd; border: 1px solid #444; }"
         )
+        self.history_view.installEventFilter(self)
         layout.addWidget(self.history_view, stretch=1)
 
         input_row = QHBoxLayout()
-        self.input_edit = QTextEdit()
-        self.input_edit.setPlaceholderText("输入问题，Enter 发送，Shift+Enter 换行")
-        self.input_edit.setMaximumHeight(80)
+        input_row.setSpacing(4)
+        self.input_edit = ChatInputEdit()
+        self.input_edit._chat_panel = self
+        self.input_edit.setPlaceholderText(
+            "输入高层任务名（如：合上后盖并拧紧）；Enter 发送"
+        )
+        self.input_edit.setFixedHeight(96)
+        self.input_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.input_edit.setStyleSheet(
             "QTextEdit { background-color: #252525; color: #eee; border: 1px solid #555; }"
         )
         self.input_edit.installEventFilter(self)
+        self._suppress_send_until = 0.0
         input_row.addWidget(self.input_edit, stretch=1)
         send_col = QVBoxLayout()
         self.send_btn = QPushButton("发送")
+        self.send_btn.setMinimumHeight(40)
         self.send_btn.setToolTip("调用大模型获取回复")
+        self.send_btn.setFocusPolicy(Qt.NoFocus)
         self.send_btn.clicked.connect(self._on_send_clicked)
         send_col.addWidget(self.send_btn)
         send_col.addStretch()
         input_row.addLayout(send_col)
         layout.addLayout(input_row)
+
+        # 面板内快捷键：焦点不在输入框时，把可输入按键转到输入框并唤醒 IME
+        self.installEventFilter(self)
+        for w in (
+            self.provider_combo,
+            self.model_edit,
+            self.settings_toggle_btn,
+            self.probe_btn,
+            self.save_btn,
+            self.history_btn,
+            self.clear_btn,
+            self.attach_camera_check,
+            self.clear_image_btn,
+            self.thinking_check,
+            self.api_base_edit,
+            self.api_key_edit,
+            self.system_prompt_edit,
+            self.save_system_btn,
+            self.reset_system_btn,
+        ):
+            w.installEventFilter(self)
 
         self._append_system_line(
             f"模型: {self._config.model}  |  API: {self._config.api_base}"
@@ -3660,6 +5475,95 @@ class ChatPanelWidget(QWidget):
     ) -> None:
         self._camera_frame_provider = provider
 
+    def _on_settings_toggled(self, checked: bool) -> None:
+        self.settings_panel.setVisible(bool(checked))
+        self.settings_toggle_btn.setText("收起" if checked else "设置")
+
+    def _on_probe_clicked(self) -> None:
+        if self._busy:
+            return
+        self._sync_config_from_ui()
+        self._set_busy(True)
+        self.probe_btn.setText("…")
+        self._append_system_line(
+            f"正在探测模型服务: {self._config.api_base}  model={self._config.model}"
+        )
+        self.status_message.emit("正在探测连接的模型…")
+
+        def _work() -> None:
+            try:
+                result = self._client.probe(timeout_s=6.0)
+            except Exception as exc:
+                result = {
+                    "ok": False,
+                    "kind": "探测失败",
+                    "api_base": self._config.api_base,
+                    "configured_model": self._config.model,
+                    "models": [],
+                    "details": [],
+                    "error": str(exc),
+                }
+            self._probe_bridge.finished.emit(result)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_probe_finished(self, result: object) -> None:
+        self._set_busy(False)
+        self.probe_btn.setText("探测")
+        data = result if isinstance(result, dict) else {}
+        ok = bool(data.get("ok"))
+        kind = str(data.get("kind") or "未知")
+        models = [str(m) for m in (data.get("models") or []) if str(m).strip()]
+        configured = str(data.get("configured_model") or "")
+        matched = bool(data.get("configured_model_matched"))
+        details = [str(x) for x in (data.get("details") or [])]
+        err = str(data.get("error") or "")
+
+        lines = [
+            f"服务类型: {kind}",
+            f"API: {data.get('api_base') or self._config.api_base}",
+        ]
+        if configured:
+            mark = "✓ 匹配" if matched else ("未在列表中确认" if models else "待确认")
+            lines.append(f"当前配置模型: {configured}（{mark}）")
+        if models:
+            show = ", ".join(models[:8])
+            if len(models) > 8:
+                show += f" …共{len(models)}个"
+            lines.append(f"可用模型: {show}")
+        else:
+            lines.append("可用模型: （未列出）")
+        for d in details[:6]:
+            lines.append(f"- {d}")
+        if err:
+            lines.append(f"错误: {err}")
+
+        summary = "\n".join(lines)
+        if ok:
+            self._append_system_line("模型探测完成:\n" + summary)
+            self.status_message.emit(f"探测完成: {kind}")
+            # 若只发现一个模型且与配置不同，提示可切换
+            if len(models) == 1 and configured and models[0] != configured:
+                reply = QMessageBox.question(
+                    self,
+                    "探测模型",
+                    f"检测到服务类型: {kind}\n"
+                    f"可用模型: {models[0]}\n"
+                    f"当前配置: {configured}\n\n"
+                    "是否把模型名切换为检测到的模型？",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reply == QMessageBox.Yes:
+                    self.model_edit.setText(models[0])
+                    self._append_system_line(f"已切换模型名为: {models[0]}")
+            else:
+                QMessageBox.information(self, "探测模型", summary)
+        else:
+            self._append_error_line("模型探测失败:\n" + summary)
+            self.status_message.emit(f"探测失败: {err or kind}")
+            QMessageBox.warning(self, "探测模型", summary)
+
     def apply_local_ollama_preset(self, silent: bool = False) -> None:
         """切换到本地 Ollama 预设（供「本地部署 AI」按钮调用）。"""
         name = "本地 Ollama · Qwen3.5-4B"
@@ -3670,6 +5574,74 @@ class ChatPanelWidget(QWidget):
         if not silent:
             self._append_system_line(f"已切换对话 API 为 {OLLAMA_API_BASE_DEFAULT}")
 
+    def apply_local_qwen_service_preset(
+        self,
+        api_base: Optional[str] = None,
+        model_id: Optional[str] = None,
+        silent: bool = False,
+    ) -> None:
+        """切换到本地 Qwen 推理服务预设（model id 随已部署模型变化）。"""
+        name = LOCAL_QWEN_CHAT_PRESET_NAME
+        self.provider_combo.blockSignals(True)
+        try:
+            idx = self.provider_combo.findText(name)
+            if idx >= 0:
+                self.provider_combo.setCurrentIndex(idx)
+        finally:
+            self.provider_combo.blockSignals(False)
+        base = (api_base or resolve_local_qwen_viewer_api_base()).rstrip("/")
+        self.api_base_edit.setText(base)
+        mid = (model_id or "").strip()
+        if not mid:
+            info = fetch_local_qwen_server_info(base) or {}
+            mid = str(info.get("model") or "").strip()
+        if not mid:
+            mid = LOCAL_QWEN_MODEL_ID
+        self.model_edit.setText(mid)
+        if not self.api_key_edit.text().strip():
+            self.api_key_edit.setText("EMPTY")
+        self.attach_camera_check.setChecked(True)
+        self.thinking_check.setChecked(False)
+        self.thinking_check.setEnabled(False)
+        if not silent:
+            self._append_system_line(
+                f"已切换对话 API 为本地 Qwen 服务 {base}  model={mid}"
+            )
+
+    def apply_remote_qwen_service_preset(
+        self,
+        api_base: Optional[str] = None,
+        model_id: Optional[str] = None,
+        silent: bool = False,
+    ) -> None:
+        """切换到远程 Qwen（SSH 隧道）推理服务预设。"""
+        name = REMOTE_QWEN_CHAT_PRESET_NAME
+        self.provider_combo.blockSignals(True)
+        try:
+            idx = self.provider_combo.findText(name)
+            if idx >= 0:
+                self.provider_combo.setCurrentIndex(idx)
+        finally:
+            self.provider_combo.blockSignals(False)
+        base = (api_base or REMOTE_QWEN_API_BASE_DEFAULT).rstrip("/")
+        self.api_base_edit.setText(base)
+        mid = (model_id or "").strip()
+        if not mid:
+            info = fetch_local_qwen_server_info(base) or {}
+            mid = str(info.get("model") or "").strip()
+        if not mid:
+            mid = "qwen3.5-35b-a3b"
+        self.model_edit.setText(mid)
+        if not self.api_key_edit.text().strip():
+            self.api_key_edit.setText("EMPTY")
+        self.attach_camera_check.setChecked(True)
+        self.thinking_check.setChecked(False)
+        self.thinking_check.setEnabled(False)
+        if not silent:
+            self._append_system_line(
+                f"已切换对话 API 为远程 Qwen 服务 {base}  model={mid}"
+            )
+
     def _apply_provider_preset(self, name: str, silent: bool = False) -> None:
         preset = LLM_PROVIDER_PRESETS.get(name)
         if preset is None or name == "自定义":
@@ -3677,7 +5649,15 @@ class ChatPanelWidget(QWidget):
         api_base, model, default_key = preset
         if api_base:
             self.api_base_edit.setText(api_base)
-        if model:
+        if name == LOCAL_QWEN_CHAT_PRESET_NAME:
+            info = fetch_local_qwen_server_info(api_base) or {}
+            live_model = str(info.get("model") or "").strip()
+            self.model_edit.setText(live_model or model)
+        elif name == REMOTE_QWEN_CHAT_PRESET_NAME:
+            info = fetch_local_qwen_server_info(api_base) or {}
+            live_model = str(info.get("model") or "").strip()
+            self.model_edit.setText(live_model or model)
+        elif model:
             self.model_edit.setText(model)
         if default_key and not self.api_key_edit.text().strip():
             self.api_key_edit.setText(default_key)
@@ -3695,19 +5675,156 @@ class ChatPanelWidget(QWidget):
                 hint = "（需: bash run_hy_embodied_vlm.sh，约 4×80GB GPU）"
             elif name == "Hy-Embodied-RxBrain-1.0":
                 hint = "（需: bash run_hy_rxbrain.sh，约 1×GPU + 权重）"
+            elif name == LOCAL_QWEN_CHAT_PRESET_NAME:
+                hint = "（需: 测试 Tab 选择模型并「启动推理服务」）"
+            elif name == REMOTE_QWEN_CHAT_PRESET_NAME:
+                hosts = " / ".join(h for h, _ in REMOTE_QWEN_HOSTS)
+                hint = f"（需: 测试 Tab 部署位置选远程，如 {hosts}）"
             self._append_system_line(f"已切换预设: {name}{hint}")
 
     def _on_provider_preset_changed(self, name: str) -> None:
         self._apply_provider_preset(name)
 
+    def set_attached_image_from_path(
+        self, path: str, display_name: str = ""
+    ) -> bool:
+        """用测试页场景图路径设置为对话附图；成功返回 True。"""
+        image = cv2.imread(path, cv2.IMREAD_COLOR)
+        if image is None or np.asarray(image).size == 0:
+            self._append_error_line(f"无法读取场景图: {path}")
+            return False
+        self._chat_attach_image_bgr = image
+        self._chat_attach_image_path = path
+        self.clear_image_btn.setEnabled(not self._busy)
+        name = display_name or os.path.basename(path)
+        h, w = image.shape[:2]
+        self.chat_image_label.setText(f"已选场景: {name}  ({w}×{h})")
+        self.chat_image_label.setToolTip(path)
+        pix = cv2_to_qpixmap(image)
+        if pix is not None and not pix.isNull():
+            scaled = pix.scaled(
+                self.chat_image_preview.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            self.chat_image_preview.setPixmap(scaled)
+            self.chat_image_preview.setText("")
+        self._append_system_line(f"已点选场景图: {name}")
+        self.attached_image_changed.emit(path)
+        return True
+
+    def _on_clear_chat_image_clicked(self, *, notify: bool = True) -> None:
+        had_image = self._chat_attach_image_bgr is not None
+        self._chat_attach_image_bgr = None
+        self._chat_attach_image_path = ""
+        self.clear_image_btn.setEnabled(False)
+        self.chat_image_label.setText(
+            "未选场景图（测试页点选，或勾选附带相机图）"
+        )
+        self.chat_image_label.setToolTip("")
+        self.chat_image_preview.clear()
+        self.chat_image_preview.setText("预览")
+        if had_image:
+            self.attached_image_changed.emit("")
+            if notify:
+                self._append_system_line("已清除所选场景图")
+
+    def _focus_chat_input(self, *, activate_ime: bool = True) -> None:
+        self.input_edit.setFocus(Qt.OtherFocusReason)
+        if activate_ime and hasattr(self.input_edit, "_notify_input_method"):
+            self.input_edit._notify_input_method(full_query=True)
+
+    def _defer_key_to_input(self, event) -> None:
+        """焦点不在输入框时，延迟把按键交给输入框（先 focus 再投递，便于 fcitx 组字）。"""
+        self._focus_chat_input(activate_ime=True)
+        key = event.key()
+        mods = event.modifiers()
+        text = event.text()
+        count = event.count()
+        auto = event.isAutoRepeat()
+
+        def _deliver() -> None:
+            if self.input_edit.isEnabled() and not self.input_edit.hasFocus():
+                self.input_edit.setFocus(Qt.OtherFocusReason)
+            if hasattr(self.input_edit, "_notify_input_method"):
+                self.input_edit._notify_input_method(full_query=True)
+            ev = QKeyEvent(QEvent.KeyPress, key, mods, text, auto, count)
+            QApplication.sendEvent(self.input_edit, ev)
+
+        QTimer.singleShot(40, _deliver)
+
     def eventFilter(self, obj, event) -> bool:
-        if obj is self.input_edit and event.type() == QEvent.KeyPress:
-            if event.key() in (Qt.Key_Return, Qt.Key_Enter) and not (
-                event.modifiers() & Qt.ShiftModifier
-            ):
-                self._on_send_clicked()
-                return True
+        et = event.type()
+
+        if (
+            obj is self.history_view
+            and et == QEvent.MouseButtonPress
+            and event.button() == Qt.LeftButton
+        ):
+            QTimer.singleShot(0, lambda: self._focus_chat_input(activate_ime=True))
+
+        # 焦点在对话面板其它控件时，延迟把按键转到输入框（不直接吞掉，避免 fcitx 首字丢失）
+        if (
+            et == QEvent.KeyPress
+            and obj is not self.input_edit
+            and not self._busy
+            and self._should_redirect_key_to_input(obj, event)
+        ):
+            self._defer_key_to_input(event)
+            return True
+
+        if obj is self.input_edit and et == QEvent.FocusIn:
+            if hasattr(self.input_edit, "_notify_input_method"):
+                QTimer.singleShot(
+                    0, lambda: self.input_edit._notify_input_method(full_query=True)
+                )
+            return False
         return super().eventFilter(obj, event)
+
+    def _should_redirect_key_to_input(self, obj, event) -> bool:
+        """判断是否把按键从按钮/下拉框等重定向到对话输入框。"""
+        if obj in (
+            self.api_base_edit,
+            self.api_key_edit,
+            self.model_edit,
+            self.system_prompt_edit,
+        ):
+            return False
+        if not self.isVisible():
+            return False
+        # 仅处理面板内控件
+        w = obj if isinstance(obj, QWidget) else None
+        if w is None or not self.isAncestorOf(w):
+            return False
+        key = event.key()
+        mods = event.modifiers()
+        if mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+            # 保留 Ctrl/Alt 快捷键（含 Ctrl+Space 切输入法）；切完后下一次字符键会进来
+            return False
+        if key in (
+            Qt.Key_Tab,
+            Qt.Key_Backtab,
+            Qt.Key_Escape,
+            Qt.Key_Shift,
+            Qt.Key_Control,
+            Qt.Key_Alt,
+            Qt.Key_Meta,
+            Qt.Key_CapsLock,
+            Qt.Key_Up,
+            Qt.Key_Down,
+            Qt.Key_Left,
+            Qt.Key_Right,
+            Qt.Key_Home,
+            Qt.Key_End,
+            Qt.Key_PageUp,
+            Qt.Key_PageDown,
+        ):
+            return False
+        # 可打印字符 / 空格 / 退格：转到输入框
+        text = event.text()
+        if text or key in (Qt.Key_Space, Qt.Key_Backspace, Qt.Key_Delete):
+            return True
+        return False
 
     def _sync_config_from_ui(self) -> None:
         self._config.api_base = self.api_base_edit.text().strip() or LLM_API_BASE_DEFAULT
@@ -3717,63 +5834,379 @@ class ChatPanelWidget(QWidget):
             key = os.environ.get(LLM_API_KEY_ENV, "").strip()
         self._config.api_key = key
         self._config.enable_thinking = bool(self.thinking_check.isChecked())
+        system = self.system_prompt_edit.toPlainText().strip()
+        self._config.system_prompt = system or LAKE_ORCHESTRATOR_SYSTEM_PROMPT
         self._client = LlmChatClient(self._config)
+
+    def _on_save_system_prompt_clicked(self) -> None:
+        self._sync_config_from_ui()
+        try:
+            path = save_chat_user_settings(
+                {"system_prompt": self._config.system_prompt}
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "保存 System", f"保存失败: {exc}")
+            return
+        preview = self._config.system_prompt.replace("\n", " ")
+        if len(preview) > 60:
+            preview = preview[:57] + "…"
+        aligned = lake_user_output_instruction(self._config.system_prompt)
+        self._append_system_line(f"已保存 System prompt: {preview}")
+        self._append_system_line(f"User 输出要求已对齐: {aligned}")
+        self.status_message.emit(f"System prompt 已保存: {path}")
+
+    def _on_reset_system_prompt_clicked(self) -> None:
+        self.system_prompt_edit.setPlainText(LAKE_ORCHESTRATOR_SYSTEM_PROMPT_TRAINING)
+        self._sync_config_from_ui()
+        self._append_system_line(
+            "已恢复训练默认 System（三行版）；user 将自动对齐为「技能/子任务/记忆」"
+        )
 
     def _append_system_line(self, text: str) -> None:
         self.history_view.append(f'<span style="color:{UI_TEXT_MUTED};">[系统] {text}</span>')
 
-    def _append_user_line(self, text: str) -> None:
-        safe = _html_escape(text).replace("\n", "<br>")
+    def _append_prompt_dump(self, messages: List[Dict[str, object]]) -> None:
+        """在对话框中打印即将发送的全部提示词。"""
+        has_image = False
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and str(part.get("type") or "") in (
+                        "image_url",
+                        "image",
+                    ):
+                        has_image = True
+                        break
+            if has_image:
+                break
+        timeout_s = (
+            LLM_CHAT_VISION_TIMEOUT_S if has_image else LLM_CHAT_TIMEOUT_S
+        )
+        dump = format_chat_prompt_dump(
+            messages,
+            api_base=self._config.api_base,
+            model=self._config.model,
+            temperature=0.2,
+            max_tokens=int(self._config.max_tokens),
+            enable_thinking=bool(self._config.enable_thinking),
+            timeout_s=timeout_s,
+        )
+        safe = _html_escape(dump).replace("\n", "<br>")
         self.history_view.append(
-            f'<p style="margin:6px 0;"><b style="color:#7ec8ff;">你:</b> {safe}</p>'
+            f'<pre style="margin:8px 0; padding:8px; white-space:pre-wrap; '
+            f'word-wrap:break-word; color:{UI_TEXT_MUTED}; '
+            f'background:rgba(127,127,127,0.12); border-radius:6px; '
+            f'font-size:11px; font-family:monospace;">{safe}</pre>'
         )
 
-    def _append_assistant_line(self, text: str) -> None:
-        safe = _html_escape(text).replace("\n", "<br>")
-        self.history_view.append(
-            f'<p style="margin:6px 0;"><b style="color:#50fa7b;">AI:</b> {safe}</p>'
+    def _meta_span(self, ts: Optional[str] = None, latency_s: Optional[float] = None) -> str:
+        parts = [format_chat_timestamp(ts)]
+        lat = format_chat_latency(latency_s)
+        if lat:
+            parts.append(f"耗时 {lat}")
+        meta = " · ".join(parts)
+        return (
+            f'<span style="color:{UI_TEXT_MUTED}; font-size:11px; margin-left:8px;">'
+            f"{_html_escape(meta)}</span>"
         )
 
-    def _append_error_line(self, text: str) -> None:
+    def _append_user_line(self, text: str, ts: Optional[str] = None) -> None:
         safe = _html_escape(text).replace("\n", "<br>")
         self.history_view.append(
-            f'<p style="margin:6px 0;"><b style="color:#ff5555;">错误:</b> {safe}</p>'
+            f'<p style="margin:6px 0;">'
+            f'<b style="color:#7ec8ff;">你:</b>{self._meta_span(ts)}'
+            f"<br>{safe}</p>"
+        )
+
+    def _append_assistant_line(
+        self,
+        text: str,
+        ts: Optional[str] = None,
+        latency_s: Optional[float] = None,
+    ) -> None:
+        safe = _html_escape(text).replace("\n", "<br>")
+        self.history_view.append(
+            f'<p style="margin:6px 0;">'
+            f'<b style="color:#50fa7b;">AI:</b>{self._meta_span(ts, latency_s)}'
+            f"<br>{safe}</p>"
+        )
+
+    def _append_error_line(
+        self,
+        text: str,
+        ts: Optional[str] = None,
+        latency_s: Optional[float] = None,
+    ) -> None:
+        safe = _html_escape(text).replace("\n", "<br>")
+        self.history_view.append(
+            f'<p style="margin:6px 0;">'
+            f'<b style="color:#ff5555;">错误:</b>{self._meta_span(ts, latency_s)}'
+            f"<br>{safe}</p>"
         )
 
     def _trim_history(self) -> None:
-        if len(self._messages) <= 1 + LLM_CHAT_MAX_HISTORY:
-            return
-        system = self._messages[0]
-        self._messages = [system] + self._messages[-(LLM_CHAT_MAX_HISTORY):]
+        # 只保留最近的 user/assistant 轮次
+        keep = [
+            m
+            for m in self._messages
+            if str(m.get("role") or "") in ("user", "assistant")
+        ]
+        if len(keep) > LLM_CHAT_MAX_HISTORY:
+            keep = keep[-LLM_CHAT_MAX_HISTORY:]
+        self._messages = keep
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         self.send_btn.setEnabled(not busy)
-        self.input_edit.setEnabled(not busy)
+        # 推理中保持输入框可聚焦，否则 fcitx 会反复断开
+        self.input_edit.setReadOnly(busy)
+        self.save_btn.setEnabled(not busy)
+        self.history_btn.setEnabled(not busy)
+        self.clear_btn.setEnabled(not busy)
+        self.probe_btn.setEnabled(not busy)
+        self.clear_image_btn.setEnabled(
+            (not busy) and self._chat_attach_image_bgr is not None
+        )
         self.send_btn.setText("思考中…" if busy else "发送")
+        if not busy:
+            QTimer.singleShot(
+                0, lambda: self._focus_chat_input(activate_ime=True)
+            )
+
+    def _refresh_history_title_label(self) -> None:
+        if self._history_id and self._history_title:
+            self.history_title_label.setText(
+                f"当前: {self._history_title}  (已保存)"
+            )
+        elif self._history_title:
+            self.history_title_label.setText(f"当前: {self._history_title}")
+        else:
+            self.history_title_label.setText("当前: 新对话（未保存）")
+
+    def _conversation_message_count(self) -> int:
+        return sum(
+            1
+            for m in self._messages
+            if m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str)
+            and str(m.get("content") or "").strip()
+        )
+
+    def _render_messages_to_view(self) -> None:
+        self.history_view.clear()
+        for msg in self._messages:
+            role = str(msg.get("role") or "")
+            content = msg.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if role == "system":
+                continue
+            ts = str(msg.get("ts") or "") or None
+            latency_raw = msg.get("latency_s")
+            latency_s: Optional[float] = None
+            if isinstance(latency_raw, (int, float)):
+                latency_s = float(latency_raw)
+            if role == "user":
+                self._append_user_line(content, ts=ts)
+            elif role == "assistant":
+                self._append_assistant_line(content, ts=ts, latency_s=latency_s)
+
+    def _on_save_chat_clicked(self) -> None:
+        if self._conversation_message_count() == 0:
+            QMessageBox.information(self, "保存对话", "当前没有可保存的对话内容")
+            return
+        self._sync_config_from_ui()
+        default_title = self._history_title or default_chat_history_title(self._messages)
+        title, ok = QInputDialog.getText(
+            self,
+            "保存对话",
+            "对话标题:",
+            text=default_title,
+        )
+        if not ok:
+            return
+        title = title.strip() or default_title
+        record: Dict[str, object] = {
+            "id": self._history_id or uuid.uuid4().hex[:12],
+            "title": title,
+            "created_at": "",
+            "model": self._config.model,
+            "api_base": self._config.api_base,
+            "system_prompt": self._config.system_prompt,
+            "messages": serialize_chat_messages(self._messages),
+        }
+        if self._history_id:
+            try:
+                old = load_chat_history(self._history_id)
+                record["created_at"] = str(old.get("created_at") or "")
+            except Exception:
+                pass
+        try:
+            path = save_chat_history_record(record)
+        except Exception as exc:
+            QMessageBox.warning(self, "保存对话", f"保存失败: {exc}")
+            return
+        self._history_id = str(record["id"])
+        self._history_title = title
+        self._refresh_history_title_label()
+        self._append_system_line(f"已保存对话: {title}")
+        self.status_message.emit(f"对话已保存: {path}")
+
+    def _on_history_clicked(self) -> None:
+        dlg = ChatHistoryDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
+            # 可能在对话框内删掉了当前对话
+            if self._history_id:
+                try:
+                    load_chat_history(self._history_id)
+                except Exception:
+                    self._history_id = ""
+                    self._history_title = ""
+                    self._refresh_history_title_label()
+            return
+        hid = dlg.selected_id
+        if not hid:
+            return
+        try:
+            data = load_chat_history(hid)
+        except Exception as exc:
+            QMessageBox.warning(self, "历史对话", f"加载失败: {exc}")
+            return
+        raw_msgs = data.get("messages") or []
+        messages: List[Dict[str, object]] = []
+        if isinstance(raw_msgs, list):
+            for msg in raw_msgs:
+                if not isinstance(msg, dict):
+                    continue
+                role = str(msg.get("role") or "")
+                content = msg.get("content")
+                if role not in ("user", "assistant") or not isinstance(content, str):
+                    continue
+                item: Dict[str, object] = {"role": role, "content": content}
+                ts = msg.get("ts")
+                if isinstance(ts, str) and ts.strip():
+                    item["ts"] = ts.strip()
+                latency = msg.get("latency_s")
+                if isinstance(latency, (int, float)):
+                    item["latency_s"] = float(latency)
+                messages.append(item)
+        # 最后一轮用户问题放入输入框；不自动请求，点「发送」后再调模型
+        draft = ""
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") != "user":
+                continue
+            content = messages[i].get("content")
+            if isinstance(content, str) and content.strip():
+                draft = content
+                messages = messages[:i]
+            break
+        self._messages = messages
+        self._trim_history()
+        self._lake_language_memory = LAKE_DEFAULT_LANGUAGE_MEMORY
+        for m in reversed(messages):
+            if m.get("role") != "assistant":
+                continue
+            mem = extract_lake_memory_from_assistant(str(m.get("content") or ""))
+            if mem:
+                self._lake_language_memory = mem
+                break
+        self._history_id = str(data.get("id") or hid)
+        self._history_title = str(data.get("title") or self._history_id)
+        saved_system = str(data.get("system_prompt") or "").strip()
+        if saved_system:
+            self.system_prompt_edit.setPlainText(saved_system)
+            self._config.system_prompt = saved_system
+        self._on_clear_chat_image_clicked(notify=False)
+        self._render_messages_to_view()
+        self._refresh_history_title_label()
+        self.input_edit.setPlainText(draft)
+        cursor = self.input_edit.textCursor()
+        cursor.movePosition(cursor.End)
+        self.input_edit.setTextCursor(cursor)
+        self._suppress_send_until = time.monotonic() + 0.4
+        QTimer.singleShot(0, self._focus_chat_input)
+        tip = "已放入输入框，点「发送」后再请求" if draft else "已加载（无用户消息可编辑）"
+        self._append_system_line(f"已加载历史对话: {self._history_title} — {tip}")
+        self.status_message.emit(f"已加载历史对话: {self._history_title}（待发送）")
+
+    def _clear_chat(self) -> None:
+        self._messages = []
+        self._lake_language_memory = LAKE_DEFAULT_LANGUAGE_MEMORY
+        self.history_view.clear()
+        self._history_id = ""
+        self._history_title = ""
+        self._refresh_history_title_label()
+        self._on_clear_chat_image_clicked(notify=False)
+        self._append_system_line("对话已清空")
 
     def _build_api_messages(self, user_text: str) -> List[Dict[str, object]]:
-        """历史保持纯文本；当前轮可附带相机 JPEG（vision）。"""
-        api_messages: List[Dict[str, object]] = list(self._messages[:-1])
-        content: object = user_text
-        if self.attach_camera_check.isChecked() and self._camera_frame_provider is not None:
+        """历史保持纯文本；当前轮可附带本地选图或相机 JPEG（vision）。
+
+        Lake / 本地远程 Qwen：对齐训练格式
+          system + user(任务 / 语言记忆 / 输出要求) + image
+        """
+        use_lake = should_use_lake_orchestrator_prompt(
+            self._config.api_base, self._config.model
+        )
+        prompt_text = (
+            format_lake_user_prompt(
+                user_text,
+                self._lake_language_memory,
+                system_prompt=self._config.system_prompt,
+            )
+            if use_lake
+            else user_text
+        )
+        if use_lake:
+            self._append_system_line(
+                "已按 Lake 格式包装提示词（system 与 user 输出要求已对齐）"
+            )
+
+        api_messages: List[Dict[str, object]] = []
+        system_text = self._config.system_prompt.strip()
+        if use_lake and system_text:
+            api_messages.append({"role": "system", "content": system_text})
+        elif not use_lake:
+            api_messages = [
+                m
+                for m in self._messages[:-1]
+                if str(m.get("role") or "") in ("user", "assistant")
+            ]
+
+        content: object = prompt_text
+        image_bgr: Optional[np.ndarray] = None
+        image_tag = ""
+
+        if self._chat_attach_image_bgr is not None:
+            image_bgr = self._chat_attach_image_bgr
+            image_tag = self._chat_attach_image_path or "本地图片"
+        elif (
+            self.attach_camera_check.isChecked()
+            and self._camera_frame_provider is not None
+        ):
             frame = self._camera_frame_provider()
             if frame is not None:
-                topic, image = frame
-                try:
-                    b64 = encode_bgr_image_jpeg_b64(image)
-                    content = [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                        },
-                        {"type": "text", "text": user_text},
-                    ]
-                    self._append_system_line(f"已附带相机帧: {topic}")
-                except Exception as exc:
-                    self._append_system_line(f"附带相机帧失败，仅发送文本: {exc}")
+                topic, image_bgr = frame
+                image_tag = topic
             else:
                 self._append_system_line("未获取到相机帧，仅发送文本")
+
+        if image_bgr is not None:
+            try:
+                b64 = encode_bgr_image_jpeg_b64(image_bgr)
+                # 训练数据为 type=image；OpenAI 兼容接口用 image_url
+                content = [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                    },
+                    {"type": "text", "text": prompt_text},
+                ]
+                self._append_system_line(f"已附带图片: {image_tag}")
+            except Exception as exc:
+                self._append_system_line(f"附带图片失败，仅发送文本: {exc}")
+
         api_messages.append({"role": "user", "content": content})
         return api_messages
 
@@ -3785,10 +6218,13 @@ class ChatPanelWidget(QWidget):
             return
         self._sync_config_from_ui()
         self.input_edit.clear()
-        self._append_user_line(text)
-        self._messages.append({"role": "user", "content": text})
+        send_ts = _utc_now_iso()
+        self._request_t0 = time.perf_counter()
+        self._append_user_line(text, ts=send_ts)
+        self._messages.append({"role": "user", "content": text, "ts": send_ts})
         self._trim_history()
         api_messages = self._build_api_messages(text)
+        self._append_prompt_dump(api_messages)
         self._set_busy(True)
         self.status_message.emit("正在调用大模型…")
 
@@ -3803,21 +6239,37 @@ class ChatPanelWidget(QWidget):
 
     def _on_llm_finished(self, text: str, ok: bool) -> None:
         self._set_busy(False)
+        recv_ts = _utc_now_iso()
+        latency_s: Optional[float] = None
+        if self._request_t0 is not None:
+            latency_s = max(0.0, time.perf_counter() - self._request_t0)
+        self._request_t0 = None
         if ok:
-            self._append_assistant_line(text)
-            self._messages.append({"role": "assistant", "content": text})
+            self._append_assistant_line(text, ts=recv_ts, latency_s=latency_s)
+            mem = extract_lake_memory_from_assistant(text)
+            if mem:
+                self._lake_language_memory = mem
+            msg: Dict[str, object] = {
+                "role": "assistant",
+                "content": text,
+                "ts": recv_ts,
+            }
+            if latency_s is not None:
+                msg["latency_s"] = float(latency_s)
+            self._messages.append(msg)
             self._trim_history()
-            self.status_message.emit("大模型回复完成")
+            lat = format_chat_latency(latency_s)
+            self.status_message.emit(
+                f"大模型回复完成" + (f"（耗时 {lat}）" if lat else "")
+            )
         else:
-            self._append_error_line(text)
+            self._append_error_line(text, ts=recv_ts, latency_s=latency_s)
             if self._messages and self._messages[-1].get("role") == "user":
                 self._messages.pop()
-            self.status_message.emit(f"大模型调用失败: {text[:80]}")
-
-    def _clear_chat(self) -> None:
-        self._messages = [{"role": "system", "content": LLM_CHAT_SYSTEM_PROMPT}]
-        self.history_view.clear()
-        self._append_system_line("对话已清空")
+            lat = format_chat_latency(latency_s)
+            self.status_message.emit(
+                f"大模型调用失败" + (f"（耗时 {lat}）: " if lat else ": ") + text[:80]
+            )
 
 
 class RosBridge(QObject):
@@ -3846,6 +6298,91 @@ class DepthVizBridge(QObject):
     """后台深度预览/点云计算完成信号。"""
 
     finished = pyqtSignal(object)
+
+
+def resolve_test_scenario_image_path(title: str) -> Optional[str]:
+    """按场景名解析 images/ 下预览图路径；不存在则返回 None。"""
+    candidates: List[str] = []
+    override = TEST_SCENARIO_IMAGE_FILES.get(title)
+    if override:
+        candidates.append(override)
+    for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        candidates.append(f"{title}{ext}")
+    seen = set()
+    for name in candidates:
+        if name in seen:
+            continue
+        seen.add(name)
+        path = os.path.join(TEST_IMAGES_DIR, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+class ScaledPixmapLabel(QLabel):
+    """保持宽高比缩放显示静态 QPixmap；可选点击选中。"""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, placeholder: str = "暂无图像", parent: Optional[QWidget] = None) -> None:
+        super().__init__(placeholder, parent)
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumSize(140, 100)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._source_pixmap: Optional[QPixmap] = None
+        self._selected = False
+        self._clickable = False
+        self._apply_frame_style()
+
+    def set_clickable(self, enabled: bool) -> None:
+        self._clickable = enabled
+        self.setCursor(Qt.PointingHandCursor if enabled else Qt.ArrowCursor)
+
+    def set_selected(self, selected: bool) -> None:
+        if self._selected == selected:
+            return
+        self._selected = selected
+        self._apply_frame_style()
+
+    def _apply_frame_style(self) -> None:
+        border = "2px solid #4CAF50" if self._selected else "1px solid #555"
+        self.setStyleSheet(
+            f"QLabel {{ background-color: #1a1a1a; border: {border}; "
+            f"color: {UI_TEXT_MUTED}; }}"
+        )
+
+    def set_source_pixmap(self, pixmap: Optional[QPixmap]) -> None:
+        self._source_pixmap = pixmap
+        if pixmap is None or pixmap.isNull():
+            self.clear()
+            self.setText("暂无图像")
+        else:
+            self.setText("")
+            self._refresh_scaled()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if (
+            self._clickable
+            and event.button() == Qt.LeftButton
+            and self._source_pixmap is not None
+            and not self._source_pixmap.isNull()
+        ):
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._refresh_scaled()
+
+    def _refresh_scaled(self) -> None:
+        if self._source_pixmap is None or self._source_pixmap.isNull():
+            return
+        scaled = self._source_pixmap.scaled(
+            self.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        super().setPixmap(scaled)
 
 
 class ClickableImageLabel(QLabel):
@@ -7731,7 +10268,7 @@ class CameraTopicWindow(QMainWindow):
         clear_btn.clicked.connect(self._clear_selection)
         camera_layout.addWidget(clear_btn)
         camera_layout.addStretch()
-        control_tabs.addTab(camera_tab, "相机")
+        control_tabs.addTab(camera_tab, "大脑")
 
         robot_tab = QWidget()
         robot_layout = QVBoxLayout(robot_tab)
@@ -8601,6 +11138,176 @@ class CameraTopicWindow(QMainWindow):
 
         control_tabs.addTab(skeleton_tab, "手骨架遥控")
 
+        test_tab = QWidget()
+        test_outer = QVBoxLayout(test_tab)
+        test_outer.setContentsMargins(8, 6, 8, 6)
+        test_outer.setSpacing(6)
+
+        test_hint = QLabel(
+            "测试区：点击下方场景图，即可附带到右侧「AI 对话」发送"
+        )
+        test_hint.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        test_hint.setWordWrap(True)
+        test_hint.setToolTip(f"图片目录: {TEST_IMAGES_DIR}")
+        test_outer.addWidget(test_hint)
+
+        test_grid_host = QWidget()
+        test_grid = QGridLayout(test_grid_host)
+        test_grid.setContentsMargins(0, 0, 0, 0)
+        test_grid.setHorizontalSpacing(8)
+        test_grid.setVerticalSpacing(8)
+        self._test_image_labels: Dict[str, ScaledPixmapLabel] = {}
+        self._test_image_paths: Dict[str, str] = {}
+        self._test_selected_scenario: str = ""
+        cols = 4
+        for idx, title in enumerate(TEST_SCENARIO_LABELS):
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(4)
+            title_label = QLabel(title)
+            title_label.setAlignment(Qt.AlignCenter)
+            title_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL, QFont.Bold))
+            title_label.setStyleSheet(f"color: {UI_TEXT_PRIMARY};")
+            title_label.setWordWrap(True)
+            cell_layout.addWidget(title_label)
+            image_label = ScaledPixmapLabel("暂无图像")
+            image_path = resolve_test_scenario_image_path(title)
+            if image_path is not None:
+                pix = QPixmap(image_path)
+                if not pix.isNull():
+                    image_label.set_source_pixmap(pix)
+                    image_label.set_clickable(True)
+                    image_label.setToolTip(
+                        f"点击选中「{title}」用于对话\n{image_path}"
+                    )
+                    self._test_image_paths[title] = image_path
+                    image_label.clicked.connect(
+                        lambda t=title: self._on_test_scenario_clicked(t)
+                    )
+                else:
+                    image_label.setText("加载失败")
+                    image_label.setToolTip(f"{title}\n无法读取: {image_path}")
+            else:
+                expected = TEST_SCENARIO_IMAGE_FILES.get(title, f"{title}.png")
+                image_label.setText("暂无图像")
+                image_label.setToolTip(
+                    f"{title}\n未找到: {os.path.join(TEST_IMAGES_DIR, expected)}"
+                )
+            cell_layout.addWidget(image_label, 1)
+            self._test_image_labels[title] = image_label
+            test_grid.addWidget(cell, idx // cols, idx % cols)
+        for c in range(cols):
+            test_grid.setColumnStretch(c, 1)
+        for r in range((len(TEST_SCENARIO_LABELS) + cols - 1) // cols):
+            test_grid.setRowStretch(r, 1)
+        test_outer.addWidget(test_grid_host, 1)
+
+        qwen_dir = resolve_local_qwen_model_dir()
+        service_row = QHBoxLayout()
+        service_row.setSpacing(6)
+        service_row.addWidget(QLabel("部署位置"))
+        self.test_qwen_target_combo = QComboBox()
+        self.test_qwen_target_combo.addItem("本地本机", "local")
+        for host_id, host_label in REMOTE_QWEN_HOSTS:
+            self.test_qwen_target_combo.addItem(host_label, f"remote:{host_id}")
+        tip_lines = ["本地：本机 GPU 部署。"]
+        for host_id, host_label in REMOTE_QWEN_HOSTS:
+            prof = remote_qwen_profile(host_id)
+            tip_lines.append(
+                f"{host_label}：SSH {host_id}，隧道 "
+                f"{prof.get('api_base') or remote_qwen_api_base_for_host(host_id)}"
+            )
+        tip_lines.append("远程适合 Qwen3.5-35B-A3B 等大模型。")
+        self.test_qwen_target_combo.setToolTip("\n".join(tip_lines))
+        self.test_qwen_target_combo.currentIndexChanged.connect(
+            self._on_test_qwen_target_changed
+        )
+        service_row.addWidget(self.test_qwen_target_combo)
+        service_row.addWidget(QLabel("权重目录"))
+        self.test_qwen_root_combo = QComboBox()
+        self.test_qwen_root_combo.setMinimumWidth(140)
+        self.test_qwen_root_combo.currentIndexChanged.connect(
+            self._on_test_qwen_root_changed
+        )
+        service_row.addWidget(self.test_qwen_root_combo)
+        self.test_qwen_refresh_btn = QPushButton("刷新")
+        self.test_qwen_refresh_btn.setToolTip(
+            "扫描所选根目录下含 config.json / adapter_config.json 的子目录"
+        )
+        self.test_qwen_refresh_btn.clicked.connect(self._refresh_test_qwen_model_list)
+        service_row.addWidget(self.test_qwen_refresh_btn)
+        service_row.addWidget(QLabel("模型"))
+        self.test_qwen_model_combo = QComboBox()
+        self.test_qwen_model_combo.setMinimumWidth(200)
+        self.test_qwen_model_combo.setToolTip(
+            "从上方根目录扫描到的可部署权重；选中后点「启动推理服务」。"
+        )
+        self.test_qwen_model_combo.currentIndexChanged.connect(
+            self._on_test_qwen_model_changed
+        )
+        service_row.addWidget(self.test_qwen_model_combo)
+        self.test_model_path_label = QLabel("")
+        self.test_model_path_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.test_model_path_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        self.test_model_path_label.setWordWrap(True)
+        service_row.addWidget(self.test_model_path_label, 1)
+        self.test_qwen_status_label = QLabel("服务: --")
+        self.test_qwen_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        service_row.addWidget(self.test_qwen_status_label)
+        self.test_qwen_start_btn = QPushButton("启动推理服务")
+        self.test_qwen_start_btn.setToolTip(
+            "按「部署位置」启动本地或远程 OpenAI 兼容推理服务。\n"
+            "远程会自动 SSH 同步脚本、拉起模型，并建立本地隧道。\n"
+            "首次加载可能需要数分钟。"
+        )
+        self.test_qwen_start_btn.clicked.connect(self._on_test_qwen_start_clicked)
+        service_row.addWidget(self.test_qwen_start_btn)
+        self.test_qwen_stop_btn = QPushButton("停止")
+        self.test_qwen_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.test_qwen_stop_btn.setToolTip("停止当前部署位置对应的推理服务（远程含隧道）")
+        self.test_qwen_stop_btn.clicked.connect(self._on_test_qwen_stop_clicked)
+        service_row.addWidget(self.test_qwen_stop_btn)
+        self.test_qwen_start_btn.setFocusPolicy(Qt.NoFocus)
+        self.test_qwen_stop_btn.setFocusPolicy(Qt.NoFocus)
+        self.test_qwen_refresh_btn.setFocusPolicy(Qt.NoFocus)
+        test_outer.addLayout(service_row)
+        self._refresh_test_qwen_model_path_label()
+
+
+        self.test_infer_log_edit = QTextEdit()
+        self.test_infer_log_edit.setReadOnly(True)
+        self.test_infer_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.test_infer_log_edit.setMinimumHeight(80)
+        self.test_infer_log_edit.setMaximumHeight(140)
+        self.test_infer_log_edit.setPlaceholderText("推理服务日志…")
+        self.test_infer_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        test_outer.addWidget(self.test_infer_log_edit)
+
+        self._local_qwen_launcher = LocalQwenServiceLauncher(self)
+        self._local_qwen_launcher.status_message.connect(self._on_test_qwen_status)
+        self._local_qwen_launcher.log_line.connect(self._append_test_infer_log)
+        self._local_qwen_launcher.running_changed.connect(self._update_test_qwen_ui)
+        self._remote_qwen_launcher = RemoteQwenServiceLauncher(self)
+        self._remote_qwen_launcher.status_message.connect(self._on_test_qwen_status)
+        self._remote_qwen_launcher.log_line.connect(self._append_test_infer_log)
+        self._remote_qwen_launcher.running_changed.connect(self._update_test_qwen_ui)
+        self._deploy_model_list_bridge = DeployModelListBridge(self)
+        self._deploy_model_list_bridge.finished.connect(
+            self._on_test_qwen_model_list_ready
+        )
+        self._test_qwen_model_list_refreshing = False
+        self._refresh_test_qwen_scan_roots()
+        self._refresh_test_qwen_model_list()
+        self._qwen_health_timer = QTimer(self)
+        self._qwen_health_timer.timeout.connect(self._refresh_test_qwen_status)
+        self._qwen_health_timer.start(4000)
+        self._update_test_qwen_ui()
+        control_tabs.addTab(test_tab, "测试")
+
         self._hand_skeleton_detector = None
         self._skeleton_tracking = False
         self._skeleton_busy = False
@@ -8659,18 +11366,29 @@ class CameraTopicWindow(QMainWindow):
 
         chat_group = QGroupBox("AI 对话")
         chat_layout = QVBoxLayout(chat_group)
-        chat_layout.setContentsMargins(4, 8, 4, 4)
+        chat_layout.setContentsMargins(4, 6, 4, 4)
+        chat_layout.setSpacing(2)
         self.chat_panel = ChatPanelWidget(config=llm_config)
         self.chat_panel.set_camera_frame_provider(self._pick_chat_camera_frame)
+        self.chat_panel.attached_image_changed.connect(
+            self._on_chat_attached_image_changed
+        )
+        self.chat_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         chat_layout.addWidget(self.chat_panel)
-        chat_group.setMinimumWidth(280)
-        chat_group.setMaximumWidth(420)
+        # 给对话区更大默认宽度，并允许拖拽继续加宽
+        chat_group.setMinimumWidth(380)
+        chat_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self._chat_group = chat_group
+        self._chat_group.installEventFilter(self)
         self._main_splitter.addWidget(chat_group)
 
         self._main_splitter.setStretchFactor(0, 0)
-        self._main_splitter.setStretchFactor(1, 1)
-        self._main_splitter.setStretchFactor(2, 0)
-        self._main_splitter.setSizes([260, max(720, win_w - 560), 320])
+        self._main_splitter.setStretchFactor(1, 2)
+        self._main_splitter.setStretchFactor(2, 3)
+        topic_w = 240
+        chat_w = max(480, int(win_w * 0.36))
+        preview_w = max(480, win_w - topic_w - chat_w - 40)
+        self._main_splitter.setSizes([topic_w, preview_w, chat_w])
         root_layout.addWidget(self._main_splitter, stretch=1)
 
         self.status_bar = QStatusBar()
@@ -8718,6 +11436,67 @@ class CameraTopicWindow(QMainWindow):
         self._update_local_ai_deploy_btn()
         self._update_train_ui()
         self._update_cad_ui()
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+
+    def _focus_chat_ime(self) -> None:
+        if hasattr(self, "chat_panel") and self.chat_panel is not None:
+            self.chat_panel._focus_chat_input(activate_ime=True)
+
+    def _test_qwen_widget_has_focus(self, w: Optional[QWidget]) -> bool:
+        stealers: List[QWidget] = []
+        for name in (
+            "test_qwen_start_btn",
+            "test_qwen_stop_btn",
+            "test_qwen_model_combo",
+            "test_qwen_target_combo",
+            "test_qwen_root_combo",
+            "test_qwen_refresh_btn",
+        ):
+            if hasattr(self, name):
+                stealers.append(getattr(self, name))
+        cur: Optional[QWidget] = w
+        while cur is not None:
+            if cur in stealers:
+                return True
+            cur = cur.parentWidget()
+        return False
+
+    @staticmethod
+    def _printable_key_for_chat(event) -> bool:
+        if event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+            return False
+        key = event.key()
+        if key in (
+            Qt.Key_Tab,
+            Qt.Key_Backtab,
+            Qt.Key_Escape,
+            Qt.Key_Return,
+            Qt.Key_Enter,
+            Qt.Key_Shift,
+            Qt.Key_Control,
+            Qt.Key_Alt,
+            Qt.Key_Meta,
+            Qt.Key_CapsLock,
+        ):
+            return False
+        text = event.text()
+        return bool(text) or key in (Qt.Key_Space, Qt.Key_Backspace, Qt.Key_Delete)
+
+    def eventFilter(self, obj, event) -> bool:
+        et = event.type()
+        if hasattr(self, "_chat_group") and obj is self._chat_group:
+            if et == QEvent.MouseButtonPress:
+                QTimer.singleShot(0, self._focus_chat_ime)
+            return False
+        if et == QEvent.KeyPress and hasattr(self, "chat_panel"):
+            fw = QApplication.focusWidget()
+            if fw is not None and self._test_qwen_widget_has_focus(fw):
+                if self._printable_key_for_chat(event):
+                    self.chat_panel._defer_key_to_input(event)
+                    return True
+        return super().eventFilter(obj, event)
 
     def _get_psi_policy_dir(self) -> Optional[str]:
         if self._psi_policy_dir_override:
@@ -8816,6 +11595,552 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_train_clear_log_clicked(self) -> None:
         self.train_log_edit.clear()
+
+    def _on_test_scenario_clicked(self, title: str) -> None:
+        path = self._test_image_paths.get(title, "")
+        if not path:
+            self.status_bar.showMessage(f"场景「{title}」无可用图片")
+            return
+        if self.chat_panel.set_attached_image_from_path(path, display_name=title):
+            self._set_test_scenario_selection(title)
+            self.status_bar.showMessage(f"已选场景图用于对话: {title}")
+
+    def _set_test_scenario_selection(self, title: str) -> None:
+        self._test_selected_scenario = title
+        for name, label in self._test_image_labels.items():
+            label.set_selected(name == title)
+
+    def _on_chat_attached_image_changed(self, path: str) -> None:
+        if not path:
+            self._set_test_scenario_selection("")
+            return
+        for name, p in self._test_image_paths.items():
+            if os.path.abspath(p) == os.path.abspath(path):
+                self._set_test_scenario_selection(name)
+                return
+
+    def _append_test_infer_log(self, line: str) -> None:
+        self.test_infer_log_edit.append(line)
+        scrollbar = self.test_infer_log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _selected_test_qwen_deploy_spec(self) -> Dict[str, str]:
+        data = self.test_qwen_model_combo.currentData()
+        if isinstance(data, dict):
+            path = str(data.get("path") or "").strip()
+            if path:
+                return {
+                    "path": path,
+                    "model_id": str(data.get("model_id") or os.path.basename(path.rstrip("/"))),
+                    "label": str(data.get("label") or data.get("name") or os.path.basename(path.rstrip("/"))),
+                    "kind": str(data.get("kind") or ""),
+                    "root": str(data.get("root") or ""),
+                }
+        return {}
+
+    def _selected_test_qwen_model_key(self) -> str:
+        spec = self._selected_test_qwen_deploy_spec()
+        if spec.get("path"):
+            return str(spec.get("model_id") or spec.get("path"))
+        key = self.test_qwen_model_combo.currentData()
+        if isinstance(key, str) and key:
+            return key
+        return LOCAL_QWEN_DEPLOY_MODELS[0][0]
+
+    def _selected_test_qwen_scan_root(self) -> str:
+        root = self.test_qwen_root_combo.currentData()
+        if isinstance(root, str) and root.strip():
+            return root.strip()
+        return ""
+
+    def _refresh_test_qwen_scan_roots(self) -> None:
+        target = self._selected_test_qwen_target()
+        prev = self._selected_test_qwen_scan_root()
+        self.test_qwen_root_combo.blockSignals(True)
+        self.test_qwen_root_combo.clear()
+        if target == "local":
+            roots = local_deploy_scan_roots()
+        else:
+            roots = remote_deploy_scan_roots(self._selected_test_qwen_remote_host())
+        for path, label in roots:
+            self.test_qwen_root_combo.addItem(label, path)
+            idx = self.test_qwen_root_combo.count() - 1
+            self.test_qwen_root_combo.setItemData(idx, path, Qt.ToolTipRole)
+        if prev:
+            idx = self.test_qwen_root_combo.findData(prev)
+            if idx >= 0:
+                self.test_qwen_root_combo.setCurrentIndex(idx)
+        self.test_qwen_root_combo.blockSignals(False)
+
+    def _on_test_qwen_root_changed(self, _index: int = 0) -> None:
+        self._refresh_test_qwen_model_list()
+
+    def _refresh_test_qwen_model_list(self) -> None:
+        if self._test_qwen_model_list_refreshing:
+            return
+        root = self._selected_test_qwen_scan_root()
+        if not root:
+            return
+        self._test_qwen_model_list_refreshing = True
+        self.test_qwen_refresh_btn.setEnabled(False)
+        self.test_qwen_model_combo.setEnabled(False)
+        target = self._selected_test_qwen_target()
+        host_id = self._selected_test_qwen_remote_host()
+        self._append_test_infer_log(f"扫描可部署目录: {root} …")
+
+        def _work() -> None:
+            ok, models, err = fetch_deploy_model_dirs(
+                target=target,
+                host_id=host_id,
+                root=root,
+            )
+            self._deploy_model_list_bridge.finished.emit(
+                {
+                    "ok": ok,
+                    "models": models,
+                    "message": err,
+                    "root": root,
+                    "target": target,
+                }
+            )
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_test_qwen_model_list_ready(self, payload: object) -> None:
+        self._test_qwen_model_list_refreshing = False
+        data = payload if isinstance(payload, dict) else {}
+        ok = bool(data.get("ok"))
+        models = data.get("models") if isinstance(data.get("models"), list) else []
+        root = str(data.get("root") or self._selected_test_qwen_scan_root())
+        prev_path = str(self._selected_test_qwen_deploy_spec().get("path") or "")
+
+        self.test_qwen_model_combo.blockSignals(True)
+        self.test_qwen_model_combo.clear()
+        for entry in models:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "").strip()
+            if not path:
+                continue
+            name = str(entry.get("name") or os.path.basename(path.rstrip("/")))
+            kind = str(entry.get("kind") or "")
+            kind_label = deploy_model_kind_label(kind)
+            item_label = f"{name} ({kind_label})"
+            spec = {
+                "path": path,
+                "name": name,
+                "model_id": str(entry.get("model_id") or name),
+                "label": str(entry.get("label") or name),
+                "kind": kind,
+                "root": str(entry.get("root") or root),
+            }
+            self.test_qwen_model_combo.addItem(item_label, spec)
+            idx = self.test_qwen_model_combo.count() - 1
+            tip = (
+                f"{name}\nmodel_id={spec['model_id']}\n"
+                f"路径: {path}\n类型: {kind_label}\n根目录: {spec['root']}"
+            )
+            self.test_qwen_model_combo.setItemData(idx, tip, Qt.ToolTipRole)
+        if prev_path:
+            for i in range(self.test_qwen_model_combo.count()):
+                spec = self.test_qwen_model_combo.itemData(i)
+                if isinstance(spec, dict) and spec.get("path") == prev_path:
+                    self.test_qwen_model_combo.setCurrentIndex(i)
+                    break
+        elif self.test_qwen_model_combo.count() > 0:
+            prefer = self.test_qwen_model_combo.findText(
+                "Qwen3.5-35B-A3B", Qt.MatchContains
+            )
+            self.test_qwen_model_combo.setCurrentIndex(
+                prefer if prefer >= 0 else 0
+            )
+        self.test_qwen_model_combo.blockSignals(False)
+
+        if ok:
+            self._append_test_infer_log(
+                f"已加载 {len(models)} 个可部署目录（{root}）"
+            )
+        else:
+            msg = str(data.get("message") or "扫描失败")
+            self._append_test_infer_log(f"目录扫描失败: {msg}")
+            self.status_bar.showMessage(f"目录扫描失败: {msg}")
+        self._refresh_test_qwen_model_path_label()
+        self._update_test_qwen_ui()
+
+    def _selected_test_qwen_target(self) -> str:
+        target = str(self.test_qwen_target_combo.currentData() or "local")
+        if target == "local":
+            return "local"
+        if target.startswith("remote:") or target == "remote":
+            return "remote"
+        return "local"
+
+    def _selected_test_qwen_remote_host(self) -> str:
+        target = str(self.test_qwen_target_combo.currentData() or "")
+        if target.startswith("remote:"):
+            return target.split(":", 1)[1].strip() or REMOTE_QWEN_SSH_HOST
+        return REMOTE_QWEN_SSH_HOST
+
+    def _on_test_qwen_target_changed(self, _index: int = 0) -> None:
+        if self._selected_test_qwen_target() == "remote":
+            self._remote_qwen_launcher.set_host(self._selected_test_qwen_remote_host())
+        self._refresh_test_qwen_scan_roots()
+        self._refresh_test_qwen_model_list()
+        self._update_test_qwen_ui()
+
+    def _on_test_qwen_model_changed(self, _index: int = 0) -> None:
+        self._refresh_test_qwen_model_path_label()
+
+    def _refresh_test_qwen_model_path_label(self) -> None:
+        spec = self._selected_test_qwen_deploy_spec()
+        target = self._selected_test_qwen_target()
+        if spec.get("path"):
+            path = spec["path"]
+            label = spec.get("label") or os.path.basename(path.rstrip("/"))
+            mid = spec.get("model_id") or label
+            kind = deploy_model_kind_label(str(spec.get("kind") or ""))
+            if target == "remote":
+                host_id = self._selected_test_qwen_remote_host()
+                prof = remote_qwen_profile(host_id)
+                py = resolve_deploy_python_for_spec(
+                    spec, target="remote", host_id=host_id
+                )
+                api = str(prof.get("api_base") or remote_qwen_api_base_for_host(host_id))
+                self.test_model_path_label.setText(
+                    f"{host_id}:{path}  ·  id={mid}"
+                )
+                self.test_model_path_label.setStyleSheet(
+                    f"color: {UI_TEXT_SECONDARY};"
+                )
+                self.test_model_path_label.setToolTip(
+                    f"远程部署 {label}（{kind}）\nSSH Host: {host_id}\n"
+                    f"model_id={mid}\n路径: {path}\n"
+                    f"Python: {py}\n"
+                    f"工作目录: {prof.get('remote_work')}\n"
+                    f"隧道 API: {api}"
+                )
+            else:
+                self.test_model_path_label.setText(f"{path}  ·  id={mid}")
+                self.test_model_path_label.setStyleSheet(
+                    f"color: {UI_TEXT_SECONDARY};"
+                )
+                self.test_model_path_label.setToolTip(
+                    f"本地部署 {label}（{kind}）\nmodel_id={mid}\n"
+                    f"路径: {path}\n"
+                    f"API: {LOCAL_QWEN_API_BASE_DEFAULT}"
+                )
+            return
+
+        key = self._selected_test_qwen_model_key()
+        label = local_qwen_label_for_key(key)
+        mid = local_qwen_model_id_for_key(key)
+        dirname = qwen_deploy_path_spec_for_key(key)
+        if target == "remote":
+            host_id = self._selected_test_qwen_remote_host()
+            prof = remote_qwen_profile(host_id)
+            remote_root = str(prof.get("model_root") or "")
+            remote_path = qwen_model_path_from_spec(dirname, root=remote_root)
+            py = remote_qwen_python_for_key(key) or str(prof.get("python") or "")
+            api = str(prof.get("api_base") or remote_qwen_api_base_for_host(host_id))
+            kind = "LoRA" if qwen_model_is_lora(remote_path) else "全量"
+            self.test_model_path_label.setText(
+                f"{host_id}:{remote_path}  ·  id={mid}"
+            )
+            self.test_model_path_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+            self.test_model_path_label.setToolTip(
+                f"远程部署 {label}（{kind}）\nSSH Host: {host_id}\n"
+                f"model_id={mid}\n路径: {remote_path}\n"
+                f"Python: {py}\n"
+                f"工作目录: {prof.get('remote_work')}\n"
+                f"隧道 API: {api}"
+            )
+            return
+
+        path = local_qwen_model_dir_for_key(key)
+        missing = qwen_model_path_from_spec(dirname)
+        if path:
+            self.test_model_path_label.setText(f"{path}  ·  id={mid}")
+            self.test_model_path_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        else:
+            self.test_model_path_label.setText(f"未找到权重: {missing}")
+            self.test_model_path_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        self.test_model_path_label.setToolTip(
+            f"本地部署 {label}\nmodel_id={mid}\n"
+            f"路径: {path or missing}\n"
+            f"API: {LOCAL_QWEN_API_BASE_DEFAULT}"
+        )
+
+    def _on_test_qwen_status(self, msg: str) -> None:
+        self.test_qwen_status_label.setText(f"服务: {msg}")
+        self._append_test_infer_log(msg)
+        self.status_bar.showMessage(msg)
+
+    def _refresh_test_qwen_status(self) -> None:
+        self._update_test_qwen_ui()
+
+    def _update_test_qwen_ui(self, *_args) -> None:
+        target = self._selected_test_qwen_target()
+        if target == "remote":
+            self._update_test_qwen_ui_remote()
+        else:
+            self._update_test_qwen_ui_local()
+
+    def _update_test_qwen_ui_remote(self) -> None:
+        host_id = self._selected_test_qwen_remote_host()
+        self._remote_qwen_launcher.set_host(host_id)
+        api = self._remote_qwen_launcher.api_base()
+        info = fetch_local_qwen_server_info(api)
+        healthy = bool(info and info.get("ok"))
+        was_starting = bool(getattr(self._remote_qwen_launcher, "_starting", False))
+        starting = was_starting and not healthy
+        if healthy:
+            self._remote_qwen_launcher._starting = False
+            starting = False
+            if was_starting:
+                mid = str(
+                    (info or {}).get("model")
+                    or self._remote_qwen_launcher.last_model_id()
+                )
+                self.chat_panel.apply_remote_qwen_service_preset(
+                    api_base=api, model_id=mid, silent=False
+                )
+                self._append_test_infer_log(f"远程 Qwen 已就绪: {api} ({mid})")
+                QTimer.singleShot(0, self._focus_chat_ime)
+        live_model = str((info or {}).get("model") or "")
+        if healthy:
+            suffix = f" · {live_model}" if live_model else ""
+            self.test_qwen_status_label.setText(f"服务: 远程在线 {api}{suffix}")
+            self.test_qwen_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        elif starting:
+            label = self._remote_qwen_launcher.last_model_label()
+            self.test_qwen_status_label.setText(
+                f"服务: 远程启动中（{label} @ {host_id}）…"
+            )
+            self.test_qwen_status_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        else:
+            self.test_qwen_status_label.setText(f"服务: 远程离线（{host_id}）")
+            self.test_qwen_status_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        self.test_qwen_start_btn.setEnabled(not healthy and not starting)
+        self.test_qwen_stop_btn.setEnabled(healthy or starting)
+        busy = healthy or starting or self._test_qwen_model_list_refreshing
+        self.test_qwen_model_combo.setEnabled(not busy)
+        self.test_qwen_target_combo.setEnabled(not busy)
+        self.test_qwen_root_combo.setEnabled(not busy)
+        self.test_qwen_refresh_btn.setEnabled(not busy)
+
+    def _update_test_qwen_ui_local(self) -> None:
+        api = self._local_qwen_launcher.api_base()
+        info = fetch_local_qwen_server_info(api)
+        healthy = bool(info and info.get("ok"))
+        hostctl_running = False
+        hostctl_starting = False
+        hostctl_error = ""
+        if check_local_qwen_hostctl_health():
+            _ok, body = local_qwen_hostctl_request("/status", method="GET", timeout_s=2.0)
+            if _ok:
+                hostctl_running = bool(body.get("process_running"))
+                hostctl_starting = bool(body.get("starting")) or (
+                    hostctl_running and not healthy
+                )
+                hostctl_error = str(body.get("last_error") or "").strip()
+
+        if healthy:
+            self._local_qwen_launcher._starting = False
+        elif getattr(self._local_qwen_launcher, "_starting", False):
+            local_proc_alive = (
+                self._local_qwen_launcher._process is not None
+                and self._local_qwen_launcher._process.state() == QProcess.Running
+            )
+            if self._local_qwen_launcher._via_hostctl:
+                if not hostctl_running and not healthy:
+                    self._local_qwen_launcher._starting = False
+                    self._local_qwen_launcher._via_hostctl = False
+                    if not self._local_qwen_launcher._fail_notified:
+                        self._local_qwen_launcher._fail_notified = True
+                        err = hostctl_error or (
+                            "推理进程已退出，请查看 log/local_qwen_service.log"
+                        )
+                        self._append_test_infer_log(f"启动失败: {err}")
+                        self.status_bar.showMessage("本地 Qwen 启动失败")
+            elif not local_proc_alive:
+                self._local_qwen_launcher._starting = False
+
+        starting = bool(getattr(self._local_qwen_launcher, "_starting", False)) and not healthy
+        if (
+            self._local_qwen_launcher._process is not None
+            and self._local_qwen_launcher._process.state() == QProcess.Running
+            and not healthy
+        ):
+            starting = True
+        if hostctl_starting:
+            starting = True
+            self._local_qwen_launcher._starting = True
+
+        live_model = str((info or {}).get("model") or "")
+        if healthy:
+            suffix = f" · {live_model}" if live_model else ""
+            self.test_qwen_status_label.setText(f"服务: 在线 {api}{suffix}")
+            self.test_qwen_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        elif starting:
+            label = self._local_qwen_launcher.last_model_label()
+            self.test_qwen_status_label.setText(f"服务: 启动中（加载 {label}）…")
+            self.test_qwen_status_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        elif hostctl_error and not healthy:
+            short = hostctl_error if len(hostctl_error) <= 80 else hostctl_error[:77] + "…"
+            self.test_qwen_status_label.setText(f"服务: 启动失败 · {short}")
+            self.test_qwen_status_label.setStyleSheet(f"color: {UI_ACCENT_RED};")
+            self.test_qwen_status_label.setToolTip(hostctl_error)
+        else:
+            self.test_qwen_status_label.setText("服务: 离线")
+            self.test_qwen_status_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        self.test_qwen_start_btn.setEnabled(not healthy and not starting)
+        self.test_qwen_stop_btn.setEnabled(healthy or starting)
+        busy = healthy or starting or self._test_qwen_model_list_refreshing
+        self.test_qwen_model_combo.setEnabled(not busy)
+        self.test_qwen_target_combo.setEnabled(not busy)
+        self.test_qwen_root_combo.setEnabled(not busy)
+        self.test_qwen_refresh_btn.setEnabled(not busy)
+
+    def _on_test_qwen_start_clicked(self) -> None:
+        spec = self._selected_test_qwen_deploy_spec()
+        key = self._selected_test_qwen_model_key()
+        target = self._selected_test_qwen_target()
+        self._qwen_switch_tries = 0
+        if not spec.get("path") and self.test_qwen_model_combo.count() == 0:
+            self._append_test_infer_log("请先点「刷新」加载可部署目录，并选择一个模型。")
+            self.status_bar.showMessage("未选择模型")
+            return
+        if target == "remote":
+            host_id = self._selected_test_qwen_remote_host()
+            path = spec.get("path") or ""
+            if path and LAKE_QWEN35_OUTPUT_ROOT in path and host_id != "psi_motus_2_for_liyichao":
+                self._append_test_infer_log(
+                    "Lake 训练 output 目前仅在远程 psi_motus 可访问。"
+                )
+                self.status_bar.showMessage("请切换部署位置为 psi_motus")
+                return
+            if path and not path.startswith("/share_data") and host_id == "tione-develop":
+                self._append_test_infer_log(
+                    "提示: 所选目录若不在 tione-develop 本机/共享盘，部署可能失败。"
+                )
+            api = remote_qwen_api_base_for_host(host_id)
+            label = spec.get("label") or key
+            self._append_test_infer_log(
+                f"远程部署: {host_id} / {label}，隧道 {api}"
+            )
+            self._remote_qwen_launcher.start(
+                model_key=key,
+                host_id=host_id,
+                model_dir=spec.get("path"),
+                model_id=spec.get("model_id"),
+                model_label=spec.get("label"),
+            )
+            self._update_test_qwen_ui()
+            QTimer.singleShot(200, self._focus_chat_ime)
+            QTimer.singleShot(2500, self._try_switch_chat_to_remote_qwen)
+            return
+
+        path = spec.get("path") or local_qwen_model_dir_for_key(key)
+        if spec.get("path"):
+            if key.endswith("-a3b") or "35b" in key.lower():
+                self._append_test_infer_log(
+                    "提示: 本地单卡部署 35B 会走 CPU/磁盘 offload，很慢；"
+                    "建议把部署位置改为远程 GPU 机。"
+                )
+            self._local_qwen_launcher.start(
+                model_dir=spec.get("path"),
+                model_id=spec.get("model_id"),
+                model_label=spec.get("label"),
+            )
+        else:
+            if key == "qwen3.5-35b-a3b":
+                self._append_test_infer_log(
+                    "提示: 本地单卡部署 35B 会走 CPU/磁盘 offload，很慢；"
+                    "建议把部署位置改为远程 GPU 机。"
+                )
+            self._local_qwen_launcher.start(model_key=key)
+        self._update_test_qwen_ui()
+        QTimer.singleShot(200, self._focus_chat_ime)
+        QTimer.singleShot(2000, self._try_switch_chat_to_local_qwen)
+
+    def _try_switch_chat_to_local_qwen(self) -> None:
+        if self._selected_test_qwen_target() != "local":
+            return
+        api = self._local_qwen_launcher.api_base()
+        info = fetch_local_qwen_server_info(api)
+        if info and info.get("ok"):
+            mid = str(info.get("model") or self._local_qwen_launcher.last_model_id())
+            self.chat_panel.apply_local_qwen_service_preset(
+                api_base=api, model_id=mid, silent=False
+            )
+            self._update_test_qwen_ui()
+            return
+
+        if check_local_qwen_hostctl_health():
+            _ok, body = local_qwen_hostctl_request("/status", method="GET", timeout_s=2.0)
+            if _ok and not body.get("process_running") and not body.get("service_healthy"):
+                self._local_qwen_launcher._starting = False
+                if not self._local_qwen_launcher._fail_notified:
+                    self._local_qwen_launcher._fail_notified = True
+                    err = str(body.get("last_error") or "推理进程已退出")
+                    self._append_test_infer_log(f"启动失败: {err}")
+                self._update_test_qwen_ui()
+                return
+
+        self._qwen_switch_tries = getattr(self, "_qwen_switch_tries", 0) + 1
+        if self._qwen_switch_tries < 180:
+            QTimer.singleShot(2000, self._try_switch_chat_to_local_qwen)
+        else:
+            self._local_qwen_launcher._starting = False
+            self._append_test_infer_log(
+                "启动超时：模型仍未就绪，请查看 eai/log/local_qwen_service.log"
+            )
+        self._update_test_qwen_ui()
+
+    def _try_switch_chat_to_remote_qwen(self) -> None:
+        if self._selected_test_qwen_target() != "remote":
+            return
+        api = self._remote_qwen_launcher.api_base()
+        info = fetch_local_qwen_server_info(api)
+        if info and info.get("ok"):
+            self._remote_qwen_launcher._starting = False
+            mid = str(info.get("model") or self._remote_qwen_launcher.last_model_id())
+            self.chat_panel.apply_remote_qwen_service_preset(
+                api_base=api, model_id=mid, silent=False
+            )
+            QTimer.singleShot(0, self._focus_chat_ime)
+            self._update_test_qwen_ui()
+            return
+
+        if (
+            not getattr(self._remote_qwen_launcher, "_starting", False)
+            and getattr(self._remote_qwen_launcher, "_fail_notified", False)
+        ):
+            self._update_test_qwen_ui()
+            return
+
+        self._qwen_switch_tries = getattr(self, "_qwen_switch_tries", 0) + 1
+        # 远程 35B 多卡加载可能更久
+        if self._qwen_switch_tries < 300:
+            QTimer.singleShot(2000, self._try_switch_chat_to_remote_qwen)
+        else:
+            self._remote_qwen_launcher._starting = False
+            host_id = self._selected_test_qwen_remote_host()
+            prof = remote_qwen_profile(host_id)
+            log_hint = str(prof.get("remote_work") or "") + "/local_qwen_service.log"
+            self._append_test_infer_log(
+                f"远程启动超时（{host_id}）：请查看远程日志 {log_hint}"
+            )
+        self._update_test_qwen_ui()
+
+    def _on_test_qwen_stop_clicked(self) -> None:
+        if self._selected_test_qwen_target() == "remote":
+            self._remote_qwen_launcher.stop(
+                host_id=self._selected_test_qwen_remote_host()
+            )
+        else:
+            self._local_qwen_launcher.stop()
+        self._update_test_qwen_ui()
 
     def _on_cad_mode_changed(self, *_args) -> None:
         mode = str(self.cad_mode_combo.currentData() or "photos")
@@ -9312,6 +12637,9 @@ class CameraTopicWindow(QMainWindow):
             self.status_bar.showMessage(f"SAM3 启动中，请稍候… ({url})")
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        app = QApplication.instance()
+        if app is not None:
+            app.removeEventFilter(self)
         self._stop_skeleton_tracking()
         self._ui_timer.stop()
         self._sam3_health_timer.stop()
@@ -9321,6 +12649,8 @@ class CameraTopicWindow(QMainWindow):
         self._local_ai_launcher.shutdown()
         self._train_launcher.shutdown()
         self._cad_launcher.shutdown()
+        self._local_qwen_launcher.shutdown()
+        self._remote_qwen_launcher.shutdown()
         for panel in self.panels.values():
             if isinstance(panel, DepthPanel3D):
                 panel.stop_robot_timer()
@@ -11082,8 +14412,34 @@ def apply_viewer_theme(app: QApplication) -> None:
     )
 
 
+def configure_qt_ime_for_chinese() -> None:
+    """为 Docker/本机启用 fcitx 中文输入（须在创建 QApplication 之前调用）。"""
+    lang = os.environ.get("LANG", "").strip()
+    if not lang:
+        os.environ["LANG"] = "zh_CN.UTF-8"
+    if not os.environ.get("LC_ALL", "").strip():
+        os.environ["LC_ALL"] = os.environ["LANG"]
+
+    if not os.environ.get("QT_IM_MODULE"):
+        os.environ["QT_IM_MODULE"] = "fcitx"
+    if not os.environ.get("XMODIFIERS"):
+        os.environ["XMODIFIERS"] = "@im=fcitx"
+    if not os.environ.get("GTK_IM_MODULE"):
+        os.environ["GTK_IM_MODULE"] = "fcitx"
+
+    plugin_root = os.path.join(EAI_DIR, "qt_plugins")
+    if os.path.isdir(os.path.join(plugin_root, "platforminputcontexts")):
+        from PyQt5.QtCore import QCoreApplication
+
+        QCoreApplication.addLibraryPath(plugin_root)
+        QCoreApplication.addLibraryPath(
+            os.path.join(plugin_root, "platforminputcontexts")
+        )
+
+
 def main() -> int:
     args = parse_args()
+    configure_qt_ime_for_chinese()
     rclpy.init()
 
     app = QApplication(sys.argv)

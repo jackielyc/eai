@@ -219,10 +219,196 @@ if [[ -n "${XAUTH_HOST}" && -f "${XAUTH_HOST}" ]]; then
     fi
 fi
 
+# 宿主机侧 Qwen 启停控制（Docker viewer 经 127.0.0.1:18101 调用；需 host 网络）
+ensure_local_qwen_hostctl() {
+    local ctl_py="${SCRIPT_DIR}/local_qwen_hostctl.py"
+    local ctl_log="${SCRIPT_DIR}/log/local_qwen_hostctl.log"
+    local ctl_port="${LOCAL_QWEN_CTL_PORT:-18101}"
+    mkdir -p "${SCRIPT_DIR}/log"
+    if curl -fsS --max-time 1 "http://127.0.0.1:${ctl_port}/health" >/dev/null 2>&1; then
+        echo ">>> 本地 Qwen hostctl 已在运行 (:${ctl_port})"
+        return 0
+    fi
+    if [[ ! -f "${ctl_py}" ]]; then
+        echo "警告: 未找到 ${ctl_py}，测试 Tab 启动推理服务可能失败" >&2
+        return 0
+    fi
+    echo ">>> 启动本地 Qwen hostctl (127.0.0.1:${ctl_port})"
+    nohup python3 "${ctl_py}" >>"${ctl_log}" 2>&1 &
+    disown || true
+    sleep 0.4
+    if curl -fsS --max-time 1 "http://127.0.0.1:${ctl_port}/health" >/dev/null 2>&1; then
+        echo ">>> hostctl 就绪。测试 Tab 可点「启动推理服务」"
+    else
+        echo "警告: hostctl 未能就绪，可手动: python3 ${ctl_py}" >&2
+    fi
+}
+ensure_local_qwen_hostctl
+
+# 宿主机侧远程 Qwen 部署（Docker 内不要直接 ssh 隧道，避免 PID/端口冲突）
+remote_hostctl_has_list_models() {
+    local port="$1"
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 \
+        "http://127.0.0.1:${port}/list_models?host=psi_motus_2_for_liyichao" 2>/dev/null || echo 000)"
+    [[ "${code}" == "200" ]]
+}
+
+stop_remote_qwen_hostctl() {
+    local ctl_port="$1"
+    pkill -f "remote_qwen_hostctl.py" 2>/dev/null || true
+    fuser -k "${ctl_port}/tcp" 2>/dev/null || true
+    sleep 0.3
+}
+
+ensure_remote_qwen_hostctl() {
+    local ctl_py="${SCRIPT_DIR}/remote_qwen_hostctl.py"
+    local ctl_log="${SCRIPT_DIR}/log/remote_qwen_hostctl.log"
+    local ctl_port="${REMOTE_QWEN_CTL_PORT:-18103}"
+    mkdir -p "${SCRIPT_DIR}/log"
+    if curl -fsS --max-time 1 "http://127.0.0.1:${ctl_port}/health" >/dev/null 2>&1; then
+        if remote_hostctl_has_list_models "${ctl_port}"; then
+            echo ">>> 远程 Qwen hostctl 已在运行 (:${ctl_port})"
+            return 0
+        fi
+        echo ">>> 远程 Qwen hostctl 版本过旧（缺少 list_models），重启…"
+        stop_remote_qwen_hostctl "${ctl_port}"
+    fi
+    if [[ ! -f "${ctl_py}" ]]; then
+        echo "警告: 未找到 ${ctl_py}" >&2
+        return 0
+    fi
+    echo ">>> 启动远程 Qwen hostctl (127.0.0.1:${ctl_port})"
+    nohup python3 "${ctl_py}" >>"${ctl_log}" 2>&1 &
+    disown || true
+    sleep 0.4
+    if curl -fsS --max-time 1 "http://127.0.0.1:${ctl_port}/health" >/dev/null 2>&1; then
+        echo ">>> remote hostctl 就绪（测试 Tab 远程部署走宿主机 SSH）"
+    else
+        echo "警告: remote hostctl 未能就绪，可手动: python3 ${ctl_py}" >&2
+    fi
+}
+ensure_remote_qwen_hostctl
+
+# 清理旧版错误 SSH 隧道（进程在但 18100/18102 未监听），勿调用 stop（会停远程模型）
+cleanup_stale_remote_qwen_tunnels() {
+    if curl -fsS --max-time 1 "http://127.0.0.1:18100/health" >/dev/null 2>&1; then
+        echo ">>> 远程 Qwen 隧道已可用 (:18100)"
+        return 0
+    fi
+    if curl -fsS --max-time 1 "http://127.0.0.1:18102/health" >/dev/null 2>&1; then
+        echo ">>> 远程 Qwen 隧道已可用 (:18102)"
+        return 0
+    fi
+    echo ">>> 清理无效 SSH 隧道进程"
+    pkill -f 'ssh .* -L 18100:127.0.0.1:8100' 2>/dev/null || true
+    pkill -f 'ssh .* -L 18102:127.0.0.1:8100' 2>/dev/null || true
+    fuser -k 18100/tcp 2>/dev/null || true
+    fuser -k 18102/tcp 2>/dev/null || true
+}
+cleanup_stale_remote_qwen_tunnels
+
+# 把宿主机 session dbus 转发到挂载目录，供容器内 fcitx 中文输入
+dbus_proxy_fcitx_ok() {
+    local bus_proxy="$1"
+    [[ -S "${bus_proxy}" ]] || return 1
+    DBUS_SESSION_BUS_ADDRESS="unix:path=${bus_proxy}" \
+        timeout 2 dbus-send --session --print-reply \
+        --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+        org.freedesktop.DBus.ListNames 2>/dev/null \
+        | grep -qi fcitx
+}
+
+stop_dbus_proxy() {
+    local pidfile="$1"
+    local bus_proxy="$2"
+    if [[ -f "${pidfile}" ]]; then
+        kill "$(cat "${pidfile}" 2>/dev/null)" 2>/dev/null || true
+        rm -f "${pidfile}"
+    fi
+    pkill -f "xdg-dbus-proxy.*${bus_proxy}" 2>/dev/null || true
+    pkill -f "socat UNIX-LISTEN:${bus_proxy}" 2>/dev/null || true
+    fuser -k "${bus_proxy}" 2>/dev/null || true
+    rm -f "${bus_proxy}"
+    sleep 0.2
+}
+
+ensure_host_dbus_proxy_for_ime() {
+    local runtime_proxy="${PSIBOT_HOME}/.cache/a2d_runtime"
+    local bus_proxy="${runtime_proxy}/bus"
+    local host_bus="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus"
+    local pidfile="${SCRIPT_DIR}/log/dbus_proxy.pid"
+    local logfile="${SCRIPT_DIR}/log/dbus_proxy.log"
+    mkdir -p "${runtime_proxy}" "${SCRIPT_DIR}/log"
+    chmod 700 "${runtime_proxy}" 2>/dev/null || true
+
+    if [[ ! -S "${host_bus}" ]]; then
+        echo "警告: 未找到宿主机 dbus (${host_bus})，中文输入可能不可用" >&2
+        return 0
+    fi
+
+    if dbus_proxy_fcitx_ok "${bus_proxy}"; then
+        echo ">>> dbus 代理已在运行且 fcitx 可访问 (${bus_proxy})"
+        return 0
+    fi
+
+    echo ">>> 重启 dbus 代理 (fcitx 中文输入)"
+    stop_dbus_proxy "${pidfile}" "${bus_proxy}"
+
+    if command -v xdg-dbus-proxy >/dev/null 2>&1; then
+        setsid xdg-dbus-proxy "unix:path=${host_bus}" "${bus_proxy}" \
+            </dev/null >>"${logfile}" 2>&1 &
+        echo $! >"${pidfile}"
+        sleep 0.35
+    fi
+
+    if ! dbus_proxy_fcitx_ok "${bus_proxy}" && command -v socat >/dev/null 2>&1; then
+        echo ">>> xdg-dbus-proxy 不可用，改用 socat 转发 dbus" >>"${logfile}"
+        stop_dbus_proxy "${pidfile}" "${bus_proxy}"
+        socat "UNIX-LISTEN:${bus_proxy},fork,mode=770,unlink-early=1" \
+            "UNIX-CONNECT:${host_bus}" >>"${logfile}" 2>&1 &
+        echo $! >"${pidfile}"
+        sleep 0.35
+    fi
+
+    if dbus_proxy_fcitx_ok "${bus_proxy}"; then
+        echo ">>> dbus 代理就绪: ${bus_proxy}"
+    else
+        echo "警告: dbus 代理未连通 fcitx，拼音可能不可用；见 ${logfile}" >&2
+    fi
+}
+ensure_host_dbus_proxy_for_ime
+
+# 确保 workspace 内有 fcitx Qt5 插件副本
+ensure_fcitx_qt_plugin() {
+    local dst_dir="${SCRIPT_DIR}/qt_plugins/platforminputcontexts"
+    local dst="${dst_dir}/libfcitxplatforminputcontextplugin.so"
+    local src="/usr/lib/x86_64-linux-gnu/qt5/plugins/platforminputcontexts/libfcitxplatforminputcontextplugin.so"
+    mkdir -p "${dst_dir}"
+    if [[ -f "${src}" && ( ! -f "${dst}" || "$(stat -c%s "${src}" 2>/dev/null)" != "$(stat -c%s "${dst}" 2>/dev/null)" ) ]]; then
+        cp -f "${src}" "${dst}"
+        echo ">>> 已复制 fcitx Qt 插件到 ${dst}"
+    fi
+}
+ensure_fcitx_qt_plugin
+
+DBUS_PROXY_PATH="${PSIBOT_HOME}/.cache/a2d_runtime/bus"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+
+# 必须用宿主机用户跑 GUI：root 无法通过 dbus EXTERNAL 认证连接 fcitx
 docker exec \
+    -u "${HOST_UID}:${HOST_GID}" \
+    -e HOME="${PSIBOT_HOME_CONTAINER}" \
+    -e USER="${USER:-psibot}" \
     -e DISPLAY="${DISPLAY}" \
     -e QT_X11_NO_MITSHM=1 \
-    -e XDG_RUNTIME_DIR=/tmp/runtime-psibot \
+    -e "XDG_RUNTIME_DIR=${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime" \
+    -e "DBUS_SESSION_BUS_ADDRESS=unix:path=${DBUS_PROXY_PATH}" \
+    -e "LANG=${LANG:-zh_CN.UTF-8}" \
+    -e "QT_IM_MODULE=${QT_IM_MODULE:-fcitx}" \
+    -e "GTK_IM_MODULE=${GTK_IM_MODULE:-fcitx}" \
+    -e "XMODIFIERS=${XMODIFIERS:-@im=fcitx}" \
     "${DOCKER_XAUTH_ENV[@]}" \
     -e FASTRTPS_DEFAULT_PROFILES_FILE="${FASTDDS_IN_CONTAINER}" \
     -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
@@ -230,10 +416,14 @@ docker exec \
     -e ROS_LOCALHOST_ONLY=1 \
     -e A2D_SCRIPTS_DIR="${A2D_SCRIPTS_DIR}" \
     -e PSIBOT_HOME="${PSIBOT_HOME_CONTAINER}" \
+    -e LOCAL_QWEN_CTL_URL="http://127.0.0.1:${LOCAL_QWEN_CTL_PORT:-18101}" \
+    -e LOCAL_QWEN_API_BASE="http://127.0.0.1:${LOCAL_QWEN_PORT:-8100}/v1" \
+    -e REMOTE_QWEN_CTL_URL="http://127.0.0.1:${REMOTE_QWEN_CTL_PORT:-18103}" \
     -it "${CONTAINER}" \
     bash -lc "
 set -eo pipefail
-mkdir -p /tmp/runtime-psibot
+mkdir -p ${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime
+chmod 700 ${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime 2>/dev/null || true
 source /opt/ros/humble/setup.bash
 if [[ -f /opt/psi/rt/a2d-tele/install/setup.bash ]]; then
     source /opt/psi/rt/a2d-tele/install/setup.bash
@@ -243,6 +433,12 @@ if [[ -f ${WORKSPACE_INSTALL} ]]; then
 fi
 export A2D_SCRIPTS_DIR=\"${A2D_SCRIPTS_DIR}\"
 export PSIBOT_HOME=\"${PSIBOT_HOME_CONTAINER}\"
+export HOME=\"${PSIBOT_HOME_CONTAINER}\"
+export QT_IM_MODULE=\"\${QT_IM_MODULE:-fcitx}\"
+export XMODIFIERS=\"\${XMODIFIERS:-@im=fcitx}\"
+export GTK_IM_MODULE=\"\${GTK_IM_MODULE:-fcitx}\"
+export DBUS_SESSION_BUS_ADDRESS=\"unix:path=${DBUS_PROXY_PATH}\"
+export XDG_RUNTIME_DIR=\"${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime\"
 
 unset QT_PLUGIN_PATH
 
@@ -254,6 +450,21 @@ python3 -m pip install -q --user \
     'PyOpenGL==3.1.7' 2>/dev/null || true
 python3 -m pip uninstall -y opencv-python 2>/dev/null || true
 
+python3 - <<'PY'
+import pathlib, shutil
+src = pathlib.Path('${REMOTE_DIR}/qt_plugins/platforminputcontexts/libfcitxplatforminputcontextplugin.so')
+if not src.is_file():
+    raise SystemExit(0)
+import PyQt5
+dst_dir = pathlib.Path(PyQt5.__file__).resolve().parent / 'Qt5' / 'plugins' / 'platforminputcontexts'
+dst_dir.mkdir(parents=True, exist_ok=True)
+dst = dst_dir / src.name
+if (not dst.exists()) or dst.stat().st_size != src.stat().st_size:
+    shutil.copy2(src, dst)
+    print(f'>>> 已安装 fcitx Qt 插件到 {dst}')
+PY
+
+echo \">>> IME QT_IM_MODULE=\$QT_IM_MODULE\"
 echo '>>> 预检 topic...'
 python3 - <<'PY'
 import rclpy
