@@ -11,18 +11,28 @@
 # 环境变量:
 #   PSIBOT_HOME              宿主机目录，挂载到容器内同路径（默认 /home/psibot）
 #   A2D_DOCKER_CONTAINER     容器名
-#   A2D_DOCKER_RECREATE=1    强制重建容器以应用挂载（慎用）
+#   A2D_DOCKER_RECREATE=1    强制重建容器以应用挂载/用户（慎用）
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# 解析软链得到真实工程目录（宿主机常为 ~/workspace_liyichao/eai -> share_data/...）
+# 容器内 /home/psibot bind 常未生效，必须走已挂载的真实路径，否则 images/ 等资源缺失
+EAI_DIR_HOST="$(readlink -f "${SCRIPT_DIR}")"
 CONTAINER="${A2D_DOCKER_CONTAINER:-a2d-tele-release-2-1-0rc3-latest}"
 PSIBOT_HOME="${PSIBOT_HOME:-/home/psibot}"
 PSIBOT_HOME_CONTAINER="${PSIBOT_HOME_CONTAINER:-${PSIBOT_HOME}}"
-REMOTE_DIR="${PSIBOT_HOME}/workspace_liyichao/eai"
+REMOTE_DIR="${EAI_DIR_HOST}"
 A2D_SCRIPTS_DIR="${A2D_SCRIPTS_DIR:-${PSIBOT_HOME}/workspace_liyichao/install/scripts_pack/share/scripts_pack/scripts}"
 WORKSPACE_INSTALL="${PSIBOT_HOME}/workspace_liyichao/install/setup.bash"
 A2D_SDK_HOME="${A2D_SDK_HOME:-${PSIBOT_HOME}/a2d_sdk}"
 FASTDDS_XML="${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"
+# 用宿主机 psibot 的 uid/gid 启动（镜像内 psibot 常为 1000，与宿主机不一致）
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
+CONTAINER_USER="${HOST_UID}:${HOST_GID}"
+# IME：容器禁挂 /tmp，改用 host network 下的 abstract unix socket 转发 fcitx dbus
+IME_RUNTIME_DIR="${IME_RUNTIME_DIR:-/tmp/a2d_ime}"
+IME_DBUS_ABSTRACT="${IME_DBUS_ABSTRACT:-a2d_ime_dbus}"
 
 container_exists() {
     docker inspect "${CONTAINER}" >/dev/null 2>&1
@@ -31,6 +41,17 @@ container_exists() {
 container_has_psibot_mount() {
     docker inspect "${CONTAINER}" --format '{{range .Mounts}}{{if eq .Destination "'"${PSIBOT_HOME_CONTAINER}"'"}}{{.Source}}{{end}}{{end}}' \
         | grep -q .
+}
+
+
+container_runs_as_psibot() {
+    local user
+    user="$(docker inspect "${CONTAINER}" --format '{{.Config.User}}' 2>/dev/null || true)"
+    [[ "${user}" == "${CONTAINER_USER}" || "${user}" == "${HOST_UID}" ]]
+}
+
+container_has_ime_mount() {
+    docker inspect "${CONTAINER}" --format '{{range .Mounts}}{{if eq .Destination "'"${IME_RUNTIME_DIR}"'"}}{{.Source}}{{end}}{{end}}'         | grep -q .
 }
 
 save_container_config() {
@@ -46,13 +67,14 @@ recreate_container_with_psibot_mount() {
         exit 1
     fi
 
-    local inspect_json image workdir entrypoint_json cmd_json
+    local inspect_json image workdir entrypoint_json cmd_json privileged
     inspect_json="$(save_container_config)"
 
     image="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d[0]['Config']['Image'])" "${inspect_json}")"
     workdir="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d[0]['Config'].get('WorkingDir') or '')" "${inspect_json}")"
     entrypoint_json="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d[0]['Config'].get('Entrypoint') or []))" "${inspect_json}")"
     cmd_json="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d[0]['Config'].get('Cmd') or []))" "${inspect_json}")"
+    privileged="$(python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print('1' if d[0]['HostConfig'].get('Privileged') else '0')" "${inspect_json}")"
 
     local -a binds=()
     while IFS= read -r line; do
@@ -78,22 +100,47 @@ recreate_container_with_psibot_mount() {
         binds+=("${PSIBOT_HOME}:${PSIBOT_HOME_CONTAINER}:rw")
     fi
 
-    echo ">>> 停止并删除旧容器 ${CONTAINER}（添加挂载 ${PSIBOT_HOME}:${PSIBOT_HOME_CONTAINER}）"
+    local has_ime=0
+    for b in "${binds[@]}"; do
+        if [[ "${b}" == "${IME_RUNTIME_DIR}:${IME_RUNTIME_DIR}"* ]]; then
+            has_ime=1
+            break
+        fi
+    done
+    # /tmp 绑定常被 daemon 拒绝；IME 改走 abstract unix socket，无需额外 bind
+
+    # 去掉旧的 HOME/USER，统一用宿主机 psibot 身份
+    local -a filtered_envs=()
+    local e
+    for e in "${envs[@]}"; do
+        case "${e}" in
+            HOME=*|USER=*|LOGNAME=*) continue ;;
+        esac
+        filtered_envs+=("${e}")
+    done
+    filtered_envs+=("HOME=${PSIBOT_HOME_CONTAINER}")
+    filtered_envs+=("USER=psibot")
+    filtered_envs+=("LOGNAME=psibot")
+
+    echo ">>> 停止并删除旧容器 ${CONTAINER}（user=${CONTAINER_USER}/psibot，挂载 ${PSIBOT_HOME}:${PSIBOT_HOME_CONTAINER}）"
     docker stop "${CONTAINER}" >/dev/null 2>&1 || true
     docker rm "${CONTAINER}" >/dev/null 2>&1 || true
 
     local -a run_args=(
         docker run -d
         --name "${CONTAINER}"
+        --user "${CONTAINER_USER}"
         --network host
-        --privileged
         --ipc host
         --security-opt label=disable
     )
+    if [[ "${privileged}" == "1" ]]; then
+        run_args+=(--privileged)
+    fi
     for b in "${binds[@]}"; do
         run_args+=(-v "${b}")
     done
-    for e in "${envs[@]}"; do
+    for e in "${filtered_envs[@]}"; do
         run_args+=(-e "${e}")
     done
     if [[ -n "${workdir}" ]]; then
@@ -117,7 +164,7 @@ recreate_container_with_psibot_mount() {
 
     echo ">>> docker run ${run_args[*]}"
     "${run_args[@]}"
-    echo ">>> 容器已重建并启动"
+    echo ">>> 容器已以 psibot(${CONTAINER_USER}) 重建并启动"
 }
 
 ensure_container_ready() {
@@ -128,12 +175,19 @@ ensure_container_ready() {
     fi
 
     local force_recreate="${A2D_DOCKER_RECREATE:-0}"
-    if [[ "${force_recreate}" == "1" ]] || ! container_has_psibot_mount; then
-        if ! container_has_psibot_mount; then
-            echo ">>> 容器未挂载 ${PSIBOT_HOME}:${PSIBOT_HOME_CONTAINER}，正在重建…"
-        else
-            echo ">>> A2D_DOCKER_RECREATE=1，重建容器…"
-        fi
+    local need_recreate=0
+    if [[ "${force_recreate}" == "1" ]]; then
+        need_recreate=1
+        echo ">>> A2D_DOCKER_RECREATE=1，重建容器…"
+    elif ! container_has_psibot_mount; then
+        need_recreate=1
+        echo ">>> 容器未挂载 ${PSIBOT_HOME}:${PSIBOT_HOME_CONTAINER}，正在重建…"
+    elif ! container_runs_as_psibot; then
+        need_recreate=1
+        echo ">>> 容器未以 psibot(${CONTAINER_USER}) 运行（当前 User=$(docker inspect -f '{{.Config.User}}' "${CONTAINER}")），正在重建…"
+    fi
+
+    if [[ "${need_recreate}" -eq 1 ]]; then
         recreate_container_with_psibot_mount
     elif [[ "$(docker inspect -f '{{.State.Running}}' "${CONTAINER}")" != "true" ]]; then
         echo ">>> 启动容器 ${CONTAINER}…"
@@ -144,6 +198,10 @@ ensure_container_ready() {
         echo "错误: 仍缺少挂载 ${PSIBOT_HOME}:${PSIBOT_HOME_CONTAINER}" >&2
         exit 1
     fi
+    if ! container_runs_as_psibot; then
+        echo "错误: 容器仍未以 psibot(${CONTAINER_USER}) 运行" >&2
+        exit 1
+    fi
 }
 
 ensure_container_ready
@@ -151,25 +209,33 @@ ensure_container_ready
 echo ">>> 容器: ${CONTAINER}"
 echo ">>> 挂载: ${PSIBOT_HOME} → ${PSIBOT_HOME_CONTAINER}"
 echo ">>> 工作目录: ${REMOTE_DIR}"
+if [[ "${REMOTE_DIR}" != "${PSIBOT_HOME}/workspace_liyichao/eai" ]]; then
+    echo ">>> 已解析软链: ${PSIBOT_HOME}/workspace_liyichao/eai → ${REMOTE_DIR}"
+fi
 
 if [[ ! -f "${SCRIPT_DIR}/show_camera_topics.py" ]]; then
     echo "错误: 未找到 ${SCRIPT_DIR}/show_camera_topics.py" >&2
     exit 1
 fi
 
-# 挂载后容器内路径与宿主机一致，无需 docker cp
-if ! docker exec "${CONTAINER}" test -f "${REMOTE_DIR}/show_camera_topics.py"; then
-    echo ">>> 容器内未看到 ${REMOTE_DIR}/show_camera_topics.py，回退 docker cp …"
-    docker exec "${CONTAINER}" mkdir -p "${REMOTE_DIR}"
-    docker cp "${SCRIPT_DIR}/show_camera_topics.py" "${CONTAINER}:${REMOTE_DIR}/"
+# 必须能看到完整工程（含 images/）；勿回退到只 cp 单个 py（会导致预览图缺失）
+if ! docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -f "${REMOTE_DIR}/show_camera_topics.py"; then
+    echo "错误: 容器内未看到 ${REMOTE_DIR}/show_camera_topics.py" >&2
+    echo "请确认该路径已挂载进容器（当前依赖 share_data 挂载）" >&2
+    exit 1
+fi
+if ! docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -d "${REMOTE_DIR}/images"; then
+    echo "错误: 容器内未看到 ${REMOTE_DIR}/images（场景预览图目录）" >&2
+    echo "宿主机有: ${EAI_DIR_HOST}/images" >&2
+    exit 1
 fi
 
 if [[ -f "${FASTDDS_XML}" ]]; then
-    docker exec "${CONTAINER}" mkdir -p "${PSIBOT_HOME}/.cache/a2d_dds" 2>/dev/null || true
-    if docker exec "${CONTAINER}" test -f "${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"; then
+    docker exec -u "${CONTAINER_USER}" "${CONTAINER}" mkdir -p "${PSIBOT_HOME}/.cache/a2d_dds" 2>/dev/null || true
+    if docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -f "${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"; then
         FASTDDS_IN_CONTAINER="${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"
     else
-        docker exec "${CONTAINER}" mkdir -p /tmp/a2d_dds
+        docker exec -u "${CONTAINER_USER}" "${CONTAINER}" mkdir -p /tmp/a2d_dds
         docker cp "${FASTDDS_XML}" "${CONTAINER}:/tmp/a2d_dds/fastdds_profiles_a2d.xml"
         FASTDDS_IN_CONTAINER="/tmp/a2d_dds/fastdds_profiles_a2d.xml"
     fi
@@ -308,73 +374,121 @@ cleanup_stale_remote_qwen_tunnels() {
 }
 cleanup_stale_remote_qwen_tunnels
 
-# 把宿主机 session dbus 转发到挂载目录，供容器内 fcitx 中文输入
-dbus_proxy_fcitx_ok() {
-    local bus_proxy="$1"
-    [[ -S "${bus_proxy}" ]] || return 1
-    DBUS_SESSION_BUS_ADDRESS="unix:path=${bus_proxy}" \
+# 把宿主机 fcitx session dbus 转到 abstract socket，供容器（host network）访问
+# 不能依赖 /tmp 或 /home/psibot bind：前者常被 daemon 拒绝，后者在本环境常不生效
+dbus_addr_has_fcitx() {
+    local addr="$1"
+    [[ -n "${addr}" ]] || return 1
+    DBUS_SESSION_BUS_ADDRESS="${addr}" \
         timeout 2 dbus-send --session --print-reply \
         --dest=org.freedesktop.DBus /org/freedesktop/DBus \
         org.freedesktop.DBus.ListNames 2>/dev/null \
         | grep -qi fcitx
 }
 
+parse_dbus_unix_path() {
+    local addr="$1"
+    if [[ "${addr}" =~ unix:path=([^,]+) ]]; then
+        printf '%s\n' "${BASH_REMATCH[1]}"
+    fi
+}
+
+resolve_host_fcitx_bus() {
+    local addr path pid sock
+    for pid in $(pgrep -x fcitx 2>/dev/null; pgrep -x fcitx5 2>/dev/null); do
+        addr="$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -1)"
+        path="$(parse_dbus_unix_path "${addr}")"
+        if [[ -n "${path}" ]] && dbus_addr_has_fcitx "unix:path=${path}"; then
+            printf '%s\n' "${path}"
+            return 0
+        fi
+    done
+    path="$(parse_dbus_unix_path "${DBUS_SESSION_BUS_ADDRESS:-}")"
+    if [[ -n "${path}" ]] && dbus_addr_has_fcitx "unix:path=${path}"; then
+        printf '%s\n' "${path}"
+        return 0
+    fi
+    for path in \
+        "${XDG_RUNTIME_DIR:-}/bus" \
+        "/tmp/runtime-${USER:-psibot}/bus" \
+        "/run/user/$(id -u)/bus"
+    do
+        if dbus_addr_has_fcitx "unix:path=${path}"; then
+            printf '%s\n' "${path}"
+            return 0
+        fi
+    done
+    for sock in /tmp/dbus-*; do
+        [[ -S "${sock}" ]] || continue
+        [[ -O "${sock}" ]] || continue
+        if dbus_addr_has_fcitx "unix:path=${sock}"; then
+            printf '%s\n' "${sock}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 stop_dbus_proxy() {
     local pidfile="$1"
-    local bus_proxy="$2"
+    local pid=""
+    # 只用 pidfile，避免 pkill -f 匹配到本脚本命令行而自杀
     if [[ -f "${pidfile}" ]]; then
-        kill "$(cat "${pidfile}" 2>/dev/null)" 2>/dev/null || true
+        pid="$(cat "${pidfile}" 2>/dev/null || true)"
+        if [[ -n "${pid}" ]]; then
+            kill "${pid}" 2>/dev/null || true
+            # socat fork 子进程
+            pkill -P "${pid}" 2>/dev/null || true
+        fi
         rm -f "${pidfile}"
     fi
-    pkill -f "xdg-dbus-proxy.*${bus_proxy}" 2>/dev/null || true
-    pkill -f "socat UNIX-LISTEN:${bus_proxy}" 2>/dev/null || true
-    fuser -k "${bus_proxy}" 2>/dev/null || true
-    rm -f "${bus_proxy}"
+    rm -f "${IME_RUNTIME_DIR}/bus"
     sleep 0.2
 }
 
 ensure_host_dbus_proxy_for_ime() {
-    local runtime_proxy="${PSIBOT_HOME}/.cache/a2d_runtime"
-    local bus_proxy="${runtime_proxy}/bus"
-    local host_bus="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus"
-    local pidfile="${SCRIPT_DIR}/log/dbus_proxy.pid"
-    local logfile="${SCRIPT_DIR}/log/dbus_proxy.log"
-    mkdir -p "${runtime_proxy}" "${SCRIPT_DIR}/log"
+    local runtime_proxy="${IME_RUNTIME_DIR}"
+    local pidfile="${runtime_proxy}/dbus_proxy.pid"
+    local logfile="${runtime_proxy}/dbus_proxy.log"
+    local abstract_addr="unix:abstract=${IME_DBUS_ABSTRACT}"
+    local host_bus=""
+
+    mkdir -p "${runtime_proxy}"
     chmod 700 "${runtime_proxy}" 2>/dev/null || true
 
-    if [[ ! -S "${host_bus}" ]]; then
-        echo "警告: 未找到宿主机 dbus (${host_bus})，中文输入可能不可用" >&2
+    if ! host_bus="$(resolve_host_fcitx_bus)"; then
+        echo "警告: 未找到带 fcitx 的宿主机 dbus，中文输入可能不可用" >&2
+        echo "  请确认桌面已启动 fcitx，且能在本机终端输入中文" >&2
+        return 0
+    fi
+    echo ">>> 宿主机 fcitx dbus: ${host_bus}"
+
+    if dbus_addr_has_fcitx "${abstract_addr}"; then
+        echo ">>> dbus abstract 代理已可用 (${abstract_addr})"
         return 0
     fi
 
-    if dbus_proxy_fcitx_ok "${bus_proxy}"; then
-        echo ">>> dbus 代理已在运行且 fcitx 可访问 (${bus_proxy})"
+    echo ">>> 重启 dbus 代理 (fcitx → ${abstract_addr})"
+    stop_dbus_proxy "${pidfile}"
+
+    if ! command -v socat >/dev/null 2>&1; then
+        echo "警告: 未找到 socat，无法建立 abstract dbus 代理" >&2
         return 0
     fi
 
-    echo ">>> 重启 dbus 代理 (fcitx 中文输入)"
-    stop_dbus_proxy "${pidfile}" "${bus_proxy}"
+    # host network 下 abstract socket 宿主机/容器共享，无需 bind mount
+    nohup socat "ABSTRACT-LISTEN:${IME_DBUS_ABSTRACT},fork,reuseaddr" \
+        "UNIX-CONNECT:${host_bus}" </dev/null >>"${logfile}" 2>&1 &
+    echo $! >"${pidfile}"
+    sleep 0.35
 
-    if command -v xdg-dbus-proxy >/dev/null 2>&1; then
-        setsid xdg-dbus-proxy "unix:path=${host_bus}" "${bus_proxy}" \
-            </dev/null >>"${logfile}" 2>&1 &
-        echo $! >"${pidfile}"
-        sleep 0.35
-    fi
-
-    if ! dbus_proxy_fcitx_ok "${bus_proxy}" && command -v socat >/dev/null 2>&1; then
-        echo ">>> xdg-dbus-proxy 不可用，改用 socat 转发 dbus" >>"${logfile}"
-        stop_dbus_proxy "${pidfile}" "${bus_proxy}"
-        socat "UNIX-LISTEN:${bus_proxy},fork,mode=770,unlink-early=1" \
-            "UNIX-CONNECT:${host_bus}" >>"${logfile}" 2>&1 &
-        echo $! >"${pidfile}"
-        sleep 0.35
-    fi
-
-    if dbus_proxy_fcitx_ok "${bus_proxy}"; then
-        echo ">>> dbus 代理就绪: ${bus_proxy}"
+    if dbus_addr_has_fcitx "${abstract_addr}"; then
+        echo ">>> dbus 代理就绪: ${abstract_addr}"
     else
         echo "警告: dbus 代理未连通 fcitx，拼音可能不可用；见 ${logfile}" >&2
+        if [[ -f "${logfile}" ]]; then
+            tail -n 20 "${logfile}" >&2 || true
+        fi
     fi
 }
 ensure_host_dbus_proxy_for_ime
@@ -392,9 +506,7 @@ ensure_fcitx_qt_plugin() {
 }
 ensure_fcitx_qt_plugin
 
-DBUS_PROXY_PATH="${PSIBOT_HOME}/.cache/a2d_runtime/bus"
-HOST_UID="$(id -u)"
-HOST_GID="$(id -g)"
+DBUS_PROXY_ADDR="unix:abstract=${IME_DBUS_ABSTRACT}"
 
 # 必须用宿主机用户跑 GUI：root 无法通过 dbus EXTERNAL 认证连接 fcitx
 docker exec \
@@ -403,8 +515,8 @@ docker exec \
     -e USER="${USER:-psibot}" \
     -e DISPLAY="${DISPLAY}" \
     -e QT_X11_NO_MITSHM=1 \
-    -e "XDG_RUNTIME_DIR=${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime" \
-    -e "DBUS_SESSION_BUS_ADDRESS=unix:path=${DBUS_PROXY_PATH}" \
+    -e "XDG_RUNTIME_DIR=/tmp/a2d_runtime" \
+    -e "DBUS_SESSION_BUS_ADDRESS=${DBUS_PROXY_ADDR}" \
     -e "LANG=${LANG:-zh_CN.UTF-8}" \
     -e "QT_IM_MODULE=${QT_IM_MODULE:-fcitx}" \
     -e "GTK_IM_MODULE=${GTK_IM_MODULE:-fcitx}" \
@@ -422,8 +534,8 @@ docker exec \
     -it "${CONTAINER}" \
     bash -lc "
 set -eo pipefail
-mkdir -p ${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime
-chmod 700 ${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime 2>/dev/null || true
+mkdir -p /tmp/a2d_runtime ${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime
+chmod 700 /tmp/a2d_runtime ${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime 2>/dev/null || true
 source /opt/ros/humble/setup.bash
 if [[ -f /opt/psi/rt/a2d-tele/install/setup.bash ]]; then
     source /opt/psi/rt/a2d-tele/install/setup.bash
@@ -434,11 +546,14 @@ fi
 export A2D_SCRIPTS_DIR=\"${A2D_SCRIPTS_DIR}\"
 export PSIBOT_HOME=\"${PSIBOT_HOME_CONTAINER}\"
 export HOME=\"${PSIBOT_HOME_CONTAINER}\"
-export QT_IM_MODULE=\"\${QT_IM_MODULE:-fcitx}\"
-export XMODIFIERS=\"\${XMODIFIERS:-@im=fcitx}\"
-export GTK_IM_MODULE=\"\${GTK_IM_MODULE:-fcitx}\"
-export DBUS_SESSION_BUS_ADDRESS=\"unix:path=${DBUS_PROXY_PATH}\"
-export XDG_RUNTIME_DIR=\"${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime\"
+# 强制中文输入环境（勿用 C.UTF-8）
+export LANG=\"zh_CN.UTF-8\"
+export LC_ALL=\"zh_CN.UTF-8\"
+export QT_IM_MODULE=\"fcitx\"
+export XMODIFIERS=\"@im=fcitx\"
+export GTK_IM_MODULE=\"fcitx\"
+export DBUS_SESSION_BUS_ADDRESS=\"${DBUS_PROXY_ADDR}\"
+export XDG_RUNTIME_DIR=\"/tmp/a2d_runtime\"
 
 unset QT_PLUGIN_PATH
 
@@ -464,7 +579,15 @@ if (not dst.exists()) or dst.stat().st_size != src.stat().st_size:
     print(f'>>> 已安装 fcitx Qt 插件到 {dst}')
 PY
 
-echo \">>> IME QT_IM_MODULE=\$QT_IM_MODULE\"
+# pip PyQt5 自带 Qt；fcitx 插件链到系统 Qt 会 Cannot mix incompatible Qt。
+# 必须把 PyQt5/Qt5/lib 放在 LD_LIBRARY_PATH 最前。
+PYQT_QT_LIB=\"\$(python3 -c 'import PyQt5, pathlib; print(pathlib.Path(PyQt5.__file__).resolve().parent / \"Qt5\" / \"lib\")' 2>/dev/null || true)\"
+if [[ -n \"\${PYQT_QT_LIB}\" && -d \"\${PYQT_QT_LIB}\" ]]; then
+    export LD_LIBRARY_PATH=\"\${PYQT_QT_LIB}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}\"
+    echo \">>> PyQt5 Qt lib: \${PYQT_QT_LIB}\"
+fi
+
+echo \">>> IME QT_IM_MODULE=\$QT_IM_MODULE DBUS=\$DBUS_SESSION_BUS_ADDRESS\"
 echo '>>> 预检 topic...'
 python3 - <<'PY'
 import rclpy

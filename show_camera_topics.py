@@ -62,7 +62,7 @@ import pyqtgraph.opengl as gl
 import rclpy
 from cv_bridge import CvBridge, CvBridgeError
 from PyQt5.QtCore import Qt, QProcess, QTimer, pyqtSignal, QObject, QPoint, QEvent
-from PyQt5.QtGui import QCloseEvent, QFont, QImage, QKeyEvent, QMouseEvent, QPixmap, QPalette, QColor
+from PyQt5.QtGui import QCloseEvent, QFont, QImage, QMouseEvent, QPixmap, QPalette, QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -104,6 +104,56 @@ from std_srvs.srv import SetBool, Trigger
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, JointState
 from geometry_msgs.msg import PoseStamped
 from tf2_ros import Buffer, TransformListener
+
+
+def restore_fcitx_input_method(widget=None) -> None:
+    """文本框重新获得焦点时恢复 fcitx。
+
+    下拉框弹层会占用/弄乱输入法上下文；对文本框开关 WA_InputMethodEnabled
+    可强制 Qt 重建该控件的 IC。不要对全局 im.reset()——那会让文本框一直失效，
+    而可编辑下拉框仍能输入。
+    """
+    app = QApplication.instance()
+    if app is None:
+        return
+    os.environ["QT_IM_MODULE"] = "fcitx"
+    os.environ["XMODIFIERS"] = "@im=fcitx"
+    os.environ["GTK_IM_MODULE"] = "fcitx"
+
+    fw = widget if isinstance(widget, QWidget) else app.focusWidget()
+    if fw is None:
+        return
+    # 只对真正的文本输入控件重建 IC
+    if not isinstance(fw, (QLineEdit, QTextEdit)):
+        return
+    try:
+        fw.setAttribute(Qt.WA_InputMethodEnabled, False)
+        fw.setAttribute(Qt.WA_InputMethodEnabled, True)
+    except Exception:
+        pass
+    try:
+        im = app.inputMethod()
+        if im is not None:
+            im.update(Qt.ImQueryAll)
+    except Exception:
+        pass
+
+
+def _schedule_fcitx_restore(widget=None) -> None:
+    """延迟两次，躲过 QComboBox 弹层销毁竞态。"""
+    w = widget
+    QTimer.singleShot(0, lambda: restore_fcitx_input_method(w))
+    QTimer.singleShot(80, lambda: restore_fcitx_input_method(w))
+
+
+class ImeSafeComboBox(QComboBox):
+    """标记类：弹层相关逻辑改由文本框 focusIn / focusChanged 恢复 IME。"""
+
+    pass
+
+
+# 所有 QComboBox() 使用同一类型（便于日后扩展）
+QComboBox = ImeSafeComboBox  # type: ignore[misc, assignment]
 
 try:
     from a2d_head_camera_tf import attach_to_node as attach_head_camera_tf
@@ -5121,11 +5171,11 @@ class ChatInputEdit(QTextEdit):
 
     def focusInEvent(self, event) -> None:  # type: ignore[override]
         super().focusInEvent(event)
-        self._notify_input_method(full_query=True)
+        _schedule_fcitx_restore(self)
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         super().mousePressEvent(event)
-        self._notify_input_method()
+        _schedule_fcitx_restore(self)
 
     def inputMethodEvent(self, event) -> None:  # type: ignore[override]
         # 必须在此跟踪组字；用 eventFilter 拦截 Enter 容易抢掉 fcitx 上屏键
@@ -5390,12 +5440,10 @@ class ChatPanelWidget(QWidget):
         self.history_view.setPlaceholderText("对话记录将显示在这里…")
         self.history_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.history_view.setMinimumHeight(180)
-        # 避免点选历史记录抢走焦点，导致未点输入框时无法中文输入
         self.history_view.setFocusPolicy(Qt.NoFocus)
         self.history_view.setStyleSheet(
             "QTextEdit { background-color: #1a1a1a; color: #ddd; border: 1px solid #444; }"
         )
-        self.history_view.installEventFilter(self)
         layout.addWidget(self.history_view, stretch=1)
 
         input_row = QHBoxLayout()
@@ -5410,7 +5458,6 @@ class ChatPanelWidget(QWidget):
         self.input_edit.setStyleSheet(
             "QTextEdit { background-color: #252525; color: #eee; border: 1px solid #555; }"
         )
-        self.input_edit.installEventFilter(self)
         self._suppress_send_until = 0.0
         input_row.addWidget(self.input_edit, stretch=1)
         send_col = QVBoxLayout()
@@ -5423,27 +5470,6 @@ class ChatPanelWidget(QWidget):
         send_col.addStretch()
         input_row.addLayout(send_col)
         layout.addLayout(input_row)
-
-        # 面板内快捷键：焦点不在输入框时，把可输入按键转到输入框并唤醒 IME
-        self.installEventFilter(self)
-        for w in (
-            self.provider_combo,
-            self.model_edit,
-            self.settings_toggle_btn,
-            self.probe_btn,
-            self.save_btn,
-            self.history_btn,
-            self.clear_btn,
-            self.attach_camera_check,
-            self.clear_image_btn,
-            self.thinking_check,
-            self.api_base_edit,
-            self.api_key_edit,
-            self.system_prompt_edit,
-            self.save_system_btn,
-            self.reset_system_btn,
-        ):
-            w.installEventFilter(self)
 
         self._append_system_line(
             f"模型: {self._config.model}  |  API: {self._config.api_base}"
@@ -5729,102 +5755,8 @@ class ChatPanelWidget(QWidget):
             if notify:
                 self._append_system_line("已清除所选场景图")
 
-    def _focus_chat_input(self, *, activate_ime: bool = True) -> None:
+    def _focus_chat_input(self) -> None:
         self.input_edit.setFocus(Qt.OtherFocusReason)
-        if activate_ime and hasattr(self.input_edit, "_notify_input_method"):
-            self.input_edit._notify_input_method(full_query=True)
-
-    def _defer_key_to_input(self, event) -> None:
-        """焦点不在输入框时，延迟把按键交给输入框（先 focus 再投递，便于 fcitx 组字）。"""
-        self._focus_chat_input(activate_ime=True)
-        key = event.key()
-        mods = event.modifiers()
-        text = event.text()
-        count = event.count()
-        auto = event.isAutoRepeat()
-
-        def _deliver() -> None:
-            if self.input_edit.isEnabled() and not self.input_edit.hasFocus():
-                self.input_edit.setFocus(Qt.OtherFocusReason)
-            if hasattr(self.input_edit, "_notify_input_method"):
-                self.input_edit._notify_input_method(full_query=True)
-            ev = QKeyEvent(QEvent.KeyPress, key, mods, text, auto, count)
-            QApplication.sendEvent(self.input_edit, ev)
-
-        QTimer.singleShot(40, _deliver)
-
-    def eventFilter(self, obj, event) -> bool:
-        et = event.type()
-
-        if (
-            obj is self.history_view
-            and et == QEvent.MouseButtonPress
-            and event.button() == Qt.LeftButton
-        ):
-            QTimer.singleShot(0, lambda: self._focus_chat_input(activate_ime=True))
-
-        # 焦点在对话面板其它控件时，延迟把按键转到输入框（不直接吞掉，避免 fcitx 首字丢失）
-        if (
-            et == QEvent.KeyPress
-            and obj is not self.input_edit
-            and not self._busy
-            and self._should_redirect_key_to_input(obj, event)
-        ):
-            self._defer_key_to_input(event)
-            return True
-
-        if obj is self.input_edit and et == QEvent.FocusIn:
-            if hasattr(self.input_edit, "_notify_input_method"):
-                QTimer.singleShot(
-                    0, lambda: self.input_edit._notify_input_method(full_query=True)
-                )
-            return False
-        return super().eventFilter(obj, event)
-
-    def _should_redirect_key_to_input(self, obj, event) -> bool:
-        """判断是否把按键从按钮/下拉框等重定向到对话输入框。"""
-        if obj in (
-            self.api_base_edit,
-            self.api_key_edit,
-            self.model_edit,
-            self.system_prompt_edit,
-        ):
-            return False
-        if not self.isVisible():
-            return False
-        # 仅处理面板内控件
-        w = obj if isinstance(obj, QWidget) else None
-        if w is None or not self.isAncestorOf(w):
-            return False
-        key = event.key()
-        mods = event.modifiers()
-        if mods & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
-            # 保留 Ctrl/Alt 快捷键（含 Ctrl+Space 切输入法）；切完后下一次字符键会进来
-            return False
-        if key in (
-            Qt.Key_Tab,
-            Qt.Key_Backtab,
-            Qt.Key_Escape,
-            Qt.Key_Shift,
-            Qt.Key_Control,
-            Qt.Key_Alt,
-            Qt.Key_Meta,
-            Qt.Key_CapsLock,
-            Qt.Key_Up,
-            Qt.Key_Down,
-            Qt.Key_Left,
-            Qt.Key_Right,
-            Qt.Key_Home,
-            Qt.Key_End,
-            Qt.Key_PageUp,
-            Qt.Key_PageDown,
-        ):
-            return False
-        # 可打印字符 / 空格 / 退格：转到输入框
-        text = event.text()
-        if text or key in (Qt.Key_Space, Qt.Key_Backspace, Qt.Key_Delete):
-            return True
-        return False
 
     def _sync_config_from_ui(self) -> None:
         self._config.api_base = self.api_base_edit.text().strip() or LLM_API_BASE_DEFAULT
@@ -5959,7 +5891,6 @@ class ChatPanelWidget(QWidget):
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         self.send_btn.setEnabled(not busy)
-        # 推理中保持输入框可聚焦，否则 fcitx 会反复断开
         self.input_edit.setReadOnly(busy)
         self.save_btn.setEnabled(not busy)
         self.history_btn.setEnabled(not busy)
@@ -5970,9 +5901,7 @@ class ChatPanelWidget(QWidget):
         )
         self.send_btn.setText("思考中…" if busy else "发送")
         if not busy:
-            QTimer.singleShot(
-                0, lambda: self._focus_chat_input(activate_ime=True)
-            )
+            QTimer.singleShot(0, self._focus_chat_input)
 
     def _refresh_history_title_label(self) -> None:
         if self._history_id and self._history_title:
@@ -11379,7 +11308,6 @@ class CameraTopicWindow(QMainWindow):
         chat_group.setMinimumWidth(380)
         chat_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self._chat_group = chat_group
-        self._chat_group.installEventFilter(self)
         self._main_splitter.addWidget(chat_group)
 
         self._main_splitter.setStretchFactor(0, 0)
@@ -11436,67 +11364,6 @@ class CameraTopicWindow(QMainWindow):
         self._update_local_ai_deploy_btn()
         self._update_train_ui()
         self._update_cad_ui()
-        app = QApplication.instance()
-        if app is not None:
-            app.installEventFilter(self)
-
-    def _focus_chat_ime(self) -> None:
-        if hasattr(self, "chat_panel") and self.chat_panel is not None:
-            self.chat_panel._focus_chat_input(activate_ime=True)
-
-    def _test_qwen_widget_has_focus(self, w: Optional[QWidget]) -> bool:
-        stealers: List[QWidget] = []
-        for name in (
-            "test_qwen_start_btn",
-            "test_qwen_stop_btn",
-            "test_qwen_model_combo",
-            "test_qwen_target_combo",
-            "test_qwen_root_combo",
-            "test_qwen_refresh_btn",
-        ):
-            if hasattr(self, name):
-                stealers.append(getattr(self, name))
-        cur: Optional[QWidget] = w
-        while cur is not None:
-            if cur in stealers:
-                return True
-            cur = cur.parentWidget()
-        return False
-
-    @staticmethod
-    def _printable_key_for_chat(event) -> bool:
-        if event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
-            return False
-        key = event.key()
-        if key in (
-            Qt.Key_Tab,
-            Qt.Key_Backtab,
-            Qt.Key_Escape,
-            Qt.Key_Return,
-            Qt.Key_Enter,
-            Qt.Key_Shift,
-            Qt.Key_Control,
-            Qt.Key_Alt,
-            Qt.Key_Meta,
-            Qt.Key_CapsLock,
-        ):
-            return False
-        text = event.text()
-        return bool(text) or key in (Qt.Key_Space, Qt.Key_Backspace, Qt.Key_Delete)
-
-    def eventFilter(self, obj, event) -> bool:
-        et = event.type()
-        if hasattr(self, "_chat_group") and obj is self._chat_group:
-            if et == QEvent.MouseButtonPress:
-                QTimer.singleShot(0, self._focus_chat_ime)
-            return False
-        if et == QEvent.KeyPress and hasattr(self, "chat_panel"):
-            fw = QApplication.focusWidget()
-            if fw is not None and self._test_qwen_widget_has_focus(fw):
-                if self._printable_key_for_chat(event):
-                    self.chat_panel._defer_key_to_input(event)
-                    return True
-        return super().eventFilter(obj, event)
 
     def _get_psi_policy_dir(self) -> Optional[str]:
         if self._psi_policy_dir_override:
@@ -11905,7 +11772,6 @@ class CameraTopicWindow(QMainWindow):
                     api_base=api, model_id=mid, silent=False
                 )
                 self._append_test_infer_log(f"远程 Qwen 已就绪: {api} ({mid})")
-                QTimer.singleShot(0, self._focus_chat_ime)
         live_model = str((info or {}).get("model") or "")
         if healthy:
             suffix = f" · {live_model}" if live_model else ""
@@ -11922,11 +11788,13 @@ class CameraTopicWindow(QMainWindow):
             self.test_qwen_status_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
         self.test_qwen_start_btn.setEnabled(not healthy and not starting)
         self.test_qwen_stop_btn.setEnabled(healthy or starting)
-        busy = healthy or starting or self._test_qwen_model_list_refreshing
-        self.test_qwen_model_combo.setEnabled(not busy)
-        self.test_qwen_target_combo.setEnabled(not busy)
-        self.test_qwen_root_combo.setEnabled(not busy)
-        self.test_qwen_refresh_btn.setEnabled(not busy)
+        service_busy = healthy or starting
+        scanning = bool(self._test_qwen_model_list_refreshing)
+        # 仅扫描目录时保持「部署位置/权重目录」可点
+        self.test_qwen_model_combo.setEnabled(not service_busy and not scanning)
+        self.test_qwen_target_combo.setEnabled(not service_busy)
+        self.test_qwen_root_combo.setEnabled(not service_busy)
+        self.test_qwen_refresh_btn.setEnabled(not service_busy and not scanning)
 
     def _update_test_qwen_ui_local(self) -> None:
         api = self._local_qwen_launcher.api_base()
@@ -11995,11 +11863,12 @@ class CameraTopicWindow(QMainWindow):
             self.test_qwen_status_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
         self.test_qwen_start_btn.setEnabled(not healthy and not starting)
         self.test_qwen_stop_btn.setEnabled(healthy or starting)
-        busy = healthy or starting or self._test_qwen_model_list_refreshing
-        self.test_qwen_model_combo.setEnabled(not busy)
-        self.test_qwen_target_combo.setEnabled(not busy)
-        self.test_qwen_root_combo.setEnabled(not busy)
-        self.test_qwen_refresh_btn.setEnabled(not busy)
+        service_busy = healthy or starting
+        scanning = bool(self._test_qwen_model_list_refreshing)
+        self.test_qwen_model_combo.setEnabled(not service_busy and not scanning)
+        self.test_qwen_target_combo.setEnabled(not service_busy)
+        self.test_qwen_root_combo.setEnabled(not service_busy)
+        self.test_qwen_refresh_btn.setEnabled(not service_busy and not scanning)
 
     def _on_test_qwen_start_clicked(self) -> None:
         spec = self._selected_test_qwen_deploy_spec()
@@ -12036,7 +11905,6 @@ class CameraTopicWindow(QMainWindow):
                 model_label=spec.get("label"),
             )
             self._update_test_qwen_ui()
-            QTimer.singleShot(200, self._focus_chat_ime)
             QTimer.singleShot(2500, self._try_switch_chat_to_remote_qwen)
             return
 
@@ -12060,7 +11928,6 @@ class CameraTopicWindow(QMainWindow):
                 )
             self._local_qwen_launcher.start(model_key=key)
         self._update_test_qwen_ui()
-        QTimer.singleShot(200, self._focus_chat_ime)
         QTimer.singleShot(2000, self._try_switch_chat_to_local_qwen)
 
     def _try_switch_chat_to_local_qwen(self) -> None:
@@ -12108,7 +11975,6 @@ class CameraTopicWindow(QMainWindow):
             self.chat_panel.apply_remote_qwen_service_preset(
                 api_base=api, model_id=mid, silent=False
             )
-            QTimer.singleShot(0, self._focus_chat_ime)
             self._update_test_qwen_ui()
             return
 
@@ -14414,27 +14280,39 @@ def apply_viewer_theme(app: QApplication) -> None:
 
 def configure_qt_ime_for_chinese() -> None:
     """为 Docker/本机启用 fcitx 中文输入（须在创建 QApplication 之前调用）。"""
-    lang = os.environ.get("LANG", "").strip()
-    if not lang:
-        os.environ["LANG"] = "zh_CN.UTF-8"
-    if not os.environ.get("LC_ALL", "").strip():
-        os.environ["LC_ALL"] = os.environ["LANG"]
+    os.environ["LANG"] = "zh_CN.UTF-8"
+    os.environ["LC_ALL"] = "zh_CN.UTF-8"
+    os.environ["QT_IM_MODULE"] = "fcitx"
+    os.environ["XMODIFIERS"] = "@im=fcitx"
+    os.environ["GTK_IM_MODULE"] = "fcitx"
 
-    if not os.environ.get("QT_IM_MODULE"):
-        os.environ["QT_IM_MODULE"] = "fcitx"
-    if not os.environ.get("XMODIFIERS"):
-        os.environ["XMODIFIERS"] = "@im=fcitx"
-    if not os.environ.get("GTK_IM_MODULE"):
-        os.environ["GTK_IM_MODULE"] = "fcitx"
+    # PyQt5 自带 Qt 库优先，避免 fcitx 插件与系统 Qt 混库
+    try:
+        import PyQt5
 
-    plugin_root = os.path.join(EAI_DIR, "qt_plugins")
-    if os.path.isdir(os.path.join(plugin_root, "platforminputcontexts")):
+        qt_lib = os.path.join(
+            os.path.dirname(os.path.abspath(PyQt5.__file__)), "Qt5", "lib"
+        )
+        if os.path.isdir(qt_lib):
+            cur = os.environ.get("LD_LIBRARY_PATH", "")
+            parts = [p for p in cur.split(":") if p and p != qt_lib]
+            os.environ["LD_LIBRARY_PATH"] = ":".join([qt_lib] + parts)
+    except Exception:
+        pass
+
+    try:
+        import PyQt5
         from PyQt5.QtCore import QCoreApplication
 
-        QCoreApplication.addLibraryPath(plugin_root)
-        QCoreApplication.addLibraryPath(
-            os.path.join(plugin_root, "platforminputcontexts")
+        plug = os.path.join(
+            os.path.dirname(os.path.abspath(PyQt5.__file__)),
+            "Qt5",
+            "plugins",
         )
+        if os.path.isdir(plug):
+            QCoreApplication.addLibraryPath(plug)
+    except Exception:
+        pass
 
 
 def main() -> int:
@@ -14446,6 +14324,13 @@ def main() -> int:
     app.setStyle("Fusion")
     apply_viewer_theme(app)
     app.setQuitOnLastWindowClosed(True)
+
+    def _on_focus_changed(_old, new_w) -> None:
+        # 从下拉框点回任意文本框时重建该控件的 fcitx 上下文
+        if isinstance(new_w, (QLineEdit, QTextEdit)):
+            _schedule_fcitx_restore(new_w)
+
+    app.focusChanged.connect(_on_focus_changed)
 
     bridge = RosBridge()
     node = CameraTopicNode(bridge, prefix=args.prefix)
