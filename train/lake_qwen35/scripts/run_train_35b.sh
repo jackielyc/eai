@@ -27,6 +27,13 @@ LOG="${ROOT}/output/train_35b_n${NODE_RANK}_$(date +%Y%m%d_%H%M%S).log"
 
 dist_ensure_dataset
 
+TRAIN_EXTRA_ARGS=()
+if [[ "${FRESH:-}" == "1" ]]; then
+  TRAIN_EXTRA_ARGS+=(--no-auto_resume)
+elif [[ "${RESUME:-}" == "1" ]]; then
+  TRAIN_EXTRA_ARGS+=(--resume_from_checkpoint auto)
+fi
+
 echo "[info] python=${PYTHON}"
 echo "[info] config=${CONFIG}"
 echo "[info] device_map=${DEVICE_MAP}"
@@ -44,10 +51,12 @@ if [[ "${NNODES}" -gt 1 ]]; then
     "${ROOT}/scripts/train_lora_sft_mm.py" \
     --config "${CONFIG}" \
     --device_map "${DEVICE_MAP}" \
+    "${TRAIN_EXTRA_ARGS[@]+"${TRAIN_EXTRA_ARGS[@]}"}" \
     2>&1 | tee -i "${LOG}"
 else
   "${PYTHON}" -u "${ROOT}/scripts/train_lora_sft_mm.py" \
     --config "${CONFIG}" \
     --device_map "${DEVICE_MAP}" \
+    "${TRAIN_EXTRA_ARGS[@]+"${TRAIN_EXTRA_ARGS[@]}"}" \
     2>&1 | tee -i "${LOG}"
 fi

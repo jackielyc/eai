@@ -190,6 +190,14 @@ HOSTS=<node0-ip>,<node1-ip> DEVICE_MAP=none bash scripts/run_train_35b.sh
 
 多机环境变量：`HOSTS` / `HOSTFILE`（推荐，一台机器启动）、`SSH_USER`、`SSH_OPTS`、`NNODES`（默认 1）、`NODE_RANK`（默认 0）、`MASTER_ADDR`（默认 `127.0.0.1`）、`MASTER_PORT`（默认 29500）、`NPROC`（默认等于 `CUDA_VISIBLE_DEVICES` 个数）。缺数据时只在 `NODE_RANK=0` 上 convert，其它节点等待共享 `data/`。
 
+**Checkpoint 与断点续训**
+
+- 默认每 **12 小时**（`save_interval_hours`）额外落盘一次 `output_dir/checkpoint-*`（含 LoRA、optimizer、scheduler、RNG、`trainer_state.json`）。
+- 仍保留按步数保存（`save_steps`）；`save_total_limit` 控制最多保留几个 checkpoint。
+- 默认 `auto_resume: true`：再次执行 `run_train_*.sh` 会自动从 `output_dir` 下最新 `checkpoint-*` 续训，步数/epoch/lr 调度会恢复。
+- 从头训练：`FRESH=1 bash scripts/run_train_4b.sh`
+- 显式指定 checkpoint：`--resume_from_checkpoint /path/to/checkpoint-1234` 或 `RESUME=1`（等价于 latest）
+
 ## 与 cortex_qwen35 的区别
 
 | | cortex_qwen35 | lake_qwen35 |

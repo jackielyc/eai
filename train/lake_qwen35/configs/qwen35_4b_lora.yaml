@@ -17,6 +17,7 @@ gradient_accumulation_steps: 8
 warmup_steps: 100
 logging_steps: 1
 save_steps: 500
+save_interval_hours: 12
 eval_steps: 500
 
 lora_rank: 16
@@ -27,7 +28,8 @@ lora_target_modules: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
 bf16: true
 gradient_checkpointing: true
 dataloader_num_workers: 0
-save_total_limit: 3
+save_total_limit: 5
+auto_resume: true
 report_to: none
 seed: 42
 device_map: none

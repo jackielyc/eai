@@ -59,7 +59,7 @@ class TerminalProgressCallback(TrainerCallback):
             return
         self._t0 = time.perf_counter()
         print(
-            f"[train] start  max_steps={state.max_steps}  "
+            f"[train] start  step={state.global_step}/{state.max_steps}  "
             f"epochs={args.num_train_epochs}  log_every={args.logging_steps}",
             flush=True,
         )
@@ -102,6 +102,78 @@ class TerminalProgressCallback(TrainerCallback):
         )
 
 
+class TimeIntervalCheckpointCallback(TrainerCallback):
+    """Save a checkpoint every N hours of wall-clock training time."""
+
+    def __init__(self, interval_hours: float) -> None:
+        super().__init__()
+        if interval_hours <= 0:
+            raise ValueError(f"save_interval_hours must be > 0, got {interval_hours}")
+        self.interval_sec = interval_hours * 3600.0
+        self.interval_hours = interval_hours
+        self._last_save_time: float | None = None
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        self._last_save_time = time.perf_counter()
+
+    def on_step_end(self, args, state, control, **kwargs):
+        if self._last_save_time is None:
+            self._last_save_time = time.perf_counter()
+            return
+        if time.perf_counter() - self._last_save_time >= self.interval_sec:
+            control.should_save = True
+            if state.is_world_process_zero:
+                print(
+                    f"[checkpoint] {self.interval_hours:g}h elapsed -> saving at step {state.global_step}",
+                    flush=True,
+                )
+
+    def on_save(self, args, state, control, **kwargs):
+        self._last_save_time = time.perf_counter()
+
+
+def find_latest_checkpoint(output_dir: str) -> str | None:
+    root = Path(output_dir)
+    if not root.is_dir():
+        return None
+    candidates: list[tuple[int, Path]] = []
+    for path in root.iterdir():
+        if not path.is_dir() or not path.name.startswith("checkpoint-"):
+            continue
+        step = path.name.rsplit("-", 1)[-1]
+        if step.isdigit():
+            candidates.append((int(step), path))
+    if not candidates:
+        return None
+    return str(sorted(candidates, key=lambda item: item[0])[-1][1])
+
+
+def resolve_resume_checkpoint(
+    output_dir: str,
+    *,
+    auto_resume: bool,
+    resume_from_checkpoint: str | bool | None,
+) -> str | None:
+    explicit = resume_from_checkpoint
+    if explicit is not None and explicit is not False and explicit != "":
+        if explicit is True or (
+            isinstance(explicit, str) and explicit.lower() in {"auto", "latest", "true", "yes", "1"}
+        ):
+            path = find_latest_checkpoint(output_dir)
+            if path is None:
+                raise ValueError(
+                    f"resume_from_checkpoint={explicit!r} but no checkpoint-* under {output_dir}"
+                )
+            return path
+        path = Path(str(explicit))
+        if not path.is_dir():
+            raise ValueError(f"resume_from_checkpoint not found: {path}")
+        return str(path)
+    if auto_resume:
+        return find_latest_checkpoint(output_dir)
+    return None
+
+
 @dataclass
 class TrainConfig:
     model_name_or_path: str = ""
@@ -119,6 +191,7 @@ class TrainConfig:
     warmup_steps: int = 100
     logging_steps: int = 1
     save_steps: int = 500
+    save_interval_hours: float = 12.0
     eval_steps: int = 500
     lora_rank: int = 16
     lora_alpha: int = 32
@@ -128,7 +201,9 @@ class TrainConfig:
     gradient_checkpointing: bool = True
     seed: int = 42
     dataloader_num_workers: int = 0
-    save_total_limit: int = 3
+    save_total_limit: int = 5
+    auto_resume: bool = True
+    resume_from_checkpoint: str | bool | None = None
     report_to: str = "none"
     device_map: str = "none"
     fsdp: str = "none"
@@ -381,7 +456,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup_steps", type=int, default=None)
     parser.add_argument("--logging_steps", type=int, default=None)
     parser.add_argument("--save_steps", type=int, default=None)
+    parser.add_argument("--save_interval_hours", type=float, default=None)
     parser.add_argument("--eval_steps", type=int, default=None)
+    parser.add_argument("--save_total_limit", type=int, default=None)
+    parser.add_argument("--auto_resume", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        nargs="?",
+        const="auto",
+        default=None,
+        help="Resume from checkpoint dir; omit value for latest under output_dir",
+    )
     parser.add_argument("--lora_rank", type=int, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--device_map", type=str, default=None)
@@ -400,6 +485,12 @@ def main() -> None:
     args = parse_args()
     cfg = build_config(args)
     os.makedirs(cfg.output_dir, exist_ok=True)
+
+    resume_ckpt = resolve_resume_checkpoint(
+        cfg.output_dir,
+        auto_resume=cfg.auto_resume,
+        resume_from_checkpoint=cfg.resume_from_checkpoint,
+    )
 
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
@@ -451,6 +542,10 @@ def main() -> None:
     model = get_peft_model(model, lora)
     if local_rank == 0:
         model.print_trainable_parameters()
+        if resume_ckpt:
+            print(f"[train] resume from {resume_ckpt}", flush=True)
+        elif cfg.auto_resume:
+            print("[train] no checkpoint found, starting fresh", flush=True)
 
     train_ds = MultimodalShareGPTDataset(
         cfg.dataset_path, processor, cfg.max_seq_length, cfg.max_samples
@@ -484,6 +579,7 @@ def main() -> None:
         eval_steps=cfg.eval_steps if eval_ds is not None else None,
         eval_strategy="steps" if eval_ds is not None else "no",
         save_strategy="steps",
+        save_safetensors=True,
         bf16=cfg.bf16,
         gradient_checkpointing=cfg.gradient_checkpointing,
         dataloader_num_workers=cfg.dataloader_num_workers,
@@ -500,6 +596,10 @@ def main() -> None:
         dataloader_pin_memory=False,
     )
 
+    callbacks: list[TrainerCallback] = [TerminalProgressCallback()]
+    if cfg.save_interval_hours > 0:
+        callbacks.append(TimeIntervalCheckpointCallback(cfg.save_interval_hours))
+
     trainer = Trainer(
         model=model,
         args=targs,
@@ -509,10 +609,10 @@ def main() -> None:
             pad_token_id=processor.tokenizer.pad_token_id,
             model=model,
         ),
-        callbacks=[TerminalProgressCallback()],
+        callbacks=callbacks,
     )
     trainer.remove_callback(PrinterCallback)
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_ckpt)
     trainer.save_model(cfg.output_dir)
     processor.save_pretrained(cfg.output_dir)
     if local_rank == 0:

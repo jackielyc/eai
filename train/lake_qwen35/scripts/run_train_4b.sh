@@ -19,6 +19,13 @@ LOG="${ROOT}/output/train_4b_n${NODE_RANK}_$(date +%Y%m%d_%H%M%S).log"
 
 dist_ensure_dataset
 
+TRAIN_EXTRA_ARGS=()
+if [[ "${FRESH:-}" == "1" ]]; then
+  TRAIN_EXTRA_ARGS+=(--no-auto_resume)
+elif [[ "${RESUME:-}" == "1" ]]; then
+  TRAIN_EXTRA_ARGS+=(--resume_from_checkpoint auto)
+fi
+
 echo "[info] python=${PYTHON}"
 echo "[info] config=${CONFIG}"
 echo "[info] nnodes=${NNODES} node_rank=${NODE_RANK} master=${MASTER_ADDR}:${MASTER_PORT}"
@@ -28,4 +35,5 @@ echo "[info] log=${LOG}"
 "${DIST_LAUNCH[@]}" \
   "${ROOT}/scripts/train_lora_sft_mm.py" \
   --config "${CONFIG}" \
+  "${TRAIN_EXTRA_ARGS[@]+"${TRAIN_EXTRA_ARGS[@]}"}" \
   2>&1 | tee -i "${LOG}"
