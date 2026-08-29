@@ -267,31 +267,31 @@ dist_spawn_workers() {
 }
 
 dist_ensure_dataset() {
-  local train_jsonl="${ROOT}/data/hermas_sys2_train.jsonl"
-  local train_json="${ROOT}/data/hermas_sys2_train_20k.json"
+  local train_jsonl="${ROOT}/data/vn_sys2_train.jsonl"
+  local val_jsonl="${ROOT}/data/vn_sys2_val.jsonl"
   local wait_sec="${DATASET_WAIT_SEC:-1800}"
 
-  if [[ -f "${train_jsonl}" || -f "${train_json}" ]]; then
+  if [[ -f "${train_jsonl}" && -f "${val_jsonl}" ]]; then
     return 0
   fi
 
   if [[ "${NODE_RANK}" -eq 0 ]]; then
-    echo "[info] dataset missing, running convert first..."
-    bash "${ROOT}/scripts/run_convert.sh"
+    echo "[info] VN dataset missing, running convert first..."
+    bash "${ROOT}/scripts/run_convert_vn.sh"
     return 0
   fi
 
-  echo "[info] node_rank=${NODE_RANK}: waiting up to ${wait_sec}s for dataset..."
+  echo "[info] node_rank=${NODE_RANK}: waiting up to ${wait_sec}s for VN dataset..."
   local elapsed=0
   while [[ "${elapsed}" -lt "${wait_sec}" ]]; do
-    if [[ -f "${train_jsonl}" || -f "${train_json}" ]]; then
-      echo "[info] dataset ready"
+    if [[ -f "${train_jsonl}" && -f "${val_jsonl}" ]]; then
+      echo "[info] VN dataset ready"
       return 0
     fi
     sleep 5
     elapsed=$((elapsed + 5))
   done
-  echo "[error] dataset still missing after ${wait_sec}s; convert on node 0 or share data/" >&2
+  echo "[error] VN dataset still missing after ${wait_sec}s; convert on node 0 or share data/" >&2
   exit 1
 }
 

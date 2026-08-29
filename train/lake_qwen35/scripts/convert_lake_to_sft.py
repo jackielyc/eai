@@ -9,7 +9,7 @@ import os
 import random
 import time
 from collections import defaultdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -91,8 +91,11 @@ class JsonlWriter:
         self._handle.write(json.dumps(sample, ensure_ascii=False))
         self._handle.write("\n")
         self.count += 1
+        if self.count % 64 == 0:
+            self._handle.flush()
 
     def close(self) -> None:
+        self._handle.flush()
         self._handle.close()
 
 
@@ -130,9 +133,77 @@ class ClipCheckpoint:
                 handle.write(f"{clip_id}\n")
         self._pending.clear()
 
+    def clear(self) -> None:
+        self._ids.clear()
+        self._pending.clear()
+        if self.path.exists():
+            self.path.unlink()
+
     @property
     def count(self) -> int:
         return len(self._ids)
+
+
+def _clip_ids_from_jsonl(path: Path) -> set[str]:
+    ids: set[str] = set()
+    if not path.exists():
+        return ids
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            obj = json.loads(line)
+            for msg in obj.get("messages") or []:
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if part.get("type") != "image":
+                        continue
+                    stem = Path(str(part.get("image", ""))).stem
+                    if stem:
+                        ids.add(stem)
+    return ids
+
+
+def _clip_ids_from_checkpoint(path: Path) -> set[str]:
+    ids: set[str] = set()
+    if not path.exists():
+        return ids
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            clip_id = line.strip()
+            if clip_id:
+                ids.add(clip_id)
+    return ids
+
+
+def load_exclude_clip_ids(*paths: Path) -> set[str]:
+    ids: set[str] = set()
+    for path in paths:
+        if path.suffix == ".jsonl":
+            ids |= _clip_ids_from_jsonl(path)
+        else:
+            ids |= _clip_ids_from_checkpoint(path)
+    return ids
+
+
+def count_jsonl_lines(path: Path) -> int:
+    if not path.exists():
+        return 0
+    n = 0
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                n += 1
+    return n
+
+
+def _default_num_workers() -> int:
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except Exception:
+        return max(1, os.cpu_count() or 1)
 
 
 def _open_zarr_data_group(zarr_path: Path):
@@ -672,6 +743,9 @@ def export_view_split(
     skip_existing: bool = True,
     resume: bool = True,
     stream_batches: bool = False,
+    jsonl_name: str | None = None,
+    checkpoint_name: str | None = None,
+    exclude_clip_ids: set[str] | None = None,
 ) -> int:
     if max_samples is not None and max_samples <= 0:
         print(f"[skip] {split}: max_samples={max_samples}")
@@ -683,9 +757,25 @@ def export_view_split(
         print(f"[skip] missing/empty index: {index_path}")
         return 0
 
-    jsonl_path = output_dir / f"hermas_sys2_{split}.jsonl"
-    checkpoint = ClipCheckpoint(output_dir / ".convert_checkpoint" / f"{split}.clip_ids", resume=resume)
+    jsonl_path = output_dir / (jsonl_name or f"hermas_sys2_{split}.jsonl")
+    checkpoint = ClipCheckpoint(
+        output_dir / ".convert_checkpoint" / (checkpoint_name or f"{split}.clip_ids"),
+        resume=resume,
+    )
+    excluded = exclude_clip_ids or set()
     writer = JsonlWriter(jsonl_path, resume=resume)
+    jsonl_ids = _clip_ids_from_jsonl(jsonl_path) if resume else set()
+    if resume and (checkpoint.count != len(jsonl_ids) or checkpoint.count != writer.count):
+        print(
+            f"[warn] {split}: checkpoint={checkpoint.count} jsonl={len(jsonl_ids)}, "
+            "syncing checkpoint to jsonl",
+            flush=True,
+        )
+        checkpoint.clear()
+        for clip_id in jsonl_ids:
+            checkpoint.add(clip_id, flush_every=10_000)
+        checkpoint.flush()
+        writer.count = len(jsonl_ids)
     if resume and max_samples is not None and writer.count >= max_samples:
         print(f"[info] {split}: already have {writer.count} samples, target={max_samples}")
         writer.close()
@@ -697,94 +787,98 @@ def export_view_split(
 
     workers = max(1, num_workers)
     started = time.time()
-    pending_jobs: list[ClipJob] = []
-    batch_size = max(workers * 8, workers)
-    processed_batches = 0
+    last_print = 0.0
     print(
         f"[info] {split}: stream -> {jsonl_path.name} "
-        f"(resume={resume}, checkpoint={checkpoint.count}, workers={workers})"
+        f"(resume={resume}, checkpoint={checkpoint.count}, excluded={len(excluded)}, workers={workers})",
+        flush=True,
     )
 
-    def _flush_jobs() -> bool:
-        nonlocal pending_jobs, processed_batches
-        if not pending_jobs:
-            return False
-        if workers == 1:
-            for job in pending_jobs:
-                if target is not None and writer.count >= target:
-                    return True
-                if job.clip_id in checkpoint:
-                    continue
-                sample = _process_clip_job(job)
-                if sample is None:
-                    continue
-                writer.write(sample)
-                checkpoint.add(job.clip_id)
-                if writer.count % 1000 == 0:
-                    checkpoint.flush()
-                    elapsed = max(time.time() - started, 1e-6)
-                    print(f"[progress] {split}: {writer.count} samples ({writer.count / elapsed:.1f} clips/s)")
-            pending_jobs = []
-            processed_batches += 1
-            return target is not None and writer.count >= target
+    def _should_skip(job: ClipJob) -> bool:
+        return job.clip_id in checkpoint or job.clip_id in excluded
 
-        with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker) as pool:
-            futures = {pool.submit(_process_clip_job, job): job for job in pending_jobs}
-            for future in as_completed(futures):
-                if target is not None and writer.count >= target:
-                    break
-                job = futures[future]
-                if job.clip_id in checkpoint:
-                    continue
-                sample = future.result()
-                if sample is None:
-                    continue
-                writer.write(sample)
-                checkpoint.add(job.clip_id)
-                if writer.count % 1000 == 0:
-                    checkpoint.flush()
-                    elapsed = max(time.time() - started, 1e-6)
-                    print(f"[progress] {split}: {writer.count} samples ({writer.count / elapsed:.1f} clips/s)")
-        pending_jobs = []
-        processed_batches += 1
+    def _consume(job: ClipJob, sample: dict[str, Any] | None) -> bool:
+        nonlocal last_print
+        if sample is None:
+            return False
+        writer.write(sample)
+        checkpoint.add(job.clip_id)
+        dt = time.time() - started
+        if writer.count % 1000 == 0 or dt - last_print >= 20:
+            last_print = dt
+            checkpoint.flush()
+            print(
+                f"[progress] {split}: {writer.count} samples ({writer.count / max(dt, 1e-6):.1f} clips/s)",
+                flush=True,
+            )
         return target is not None and writer.count >= target
 
-    for row_dict in _iter_index_rows(
-        index_path,
-        split=split,
-        tasks=tasks,
-        max_per_task=max_per_task,
-        max_samples=max_samples if stream_batches else None,
-        seed=seed,
-        oversample=oversample,
-        stream_batches=stream_batches,
-    ):
-        if target is not None and writer.count >= target:
-            break
-        job = _row_to_job(
-            row_dict,
+    def _iter_jobs() -> Iterator[ClipJob]:
+        for row_dict in _iter_index_rows(
+            index_path,
             split=split,
-            data_root=data_root,
-            datahouse_id=datahouse_id,
-            view_id=view_id,
-            image_dir=image_dir,
-            camera=camera,
-            skip_existing=skip_existing,
-        )
-        if job is None or job.clip_id in checkpoint:
-            continue
-        pending_jobs.append(job)
-        if len(pending_jobs) >= batch_size:
-            if _flush_jobs():
-                break
+            tasks=tasks,
+            max_per_task=max_per_task,
+            max_samples=max_samples if stream_batches else None,
+            seed=seed,
+            oversample=oversample,
+            stream_batches=stream_batches,
+        ):
+            if target is not None and writer.count >= target:
+                return
+            job = _row_to_job(
+                row_dict,
+                split=split,
+                data_root=data_root,
+                datahouse_id=datahouse_id,
+                view_id=view_id,
+                image_dir=image_dir,
+                camera=camera,
+                skip_existing=skip_existing,
+            )
+            if job is None or _should_skip(job):
+                continue
+            yield job
 
-    if pending_jobs and (target is None or writer.count < target):
-        _flush_jobs()
+    stop = False
+    if workers == 1:
+        for job in _iter_jobs():
+            if _consume(job, _process_clip_job(job)):
+                stop = True
+                break
+    else:
+        max_inflight = max(workers * 2, workers + 4)
+        with ProcessPoolExecutor(max_workers=workers, initializer=_init_worker) as pool:
+            inflight: dict[Any, ClipJob] = {}
+            for job in _iter_jobs():
+                if stop or (target is not None and writer.count >= target):
+                    break
+                fut = pool.submit(_process_clip_job, job)
+                inflight[fut] = job
+                while len(inflight) >= max_inflight:
+                    done, _not_done = wait(inflight.keys(), return_when=FIRST_COMPLETED)
+                    for fut_done in done:
+                        j = inflight.pop(fut_done)
+                        if _consume(j, fut_done.result()):
+                            stop = True
+                            break
+                    if stop:
+                        break
+            while inflight and not stop:
+                done, _not_done = wait(inflight.keys(), return_when=FIRST_COMPLETED)
+                for fut_done in done:
+                    j = inflight.pop(fut_done)
+                    if _consume(j, fut_done.result()):
+                        stop = True
+                        break
 
     checkpoint.flush()
     writer.close()
     elapsed = max(time.time() - started, 1e-6)
-    print(f"[ok] {split}: {writer.count} samples in {jsonl_path.name} ({writer.count / elapsed:.2f} clips/s)")
+    print(
+        f"[ok] {split}: {writer.count} samples in {jsonl_path.name} ({writer.count / elapsed:.2f} clips/s)",
+        flush=True,
+    )
     return writer.count
 
 
@@ -804,11 +898,40 @@ def convert_source(
     skip_existing: bool = True,
     resume: bool = True,
     seed: int = 42,
+    supplement: bool = False,
 ) -> tuple[int, int]:
     image_dir = output_dir / "images"
+    ckpt_dir = output_dir / ".convert_checkpoint"
+    exclude_train: set[str] = set()
+    exclude_val: set[str] = set()
+    train_jsonl_name: str | None = None
+    val_jsonl_name: str | None = None
+    train_checkpoint_name: str | None = None
+    val_checkpoint_name: str | None = None
+
+    if supplement:
+        exclude_train = load_exclude_clip_ids(
+            ckpt_dir / "train.clip_ids",
+            output_dir / "hermas_sys2_train.jsonl",
+        )
+        exclude_val = load_exclude_clip_ids(
+            ckpt_dir / "val.clip_ids",
+            output_dir / "hermas_sys2_val.jsonl",
+        )
+        train_jsonl_name = "hermas_sys2_train_supplement.jsonl"
+        val_jsonl_name = "hermas_sys2_val_supplement.jsonl"
+        train_checkpoint_name = "train_supplement.clip_ids"
+        val_checkpoint_name = "val_supplement.clip_ids"
+        skip_full = False
+        print(
+            f"[info] supplement mode: keep existing hermas jsonl, export remainder to "
+            f"{train_jsonl_name} / {val_jsonl_name}; "
+            f"exclude train={len(exclude_train)} val={len(exclude_val)}"
+        )
+
     train_limit = subset_train if skip_full and max_per_task is None else None
     val_limit = subset_val if skip_full and max_per_task is None else None
-    stream_batches = not skip_full and max_per_task is None and not tasks
+    stream_batches = supplement or (not skip_full and max_per_task is None and not tasks)
     if skip_full and max_per_task is not None:
         print("[info] max_per_task set: ignoring SUBSET_TRAIN/SUBSET_VAL global cap during decode")
 
@@ -830,12 +953,18 @@ def convert_source(
         split="train",
         max_samples=train_limit,
         seed=seed,
+        jsonl_name=train_jsonl_name,
+        checkpoint_name=train_checkpoint_name,
+        exclude_clip_ids=exclude_train,
         **common,
     )
     val_count = export_view_split(
         split="val",
         max_samples=val_limit,
         seed=seed + 1,
+        jsonl_name=val_jsonl_name,
+        checkpoint_name=val_checkpoint_name,
+        exclude_clip_ids=exclude_val,
         **common,
     )
     print(f"[ok] {datahouse_id}/{view_id}: train={train_count}, val={val_count}")
@@ -874,7 +1003,7 @@ def write_json(path: Path, data: list[dict[str, Any]]) -> None:
     print(f"[write] {path} ({len(data)} samples)")
 
 
-def write_dataset_info(path: Path) -> None:
+def write_dataset_info(path: Path, *, include_supplement: bool = False) -> None:
     tags = {
         "role_tag": "role",
         "content_tag": "content",
@@ -882,6 +1011,19 @@ def write_dataset_info(path: Path) -> None:
         "assistant_tag": "assistant",
         "system_tag": "system",
     }
+    entries = [
+        ("hermas_sys2_train", "hermas_sys2_train.jsonl"),
+        ("hermas_sys2_val", "hermas_sys2_val.jsonl"),
+        ("hermas_sys2_train_20k", "hermas_sys2_train_20k.json"),
+        ("hermas_sys2_val_2k", "hermas_sys2_val_2k.json"),
+    ]
+    if include_supplement:
+        entries.extend(
+            [
+                ("hermas_sys2_train_supplement", "hermas_sys2_train_supplement.jsonl"),
+                ("hermas_sys2_val_supplement", "hermas_sys2_val_supplement.jsonl"),
+            ]
+        )
     info = {
         name: {
             "file_name": fname,
@@ -889,13 +1031,16 @@ def write_dataset_info(path: Path) -> None:
             "columns": {"messages": "messages"},
             "tags": tags,
         }
-        for name, fname in [
-            ("hermas_sys2_train", "hermas_sys2_train.jsonl"),
-            ("hermas_sys2_val", "hermas_sys2_val.jsonl"),
-            ("hermas_sys2_train_20k", "hermas_sys2_train_20k.json"),
-            ("hermas_sys2_val_2k", "hermas_sys2_val_2k.json"),
-        ]
+        for name, fname in entries
     }
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                existing.update(info)
+                info = existing
+        except json.JSONDecodeError:
+            pass
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         json.dump(info, f, ensure_ascii=False, indent=2)
@@ -948,7 +1093,7 @@ def main() -> None:
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=os.cpu_count() or 1,
+        default=_default_num_workers(),
         help="Parallel workers for image decode/export (default: all CPUs).",
     )
     parser.add_argument(
@@ -964,6 +1109,11 @@ def main() -> None:
         help="Resume from .convert_checkpoint/* and append to existing .jsonl.",
     )
     parser.add_argument("--skip-full", action="store_true")
+    parser.add_argument(
+        "--supplement",
+        action="store_true",
+        help="Export remaining Hermes clips to *_supplement.jsonl without touching existing hermas jsonl.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -984,21 +1134,23 @@ def main() -> None:
         skip_existing=args.skip_existing,
         resume=args.resume,
         seed=args.seed,
+        supplement=args.supplement,
     )
 
-    write_dataset_info(args.output_dir / "dataset_info.json")
-    subset_train = None if args.max_per_task else args.subset_train
-    subset_val = None if args.max_per_task else args.subset_val
-    jsonl_to_json_array(
-        args.output_dir / "hermas_sys2_train.jsonl",
-        args.output_dir / "hermas_sys2_train_20k.json",
-        subset_train,
-    )
-    jsonl_to_json_array(
-        args.output_dir / "hermas_sys2_val.jsonl",
-        args.output_dir / "hermas_sys2_val_2k.json",
-        subset_val,
-    )
+    write_dataset_info(args.output_dir / "dataset_info.json", include_supplement=args.supplement)
+    if not args.supplement:
+        subset_train = None if args.max_per_task else args.subset_train
+        subset_val = None if args.max_per_task else args.subset_val
+        jsonl_to_json_array(
+            args.output_dir / "hermas_sys2_train.jsonl",
+            args.output_dir / "hermas_sys2_train_20k.json",
+            subset_train,
+        )
+        jsonl_to_json_array(
+            args.output_dir / "hermas_sys2_val.jsonl",
+            args.output_dir / "hermas_sys2_val_2k.json",
+            subset_val,
+        )
     print(
         f"[done] train={train_count} val={val_count} "
         f"(jsonl + subset json; full export trains on *.jsonl directly)"

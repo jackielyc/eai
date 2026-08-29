@@ -18,6 +18,9 @@ train/cortex_qwen35/data/cortex_sys2_val.json
 train/lake_qwen35/data/images/*
 train/lake_qwen35/data/.convert_checkpoint/train.clip_ids
 train/lake_qwen35/data/.convert_checkpoint/val.clip_ids
+train/lake_qwen35/data/.convert_checkpoint/vn_attach_*.episode_ids
+train/lake_qwen35/data/.convert_checkpoint/*_supplement.clip_ids
+train/lake_qwen35/data/hermas_sys2_*_supplement.jsonl
 train/lake_qwen35/output/*
 train/lake_qwen35/data/layer2_en2zh.shard*.json
 train/lake_qwen35/data/._clip_ids_for_zh.txt

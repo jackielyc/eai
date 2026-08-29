@@ -69,6 +69,13 @@ TEXT_SYSTEM_PROMPT = (
 )
 
 
+def _default_num_workers() -> int:
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except Exception:
+        return max(1, os.cpu_count() or 1)
+
+
 class EpisodeCheckpoint:
     def __init__(self, path: Path, *, resume: bool) -> None:
         self.path = path
@@ -601,7 +608,7 @@ def main() -> None:
         default=Path("/share_data/projects/mahjong/share/personal/liyichao/dataset/Steinate/Cortex"),
     )
     parser.add_argument("--output-dir", type=Path, default=DATA)
-    parser.add_argument("--workers", type=int, default=32)
+    parser.add_argument("--workers", type=int, default=_default_num_workers())
     parser.add_argument("--limit", type=int, default=None, help="Max episodes per split (debug)")
     parser.add_argument("--skip-existing", action="store_true", default=True)
     parser.add_argument("--no-skip-existing", action="store_true")
