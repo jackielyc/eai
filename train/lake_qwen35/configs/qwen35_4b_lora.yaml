@@ -1,19 +1,19 @@
-### Multimodal LoRA SFT — Qwen3.5-4B on share_data_lake
+### Multimodal LoRA SFT — Qwen3.5-4B on VN ego data
 model_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-4B
-dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/hermas_sys2_train.jsonl
-eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/hermas_sys2_val.jsonl
-output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-lake
+dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_train.jsonl
+eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_val.jsonl
+output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-vn
 
 max_seq_length: 2048
 max_samples: null
 eval_max_samples: 256
 image_max_pixels: 262144
 
-num_train_epochs: 2.0
+num_train_epochs: 1.0
 learning_rate: 1.0e-4
-per_device_train_batch_size: 1
+per_device_train_batch_size: 2
 per_device_eval_batch_size: 1
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 4
 warmup_steps: 100
 logging_steps: 1
 save_steps: 500
@@ -27,7 +27,7 @@ lora_target_modules: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
 
 bf16: true
 gradient_checkpointing: true
-dataloader_num_workers: 0
+dataloader_num_workers: 4
 save_total_limit: 5
 auto_resume: true
 report_to: none

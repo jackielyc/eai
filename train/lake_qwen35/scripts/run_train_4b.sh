@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Multimodal LoRA SFT Qwen3.5-4B on share_data_lake (single- or multi-node DDP)
+# Multimodal LoRA SFT Qwen3.5-4B on VN ego data (single- or multi-node DDP)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

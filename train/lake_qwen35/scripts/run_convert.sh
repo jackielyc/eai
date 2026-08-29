@@ -3,6 +3,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=convert_env.sh
+source "$(dirname "${BASH_SOURCE[0]}")/convert_env.sh"
 WORKSPACE="/share_data/projects/mahjong/share/personal/liyichao"
 # zarr 读取依赖 psi-policy 环境；训练仍用 Qwen2.5-VL
 CONVERT_PYTHON="${CONVERT_PYTHON:-${WORKSPACE}/miniconda3/envs/psi-policy/bin/python}"
@@ -16,7 +18,7 @@ SUBSET_VAL="${SUBSET_VAL:-2000}"
 TASKS="${TASKS:-}"
 TASK_LIST_FILE="${TASK_LIST_FILE:-}"
 MAX_PER_TASK="${MAX_PER_TASK:-}"
-NUM_WORKERS="${NUM_WORKERS:-$(nproc)}"
+NUM_WORKERS="$(default_num_workers)"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 RESUME="${RESUME:-1}"
 SKIP_FULL="${SKIP_FULL:-1}"
@@ -50,5 +52,5 @@ if [[ -n "${SKIP_FULL}" && "${SKIP_FULL}" != "0" ]]; then
   ARGS+=(--skip-full)
 fi
 
-echo "[info] convert ${DATAHOUSE_ID}/${VIEW_ID} -> ${ROOT}/data"
+echo "[info] convert ${DATAHOUSE_ID}/${VIEW_ID} -> ${ROOT}/data (workers=${NUM_WORKERS})"
 "${CONVERT_PYTHON}" "${ROOT}/scripts/convert_lake_to_sft.py" "${ARGS[@]}"

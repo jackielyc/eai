@@ -14,7 +14,7 @@ from typing import Any
 
 import torch
 
-# Disable cuDNN before importing transformers/accelerate (they may init cuDNN on import).
+# cuDNN + DDP/dataloader workers can raise CUDNN_STATUS_NOT_INITIALIZED on this stack.
 torch.backends.cudnn.enabled = False
 
 from peft import LoraConfig, TaskType, get_peft_model
@@ -282,6 +282,41 @@ def load_sharegpt_records(path: str, max_samples: int | None = None) -> list[dic
     return data
 
 
+def build_jsonl_offsets(path: Path, max_samples: int | None = None) -> list[int]:
+    """Byte offsets for each JSONL row; cached beside the file for fast restarts."""
+    idx_path = Path(f"{path}.offsets.npy")
+    if idx_path.exists() and idx_path.stat().st_mtime >= path.stat().st_mtime:
+        import numpy as np
+
+        offsets = np.load(idx_path)
+        if max_samples is None:
+            return offsets.tolist()
+        return offsets[:max_samples].tolist()
+
+    offsets: list[int] = []
+    with path.open("rb") as handle:
+        while True:
+            offset = handle.tell()
+            line = handle.readline()
+            if not line:
+                break
+            if line.strip():
+                offsets.append(offset)
+                if max_samples is not None and len(offsets) >= max_samples:
+                    break
+
+    import numpy as np
+
+    np.save(idx_path, np.array(offsets, dtype=np.int64))
+    return offsets
+
+
+def read_jsonl_record(path: Path, offset: int) -> dict[str, Any]:
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        return json.loads(handle.readline())
+
+
 class MultimodalShareGPTDataset(Dataset):
     def __init__(
         self,
@@ -290,12 +325,20 @@ class MultimodalShareGPTDataset(Dataset):
         max_seq_length: int,
         max_samples: int | None = None,
     ) -> None:
-        self.data = load_sharegpt_records(path, max_samples)
+        self.path = Path(path)
         self.processor = processor
         self.max_seq_length = max_seq_length
+        if self.path.suffix.lower() == ".jsonl":
+            self._offsets = build_jsonl_offsets(self.path, max_samples)
+            self.data: list[dict[str, Any]] | None = None
+        else:
+            self._offsets = None
+            self.data = load_sharegpt_records(path, max_samples)
 
     def __len__(self) -> int:
-        return len(self.data)
+        if self._offsets is not None:
+            return len(self._offsets)
+        return len(self.data or [])
 
     def _encode(self, messages: list[dict[str, Any]], *, add_generation_prompt: bool) -> dict[str, torch.Tensor]:
         encoded = self.processor.apply_chat_template(
@@ -322,7 +365,11 @@ class MultimodalShareGPTDataset(Dataset):
         return result
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
-        messages = _resolve_messages(self.data[idx]["messages"])
+        if self._offsets is not None:
+            record = read_jsonl_record(self.path, self._offsets[idx])
+        else:
+            record = (self.data or [])[idx]
+        messages = _resolve_messages(record["messages"])
         full = self._encode(messages, add_generation_prompt=False)
         prompt = self._encode(messages[:-1], add_generation_prompt=True)
 
@@ -550,6 +597,8 @@ def main() -> None:
     train_ds = MultimodalShareGPTDataset(
         cfg.dataset_path, processor, cfg.max_seq_length, cfg.max_samples
     )
+    if local_rank == 0:
+        print(f"[train] train samples={len(train_ds)}", flush=True)
     eval_ds = None
     if cfg.eval_dataset_path:
         eval_ds = MultimodalShareGPTDataset(
@@ -566,6 +615,11 @@ def main() -> None:
         fsdp_arg = "full_shard auto_wrap"
         fsdp_config = {"transformer_layer_cls_to_wrap": [wrap]}
 
+    dataloader_kwargs: dict[str, Any] = {}
+    if cfg.dataloader_num_workers > 0:
+        dataloader_kwargs["dataloader_prefetch_factor"] = 2
+        dataloader_kwargs["dataloader_persistent_workers"] = True
+
     targs = TrainingArguments(
         output_dir=cfg.output_dir,
         num_train_epochs=cfg.num_train_epochs,
@@ -579,7 +633,6 @@ def main() -> None:
         eval_steps=cfg.eval_steps if eval_ds is not None else None,
         eval_strategy="steps" if eval_ds is not None else "no",
         save_strategy="steps",
-        save_safetensors=True,
         bf16=cfg.bf16,
         gradient_checkpointing=cfg.gradient_checkpointing,
         dataloader_num_workers=cfg.dataloader_num_workers,
@@ -593,7 +646,8 @@ def main() -> None:
         disable_tqdm=True,
         fsdp=fsdp_arg,
         fsdp_config=fsdp_config,
-        dataloader_pin_memory=False,
+        dataloader_pin_memory=torch.cuda.is_available(),
+        **dataloader_kwargs,
     )
 
     callbacks: list[TrainerCallback] = [TerminalProgressCallback()]
