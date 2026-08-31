@@ -22,6 +22,7 @@ NUM_WORKERS="$(default_num_workers)"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 RESUME="${RESUME:-1}"
 SKIP_FULL="${SKIP_FULL:-1}"
+REQUIRE_APPROVED="${REQUIRE_APPROVED:-1}"
 
 ARGS=(
   --data-root "${DATA_ROOT}"
@@ -51,6 +52,9 @@ fi
 if [[ -n "${SKIP_FULL}" && "${SKIP_FULL}" != "0" ]]; then
   ARGS+=(--skip-full)
 fi
+if [[ "${REQUIRE_APPROVED}" == "0" ]]; then
+  ARGS+=(--no-require-approved)
+fi
 
-echo "[info] convert ${DATAHOUSE_ID}/${VIEW_ID} -> ${ROOT}/data (workers=${NUM_WORKERS})"
+echo "[info] convert ${DATAHOUSE_ID}/${VIEW_ID} -> ${ROOT}/data (workers=${NUM_WORKERS}, require_approved=${REQUIRE_APPROVED})"
 "${CONVERT_PYTHON}" "${ROOT}/scripts/convert_lake_to_sft.py" "${ARGS[@]}"

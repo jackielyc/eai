@@ -301,6 +301,7 @@ export CUDA_VISIBLE_DEVICES
 if [[ -z "${NPROC:-}" ]]; then
   NPROC="$(awk -F',' '{print NF}' <<< "${CUDA_VISIBLE_DEVICES}")"
 fi
+export NPROC
 
 _node_rank_provided=0
 [[ -n "${NODE_RANK+x}" ]] && _node_rank_provided=1
@@ -355,10 +356,9 @@ if ! [[ "${NPROC}" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-export MASTER_ADDR MASTER_PORT
+export MASTER_ADDR MASTER_PORT NNODES NODE_RANK NPROC
 export PYTHONUNBUFFERED=1
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
-export NCCL_ASYNC_ERROR_HANDLING="${NCCL_ASYNC_ERROR_HANDLING:-1}"
 
 DIST_LAUNCH=( "${PYTHON}" -u -m torch.distributed.run --nproc_per_node="${NPROC}" )
 if [[ "${NNODES}" -eq 1 ]]; then

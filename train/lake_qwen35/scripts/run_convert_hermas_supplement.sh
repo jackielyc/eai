@@ -15,6 +15,7 @@ CAMERA="${CAMERA:-auto}"
 NUM_WORKERS="$(default_num_workers)"
 SKIP_EXISTING="${SKIP_EXISTING:-1}"
 RESUME="${RESUME:-1}"
+REQUIRE_APPROVED="${REQUIRE_APPROVED:-1}"
 
 ARGS=(
   --data-root "${DATA_ROOT}"
@@ -31,6 +32,9 @@ fi
 if [[ "${RESUME}" == "0" ]]; then
   ARGS+=(--no-resume)
 fi
+if [[ "${REQUIRE_APPROVED}" == "0" ]]; then
+  ARGS+=(--no-require-approved)
+fi
 
 mkdir -p "${ROOT}/output"
 LOG="${ROOT}/output/convert_hermas_supplement_$(date +%Y%m%d_%H%M%S).log"
@@ -38,9 +42,9 @@ PID_FILE="${ROOT}/output/convert_hermas_supplement.pid"
 
 echo "[info] keep existing: ${ROOT}/data/hermas_sys2_{train,val}.jsonl"
 echo "[info] export remainder -> ${ROOT}/data/hermas_sys2_{train,val}_supplement.jsonl"
-echo "[info] workers=${NUM_WORKERS} resume=${RESUME} skip_existing=${SKIP_EXISTING}"
+echo "[info] workers=${NUM_WORKERS} resume=${RESUME} skip_existing=${SKIP_EXISTING} require_approved=${REQUIRE_APPROVED}"
 echo "[info] log=${LOG}"
 
-nohup "${CONVERT_PYTHON}" "${ROOT}/scripts/convert_lake_to_sft.py" "${ARGS[@]}" >"${LOG}" 2>&1 &
+nohup "${CONVERT_PYTHON}" -u "${ROOT}/scripts/convert_lake_to_sft.py" "${ARGS[@]}" >"${LOG}" 2>&1 &
 echo $! >"${PID_FILE}"
 echo "[info] started pid=$(cat "${PID_FILE}")"

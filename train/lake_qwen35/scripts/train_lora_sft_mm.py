@@ -18,7 +18,7 @@ import torch
 torch.backends.cudnn.enabled = False
 
 from peft import LoraConfig, TaskType, get_peft_model
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset
 from transformers import (
     AutoConfig,
@@ -242,6 +242,17 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
     return cfg
 
 
+def _load_image_rgb(image_ref: str) -> Image.Image:
+    path = Path(image_ref)
+    if not path.is_file():
+        raise FileNotFoundError(f"image not found: {image_ref}")
+    if path.stat().st_size <= 0:
+        raise UnidentifiedImageError(f"empty image file: {image_ref}")
+    with Image.open(path) as img:
+        img.load()
+        return img.convert("RGB")
+
+
 def _resolve_messages(raw_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     for msg in raw_messages:
@@ -253,7 +264,7 @@ def _resolve_messages(raw_messages: list[dict[str, Any]]) -> list[dict[str, Any]
                     image_ref = part.get("image") or part.get("url")
                     if not image_ref:
                         raise ValueError("Image part missing 'image' path")
-                    resolved.append({"type": "image", "image": Image.open(image_ref).convert("RGB")})
+                    resolved.append({"type": "image", "image": _load_image_rgb(image_ref)})
                 else:
                     resolved.append(part)
             messages.append({"role": msg["role"], "content": resolved})
@@ -282,17 +293,16 @@ def load_sharegpt_records(path: str, max_samples: int | None = None) -> list[dic
     return data
 
 
-def build_jsonl_offsets(path: Path, max_samples: int | None = None) -> list[int]:
-    """Byte offsets for each JSONL row; cached beside the file for fast restarts."""
-    idx_path = Path(f"{path}.offsets.npy")
-    if idx_path.exists() and idx_path.stat().st_mtime >= path.stat().st_mtime:
-        import numpy as np
+def _load_jsonl_offsets(idx_path: Path, max_samples: int | None) -> list[int]:
+    import numpy as np
 
-        offsets = np.load(idx_path)
-        if max_samples is None:
-            return offsets.tolist()
-        return offsets[:max_samples].tolist()
+    offsets = np.load(idx_path)
+    if max_samples is None:
+        return offsets.tolist()
+    return offsets[:max_samples].tolist()
 
+
+def _scan_jsonl_offsets(path: Path, max_samples: int | None) -> list[int]:
     offsets: list[int] = []
     with path.open("rb") as handle:
         while True:
@@ -304,11 +314,55 @@ def build_jsonl_offsets(path: Path, max_samples: int | None = None) -> list[int]
                 offsets.append(offset)
                 if max_samples is not None and len(offsets) >= max_samples:
                     break
-
-    import numpy as np
-
-    np.save(idx_path, np.array(offsets, dtype=np.int64))
     return offsets
+
+
+def build_jsonl_offsets(path: Path, max_samples: int | None = None) -> list[int]:
+    """Byte offsets for each JSONL row; rank 0 builds, others wait (multi-node safe)."""
+    idx_path = Path(f"{path}.offsets.npy")
+    if idx_path.exists() and idx_path.stat().st_mtime >= path.stat().st_mtime:
+        return _load_jsonl_offsets(idx_path, max_samples)
+
+    rank = int(os.environ.get("RANK", "0"))
+    tmp_path = idx_path.with_suffix(".offsets.tmp.npy")
+    if rank == 0:
+        offsets = _scan_jsonl_offsets(path, max_samples)
+        import numpy as np
+
+        np.save(tmp_path, np.array(offsets, dtype=np.int64))
+        tmp_path.replace(idx_path)
+        print(f"[data] built index {idx_path} rows={len(offsets)}", flush=True)
+    else:
+        wait_sec = float(os.environ.get("INDEX_WAIT_SEC", "3600"))
+        deadline = time.time() + wait_sec
+        while time.time() < deadline:
+            if idx_path.exists() and idx_path.stat().st_mtime >= path.stat().st_mtime:
+                break
+            time.sleep(2)
+        else:
+            raise TimeoutError(f"Timed out waiting for index: {idx_path}")
+
+    return _load_jsonl_offsets(idx_path, max_samples)
+
+
+def _training_nnodes(world_size: int) -> int:
+    if os.environ.get("NNODES"):
+        return max(1, int(os.environ["NNODES"]))
+    local = max(1, int(os.environ.get("LOCAL_WORLD_SIZE", os.environ.get("NPROC", "1"))))
+    return max(1, (world_size + local - 1) // local)
+
+
+def resolve_dataloader_workers(requested: int, world_size: int) -> int:
+    """Cap prefetch workers on multi-node to avoid host OOM / NFS overload."""
+    if requested <= 0:
+        return 0
+    nnodes = _training_nnodes(world_size)
+    if nnodes <= 1:
+        return requested
+    if requested <= 2:
+        return 0
+    cap = max(1, 8 // nnodes)
+    return min(requested, cap)
 
 
 def read_jsonl_record(path: Path, offset: int) -> dict[str, Any]:
@@ -364,7 +418,7 @@ class MultimodalShareGPTDataset(Dataset):
                 result[key] = value
         return result
 
-    def __getitem__(self, idx: int) -> dict[str, Any]:
+    def _getitem_at(self, idx: int) -> dict[str, Any]:
         if self._offsets is not None:
             record = read_jsonl_record(self.path, self._offsets[idx])
         else:
@@ -387,6 +441,20 @@ class MultimodalShareGPTDataset(Dataset):
             if key in full:
                 item[key] = full[key]
         return item
+
+    def __getitem__(self, idx: int) -> dict[str, Any]:
+        n = len(self)
+        max_attempts = min(32, n)
+        last_exc: Exception | None = None
+        for offset in range(max_attempts):
+            cur = (idx + offset) % n
+            try:
+                return self._getitem_at(cur)
+            except (UnidentifiedImageError, OSError, FileNotFoundError, json.JSONDecodeError, ValueError, KeyError) as exc:
+                last_exc = exc
+                if int(os.environ.get("LOCAL_RANK", "0")) == 0:
+                    print(f"[warn] skip bad sample idx={cur}: {exc}", flush=True)
+        raise RuntimeError(f"failed to load sample near idx={idx} after {max_attempts} attempts") from last_exc
 
 
 def _get_rope_model(model: torch.nn.Module) -> torch.nn.Module:
@@ -616,9 +684,18 @@ def main() -> None:
         fsdp_config = {"transformer_layer_cls_to_wrap": [wrap]}
 
     dataloader_kwargs: dict[str, Any] = {}
-    if cfg.dataloader_num_workers > 0:
+    num_workers = resolve_dataloader_workers(cfg.dataloader_num_workers, world_size)
+    nnodes = _training_nnodes(world_size)
+    if num_workers > 0:
         dataloader_kwargs["dataloader_prefetch_factor"] = 2
-        dataloader_kwargs["dataloader_persistent_workers"] = True
+        if nnodes <= 1:
+            dataloader_kwargs["dataloader_persistent_workers"] = True
+    if local_rank == 0:
+        print(
+            f"[train] dataloader workers={num_workers} "
+            f"(requested={cfg.dataloader_num_workers}, nnodes={nnodes}, world_size={world_size})",
+            flush=True,
+        )
 
     targs = TrainingArguments(
         output_dir=cfg.output_dir,
@@ -635,7 +712,7 @@ def main() -> None:
         save_strategy="steps",
         bf16=cfg.bf16,
         gradient_checkpointing=cfg.gradient_checkpointing,
-        dataloader_num_workers=cfg.dataloader_num_workers,
+        dataloader_num_workers=num_workers,
         save_total_limit=cfg.save_total_limit,
         report_to=cfg.report_to,
         seed=cfg.seed,

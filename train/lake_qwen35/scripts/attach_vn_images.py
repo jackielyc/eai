@@ -245,6 +245,13 @@ class CosFile:
 
 
 def jpeg_from_cdr(data: bytes) -> bytes:
+    # CDR wrappers may contain a bare SOI before the real JFIF/EXIF JPEG payload.
+    for marker in (b"\xff\xd8\xff\xe0", b"\xff\xd8\xff\xe1", b"\xff\xd8\xff\xdb"):
+        soi = data.find(marker)
+        if soi >= 0:
+            eoi = data.rfind(b"\xff\xd9", soi)
+            if eoi > soi:
+                return data[soi : eoi + 2]
     soi = data.find(b"\xff\xd8")
     eoi = data.rfind(b"\xff\xd9")
     if soi < 0 or eoi <= soi:
@@ -486,6 +493,85 @@ def iter_episodes(path: Path, limit: int | None):
                 return
 
 
+def parse_image_job(path: Path) -> tuple[str, int, str]:
+    split = path.parent.name
+    eid, idx_str = path.stem.rsplit("_", 1)
+    return eid, int(idx_str), split
+
+
+def load_episode_map(cortex_dir: Path, eids: set[str]) -> dict[str, tuple[str, dict[str, Any]]]:
+    out: dict[str, tuple[str, dict[str, Any]]] = {}
+    remaining = set(eids)
+    for split, name in (("train", "vn_norm_mem_train.jsonl"), ("val", "vn_norm_mem_val.jsonl")):
+        src = cortex_dir / name
+        if not src.is_file() or not remaining:
+            continue
+        with src.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                ep = json.loads(line)
+                eid = episode_id(ep)
+                if eid in remaining:
+                    out[eid] = (split, ep)
+                    remaining.discard(eid)
+                if not remaining:
+                    break
+    return out
+
+
+def reexport_images(
+    paths: list[Path],
+    *,
+    cortex_dir: Path,
+    act_map: dict[str, str],
+    task_map: dict[str, str],
+) -> None:
+    from PIL import Image
+
+    episodes = load_episode_map(cortex_dir, {parse_image_job(p)[0] for p in paths})
+    ok = fail = 0
+    for path in paths:
+        eid, idx, _split = parse_image_job(path)
+        rec = episodes.get(eid)
+        if not rec:
+            print(f"[fail] episode not found eid={eid} path={path}", flush=True)
+            fail += 1
+            continue
+        _ep_split, ep = rec
+        key = mcap_key(ep)
+        if not key:
+            print(f"[fail] no mcap key eid={eid}", flush=True)
+            fail += 1
+            continue
+        frame_idx = fps = None
+        for fi, fp, ai, _, _ in action_jobs(ep, act_map, task_map):
+            if ai == idx:
+                frame_idx, fps = fi, fp
+                break
+        if frame_idx is None or fps is None:
+            print(f"[fail] action idx={idx} not found eid={eid}", flush=True)
+            fail += 1
+            continue
+        try:
+            frames = extract_frames(key, [(frame_idx, fps)])
+            jpeg = frames.get(frame_idx)
+            if not jpeg:
+                print(f"[fail] frame missing eid={eid} idx={idx} frame={frame_idx}", flush=True)
+                fail += 1
+                continue
+            _write_jpeg(path, jpeg)
+            with Image.open(path) as img:
+                img.load()
+                size = img.size
+            print(f"[ok] {path.name} {size}", flush=True)
+            ok += 1
+        except Exception as exc:
+            print(f"[fail] {path} {type(exc).__name__}: {exc}", flush=True)
+            fail += 1
+    print(f"[done] reexport ok={ok} fail={fail}", flush=True)
+
+
 def convert_split(
     *,
     src: Path,
@@ -623,6 +709,12 @@ def main() -> None:
     parser.add_argument("--prefer-local", action="store_true", default=True)
     parser.add_argument("--no-prefer-local", action="store_true")
     parser.add_argument("--splits", default="val,train")
+    parser.add_argument(
+        "--reexport-list",
+        type=Path,
+        default=None,
+        help="Re-extract JPEGs for paths listed one per line, then exit.",
+    )
     args = parser.parse_args()
     skip_existing = not args.no_skip_existing
     resume = not args.no_resume
@@ -639,6 +731,12 @@ def main() -> None:
         f"resume={resume} prefer_local={_PREFER_LOCAL} cos_mount={args.cos_mount}",
         flush=True,
     )
+
+    if args.reexport_list is not None:
+        paths = [Path(line.strip()) for line in args.reexport_list.read_text(encoding="utf-8").splitlines() if line.strip()]
+        print(f"[info] reexport images={len(paths)} list={args.reexport_list}", flush=True)
+        reexport_images(paths, cortex_dir=args.cortex_dir, act_map=act_map, task_map=task_map)
+        return
 
     mapping = {
         "train": (args.cortex_dir / "vn_norm_mem_train.jsonl", args.output_dir / "vn_sys2_train.jsonl"),

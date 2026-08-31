@@ -7,13 +7,14 @@ import argparse
 import json
 import os
 import random
+import subprocess
 import time
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 import numpy as np
 import pandas as pd
@@ -46,10 +47,20 @@ INDEX_COLUMNS = (
     "start_idx",
     "end_idx",
     "clip_id",
+    "episode_id",
     "zarr_path",
     "text_embedding_content",
     "upper_text_embedding_content",
 )
+
+DEFAULT_DB_HOST = "sh-cdb-a3xciow0.sql.tencentcdb.com"
+DEFAULT_DB_PORT = 22651
+DEFAULT_DB_USER = "psi_datahub"
+DEFAULT_DB_PASSWORD = "Q7HV5EXV3vZv"
+DEFAULT_DB_NAME = "data_hub"
+DEFAULT_PROJECT_ID = 10029
+
+_APPROVED_EPISODE_IDS: set[int] | None = None
 _ZARR_CACHE: dict[str, tuple[Any, str]] = {}
 _LAYER2_ZH_CACHE: dict[str, str] | None = None
 _LAYER2_ZH_CACHE_PATH: Path | None = None
@@ -520,6 +531,172 @@ def _resolve_zarr_path(data_root: Path, datahouse_id: str, row: pd.Series) -> Pa
     return data_root / datahouse_id / "tasks" / task / f"{volume_id}.zarr"
 
 
+def load_approved_episode_ids(
+    *,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str,
+    project_id: int,
+    cache_path: Path | None = None,
+    refresh_cache: bool = False,
+    mysql_bin: str | None = None,
+) -> set[int]:
+    global _APPROVED_EPISODE_IDS
+    if _APPROVED_EPISODE_IDS is not None:
+        return _APPROVED_EPISODE_IDS
+
+    if cache_path and cache_path.exists() and not refresh_cache:
+        ids = {int(x) for x in json.loads(cache_path.read_text(encoding="utf-8"))}
+        print(f"[info] loaded {len(ids):,} approved episode ids from {cache_path.name}", flush=True)
+        _APPROVED_EPISODE_IDS = ids
+        return ids
+
+    mysql = mysql_bin or "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/bin/mysql"
+    if cache_path and cache_path.exists() and refresh_cache:
+        cache_path.unlink(missing_ok=True)
+
+    print(
+        f"[info] fetching approved episode ids from CDB project_id={project_id} ...",
+        flush=True,
+    )
+    sql = (
+        "SELECT DISTINCT r.episode_id FROM review r "
+        "JOIN episode e ON e.id = r.episode_id "
+        f"WHERE e.project_id = {int(project_id)} AND r.valid_pass = 1"
+    )
+    with subprocess.Popen(
+        [mysql, "-h", host, "-P", str(port), "-u", user, f"-p{password}", database, "-N", "-e", sql],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    ) as proc:
+        ids: set[int] = set()
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                ids.add(int(line))
+        stderr = proc.stderr.read() if proc.stderr is not None else ""
+        rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(stderr.strip() or "mysql query failed")
+
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(sorted(ids)), encoding="utf-8")
+        print(f"[info] cached approved episode ids -> {cache_path}", flush=True)
+    print(f"[info] approved episode ids: {len(ids):,}", flush=True)
+    _APPROVED_EPISODE_IDS = ids
+    return ids
+
+
+def _clip_id_from_sample(sample: dict[str, Any]) -> str | None:
+    for message in sample.get("messages") or []:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if part.get("type") != "image":
+                continue
+            image = str(part.get("image") or "")
+            clip_id = Path(image).stem
+            if clip_id.isdigit():
+                return clip_id
+    return None
+
+
+def _collect_jsonl_clip_ids(*paths: Path) -> set[str]:
+    clip_ids: set[str] = set()
+    for path in paths:
+        if not path.exists():
+            continue
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                clip_id = _clip_id_from_sample(json.loads(line))
+                if clip_id:
+                    clip_ids.add(clip_id)
+    return clip_ids
+
+
+def _lookup_clip_episodes(clip_ids: set[str], index_paths: Iterable[Path]) -> dict[str, int]:
+    if not clip_ids:
+        return {}
+    needed = set(clip_ids)
+    found: dict[str, int] = {}
+    for index_path in index_paths:
+        if not index_path.exists() or not needed:
+            continue
+        schema = pq.read_schema(index_path)
+        cols = [c for c in ("clip_id", "episode_id") if c in schema.names]
+        if len(cols) != 2:
+            continue
+        pf = pq.ParquetFile(index_path)
+        for batch in pf.iter_batches(batch_size=65536, columns=cols):
+            df = batch.to_pandas()
+            for clip_id, episode_id in zip(df["clip_id"], df["episode_id"], strict=False):
+                cid = str(clip_id)
+                if cid in needed and cid not in found:
+                    found[cid] = int(episode_id)
+            needed -= found.keys()
+            if not needed:
+                break
+    return found
+
+
+def filter_jsonl_by_approved(
+    jsonl_path: Path,
+    *,
+    approved_episode_ids: set[int],
+    clip_episode_map: dict[str, int],
+    checkpoint_path: Path | None = None,
+) -> tuple[int, int]:
+    if not jsonl_path.exists():
+        return 0, 0
+
+    kept: list[str] = []
+    kept_ids: list[str] = []
+    removed = 0
+    with jsonl_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            sample = json.loads(line)
+            clip_id = _clip_id_from_sample(sample)
+            if clip_id is None:
+                removed += 1
+                continue
+            episode_id = clip_episode_map.get(clip_id)
+            if episode_id is None or episode_id not in approved_episode_ids:
+                removed += 1
+                continue
+            kept.append(line.rstrip("\n"))
+            kept_ids.append(clip_id)
+
+    tmp_path = jsonl_path.with_suffix(jsonl_path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
+        for line in kept:
+            handle.write(line + "\n")
+    tmp_path.replace(jsonl_path)
+
+    if checkpoint_path is not None:
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        with checkpoint_path.open("w", encoding="utf-8") as handle:
+            for clip_id in kept_ids:
+                handle.write(f"{clip_id}\n")
+
+    if removed:
+        print(
+            f"[info] filtered {jsonl_path.name}: kept={len(kept):,} removed={removed:,}",
+            flush=True,
+        )
+    return len(kept), removed
+
+
 def _parse_task_list(raw: str | None, task_list_file: Path | None) -> list[str] | None:
     tasks: list[str] = []
     if raw:
@@ -542,8 +719,22 @@ def _prepare_clip_index(
     max_samples: int | None = None,
     seed: int = 42,
     oversample: float = 3.0,
+    approved_episode_ids: set[int] | None = None,
 ) -> pd.DataFrame:
     total_rows = len(df)
+    if approved_episode_ids is not None:
+        if "episode_id" not in df.columns:
+            raise ValueError(f"{split}: episode_id column required for approved filter")
+        before = len(df)
+        df = df[df["episode_id"].astype(int).isin(approved_episode_ids)].reset_index(drop=True)
+        print(
+            f"[info] {split}: require_approved -> {len(df):,}/{before:,} rows "
+            f"({len(df) / max(before, 1) * 100:.2f}%)",
+            flush=True,
+        )
+        if df.empty:
+            return df
+
     if tasks:
         task_set = set(tasks)
         df = df[df["task"].isin(task_set)].reset_index(drop=True)
@@ -647,6 +838,7 @@ def _load_filtered_index(
     max_samples: int | None,
     seed: int,
     oversample: float,
+    approved_episode_ids: set[int] | None = None,
 ) -> pd.DataFrame | None:
     available_cols = pq.read_schema(index_path).names
     read_cols = [c for c in INDEX_COLUMNS if c in available_cols]
@@ -663,6 +855,7 @@ def _load_filtered_index(
         max_samples=max_samples,
         seed=seed,
         oversample=oversample,
+        approved_episode_ids=approved_episode_ids,
     )
     if df.empty:
         return None
@@ -682,6 +875,7 @@ def _iter_index_rows(
     seed: int,
     oversample: float,
     stream_batches: bool,
+    approved_episode_ids: set[int] | None = None,
 ) -> Iterator[dict[str, Any]]:
     if not stream_batches:
         df = _load_filtered_index(
@@ -692,6 +886,7 @@ def _iter_index_rows(
             max_samples=max_samples,
             seed=seed,
             oversample=oversample,
+            approved_episode_ids=approved_episode_ids,
         )
         if df is None:
             return
@@ -708,6 +903,10 @@ def _iter_index_rows(
 
     for batch in pf.iter_batches(batch_size=8192, columns=read_cols):
         df = batch.to_pandas()
+        if approved_episode_ids is not None:
+            if "episode_id" not in df.columns:
+                raise ValueError(f"{split}: episode_id column required for approved filter")
+            df = df[df["episode_id"].astype(int).isin(approved_episode_ids)]
         if task_set is not None:
             df = df[df["task"].isin(task_set)]
         sort_cols = [c for c in ("zarr_path", "volume_id", "start_idx") if c in df.columns]
@@ -746,6 +945,7 @@ def export_view_split(
     jsonl_name: str | None = None,
     checkpoint_name: str | None = None,
     exclude_clip_ids: set[str] | None = None,
+    approved_episode_ids: set[int] | None = None,
 ) -> int:
     if max_samples is not None and max_samples <= 0:
         print(f"[skip] {split}: max_samples={max_samples}")
@@ -814,6 +1014,9 @@ def export_view_split(
         return target is not None and writer.count >= target
 
     def _iter_jobs() -> Iterator[ClipJob]:
+        scanned = 0
+        skipped = 0
+        last_scan_print = time.time()
         for row_dict in _iter_index_rows(
             index_path,
             split=split,
@@ -823,9 +1026,11 @@ def export_view_split(
             seed=seed,
             oversample=oversample,
             stream_batches=stream_batches,
+            approved_episode_ids=approved_episode_ids,
         ):
             if target is not None and writer.count >= target:
                 return
+            scanned += 1
             job = _row_to_job(
                 row_dict,
                 split=split,
@@ -837,6 +1042,15 @@ def export_view_split(
                 skip_existing=skip_existing,
             )
             if job is None or _should_skip(job):
+                skipped += 1
+                now = time.time()
+                if now - last_scan_print >= 20:
+                    last_scan_print = now
+                    print(
+                        f"[scan] {split}: scanned={scanned:,} skipped={skipped:,} "
+                        f"written={writer.count:,}",
+                        flush=True,
+                    )
                 continue
             yield job
 
@@ -899,6 +1113,9 @@ def convert_source(
     resume: bool = True,
     seed: int = 42,
     supplement: bool = False,
+    require_approved: bool = True,
+    approved_episode_ids: set[int] | None = None,
+    refilter_jsonl: bool = False,
 ) -> tuple[int, int]:
     image_dir = output_dir / "images"
     ckpt_dir = output_dir / ".convert_checkpoint"
@@ -908,6 +1125,56 @@ def convert_source(
     val_jsonl_name: str | None = None
     train_checkpoint_name: str | None = None
     val_checkpoint_name: str | None = None
+    stamp_path = output_dir / ".hermes_jsonl_approved_filtered"
+
+    if (
+        require_approved
+        and approved_episode_ids is not None
+        and (refilter_jsonl or not stamp_path.exists())
+    ):
+        view_root = data_root / datahouse_id / "views" / view_id
+        index_paths = [
+            view_root / "clip_index_train.parquet",
+            view_root / "clip_index_val.parquet",
+        ]
+        jsonl_jobs = [
+            ("hermas_sys2_train.jsonl", "train.clip_ids"),
+            ("hermas_sys2_val.jsonl", "val.clip_ids"),
+        ]
+        if supplement:
+            jsonl_jobs.extend(
+                [
+                    ("hermas_sys2_train_supplement.jsonl", "train_supplement.clip_ids"),
+                    ("hermas_sys2_val_supplement.jsonl", "val_supplement.clip_ids"),
+                ]
+            )
+        jsonl_paths = [output_dir / name for name, _ in jsonl_jobs]
+        print("[info] filtering existing jsonl by approved episodes...", flush=True)
+        clip_ids = _collect_jsonl_clip_ids(*jsonl_paths)
+        clip_episode_map = _lookup_clip_episodes(clip_ids, index_paths)
+        print(
+            f"[info] resolved clip->episode for {len(clip_episode_map):,}/{len(clip_ids):,} jsonl clips",
+            flush=True,
+        )
+        for jsonl_name, checkpoint_name in jsonl_jobs:
+            filter_jsonl_by_approved(
+                output_dir / jsonl_name,
+                approved_episode_ids=approved_episode_ids,
+                clip_episode_map=clip_episode_map,
+                checkpoint_path=ckpt_dir / checkpoint_name,
+            )
+        stamp_path.write_text(
+            json.dumps({"approved_count": len(approved_episode_ids)}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"[info] wrote approved-filter stamp -> {stamp_path.name}", flush=True)
+        del clip_ids, clip_episode_map
+    elif require_approved and stamp_path.exists():
+        print(
+            f"[info] skip jsonl re-filter (stamp exists: {stamp_path.name}); "
+            "pass --refilter-jsonl to force",
+            flush=True,
+        )
 
     if supplement:
         exclude_train = load_exclude_clip_ids(
@@ -948,6 +1215,7 @@ def convert_source(
         skip_existing=skip_existing,
         resume=resume,
         stream_batches=stream_batches,
+        approved_episode_ids=approved_episode_ids if require_approved else None,
     )
     train_count = export_view_split(
         split="train",
@@ -1114,10 +1382,52 @@ def main() -> None:
         action="store_true",
         help="Export remaining Hermes clips to *_supplement.jsonl without touching existing hermas jsonl.",
     )
+    parser.add_argument(
+        "--require-approved",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Only export clips whose episode has review.valid_pass=1 (default: true).",
+    )
+    parser.add_argument("--db-host", default=DEFAULT_DB_HOST)
+    parser.add_argument("--db-port", type=int, default=DEFAULT_DB_PORT)
+    parser.add_argument("--db-user", default=DEFAULT_DB_USER)
+    parser.add_argument("--db-password", default=DEFAULT_DB_PASSWORD)
+    parser.add_argument("--db-name", default=DEFAULT_DB_NAME)
+    parser.add_argument("--project-id", type=int, default=DEFAULT_PROJECT_ID)
+    parser.add_argument(
+        "--approved-episode-cache",
+        type=Path,
+        default=None,
+        help="Cache file for approved episode ids (default: <output-dir>/.hermes_approved_episode_ids.json).",
+    )
+    parser.add_argument(
+        "--refresh-approved-cache",
+        action="store_true",
+        help="Re-fetch approved episode ids from CDB instead of using cache.",
+    )
+    parser.add_argument(
+        "--refilter-jsonl",
+        action="store_true",
+        help="Force re-filter existing hermas jsonl by approved episodes (default: skip if stamp exists).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
     task_filter = _parse_task_list(args.tasks, args.task_list_file)
+
+    approved_episode_ids: set[int] | None = None
+    if args.require_approved:
+        cache_path = args.approved_episode_cache or (args.output_dir / ".hermes_approved_episode_ids.json")
+        approved_episode_ids = load_approved_episode_ids(
+            host=args.db_host,
+            port=args.db_port,
+            user=args.db_user,
+            password=args.db_password,
+            database=args.db_name,
+            project_id=args.project_id,
+            cache_path=cache_path,
+            refresh_cache=args.refresh_approved_cache,
+        )
 
     train_count, val_count = convert_source(
         args.data_root,
@@ -1135,6 +1445,9 @@ def main() -> None:
         resume=args.resume,
         seed=args.seed,
         supplement=args.supplement,
+        require_approved=args.require_approved,
+        approved_episode_ids=approved_episode_ids,
+        refilter_jsonl=args.refilter_jsonl,
     )
 
     write_dataset_info(args.output_dir / "dataset_info.json", include_supplement=args.supplement)
