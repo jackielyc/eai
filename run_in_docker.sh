@@ -33,6 +33,13 @@ CONTAINER_USER="${HOST_UID}:${HOST_GID}"
 # IME：容器禁挂 /tmp，改用 host network 下的 abstract unix socket 转发 fcitx dbus
 IME_RUNTIME_DIR="${IME_RUNTIME_DIR:-/tmp/a2d_ime}"
 IME_DBUS_ABSTRACT="${IME_DBUS_ABSTRACT:-a2d_ime_dbus}"
+SOCAT_BIN="${SOCAT_BIN:-$HOME/.local/bin/socat}"
+
+resolve_socat() {
+    if [[ -x "${SOCAT_BIN}" ]]; then printf '%s\n' "${SOCAT_BIN}"; return 0; fi
+    if command -v socat >/dev/null 2>&1; then command -v socat; return 0; fi
+    return 1
+}
 
 container_exists() {
     docker inspect "${CONTAINER}" >/dev/null 2>&1
@@ -420,7 +427,6 @@ resolve_host_fcitx_bus() {
     done
     for sock in /tmp/dbus-*; do
         [[ -S "${sock}" ]] || continue
-        [[ -O "${sock}" ]] || continue
         if dbus_addr_has_fcitx "unix:path=${sock}"; then
             printf '%s\n' "${sock}"
             return 0
@@ -450,20 +456,34 @@ ensure_host_dbus_proxy_for_ime() {
     local runtime_proxy="${IME_RUNTIME_DIR}"
     local pidfile="${runtime_proxy}/dbus_proxy.pid"
     local logfile="${runtime_proxy}/dbus_proxy.log"
+    local hostbus_file="${runtime_proxy}/host_bus.path"
     local abstract_addr="unix:abstract=${IME_DBUS_ABSTRACT}"
     local host_bus=""
+    local prev_bus=""
+    local need_restart=0
+    local socat_cmd=""
 
     mkdir -p "${runtime_proxy}"
     chmod 700 "${runtime_proxy}" 2>/dev/null || true
 
     if ! host_bus="$(resolve_host_fcitx_bus)"; then
         echo "警告: 未找到带 fcitx 的宿主机 dbus，中文输入可能不可用" >&2
-        echo "  请确认桌面已启动 fcitx，且能在本机终端输入中文" >&2
+        echo "  请确认桌面已启动 fcitx（当前用户），且能在本机终端输入中文" >&2
         return 0
     fi
     echo ">>> 宿主机 fcitx dbus: ${host_bus}"
 
-    if dbus_addr_has_fcitx "${abstract_addr}"; then
+    if [[ -f "${hostbus_file}" ]]; then
+        prev_bus="$(cat "${hostbus_file}" 2>/dev/null || true)"
+    fi
+    if [[ "${prev_bus}" != "${host_bus}" ]]; then
+        need_restart=1
+    fi
+    if ! dbus_addr_has_fcitx "${abstract_addr}"; then
+        need_restart=1
+    fi
+
+    if [[ "${need_restart}" -eq 0 ]]; then
         echo ">>> dbus abstract 代理已可用 (${abstract_addr})"
         return 0
     fi
@@ -471,15 +491,15 @@ ensure_host_dbus_proxy_for_ime() {
     echo ">>> 重启 dbus 代理 (fcitx → ${abstract_addr})"
     stop_dbus_proxy "${pidfile}"
 
-    if ! command -v socat >/dev/null 2>&1; then
-        echo "警告: 未找到 socat，无法建立 abstract dbus 代理" >&2
+    if ! socat_cmd="$(resolve_socat)"; then
+        echo "警告: 未找到 socat（试 ${HOME}/.local/bin/socat），无法建立 abstract dbus 代理" >&2
         return 0
     fi
 
-    # host network 下 abstract socket 宿主机/容器共享，无需 bind mount
-    nohup socat "ABSTRACT-LISTEN:${IME_DBUS_ABSTRACT},fork,reuseaddr" \
+    nohup "${socat_cmd}" "ABSTRACT-LISTEN:${IME_DBUS_ABSTRACT},fork,reuseaddr" \
         "UNIX-CONNECT:${host_bus}" </dev/null >>"${logfile}" 2>&1 &
     echo $! >"${pidfile}"
+    printf '%s\n' "${host_bus}" >"${hostbus_file}"
     sleep 0.35
 
     if dbus_addr_has_fcitx "${abstract_addr}"; then
@@ -517,7 +537,8 @@ docker exec \
     -e QT_X11_NO_MITSHM=1 \
     -e "XDG_RUNTIME_DIR=/tmp/a2d_runtime" \
     -e "DBUS_SESSION_BUS_ADDRESS=${DBUS_PROXY_ADDR}" \
-    -e "LANG=${LANG:-zh_CN.UTF-8}" \
+    -e "LANG=zh_CN.UTF-8" \
+    -e "LC_ALL=zh_CN.UTF-8" \
     -e "QT_IM_MODULE=${QT_IM_MODULE:-fcitx}" \
     -e "GTK_IM_MODULE=${GTK_IM_MODULE:-fcitx}" \
     -e "XMODIFIERS=${XMODIFIERS:-@im=fcitx}" \
@@ -546,9 +567,15 @@ fi
 export A2D_SCRIPTS_DIR=\"${A2D_SCRIPTS_DIR}\"
 export PSIBOT_HOME=\"${PSIBOT_HOME_CONTAINER}\"
 export HOME=\"${PSIBOT_HOME_CONTAINER}\"
-# 强制中文输入环境（勿用 C.UTF-8）
-export LANG=\"zh_CN.UTF-8\"
-export LC_ALL=\"zh_CN.UTF-8\"
+if locale -a 2>/dev/null | grep -qi zh_CN; then
+    export LANG=\"zh_CN.UTF-8\"
+    export LC_ALL=\"zh_CN.UTF-8\"
+else
+    echo \"警告: 容器无 zh_CN.UTF-8，回退 C.UTF-8\" >&2
+    export LANG=\"C.UTF-8\"
+    export LC_ALL=\"C.UTF-8\"
+fi
+export QT_X11_NO_MITSHM=1
 export QT_IM_MODULE=\"fcitx\"
 export XMODIFIERS=\"@im=fcitx\"
 export GTK_IM_MODULE=\"fcitx\"

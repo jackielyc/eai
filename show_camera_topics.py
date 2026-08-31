@@ -106,54 +106,17 @@ from geometry_msgs.msg import PoseStamped
 from tf2_ros import Buffer, TransformListener
 
 
+# 中文输入依赖宿主机 fcitx + run_in_docker.sh 的 dbus abstract 代理。
+# 不要在控件获焦时 reset/清焦/开关 WA_InputMethodEnabled，会弄死 IC。
+
 def restore_fcitx_input_method(widget=None) -> None:
-    """文本框重新获得焦点时恢复 fcitx。
-
-    下拉框弹层会占用/弄乱输入法上下文；对文本框开关 WA_InputMethodEnabled
-    可强制 Qt 重建该控件的 IC。不要对全局 im.reset()——那会让文本框一直失效，
-    而可编辑下拉框仍能输入。
-    """
-    app = QApplication.instance()
-    if app is None:
-        return
-    os.environ["QT_IM_MODULE"] = "fcitx"
-    os.environ["XMODIFIERS"] = "@im=fcitx"
-    os.environ["GTK_IM_MODULE"] = "fcitx"
-
-    fw = widget if isinstance(widget, QWidget) else app.focusWidget()
-    if fw is None:
-        return
-    # 只对真正的文本输入控件重建 IC
-    if not isinstance(fw, (QLineEdit, QTextEdit)):
-        return
-    try:
-        fw.setAttribute(Qt.WA_InputMethodEnabled, False)
-        fw.setAttribute(Qt.WA_InputMethodEnabled, True)
-    except Exception:
-        pass
-    try:
-        im = app.inputMethod()
-        if im is not None:
-            im.update(Qt.ImQueryAll)
-    except Exception:
-        pass
+    return
 
 
 def _schedule_fcitx_restore(widget=None) -> None:
-    """延迟两次，躲过 QComboBox 弹层销毁竞态。"""
-    w = widget
-    QTimer.singleShot(0, lambda: restore_fcitx_input_method(w))
-    QTimer.singleShot(80, lambda: restore_fcitx_input_method(w))
+    return
 
 
-class ImeSafeComboBox(QComboBox):
-    """标记类：弹层相关逻辑改由文本框 focusIn / focusChanged 恢复 IME。"""
-
-    pass
-
-
-# 所有 QComboBox() 使用同一类型（便于日后扩展）
-QComboBox = ImeSafeComboBox  # type: ignore[misc, assignment]
 
 try:
     from a2d_head_camera_tf import attach_to_node as attach_head_camera_tf
@@ -5168,14 +5131,6 @@ class ChatInputEdit(QTextEdit):
         self._chat_panel: Optional["ChatPanelWidget"] = None
         self._ime_composing = False
         self._ime_guard_until = 0.0
-
-    def focusInEvent(self, event) -> None:  # type: ignore[override]
-        super().focusInEvent(event)
-        _schedule_fcitx_restore(self)
-
-    def mousePressEvent(self, event) -> None:  # type: ignore[override]
-        super().mousePressEvent(event)
-        _schedule_fcitx_restore(self)
 
     def inputMethodEvent(self, event) -> None:  # type: ignore[override]
         # 必须在此跟踪组字；用 eventFilter 拦截 Enter 容易抢掉 fcitx 上屏键
@@ -11549,8 +11504,15 @@ class CameraTopicWindow(QMainWindow):
         if not root:
             return
         self._test_qwen_model_list_refreshing = True
+        # 禁用前先移走焦点，避免 focused+disabled 弄死整窗 fcitx
+        fw = QApplication.focusWidget()
+        if fw is self.test_qwen_model_combo or (
+            fw is not None and self.test_qwen_model_combo.isAncestorOf(fw)
+        ):
+            self.test_qwen_model_combo.clearFocus()
         self.test_qwen_refresh_btn.setEnabled(False)
         self.test_qwen_model_combo.setEnabled(False)
+        _schedule_fcitx_restore(None)
         target = self._selected_test_qwen_target()
         host_id = self._selected_test_qwen_remote_host()
         self._append_test_infer_log(f"扫描可部署目录: {root} …")
@@ -14324,13 +14286,6 @@ def main() -> int:
     app.setStyle("Fusion")
     apply_viewer_theme(app)
     app.setQuitOnLastWindowClosed(True)
-
-    def _on_focus_changed(_old, new_w) -> None:
-        # 从下拉框点回任意文本框时重建该控件的 fcitx 上下文
-        if isinstance(new_w, (QLineEdit, QTextEdit)):
-            _schedule_fcitx_restore(new_w)
-
-    app.focusChanged.connect(_on_focus_changed)
 
     bridge = RosBridge()
     node = CameraTopicNode(bridge, prefix=args.prefix)
