@@ -505,10 +505,14 @@ ensure_host_dbus_proxy_for_ime() {
     if dbus_addr_has_fcitx "${abstract_addr}"; then
         echo ">>> dbus 代理就绪: ${abstract_addr}"
     else
-        echo "警告: dbus 代理未连通 fcitx，拼音可能不可用；见 ${logfile}" >&2
+        echo "错误: dbus 代理未连通 fcitx（${abstract_addr}）。" >&2
+        echo "  常见原因: 代理在 Cursor 沙箱 netns 启动，宿主机/容器连不上。" >&2
+        echo "  请在宿主机普通终端执行:" >&2
+        echo "    bash ${SCRIPT_DIR}/fix_ime_dbus_proxy.sh" >&2
         if [[ -f "${logfile}" ]]; then
             tail -n 20 "${logfile}" >&2 || true
         fi
+        exit 1
     fi
 }
 ensure_host_dbus_proxy_for_ime

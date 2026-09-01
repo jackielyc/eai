@@ -107,15 +107,256 @@ from tf2_ros import Buffer, TransformListener
 
 
 # 中文输入依赖宿主机 fcitx + run_in_docker.sh 的 dbus abstract 代理。
-# 不要在控件获焦时 reset/清焦/开关 WA_InputMethodEnabled，会弄死 IC。
+# 禁止: 全局 im.reset()；获焦时反复开关 WA_InputMethodEnabled。
+# 下拉: 用「主窗口内浮层」而非 Qt.Tool 顶层窗（独立 X 窗口会弄死 fcitx IC）。
+
+_IME_LAST_TEXT_WIDGET = None  # type: ignore
+_IME_OPEN_POPUPS = []  # type: ignore
+
+
+def _is_text_ime_widget(widget) -> bool:
+    if widget is None:
+        return False
+    if not isinstance(widget, (QLineEdit, QTextEdit)):
+        return False
+    try:
+        if hasattr(widget, "isReadOnly") and widget.isReadOnly():
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _remember_text_focus() -> None:
+    global _IME_LAST_TEXT_WIDGET
+    try:
+        fw = QApplication.focusWidget()
+        if _is_text_ime_widget(fw):
+            _IME_LAST_TEXT_WIDGET = fw
+    except Exception:
+        pass
+
+
+def _keep_text_focus() -> None:
+    w = _IME_LAST_TEXT_WIDGET
+    if not _is_text_ime_widget(w):
+        return
+    try:
+        w.setFocus(Qt.OtherFocusReason)
+    except Exception:
+        pass
+
+
+def _revive_ime_after_combo() -> None:
+    """下拉关闭后恢复中文：聊天框重建控件；其它文本框一次性重挂 IC。"""
+    w = _IME_LAST_TEXT_WIDGET
+    try:
+        # ChatInputEdit：整控件替换，强制 fcitx 重新挂接
+        panel = getattr(w, "_chat_panel", None) if w is not None else None
+        if panel is not None and hasattr(panel, "_rebuild_chat_input"):
+            panel._rebuild_chat_input()
+            return
+        if not _is_text_ime_widget(w):
+            return
+        w.setFocus(Qt.OtherFocusReason)
+        w.setAttribute(Qt.WA_InputMethodEnabled, False)
+        w.setAttribute(Qt.WA_InputMethodEnabled, True)
+        w.setFocus(Qt.OtherFocusReason)
+        app = QApplication.instance()
+        if app is not None:
+            im = app.inputMethod()
+            if im is not None:
+                im.update(Qt.ImQueryAll)
+    except Exception:
+        pass
+
 
 def restore_fcitx_input_method(widget=None) -> None:
-    return
+    _revive_ime_after_combo()
 
 
 def _schedule_fcitx_restore(widget=None) -> None:
-    return
+    try:
+        QTimer.singleShot(0, _revive_ime_after_combo)
+        QTimer.singleShot(80, _revive_ime_after_combo)
+    except Exception:
+        pass
 
+
+class ImeSafeComboBox(QComboBox):
+    """鼠标可选下拉：列表做主窗口子控件浮层，不创建新的 X11 窗口。"""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_InputMethodEnabled, False)
+        self.setFocusPolicy(Qt.NoFocus)
+        self._ime_list: Optional[QListWidget] = None
+
+    def _ensure_list(self) -> QListWidget:
+        win = self.window()
+        if self._ime_list is not None:
+            # 父窗口变了则重建
+            if self._ime_list.parent() is win:
+                return self._ime_list
+            try:
+                self._ime_list.hide()
+                self._ime_list.setParent(None)
+                self._ime_list.deleteLater()
+            except Exception:
+                pass
+            self._ime_list = None
+        lw = QListWidget(win)
+        # 普通子控件，禁止变顶层 Tool/Popup
+        lw.setWindowFlags(Qt.Widget)
+        lw.setAttribute(Qt.WA_InputMethodEnabled, False)
+        lw.setFocusPolicy(Qt.NoFocus)
+        lw.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lw.setStyleSheet(
+            "QListWidget { background: #2d2d2d; color: #eee; border: 1px solid #666; }"
+            "QListWidget::item:selected { background: #3d6ea8; }"
+            "QListWidget::item:hover { background: #454545; }"
+        )
+        lw.itemClicked.connect(self._on_ime_item_clicked)
+        self._ime_list = lw
+        return lw
+
+    def showPopup(self) -> None:  # type: ignore[override]
+        _remember_text_focus()
+        for c in list(_IME_OPEN_POPUPS):
+            try:
+                if c is not self:
+                    c.hidePopup()
+            except Exception:
+                pass
+        lw = self._ensure_list()
+        lw.clear()
+        cur = self.currentIndex()
+        for i in range(self.count()):
+            item = QListWidgetItem(self.itemText(i))
+            tip = self.itemData(i, Qt.ToolTipRole)
+            if tip:
+                item.setToolTip(str(tip))
+            try:
+                enabled = bool(
+                    self.model().flags(self.model().index(i, self.modelColumn()))
+                    & Qt.ItemIsEnabled
+                )
+            except Exception:
+                enabled = True
+            if not enabled:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled & ~Qt.ItemIsSelectable)
+            lw.addItem(item)
+        if 0 <= cur < lw.count():
+            lw.setCurrentRow(cur)
+        rows = max(lw.count(), 1)
+        row_h = lw.sizeHintForRow(0) if lw.count() else 24
+        if row_h <= 0:
+            row_h = 24
+        visible = min(rows, max(self.maxVisibleItems(), 8))
+        lw.setFixedWidth(max(self.width(), 120))
+        lw.setFixedHeight(min(280, row_h * visible + 4))
+        # 相对主窗口定位（同一 X 窗口内）
+        parent = lw.parentWidget()
+        gp = self.mapToGlobal(QPoint(0, self.height()))
+        if parent is not None:
+            lp = parent.mapFromGlobal(gp)
+            # 若底部不够，向上展开
+            if lp.y() + lw.height() > parent.height():
+                gp2 = self.mapToGlobal(QPoint(0, 0))
+                lp2 = parent.mapFromGlobal(gp2)
+                lp = QPoint(lp2.x(), max(0, lp2.y() - lw.height()))
+            lw.move(lp)
+        lw.show()
+        lw.raise_()
+        if self not in _IME_OPEN_POPUPS:
+            _IME_OPEN_POPUPS.append(self)
+        _keep_text_focus()
+        QTimer.singleShot(0, _keep_text_focus)
+
+    def hidePopup(self) -> None:  # type: ignore[override]
+        lw = self._ime_list
+        if lw is not None:
+            lw.hide()
+        try:
+            _IME_OPEN_POPUPS.remove(self)
+        except ValueError:
+            pass
+
+    def _on_ime_item_clicked(self, item: QListWidgetItem) -> None:
+        if item is None or not (item.flags() & Qt.ItemIsEnabled):
+            return
+        lw = self._ime_list
+        row = lw.row(item) if lw is not None else -1
+        if row < 0:
+            return
+        self.hidePopup()
+        if row != self.currentIndex():
+            self.setCurrentIndex(row)
+        self.activated.emit(row)
+        # 选完后再恢复 IC（此时回调已跑完）
+        QTimer.singleShot(0, _revive_ime_after_combo)
+        QTimer.singleShot(100, _revive_ime_after_combo)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            if self._ime_list is not None and self._ime_list.isVisible():
+                self.hidePopup()
+                QTimer.singleShot(0, _revive_ime_after_combo)
+            else:
+                self.showPopup()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class ImePopupDismissFilter(QObject):
+    """点击浮层外关闭；关闭后恢复中文 IC。"""
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        try:
+            et = event.type()
+            if et == QEvent.FocusIn and _is_text_ime_widget(obj):
+                global _IME_LAST_TEXT_WIDGET
+                _IME_LAST_TEXT_WIDGET = obj
+            if not _IME_OPEN_POPUPS:
+                return False
+            if et == QEvent.MouseButtonPress:
+                gp = event.globalPos() if hasattr(event, "globalPos") else None
+                if gp is None:
+                    return False
+                closed = False
+                for combo in list(_IME_OPEN_POPUPS):
+                    lw = getattr(combo, "_ime_list", None)
+                    if lw is None or not lw.isVisible():
+                        continue
+                    if combo.rect().contains(combo.mapFromGlobal(gp)):
+                        continue
+                    if lw.rect().contains(lw.mapFromGlobal(gp)):
+                        continue
+                    combo.hidePopup()
+                    closed = True
+                if closed:
+                    QTimer.singleShot(0, _revive_ime_after_combo)
+            elif et == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                for combo in list(_IME_OPEN_POPUPS):
+                    combo.hidePopup()
+                QTimer.singleShot(0, _revive_ime_after_combo)
+        except Exception:
+            pass
+        return False
+
+
+def install_chinese_ime_guards(app: QApplication) -> None:
+    filt = ImePopupDismissFilter(app)
+    app.installEventFilter(filt)
+    setattr(app, "_ime_popup_dismiss_filter", filt)
+    for w in app.allWidgets():
+        try:
+            if isinstance(w, QComboBox):
+                w.setAttribute(Qt.WA_InputMethodEnabled, False)
+                w.setFocusPolicy(Qt.NoFocus)
+        except Exception:
+            pass
 
 
 try:
@@ -4986,53 +5227,73 @@ def rename_chat_history(history_id: str, title: str) -> None:
     save_chat_history_record(data)
 
 
-class ChatHistoryDialog(QDialog):
-    """管理已保存对话：加载 / 修改标题 / 删除。"""
+class ChatHistoryBrowser(QWidget):
+    """内嵌历史列表（非模态）。避免 QDialog.exec_ 弄坏 fcitx。"""
+
+    load_requested = pyqtSignal(str)
+    closed = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("历史对话")
-        self.setMinimumSize(420, 360)
-        self.selected_id: str = ""
+        self.setAttribute(Qt.WA_InputMethodEnabled, False)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setSpacing(4)
         tip = QLabel(
-            "选择一条历史对话：双击或点「加载」将把最后一轮问题放入输入框"
-            "（不自动请求，点「发送」后再调模型）；可修改标题或删除。"
+            "选择历史对话后点「加载」（问题进输入框，不自动请求）。"
+            "改标题在下方编辑后点「保存标题」。"
         )
         tip.setWordWrap(True)
         tip.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
         layout.addWidget(tip)
         self.list_widget = QListWidget()
+        self.list_widget.setAttribute(Qt.WA_InputMethodEnabled, False)
+        self.list_widget.setFocusPolicy(Qt.NoFocus)
+        self.list_widget.setMaximumHeight(160)
         self.list_widget.setStyleSheet(
             "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
         )
         self.list_widget.itemDoubleClicked.connect(self._on_load_clicked)
-        layout.addWidget(self.list_widget, 1)
+        self.list_widget.currentItemChanged.connect(self._on_current_changed)
+        layout.addWidget(self.list_widget)
+        title_row = QHBoxLayout()
+        title_row.addWidget(QLabel("标题"))
+        self.title_edit = QLineEdit()
+        self.title_edit.setPlaceholderText("选中条目后可改标题")
+        self.title_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
+        title_row.addWidget(self.title_edit, stretch=1)
+        self.save_title_btn = QPushButton("保存标题")
+        self.save_title_btn.setFocusPolicy(Qt.NoFocus)
+        self.save_title_btn.clicked.connect(self._on_save_title_clicked)
+        title_row.addWidget(self.save_title_btn)
+        layout.addLayout(title_row)
         btn_row = QHBoxLayout()
         self.load_btn = QPushButton("加载")
-        self.load_btn.setDefault(False)
-        self.load_btn.setAutoDefault(False)
+        self.load_btn.setFocusPolicy(Qt.NoFocus)
         self.load_btn.clicked.connect(self._on_load_clicked)
         btn_row.addWidget(self.load_btn)
-        self.rename_btn = QPushButton("修改标题")
-        self.rename_btn.setAutoDefault(False)
-        self.rename_btn.clicked.connect(self._on_rename_clicked)
-        btn_row.addWidget(self.rename_btn)
         self.delete_btn = QPushButton("删除")
-        self.delete_btn.setAutoDefault(False)
+        self.delete_btn.setFocusPolicy(Qt.NoFocus)
         self.delete_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
         self.delete_btn.clicked.connect(self._on_delete_clicked)
         btn_row.addWidget(self.delete_btn)
+        self._delete_armed = False
         btn_row.addStretch(1)
-        close_btn = QPushButton("关闭")
-        close_btn.setAutoDefault(False)
-        close_btn.clicked.connect(self.reject)
+        close_btn = QPushButton("收起")
+        close_btn.setFocusPolicy(Qt.NoFocus)
+        close_btn.clicked.connect(self._on_close_clicked)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
-        self._reload()
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        layout.addWidget(self._status)
+        self.reload()
 
-    def _reload(self) -> None:
+    def reload(self) -> None:
+        self._delete_armed = False
+        self.delete_btn.setText("删除")
         self.list_widget.clear()
+        self.title_edit.clear()
         for item in list_chat_histories():
             title = str(item.get("title") or "")
             updated = str(item.get("updated_at") or "")
@@ -5046,12 +5307,14 @@ class ChatHistoryDialog(QDialog):
             label += f"  ·  {count} 条"
             row = QListWidgetItem(label)
             row.setData(Qt.UserRole, str(item.get("id") or ""))
+            row.setData(Qt.UserRole + 1, title)
             row.setToolTip(str(item.get("path") or ""))
             self.list_widget.addItem(row)
         if self.list_widget.count() == 0:
             empty = QListWidgetItem("（暂无保存的对话）")
             empty.setFlags(Qt.NoItemFlags)
             self.list_widget.addItem(empty)
+        self._status.setText("")
 
     def _current_id(self) -> str:
         item = self.list_widget.currentItem()
@@ -5059,66 +5322,62 @@ class ChatHistoryDialog(QDialog):
             return ""
         return str(item.data(Qt.UserRole) or "")
 
+    def _on_current_changed(self, current, _previous) -> None:
+        self._delete_armed = False
+        self.delete_btn.setText("删除")
+        if current is None or not (current.flags() & Qt.ItemIsEnabled):
+            self.title_edit.clear()
+            return
+        self.title_edit.setText(str(current.data(Qt.UserRole + 1) or ""))
+
     def _on_load_clicked(self, *_args) -> None:
         hid = self._current_id()
         if not hid:
-            QMessageBox.information(self, "历史对话", "请先选择一条对话")
+            self._status.setText("请先选择一条对话")
             return
-        self.selected_id = hid
-        self.accept()
+        self.load_requested.emit(hid)
 
-    def _on_rename_clicked(self) -> None:
+    def _on_save_title_clicked(self) -> None:
         hid = self._current_id()
         if not hid:
-            QMessageBox.information(self, "修改标题", "请先选择一条对话")
+            self._status.setText("请先选择一条对话")
             return
-        try:
-            data = load_chat_history(hid)
-        except Exception as exc:
-            QMessageBox.warning(self, "修改标题", f"读取失败: {exc}")
-            return
-        old = str(data.get("title") or "")
-        new_title, ok = QInputDialog.getText(
-            self, "修改标题", "对话标题:", text=old
-        )
-        if not ok:
-            return
-        new_title = new_title.strip()
+        new_title = self.title_edit.text().strip()
         if not new_title:
-            QMessageBox.warning(self, "修改标题", "标题不能为空")
+            self._status.setText("标题不能为空")
             return
         try:
             rename_chat_history(hid, new_title)
         except Exception as exc:
-            QMessageBox.warning(self, "修改标题", f"保存失败: {exc}")
+            self._status.setText(f"保存标题失败: {exc}")
             return
-        self._reload()
+        self.reload()
+        self._status.setText("标题已保存")
 
     def _on_delete_clicked(self) -> None:
         hid = self._current_id()
         if not hid:
-            QMessageBox.information(self, "删除", "请先选择一条对话")
+            self._status.setText("请先选择一条对话")
             return
-        try:
-            data = load_chat_history(hid)
-            title = str(data.get("title") or hid)
-        except Exception:
-            title = hid
-        reply = QMessageBox.question(
-            self,
-            "删除历史对话",
-            f"确认删除「{title}」？此操作不可恢复。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        if reply != QMessageBox.Yes:
+        if not self._delete_armed:
+            self._delete_armed = True
+            self.delete_btn.setText("再点确认删除")
+            self._status.setText("再点一次「再点确认删除」才会删除")
             return
         try:
             delete_chat_history(hid)
         except Exception as exc:
-            QMessageBox.warning(self, "删除", f"删除失败: {exc}")
+            self._status.setText(f"删除失败: {exc}")
+            self._delete_armed = False
+            self.delete_btn.setText("删除")
             return
-        self._reload()
+        self.reload()
+        self._status.setText("已删除")
+
+    def _on_close_clicked(self) -> None:
+        self.setVisible(False)
+        self.closed.emit()
+
 
 
 class ChatInputEdit(QTextEdit):
@@ -5131,6 +5390,11 @@ class ChatInputEdit(QTextEdit):
         self._chat_panel: Optional["ChatPanelWidget"] = None
         self._ime_composing = False
         self._ime_guard_until = 0.0
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        super().focusInEvent(event)
+        global _IME_LAST_TEXT_WIDGET
+        _IME_LAST_TEXT_WIDGET = self
 
     def inputMethodEvent(self, event) -> None:  # type: ignore[override]
         # 必须在此跟踪组字；用 eventFilter 拦截 Enter 容易抢掉 fcitx 上屏键
@@ -5234,7 +5498,7 @@ class ChatPanelWidget(QWidget):
         # 紧凑顶栏：预设 / 模型 / 设置 / 清空 —— 把纵向空间留给对话区
         header = QHBoxLayout()
         header.setSpacing(4)
-        self.provider_combo = QComboBox()
+        self.provider_combo = ImeSafeComboBox()
         self.provider_combo.addItems(list(LLM_PROVIDER_PRESETS.keys()))
         self.provider_combo.setToolTip(
             "含腾讯混元 Hy-Embodied-VLM / RxBrain（需先 bash run_hy_embodied_vlm.sh "
@@ -5287,6 +5551,12 @@ class ChatPanelWidget(QWidget):
         self.history_title_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         self.history_title_label.setWordWrap(True)
         layout.addWidget(self.history_title_label)
+
+        self.history_browser = ChatHistoryBrowser()
+        self.history_browser.setVisible(False)
+        self.history_browser.load_requested.connect(self._load_history_by_id)
+        self.history_browser.closed.connect(self._on_history_browser_closed)
+        layout.addWidget(self.history_browser)
 
         self.settings_panel = QWidget()
         settings_layout = QVBoxLayout(self.settings_panel)
@@ -5403,6 +5673,7 @@ class ChatPanelWidget(QWidget):
 
         input_row = QHBoxLayout()
         input_row.setSpacing(4)
+        self._input_row = input_row
         self.input_edit = ChatInputEdit()
         self.input_edit._chat_panel = self
         self.input_edit.setPlaceholderText(
@@ -5710,7 +5981,36 @@ class ChatPanelWidget(QWidget):
             if notify:
                 self._append_system_line("已清除所选场景图")
 
+    def _rebuild_chat_input(self, text: Optional[str] = None) -> "ChatInputEdit":
+        """替换输入框，强制 fcitx 重新挂 IC。"""
+        global _IME_LAST_TEXT_WIDGET
+        old = self.input_edit
+        if text is None:
+            text = old.toPlainText()
+        placeholder = old.placeholderText()
+        style = old.styleSheet()
+        height = old.height()
+        new = ChatInputEdit(self)
+        new._chat_panel = self
+        new.setPlaceholderText(placeholder)
+        new.setFixedHeight(height if height > 0 else 96)
+        new.setAttribute(Qt.WA_InputMethodEnabled, True)
+        new.setStyleSheet(style)
+        new.setPlainText(text)
+        cursor = new.textCursor()
+        cursor.movePosition(cursor.End)
+        new.setTextCursor(cursor)
+        row = getattr(self, "_input_row", None)
+        if row is not None:
+            row.replaceWidget(old, new)
+        old.deleteLater()
+        self.input_edit = new
+        _IME_LAST_TEXT_WIDGET = new
+        new.setFocus(Qt.OtherFocusReason)
+        return new
+
     def _focus_chat_input(self) -> None:
+        self.input_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.input_edit.setFocus(Qt.OtherFocusReason)
 
     def _sync_config_from_ui(self) -> None:
@@ -5901,16 +6201,9 @@ class ChatPanelWidget(QWidget):
             QMessageBox.information(self, "保存对话", "当前没有可保存的对话内容")
             return
         self._sync_config_from_ui()
-        default_title = self._history_title or default_chat_history_title(self._messages)
-        title, ok = QInputDialog.getText(
-            self,
-            "保存对话",
-            "对话标题:",
-            text=default_title,
-        )
-        if not ok:
-            return
-        title = title.strip() or default_title
+        title = (self._history_title or default_chat_history_title(self._messages)).strip()
+        if not title:
+            title = time.strftime("对话 %Y-%m-%d %H:%M")
         record: Dict[str, object] = {
             "id": self._history_id or uuid.uuid4().hex[:12],
             "title": title,
@@ -5938,24 +6231,27 @@ class ChatPanelWidget(QWidget):
         self.status_message.emit(f"对话已保存: {path}")
 
     def _on_history_clicked(self) -> None:
-        dlg = ChatHistoryDialog(self)
-        if dlg.exec_() != QDialog.Accepted:
-            # 可能在对话框内删掉了当前对话
-            if self._history_id:
-                try:
-                    load_chat_history(self._history_id)
-                except Exception:
-                    self._history_id = ""
-                    self._history_title = ""
-                    self._refresh_history_title_label()
-            return
-        hid = dlg.selected_id
+        show = not self.history_browser.isVisible()
+        self.history_browser.setVisible(show)
+        if show:
+            self.history_browser.reload()
+            self.history_btn.setText("收起")
+        else:
+            self.history_btn.setText("历史")
+            self._focus_chat_input()
+
+    def _on_history_browser_closed(self) -> None:
+        self.history_btn.setText("历史")
+        self._focus_chat_input()
+
+    def _load_history_by_id(self, hid: str) -> None:
+        hid = str(hid or "").strip()
         if not hid:
             return
         try:
             data = load_chat_history(hid)
         except Exception as exc:
-            QMessageBox.warning(self, "历史对话", f"加载失败: {exc}")
+            self.history_browser._status.setText(f"加载失败: {exc}")
             return
         raw_msgs = data.get("messages") or []
         messages: List[Dict[str, object]] = []
@@ -5975,7 +6271,6 @@ class ChatPanelWidget(QWidget):
                 if isinstance(latency, (int, float)):
                     item["latency_s"] = float(latency)
                 messages.append(item)
-        # 最后一轮用户问题放入输入框；不自动请求，点「发送」后再调模型
         draft = ""
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].get("role") != "user":
@@ -6004,12 +6299,14 @@ class ChatPanelWidget(QWidget):
         self._on_clear_chat_image_clicked(notify=False)
         self._render_messages_to_view()
         self._refresh_history_title_label()
+        self._suppress_send_until = time.monotonic() + 0.4
+        self.history_browser.setVisible(False)
+        self.history_btn.setText("历史")
         self.input_edit.setPlainText(draft)
         cursor = self.input_edit.textCursor()
         cursor.movePosition(cursor.End)
         self.input_edit.setTextCursor(cursor)
-        self._suppress_send_until = time.monotonic() + 0.4
-        QTimer.singleShot(0, self._focus_chat_input)
+        self._focus_chat_input()
         tip = "已放入输入框，点「发送」后再请求" if draft else "已加载（无用户消息可编辑）"
         self._append_system_line(f"已加载历史对话: {self._history_title} — {tip}")
         self.status_message.emit(f"已加载历史对话: {self._history_title}（待发送）")
@@ -10279,7 +10576,7 @@ class CameraTopicWindow(QMainWindow):
         segment_layout = QHBoxLayout()
         segment_layout.setSpacing(6)
         segment_layout.addWidget(QLabel("分割"))
-        self.segment_backend_combo = QComboBox()
+        self.segment_backend_combo = ImeSafeComboBox()
         self.segment_backend_combo.addItem("几何(深度+颜色)", SAM3_BACKEND_GEOMETRY)
         self.segment_backend_combo.addItem("SAM3 点提示", SAM3_BACKEND_POINT)
         self.segment_backend_combo.addItem("SAM3 文本", SAM3_BACKEND_TEXT)
@@ -10376,7 +10673,7 @@ class CameraTopicWindow(QMainWindow):
         pose_row = QHBoxLayout()
         pose_row.setSpacing(6)
         pose_row.addWidget(QLabel("位姿"))
-        self.pose_backend_combo = QComboBox()
+        self.pose_backend_combo = ImeSafeComboBox()
         self.pose_backend_combo.addItem("PCA(点云)", POSE_BACKEND_PCA)
         self.pose_backend_combo.addItem("FoundationPose", POSE_BACKEND_FOUNDATIONPOSE)
         self.pose_backend_combo.setToolTip(
@@ -10444,7 +10741,7 @@ class CameraTopicWindow(QMainWindow):
         cad_mode_row = QHBoxLayout()
         cad_mode_row.setSpacing(6)
         cad_mode_row.addWidget(QLabel("模式"))
-        self.cad_mode_combo = QComboBox()
+        self.cad_mode_combo = ImeSafeComboBox()
         self.cad_mode_combo.addItem("多视角照片", "photos")
         self.cad_mode_combo.addItem("导入 Mesh", "mesh")
         self.cad_mode_combo.setToolTip(
@@ -10536,7 +10833,7 @@ class CameraTopicWindow(QMainWindow):
             "照片重建需安装 COLMAP"
         )
         cad_action_row.addWidget(self.cad_status_label, 1)
-        self.cad_existing_combo = QComboBox()
+        self.cad_existing_combo = ImeSafeComboBox()
         self.cad_existing_combo.setMinimumWidth(160)
         self.cad_existing_combo.setToolTip("已有 meshes/<name>/reconstructed.obj")
         cad_action_row.addWidget(self.cad_existing_combo)
@@ -10606,7 +10903,7 @@ class CameraTopicWindow(QMainWindow):
         train_row1 = QHBoxLayout()
         train_row1.setSpacing(6)
         train_row1.addWidget(QLabel("配置"))
-        self.train_config_combo = QComboBox()
+        self.train_config_combo = ImeSafeComboBox()
         self.train_config_combo.setMinimumWidth(220)
         self.train_config_combo.setToolTip("psi-policy Hydra workspace 配置 (example_workspace_*)")
         psi_repo = resolve_psi_policy_dir()
@@ -10650,7 +10947,7 @@ class CameraTopicWindow(QMainWindow):
         self.train_batch_spin.setFixedWidth(72)
         train_row2.addWidget(self.train_batch_spin)
         train_row2.addWidget(QLabel("WandB"))
-        self.train_logging_combo = QComboBox()
+        self.train_logging_combo = ImeSafeComboBox()
         for mode in PSI_POLICY_LOGGING_MODES:
             self.train_logging_combo.addItem(mode, mode)
         self.train_logging_combo.setCurrentIndex(
@@ -10952,7 +11249,7 @@ class CameraTopicWindow(QMainWindow):
         sk_row1 = QHBoxLayout()
         sk_row1.setSpacing(6)
         sk_row1.addWidget(QLabel("相机:"))
-        self.skeleton_cam_combo = QComboBox()
+        self.skeleton_cam_combo = ImeSafeComboBox()
         self.skeleton_cam_combo.setMinimumWidth(220)
         self.skeleton_cam_combo.setToolTip("选择用于手骨架识别的彩色图像 topic（需先在左侧勾选订阅）")
         sk_row1.addWidget(self.skeleton_cam_combo, 1)
@@ -11091,7 +11388,7 @@ class CameraTopicWindow(QMainWindow):
         service_row = QHBoxLayout()
         service_row.setSpacing(6)
         service_row.addWidget(QLabel("部署位置"))
-        self.test_qwen_target_combo = QComboBox()
+        self.test_qwen_target_combo = ImeSafeComboBox()
         self.test_qwen_target_combo.addItem("本地本机", "local")
         for host_id, host_label in REMOTE_QWEN_HOSTS:
             self.test_qwen_target_combo.addItem(host_label, f"remote:{host_id}")
@@ -11109,7 +11406,7 @@ class CameraTopicWindow(QMainWindow):
         )
         service_row.addWidget(self.test_qwen_target_combo)
         service_row.addWidget(QLabel("权重目录"))
-        self.test_qwen_root_combo = QComboBox()
+        self.test_qwen_root_combo = ImeSafeComboBox()
         self.test_qwen_root_combo.setMinimumWidth(140)
         self.test_qwen_root_combo.currentIndexChanged.connect(
             self._on_test_qwen_root_changed
@@ -11122,7 +11419,7 @@ class CameraTopicWindow(QMainWindow):
         self.test_qwen_refresh_btn.clicked.connect(self._refresh_test_qwen_model_list)
         service_row.addWidget(self.test_qwen_refresh_btn)
         service_row.addWidget(QLabel("模型"))
-        self.test_qwen_model_combo = QComboBox()
+        self.test_qwen_model_combo = ImeSafeComboBox()
         self.test_qwen_model_combo.setMinimumWidth(200)
         self.test_qwen_model_combo.setToolTip(
             "从上方根目录扫描到的可部署权重；选中后点「启动推理服务」。"
@@ -11504,15 +11801,19 @@ class CameraTopicWindow(QMainWindow):
         if not root:
             return
         self._test_qwen_model_list_refreshing = True
-        # 禁用前先移走焦点，避免 focused+disabled 弄死整窗 fcitx
+        # 禁用前把焦点还给文本框，避免 focused+disabled 弄死 fcitx
         fw = QApplication.focusWidget()
         if fw is self.test_qwen_model_combo or (
             fw is not None and self.test_qwen_model_combo.isAncestorOf(fw)
         ):
-            self.test_qwen_model_combo.clearFocus()
+            target = _IME_LAST_TEXT_WIDGET
+            if target is not None and _is_text_ime_widget(target):
+                target.setFocus(Qt.OtherFocusReason)
+            else:
+                self.setFocus(Qt.OtherFocusReason)
         self.test_qwen_refresh_btn.setEnabled(False)
         self.test_qwen_model_combo.setEnabled(False)
-        _schedule_fcitx_restore(None)
+        _schedule_fcitx_restore(_IME_LAST_TEXT_WIDGET)
         target = self._selected_test_qwen_target()
         host_id = self._selected_test_qwen_remote_host()
         self._append_test_infer_log(f"扫描可部署目录: {root} …")
@@ -14242,6 +14543,7 @@ def apply_viewer_theme(app: QApplication) -> None:
 
 def configure_qt_ime_for_chinese() -> None:
     """为 Docker/本机启用 fcitx 中文输入（须在创建 QApplication 之前调用）。"""
+    os.environ.setdefault("QT_X11_NO_MITSHM", "1")
     os.environ["LANG"] = "zh_CN.UTF-8"
     os.environ["LC_ALL"] = "zh_CN.UTF-8"
     os.environ["QT_IM_MODULE"] = "fcitx"
@@ -14285,6 +14587,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     apply_viewer_theme(app)
+    install_chinese_ime_guards(app)
     app.setQuitOnLastWindowClosed(True)
 
     bridge = RosBridge()
