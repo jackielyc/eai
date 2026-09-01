@@ -1554,16 +1554,13 @@ LAKE_ORCHESTRATOR_SYSTEM_PROMPT = (
     "上一个子任务」「下一个子任务」四行作答。"
 )
 LAKE_ORCHESTRATOR_SYSTEM_PROMPT_TRAINING = (
-    "你是机器人操作任务的认知编排器。给定场景图像、高层任务名称和进度记忆，"
-    "预测该任务下的全部二层（layer-2）子任务列表，以及当前可执行的子任务，并更新语言记忆。"
-    "请先输出「所有子任务」编号列表，再分别用「技能」「子任务」「记忆」三行作答。"
+    "你是机器人操作任务的认知编排器。给定场景图像与高层任务名称，"
+    "预测该任务下的全部二层（layer-2）子任务列表，以及当前可执行的子任务。"
+    "请先输出「所有子任务」编号列表，再分别用「技能」「子任务」两行作答。"
 )
 LAKE_DEFAULT_LANGUAGE_MEMORY = "尚无已完成子任务。"
 LAKE_USER_PROMPT_TEMPLATE = (
     "任务：{task}\n"
-    "\n"
-    "语言记忆：\n"
-    "{memory}\n"
     "\n"
     "{output_instruction}"
 )
@@ -1577,8 +1574,8 @@ def lake_user_output_instruction(system_prompt: str = "") -> str:
             "请输出全部子任务，以及当前技能、当前子任务、"
             "上一个子任务与下一个子任务。"
         )
-    if "记忆" in sp and "子任务" in sp:
-        return "请输出全部子任务，以及当前技能、子任务与更新后的语言记忆。"
+    if "子任务" in sp:
+        return "请输出全部子任务，以及当前技能与子任务。"
     return (
         "请输出全部子任务，以及当前技能、当前子任务、"
         "上一个子任务与下一个子任务。"
@@ -1591,21 +1588,60 @@ def format_lake_user_prompt(
     *,
     system_prompt: str = "",
 ) -> str:
-    """把用户任务描述包装成与 system 对齐的 user 文本。"""
-    task_line = (task or "").strip()
-    # 若用户已手写完整训练模板（中/英），直接透传
+    """把用户任务描述包装成与 system 对齐的 user 文本（不含语言记忆）。"""
+    del memory  # 保留参数兼容旧调用，不再写入 prompt
+    task_line = _strip_language_memory_from_prompt((task or "").strip())
+    # 已手写完整模板（含输出要求）则透传
     if (
         (task_line.startswith("任务：") or task_line.startswith("Task:"))
-        and ("语言记忆" in task_line or "Language memory" in task_line)
+        and ("请输出" in task_line or "output" in task_line.lower())
     ):
         return task_line
-    mem = (memory or "").strip() or LAKE_DEFAULT_LANGUAGE_MEMORY
+    # 去掉可能自带的「任务：」前缀，避免套模板时重复
+    if task_line.startswith("任务："):
+        task_line = task_line[len("任务：") :].strip()
+    elif task_line.startswith("任务:"):
+        task_line = task_line[len("任务:") :].strip()
+    elif task_line.lower().startswith("task:"):
+        task_line = task_line.split(":", 1)[-1].strip()
     output_instruction = lake_user_output_instruction(system_prompt)
     return LAKE_USER_PROMPT_TEMPLATE.format(
         task=task_line,
-        memory=mem,
         output_instruction=output_instruction,
     )
+
+
+def _strip_language_memory_from_prompt(text: str) -> str:
+    """从手写 prompt 中移除「语言记忆 / Language memory」段落。"""
+    lines = str(text).splitlines()
+    out: List[str] = []
+    skipping = False
+    for line in lines:
+        stripped = line.strip()
+        low = stripped.lower()
+        if (
+            stripped.startswith("语言记忆")
+            or low.startswith("language memory")
+        ):
+            skipping = True
+            continue
+        if skipping:
+            # 记忆段直到空行或下一项（输出要求等）结束
+            if not stripped:
+                skipping = False
+                continue
+            if (
+                stripped.startswith("请输出")
+                or stripped.startswith("输出")
+                or low.startswith("output")
+                or stripped.startswith("任务")
+                or low.startswith("task")
+            ):
+                skipping = False
+                out.append(line)
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
 
 
 def extract_lake_memory_from_assistant(text: str) -> Optional[str]:
@@ -6386,7 +6422,7 @@ class ChatPanelWidget(QWidget):
         """历史保持纯文本；当前轮可附带本地选图或相机 JPEG（vision）。
 
         Lake / 本地远程 Qwen：对齐训练格式
-          system + user(任务 / 语言记忆 / 输出要求) + image
+          system + user(任务 / 输出要求) + image
         """
         use_lake = should_use_lake_orchestrator_prompt(
             self._config.api_base, self._config.model
@@ -6394,7 +6430,6 @@ class ChatPanelWidget(QWidget):
         prompt_text = (
             format_lake_user_prompt(
                 user_text,
-                self._lake_language_memory,
                 system_prompt=self._config.system_prompt,
             )
             if use_lake
