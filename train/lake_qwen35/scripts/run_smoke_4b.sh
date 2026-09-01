@@ -1,29 +1,31 @@
 #!/usr/bin/env bash
-# Tiny smoke test: multimodal VN SFT on 1 GPU
+# Tiny smoke test: multimodal Hermes SFT on 1 GPU
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="/share_data/projects/mahjong/share/personal/liyichao"
 PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/Qwen2.5-VL/bin/python}"
 GPU="${GPU:-0}"
-OUT="${ROOT}/output/qwen35-4b-lora-vn-smoke"
+OUT="${ROOT}/output/qwen35-4b-lora-hermas-approved-smoke"
+TRAIN_JSONL="${ROOT}/data/hermas_sys2_train_approved.jsonl"
+VAL_JSONL="${ROOT}/data/hermas_sys2_val_approved.jsonl"
 
 export CUDA_VISIBLE_DEVICES="${GPU}"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 
 mkdir -p "${ROOT}/output"
-LOG="${ROOT}/output/smoke_vn_$(date +%Y%m%d_%H%M%S).log"
+LOG="${ROOT}/output/smoke_hermas_$(date +%Y%m%d_%H%M%S).log"
 
-if [[ ! -f "${ROOT}/data/vn_sys2_train.jsonl" ]]; then
-  echo "[info] VN dataset missing, running convert first..."
-  LIMIT=32 SPLITS=train bash "${ROOT}/scripts/run_convert_vn.sh"
+if [[ ! -f "${TRAIN_JSONL}" ]]; then
+  echo "[error] missing ${TRAIN_JSONL}; export Hermes approved data first" >&2
+  exit 1
 fi
 
 "${PYTHON}" -u "${ROOT}/scripts/train_lora_sft_mm.py" \
   --model_name_or_path "${WORKSPACE}/models/Qwen/Qwen3.5-4B" \
-  --dataset_path "${ROOT}/data/vn_sys2_train.jsonl" \
-  --eval_dataset_path "${ROOT}/data/vn_sys2_val.jsonl" \
+  --dataset_path "${TRAIN_JSONL}" \
+  --eval_dataset_path "${VAL_JSONL}" \
   --output_dir "${OUT}" \
   --max_samples 16 \
   --eval_max_samples 4 \

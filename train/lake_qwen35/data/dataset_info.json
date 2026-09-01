@@ -110,5 +110,33 @@
       "assistant_tag": "assistant",
       "system_tag": "system"
     }
+  },
+  "hermas_sys2_train_all_approved": {
+    "file_name": "hermas_sys2_train_approved.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "hermas_sys2_val_all_approved": {
+    "file_name": "hermas_sys2_val_approved.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
   }
 }

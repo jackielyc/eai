@@ -267,31 +267,33 @@ dist_spawn_workers() {
 }
 
 dist_ensure_dataset() {
-  local train_jsonl="${ROOT}/data/vn_sys2_train.jsonl"
-  local val_jsonl="${ROOT}/data/vn_sys2_val.jsonl"
+  # Hermes all approved (main + supplement merged)
+  local train_jsonl="${ROOT}/data/hermas_sys2_train_approved.jsonl"
+  local val_jsonl="${ROOT}/data/hermas_sys2_val_approved.jsonl"
   local wait_sec="${DATASET_WAIT_SEC:-1800}"
 
   if [[ -f "${train_jsonl}" && -f "${val_jsonl}" ]]; then
+    echo "[info] Hermes approved full dataset ready"
     return 0
   fi
 
   if [[ "${NODE_RANK}" -eq 0 ]]; then
-    echo "[info] VN dataset missing, running convert first..."
-    bash "${ROOT}/scripts/run_convert_vn.sh"
-    return 0
+    echo "[error] Hermes approved full dataset missing:" >&2
+    echo "[error]   need: hermas_sys2_{train,val}_approved.jsonl" >&2
+    exit 1
   fi
 
-  echo "[info] node_rank=${NODE_RANK}: waiting up to ${wait_sec}s for VN dataset..."
+  echo "[info] node_rank=${NODE_RANK}: waiting up to ${wait_sec}s for Hermes approved dataset..."
   local elapsed=0
   while [[ "${elapsed}" -lt "${wait_sec}" ]]; do
     if [[ -f "${train_jsonl}" && -f "${val_jsonl}" ]]; then
-      echo "[info] VN dataset ready"
+      echo "[info] Hermes approved full dataset ready"
       return 0
     fi
     sleep 5
     elapsed=$((elapsed + 5))
   done
-  echo "[error] VN dataset still missing after ${wait_sec}s; convert on node 0 or share data/" >&2
+  echo "[error] Hermes approved still missing after ${wait_sec}s; export/merge on node 0 or share data/" >&2
   exit 1
 }
 

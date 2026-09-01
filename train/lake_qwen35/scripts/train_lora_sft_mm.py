@@ -19,7 +19,7 @@ torch.backends.cudnn.enabled = False
 
 from peft import LoraConfig, TaskType, get_peft_model
 from PIL import Image, UnidentifiedImageError
-from torch.utils.data import Dataset
+from torch.utils.data import ConcatDataset, Dataset
 from transformers import (
     AutoConfig,
     AutoModelForImageTextToText,
@@ -371,6 +371,35 @@ def read_jsonl_record(path: Path, offset: int) -> dict[str, Any]:
         return json.loads(handle.readline())
 
 
+def parse_dataset_paths(path: str) -> list[str]:
+    """Split comma-separated dataset paths (main + supplement, etc.)."""
+    return [p.strip() for p in str(path).split(",") if p.strip()]
+
+
+def build_sharegpt_dataset(
+    path: str,
+    processor,
+    max_seq_length: int,
+    max_samples: int | None = None,
+) -> Dataset:
+    """Build one or more ShareGPT datasets; comma-separated paths are concatenated."""
+    paths = parse_dataset_paths(path)
+    if not paths:
+        raise ValueError("dataset_path is empty")
+    parts: list[MultimodalShareGPTDataset] = []
+    remaining = max_samples
+    for single in paths:
+        if remaining is not None and remaining <= 0:
+            break
+        ds = MultimodalShareGPTDataset(single, processor, max_seq_length, remaining)
+        parts.append(ds)
+        if remaining is not None:
+            remaining -= len(ds)
+    if len(parts) == 1:
+        return parts[0]
+    return ConcatDataset(parts)
+
+
 class MultimodalShareGPTDataset(Dataset):
     def __init__(
         self,
@@ -662,19 +691,27 @@ def main() -> None:
         elif cfg.auto_resume:
             print("[train] no checkpoint found, starting fresh", flush=True)
 
-    train_ds = MultimodalShareGPTDataset(
+    train_ds = build_sharegpt_dataset(
         cfg.dataset_path, processor, cfg.max_seq_length, cfg.max_samples
     )
     if local_rank == 0:
-        print(f"[train] train samples={len(train_ds)}", flush=True)
+        train_paths = parse_dataset_paths(cfg.dataset_path)
+        print(
+            f"[train] train samples={len(train_ds)} files={len(train_paths)}",
+            flush=True,
+        )
+        for p in train_paths:
+            print(f"[train]   - {p}", flush=True)
     eval_ds = None
     if cfg.eval_dataset_path:
-        eval_ds = MultimodalShareGPTDataset(
+        eval_ds = build_sharegpt_dataset(
             cfg.eval_dataset_path,
             processor,
             cfg.max_seq_length,
             cfg.eval_max_samples,
         )
+        if local_rank == 0:
+            print(f"[train] eval samples={len(eval_ds)}", flush=True)
 
     fsdp_arg = ""
     fsdp_config = None

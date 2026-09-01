@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Multimodal LoRA SFT Qwen3.5-35B-A3B on VN ego data
+# Multimodal LoRA SFT Qwen3.5-35B-A3B on Hermes approved (valid_pass=1) data
 # Single machine (default): one process, device_map=auto.
 # Multi-node: torchrun + DEVICE_MAP=none (device_map=auto is single-process only).
 set -euo pipefail

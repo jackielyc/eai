@@ -1,8 +1,8 @@
-### Multimodal LoRA SFT — Qwen3.5-4B on VN ego data
+### Multimodal LoRA SFT — Qwen3.5-4B on Hermes all approved data
 model_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-4B
-dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_train.jsonl
-eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_val.jsonl
-output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-vn
+dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/hermas_sys2_train_approved.jsonl
+eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/hermas_sys2_val_approved.jsonl
+output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-hermas-approved
 
 max_seq_length: 2048
 max_samples: null
