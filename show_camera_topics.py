@@ -70,6 +70,7 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
     QDoubleSpinBox,
+    QFrame,
     QGroupBox,
     QGridLayout,
     QHBoxLayout,
@@ -148,27 +149,8 @@ def _keep_text_focus() -> None:
 
 
 def _revive_ime_after_combo() -> None:
-    """下拉关闭后恢复中文：聊天框重建控件；其它文本框一次性重挂 IC。"""
-    w = _IME_LAST_TEXT_WIDGET
-    try:
-        # ChatInputEdit：整控件替换，强制 fcitx 重新挂接
-        panel = getattr(w, "_chat_panel", None) if w is not None else None
-        if panel is not None and hasattr(panel, "_rebuild_chat_input"):
-            panel._rebuild_chat_input()
-            return
-        if not _is_text_ime_widget(w):
-            return
-        w.setFocus(Qt.OtherFocusReason)
-        w.setAttribute(Qt.WA_InputMethodEnabled, False)
-        w.setAttribute(Qt.WA_InputMethodEnabled, True)
-        w.setFocus(Qt.OtherFocusReason)
-        app = QApplication.instance()
-        if app is not None:
-            im = app.inputMethod()
-            if im is not None:
-                im.update(Qt.ImQueryAll)
-    except Exception:
-        pass
+    """下拉关闭后只交还焦点，不重建控件（重建反而常弄死 fcitx）。"""
+    _keep_text_focus()
 
 
 def restore_fcitx_input_method(widget=None) -> None:
@@ -5227,40 +5209,68 @@ def rename_chat_history(history_id: str, title: str) -> None:
     save_chat_history_record(data)
 
 
-class ChatHistoryBrowser(QWidget):
-    """内嵌历史列表（非模态）。避免 QDialog.exec_ 弄坏 fcitx。"""
+class ChatHistoryDialog(QWidget):
+    """主窗口内居中浮层（看起来像弹窗，但不新建 X11 窗口，避免弄坏 fcitx）。"""
 
-    load_requested = pyqtSignal(str)
-    closed = pyqtSignal()
+    finished = pyqtSignal(int)  # QDialog.Accepted / Rejected
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setAttribute(Qt.WA_InputMethodEnabled, False)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 4, 0, 4)
-        layout.setSpacing(4)
+        # parent 必须是顶层窗口，浮层盖在其上
+        win = parent.window() if parent is not None else parent
+        super().__init__(win)
+        self.selected_id: str = ""
+        self.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setObjectName("historyMask")
+        self.setStyleSheet("#historyMask { background-color: rgba(0,0,0,160); }")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 24)
+        panel = QFrame()
+        panel.setObjectName("historyPanel")
+        panel.setStyleSheet(
+            "#historyPanel {"
+            "  background-color: #2b2b2b;"
+            "  border: 1px solid #666;"
+            "  border-radius: 6px;"
+            "}"
+        )
+        panel.setMinimumSize(480, 420)
+        panel.setMaximumSize(720, 560)
+        root.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(panel)
+        row.addStretch(1)
+        root.addLayout(row)
+        root.addStretch(1)
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        title = QLabel("历史对话")
+        title.setStyleSheet(f"color: {UI_TEXT_PRIMARY}; font-weight: bold; font-size: 14pt;")
+        layout.addWidget(title)
         tip = QLabel(
-            "选择历史对话后点「加载」（问题进输入框，不自动请求）。"
-            "改标题在下方编辑后点「保存标题」。"
+            "选择一条历史对话：双击或点「加载」将把最后一轮问题放入输入框"
+            "（不自动请求）；可修改标题或删除。点空白处或「关闭」退出。"
         )
         tip.setWordWrap(True)
         tip.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
         layout.addWidget(tip)
         self.list_widget = QListWidget()
         self.list_widget.setAttribute(Qt.WA_InputMethodEnabled, False)
-        self.list_widget.setFocusPolicy(Qt.NoFocus)
-        self.list_widget.setMaximumHeight(160)
+        self.list_widget.setFocusPolicy(Qt.ClickFocus)
         self.list_widget.setStyleSheet(
             "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
         )
         self.list_widget.itemDoubleClicked.connect(self._on_load_clicked)
         self.list_widget.currentItemChanged.connect(self._on_current_changed)
-        layout.addWidget(self.list_widget)
+        layout.addWidget(self.list_widget, 1)
         title_row = QHBoxLayout()
         title_row.addWidget(QLabel("标题"))
         self.title_edit = QLineEdit()
-        self.title_edit.setPlaceholderText("选中条目后可改标题")
+        self.title_edit.setPlaceholderText("选中条目后可改标题（可输入中文）")
         self.title_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.title_edit.setFocusPolicy(Qt.StrongFocus)
         title_row.addWidget(self.title_edit, stretch=1)
         self.save_title_btn = QPushButton("保存标题")
         self.save_title_btn.setFocusPolicy(Qt.NoFocus)
@@ -5279,17 +5289,45 @@ class ChatHistoryBrowser(QWidget):
         btn_row.addWidget(self.delete_btn)
         self._delete_armed = False
         btn_row.addStretch(1)
-        close_btn = QPushButton("收起")
+        close_btn = QPushButton("关闭")
         close_btn.setFocusPolicy(Qt.NoFocus)
-        close_btn.clicked.connect(self._on_close_clicked)
+        close_btn.clicked.connect(self.reject)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
         self._status = QLabel("")
         self._status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         layout.addWidget(self._status)
-        self.reload()
+        self._panel = panel
+        self._reload()
 
-    def reload(self) -> None:
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self.parentWidget() is not None:
+            self.setGeometry(self.parentWidget().rect())
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if self.parentWidget() is not None:
+            self.setGeometry(self.parentWidget().rect())
+        self.raise_()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        # 点遮罩空白关闭
+        if not self._panel.geometry().contains(event.pos()):
+            self.reject()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def accept(self) -> None:
+        self.hide()
+        self.finished.emit(int(QDialog.Accepted))
+
+    def reject(self) -> None:
+        self.hide()
+        self.finished.emit(int(QDialog.Rejected))
+
+    def _reload(self) -> None:
         self._delete_armed = False
         self.delete_btn.setText("删除")
         self.list_widget.clear()
@@ -5329,13 +5367,15 @@ class ChatHistoryBrowser(QWidget):
             self.title_edit.clear()
             return
         self.title_edit.setText(str(current.data(Qt.UserRole + 1) or ""))
+        self.title_edit.setFocus(Qt.OtherFocusReason)
 
     def _on_load_clicked(self, *_args) -> None:
         hid = self._current_id()
         if not hid:
             self._status.setText("请先选择一条对话")
             return
-        self.load_requested.emit(hid)
+        self.selected_id = hid
+        self.accept()
 
     def _on_save_title_clicked(self) -> None:
         hid = self._current_id()
@@ -5351,7 +5391,7 @@ class ChatHistoryBrowser(QWidget):
         except Exception as exc:
             self._status.setText(f"保存标题失败: {exc}")
             return
-        self.reload()
+        self._reload()
         self._status.setText("标题已保存")
 
     def _on_delete_clicked(self) -> None:
@@ -5371,12 +5411,8 @@ class ChatHistoryBrowser(QWidget):
             self._delete_armed = False
             self.delete_btn.setText("删除")
             return
-        self.reload()
+        self._reload()
         self._status.setText("已删除")
-
-    def _on_close_clicked(self) -> None:
-        self.setVisible(False)
-        self.closed.emit()
 
 
 
@@ -5552,12 +5588,6 @@ class ChatPanelWidget(QWidget):
         self.history_title_label.setWordWrap(True)
         layout.addWidget(self.history_title_label)
 
-        self.history_browser = ChatHistoryBrowser()
-        self.history_browser.setVisible(False)
-        self.history_browser.load_requested.connect(self._load_history_by_id)
-        self.history_browser.closed.connect(self._on_history_browser_closed)
-        layout.addWidget(self.history_browser)
-
         self.settings_panel = QWidget()
         settings_layout = QVBoxLayout(self.settings_panel)
         settings_layout.setContentsMargins(0, 0, 0, 0)
@@ -5685,6 +5715,9 @@ class ChatPanelWidget(QWidget):
             "QTextEdit { background-color: #252525; color: #eee; border: 1px solid #555; }"
         )
         self._suppress_send_until = 0.0
+        self._ime_dirty_from_history = False
+        self._ime_rebuilding = False
+        self._history_dialog = None
         input_row.addWidget(self.input_edit, stretch=1)
         send_col = QVBoxLayout()
         self.send_btn = QPushButton("发送")
@@ -5984,30 +6017,37 @@ class ChatPanelWidget(QWidget):
     def _rebuild_chat_input(self, text: Optional[str] = None) -> "ChatInputEdit":
         """替换输入框，强制 fcitx 重新挂 IC。"""
         global _IME_LAST_TEXT_WIDGET
-        old = self.input_edit
-        if text is None:
-            text = old.toPlainText()
-        placeholder = old.placeholderText()
-        style = old.styleSheet()
-        height = old.height()
-        new = ChatInputEdit(self)
-        new._chat_panel = self
-        new.setPlaceholderText(placeholder)
-        new.setFixedHeight(height if height > 0 else 96)
-        new.setAttribute(Qt.WA_InputMethodEnabled, True)
-        new.setStyleSheet(style)
-        new.setPlainText(text)
-        cursor = new.textCursor()
-        cursor.movePosition(cursor.End)
-        new.setTextCursor(cursor)
-        row = getattr(self, "_input_row", None)
-        if row is not None:
-            row.replaceWidget(old, new)
-        old.deleteLater()
-        self.input_edit = new
-        _IME_LAST_TEXT_WIDGET = new
-        new.setFocus(Qt.OtherFocusReason)
-        return new
+        if getattr(self, "_ime_rebuilding", False):
+            return self.input_edit
+        self._ime_rebuilding = True
+        try:
+            old = self.input_edit
+            if text is None:
+                text = old.toPlainText()
+            placeholder = old.placeholderText()
+            style = old.styleSheet()
+            height = old.height()
+            new = ChatInputEdit(self)
+            new._chat_panel = self
+            new.setPlaceholderText(placeholder)
+            new.setFixedHeight(height if height > 0 else 96)
+            new.setAttribute(Qt.WA_InputMethodEnabled, True)
+            new.setStyleSheet(style)
+            new.setPlainText(text)
+            cursor = new.textCursor()
+            cursor.movePosition(cursor.End)
+            new.setTextCursor(cursor)
+            row = getattr(self, "_input_row", None)
+            if row is not None:
+                row.replaceWidget(old, new)
+            old.deleteLater()
+            self.input_edit = new
+            self._ime_dirty_from_history = False
+            _IME_LAST_TEXT_WIDGET = new
+            new.setFocus(Qt.OtherFocusReason)
+            return new
+        finally:
+            self._ime_rebuilding = False
 
     def _focus_chat_input(self) -> None:
         self.input_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
@@ -6231,18 +6271,40 @@ class ChatPanelWidget(QWidget):
         self.status_message.emit(f"对话已保存: {path}")
 
     def _on_history_clicked(self) -> None:
-        show = not self.history_browser.isVisible()
-        self.history_browser.setVisible(show)
-        if show:
-            self.history_browser.reload()
-            self.history_btn.setText("收起")
-        else:
-            self.history_btn.setText("历史")
+        existing = getattr(self, "_history_dialog", None)
+        if existing is not None:
+            try:
+                if existing.isVisible():
+                    existing.raise_()
+                    existing.title_edit.setFocus(Qt.OtherFocusReason)
+                    return
+                existing.deleteLater()
+            except Exception:
+                pass
+        dlg = ChatHistoryDialog(self)
+        self._history_dialog = dlg
+
+        def _on_finished(result: int) -> None:
+            self._history_dialog = None
+            accepted = result == int(QDialog.Accepted)
+            hid = dlg.selected_id if accepted else ""
+            dlg.deleteLater()
+            if accepted and hid:
+                self._load_history_by_id(hid)
+                return
+            if not accepted and self._history_id:
+                try:
+                    load_chat_history(self._history_id)
+                except Exception:
+                    self._history_id = ""
+                    self._history_title = ""
+                    self._refresh_history_title_label()
             self._focus_chat_input()
 
-    def _on_history_browser_closed(self) -> None:
-        self.history_btn.setText("历史")
-        self._focus_chat_input()
+        dlg.finished.connect(_on_finished)
+        dlg.show()
+        dlg.raise_()
+        QTimer.singleShot(0, lambda: dlg.title_edit.setFocus(Qt.OtherFocusReason))
 
     def _load_history_by_id(self, hid: str) -> None:
         hid = str(hid or "").strip()
@@ -6251,7 +6313,8 @@ class ChatPanelWidget(QWidget):
         try:
             data = load_chat_history(hid)
         except Exception as exc:
-            self.history_browser._status.setText(f"加载失败: {exc}")
+            QMessageBox.warning(self, "历史对话", f"加载失败: {exc}")
+            self._focus_chat_input()
             return
         raw_msgs = data.get("messages") or []
         messages: List[Dict[str, object]] = []
@@ -6300,8 +6363,6 @@ class ChatPanelWidget(QWidget):
         self._render_messages_to_view()
         self._refresh_history_title_label()
         self._suppress_send_until = time.monotonic() + 0.4
-        self.history_browser.setVisible(False)
-        self.history_btn.setText("历史")
         self.input_edit.setPlainText(draft)
         cursor = self.input_edit.textCursor()
         cursor.movePosition(cursor.End)
