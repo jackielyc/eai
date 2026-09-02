@@ -1611,6 +1611,8 @@ LAKE_ORCHESTRATOR_SYSTEM_PROMPT_TRAINING = (
     "请先输出「所有子任务」编号列表，再分别用「技能」「子任务」两行作答。"
 )
 LAKE_DEFAULT_LANGUAGE_MEMORY = "尚无已完成子任务。"
+TRADITIONAL_CHAT_INPUT_PLACEHOLDER = "输入问题或指令，Enter 发送（传统对话，无 System/Lake 提示词）"
+LAKE_CHAT_INPUT_PLACEHOLDER = "输入高层任务名（如：合上后盖并拧紧）；Enter 发送"
 LAKE_USER_PROMPT_TEMPLATE = (
     "任务：{task}\n"
     "\n"
@@ -5585,6 +5587,7 @@ class ChatPanelWidget(QWidget):
         self._client = LlmChatClient(self._config)
         self._messages: List[Dict[str, object]] = []
         self._lake_language_memory: str = LAKE_DEFAULT_LANGUAGE_MEMORY
+        self._traditional_chat_mode: bool = False
         self._busy = False
         self._history_id: str = ""
         self._history_title: str = ""
@@ -5648,6 +5651,14 @@ class ChatPanelWidget(QWidget):
         )
         self.history_btn.clicked.connect(self._on_history_clicked)
         header.addWidget(self.history_btn)
+        self.traditional_chat_btn = QPushButton("传统对话")
+        self.traditional_chat_btn.setFixedWidth(64)
+        self.traditional_chat_btn.setFocusPolicy(Qt.NoFocus)
+        self.traditional_chat_btn.setToolTip(
+            "切换为传统多轮对话：清空 System prompt，不再注入 Lake 编排提示词"
+        )
+        self.traditional_chat_btn.clicked.connect(self._on_traditional_chat_clicked)
+        header.addWidget(self.traditional_chat_btn)
         self.clear_btn = QPushButton("清空")
         self.clear_btn.setFixedWidth(44)
         self.clear_btn.clicked.connect(self._clear_chat)
@@ -5776,9 +5787,7 @@ class ChatPanelWidget(QWidget):
         self._input_row = input_row
         self.input_edit = ChatInputEdit()
         self.input_edit._chat_panel = self
-        self.input_edit.setPlaceholderText(
-            "输入高层任务名（如：合上后盖并拧紧）；Enter 发送"
-        )
+        self.input_edit.setPlaceholderText(LAKE_CHAT_INPUT_PLACEHOLDER)
         self.input_edit.setFixedHeight(96)
         self.input_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.input_edit.setStyleSheet(
@@ -5829,6 +5838,31 @@ class ChatPanelWidget(QWidget):
         provider: Optional[Callable[[], Optional[Tuple[str, np.ndarray]]]],
     ) -> None:
         self._camera_frame_provider = provider
+
+    def _apply_traditional_chat_mode(self, enabled: bool, *, notify: bool = True) -> None:
+        self._traditional_chat_mode = bool(enabled)
+        if self._traditional_chat_mode:
+            self._config.system_prompt = ""
+            self.system_prompt_edit.setPlainText("")
+            self.input_edit.setPlaceholderText(TRADITIONAL_CHAT_INPUT_PLACEHOLDER)
+            self.traditional_chat_btn.setStyleSheet(
+                f"QPushButton {{ background-color: #2a4a6a; color: {UI_TEXT_PRIMARY}; }}"
+            )
+            if notify:
+                self._append_system_line(
+                    "已切换为传统对话：System prompt 已清空，后续不再注入 Lake 编排提示词"
+                )
+                self.status_message.emit("传统对话模式")
+        else:
+            self.input_edit.setPlaceholderText(LAKE_CHAT_INPUT_PLACEHOLDER)
+            self.traditional_chat_btn.setStyleSheet("")
+
+    def _on_traditional_chat_clicked(self) -> None:
+        self._apply_traditional_chat_mode(True)
+        try:
+            save_chat_user_settings({"system_prompt": ""})
+        except Exception as exc:
+            self._append_system_line(f"保存空 System prompt 失败: {exc}")
 
     def _on_settings_toggled(self, checked: bool) -> None:
         self.settings_panel.setVisible(bool(checked))
@@ -6139,11 +6173,23 @@ class ChatPanelWidget(QWidget):
         self._config.api_key = key
         self._config.enable_thinking = bool(self.thinking_check.isChecked())
         system = self.system_prompt_edit.toPlainText().strip()
-        self._config.system_prompt = system or LAKE_ORCHESTRATOR_SYSTEM_PROMPT
+        if system:
+            self._traditional_chat_mode = False
+            self.traditional_chat_btn.setStyleSheet("")
+            self.input_edit.setPlaceholderText(LAKE_CHAT_INPUT_PLACEHOLDER)
+            self._config.system_prompt = system
+        elif self._traditional_chat_mode:
+            self._config.system_prompt = ""
+        else:
+            self._config.system_prompt = LAKE_ORCHESTRATOR_SYSTEM_PROMPT
         self._client = LlmChatClient(self._config)
 
     def _on_save_system_prompt_clicked(self) -> None:
         self._sync_config_from_ui()
+        if self._config.system_prompt.strip():
+            self._apply_traditional_chat_mode(False, notify=False)
+        else:
+            self._apply_traditional_chat_mode(True, notify=False)
         try:
             path = save_chat_user_settings(
                 {"system_prompt": self._config.system_prompt}
@@ -6160,6 +6206,7 @@ class ChatPanelWidget(QWidget):
         self.status_message.emit(f"System prompt 已保存: {path}")
 
     def _on_reset_system_prompt_clicked(self) -> None:
+        self._apply_traditional_chat_mode(False, notify=False)
         self.system_prompt_edit.setPlainText(LAKE_ORCHESTRATOR_SYSTEM_PROMPT_TRAINING)
         self._sync_config_from_ui()
         self._append_system_line(
@@ -6434,8 +6481,11 @@ class ChatPanelWidget(QWidget):
         self._history_title = str(data.get("title") or self._history_id)
         saved_system = str(data.get("system_prompt") or "").strip()
         if saved_system:
+            self._apply_traditional_chat_mode(False, notify=False)
             self.system_prompt_edit.setPlainText(saved_system)
             self._config.system_prompt = saved_system
+        else:
+            self._apply_traditional_chat_mode(True, notify=False)
         self._on_clear_chat_image_clicked(notify=False)
         self._render_messages_to_view()
         self._refresh_history_title_label()
@@ -6465,8 +6515,11 @@ class ChatPanelWidget(QWidget):
         Lake / 本地远程 Qwen：对齐训练格式
           system + user(任务 / 输出要求) + image
         """
-        use_lake = should_use_lake_orchestrator_prompt(
-            self._config.api_base, self._config.model
+        use_lake = (
+            not self._traditional_chat_mode
+            and should_use_lake_orchestrator_prompt(
+                self._config.api_base, self._config.model
+            )
         )
         prompt_text = (
             format_lake_user_prompt(
