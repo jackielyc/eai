@@ -1748,6 +1748,7 @@ def should_use_lake_orchestrator_prompt(api_base: str, model: str) -> bool:
 
 CHAT_HISTORY_DIR = os.path.join(EAI_DIR, "chat_history")
 CHAT_USER_SETTINGS_PATH = os.path.join(EAI_DIR, "chat_user_settings.json")
+TEST_QWEN_LAST_CONFIG_PATH = os.path.join(EAI_DIR, "test_qwen_last_config.json")
 HY_EMBODIED_VLM_API_BASE = os.environ.get(
     "HY_EMBODIED_VLM_API_BASE", "http://127.0.0.1:8080/v1"
 )
@@ -5143,6 +5144,25 @@ def save_chat_user_settings(data: Dict[str, object]) -> str:
     with open(CHAT_USER_SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     return CHAT_USER_SETTINGS_PATH
+
+
+def load_test_qwen_last_config() -> Dict[str, object]:
+    """加载测试 Tab 上次推理部署配置。"""
+    try:
+        with open(TEST_QWEN_LAST_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+def save_test_qwen_last_config(data: Dict[str, object]) -> str:
+    os.makedirs(os.path.dirname(TEST_QWEN_LAST_CONFIG_PATH), exist_ok=True)
+    with open(TEST_QWEN_LAST_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return TEST_QWEN_LAST_CONFIG_PATH
 
 
 def chat_history_path(history_id: str) -> str:
@@ -11626,6 +11646,14 @@ class CameraTopicWindow(QMainWindow):
         self.test_qwen_status_label = QLabel("服务: --")
         self.test_qwen_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         service_row.addWidget(self.test_qwen_status_label)
+        self.test_qwen_load_last_btn = QPushButton("上次配置")
+        self.test_qwen_load_last_btn.setFixedWidth(64)
+        self.test_qwen_load_last_btn.setFocusPolicy(Qt.NoFocus)
+        self.test_qwen_load_last_btn.setToolTip(
+            "恢复上一次「启动推理服务」时使用的部署位置、权重目录与模型"
+        )
+        self.test_qwen_load_last_btn.clicked.connect(self._on_test_qwen_load_last_clicked)
+        service_row.addWidget(self.test_qwen_load_last_btn)
         self.test_qwen_start_btn = QPushButton("启动推理服务")
         self.test_qwen_start_btn.setToolTip(
             "按「部署位置」启动本地或远程 OpenAI 兼容推理服务。\n"
@@ -11671,6 +11699,7 @@ class CameraTopicWindow(QMainWindow):
             self._on_test_qwen_model_list_ready
         )
         self._test_qwen_model_list_refreshing = False
+        self._pending_test_qwen_model_path = ""
         self._refresh_test_qwen_scan_roots()
         self._refresh_test_qwen_model_list()
         self._qwen_health_timer = QTimer(self)
@@ -12032,7 +12061,11 @@ class CameraTopicWindow(QMainWindow):
         ok = bool(data.get("ok"))
         models = data.get("models") if isinstance(data.get("models"), list) else []
         root = str(data.get("root") or self._selected_test_qwen_scan_root())
-        prev_path = str(self._selected_test_qwen_deploy_spec().get("path") or "")
+        prev_path = (
+            self._pending_test_qwen_model_path
+            or str(self._selected_test_qwen_deploy_spec().get("path") or "")
+        )
+        self._pending_test_qwen_model_path = ""
 
         self.test_qwen_model_combo.blockSignals(True)
         self.test_qwen_model_combo.clear()
@@ -12248,6 +12281,7 @@ class CameraTopicWindow(QMainWindow):
         self.test_qwen_target_combo.setEnabled(not service_busy)
         self.test_qwen_root_combo.setEnabled(not service_busy)
         self.test_qwen_refresh_btn.setEnabled(not service_busy and not scanning)
+        self.test_qwen_load_last_btn.setEnabled(not service_busy and not scanning)
 
     def _update_test_qwen_ui_local(self) -> None:
         api = self._local_qwen_launcher.api_base()
@@ -12322,6 +12356,60 @@ class CameraTopicWindow(QMainWindow):
         self.test_qwen_target_combo.setEnabled(not service_busy)
         self.test_qwen_root_combo.setEnabled(not service_busy)
         self.test_qwen_refresh_btn.setEnabled(not service_busy and not scanning)
+        self.test_qwen_load_last_btn.setEnabled(not service_busy and not scanning)
+
+    def _save_test_qwen_deploy_config(self) -> None:
+        spec = self._selected_test_qwen_deploy_spec()
+        try:
+            save_test_qwen_last_config(
+                {
+                    "target": str(self.test_qwen_target_combo.currentData() or "local"),
+                    "scan_root": self._selected_test_qwen_scan_root(),
+                    "model_path": str(spec.get("path") or ""),
+                    "model_id": str(spec.get("model_id") or ""),
+                    "model_label": str(spec.get("label") or ""),
+                    "saved_at": _utc_now_iso(),
+                }
+            )
+        except Exception as exc:
+            self._append_test_infer_log(f"保存上次配置失败: {exc}")
+
+    def _on_test_qwen_load_last_clicked(self) -> None:
+        cfg = load_test_qwen_last_config()
+        target = str(cfg.get("target") or "").strip()
+        scan_root = str(cfg.get("scan_root") or "").strip()
+        model_path = str(cfg.get("model_path") or "").strip()
+        model_label = str(cfg.get("model_label") or model_path).strip()
+        if not target and not scan_root and not model_path:
+            self._append_test_infer_log("无上次模型配置（需先成功点过一次「启动推理服务」）")
+            self.status_bar.showMessage("无上次推理配置")
+            return
+
+        self.test_qwen_target_combo.blockSignals(True)
+        idx = self.test_qwen_target_combo.findData(target or "local")
+        if idx >= 0:
+            self.test_qwen_target_combo.setCurrentIndex(idx)
+        self.test_qwen_target_combo.blockSignals(False)
+
+        if self._selected_test_qwen_target() == "remote":
+            self._remote_qwen_launcher.set_host(self._selected_test_qwen_remote_host())
+
+        self._refresh_test_qwen_scan_roots()
+        if scan_root:
+            root_idx = self.test_qwen_root_combo.findData(scan_root)
+            if root_idx >= 0:
+                self.test_qwen_root_combo.setCurrentIndex(root_idx)
+            else:
+                self._append_test_infer_log(f"上次权重目录不在当前列表: {scan_root}")
+
+        self._pending_test_qwen_model_path = model_path
+        self._refresh_test_qwen_model_list()
+        saved_at = str(cfg.get("saved_at") or "").strip()
+        when = f" ({saved_at})" if saved_at else ""
+        self._append_test_infer_log(
+            f"已加载上次配置{when}: {target or 'local'} / {model_label or model_path or scan_root}"
+        )
+        self.status_bar.showMessage("已加载上次推理配置")
 
     def _on_test_qwen_start_clicked(self) -> None:
         spec = self._selected_test_qwen_deploy_spec()
@@ -12332,6 +12420,7 @@ class CameraTopicWindow(QMainWindow):
             self._append_test_infer_log("请先点「刷新」加载可部署目录，并选择一个模型。")
             self.status_bar.showMessage("未选择模型")
             return
+        self._save_test_qwen_deploy_config()
         if target == "remote":
             host_id = self._selected_test_qwen_remote_host()
             path = spec.get("path") or ""
