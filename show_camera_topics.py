@@ -165,6 +165,58 @@ def _schedule_fcitx_restore(widget=None) -> None:
         pass
 
 
+def _notify_ime_widget(widget, *, full_query: bool = False) -> None:
+    """文本框获焦后通知 Qt/fcitx 更新输入法上下文。"""
+    try:
+        app = QApplication.instance()
+        if app is None or widget is None:
+            return
+        im = app.inputMethod()
+        if im is None:
+            return
+        if full_query:
+            im.update(Qt.ImQueryAll)
+        else:
+            im.update(
+                Qt.ImEnabled
+                | Qt.ImCursorRectangle
+                | Qt.ImHints
+                | Qt.ImInputItemClipRectangle
+            )
+    except Exception:
+        pass
+
+
+class ImeSafeLineEdit(QLineEdit):
+    """支持 fcitx 中文输入的单行框。"""
+
+    def __init__(self, text: str = "", parent=None) -> None:
+        super().__init__(text, parent)
+        self.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        super().focusInEvent(event)
+        global _IME_LAST_TEXT_WIDGET
+        _IME_LAST_TEXT_WIDGET = self
+        _notify_ime_widget(self)
+
+
+class ImeSafeTextEdit(QTextEdit):
+    """支持 fcitx 中文输入的多行框（无 Enter 发送逻辑）。"""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        super().focusInEvent(event)
+        global _IME_LAST_TEXT_WIDGET
+        _IME_LAST_TEXT_WIDGET = self
+        _notify_ime_widget(self)
+
+
 class ImeSafeComboBox(QComboBox):
     """鼠标可选下拉：列表做主窗口子控件浮层，不创建新的 X11 窗口。"""
 
@@ -5303,10 +5355,8 @@ class ChatHistoryDialog(QWidget):
         layout.addWidget(self.list_widget, 1)
         title_row = QHBoxLayout()
         title_row.addWidget(QLabel("标题"))
-        self.title_edit = QLineEdit()
+        self.title_edit = ImeSafeLineEdit()
         self.title_edit.setPlaceholderText("选中条目后可改标题（可输入中文）")
-        self.title_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
-        self.title_edit.setFocusPolicy(Qt.StrongFocus)
         title_row.addWidget(self.title_edit, stretch=1)
         self.save_title_btn = QPushButton("保存标题")
         self.save_title_btn.setFocusPolicy(Qt.NoFocus)
@@ -5467,6 +5517,7 @@ class ChatInputEdit(QTextEdit):
         super().focusInEvent(event)
         global _IME_LAST_TEXT_WIDGET
         _IME_LAST_TEXT_WIDGET = self
+        _notify_ime_widget(self)
 
     def inputMethodEvent(self, event) -> None:  # type: ignore[override]
         # 必须在此跟踪组字；用 eventFilter 拦截 Enter 容易抢掉 fcitx 上屏键
@@ -5510,24 +5561,7 @@ class ChatInputEdit(QTextEdit):
         super().keyPressEvent(event)
 
     def _notify_input_method(self, *, full_query: bool = False) -> None:
-        try:
-            app = QApplication.instance()
-            if app is None:
-                return
-            im = app.inputMethod()
-            if im is None:
-                return
-            if full_query:
-                im.update(Qt.ImQueryAll)
-            else:
-                im.update(
-                    Qt.ImEnabled
-                    | Qt.ImCursorRectangle
-                    | Qt.ImHints
-                    | Qt.ImInputItemClipRectangle
-                )
-        except Exception:
-            pass
+        _notify_ime_widget(self, full_query=full_query)
 
 
 class ChatPanelWidget(QWidget):
@@ -5590,6 +5624,7 @@ class ChatPanelWidget(QWidget):
         self.settings_toggle_btn.setText("设置")
         self.settings_toggle_btn.setCheckable(True)
         self.settings_toggle_btn.setChecked(False)
+        self.settings_toggle_btn.setFocusPolicy(Qt.NoFocus)
         self.settings_toggle_btn.setToolTip("展开/收起 API、Key 与 System prompt 设置")
         self.settings_toggle_btn.toggled.connect(self._on_settings_toggled)
         header.addWidget(self.settings_toggle_btn)
@@ -5630,7 +5665,7 @@ class ChatPanelWidget(QWidget):
         settings_layout.setSpacing(3)
         settings_row = QHBoxLayout()
         settings_row.addWidget(QLabel("API"))
-        self.api_base_edit = QLineEdit(self._config.api_base)
+        self.api_base_edit = ImeSafeLineEdit(self._config.api_base)
         self.api_base_edit.setPlaceholderText("https://api.openai.com/v1")
         self.api_base_edit.setToolTip(
             "OpenAI 兼容 API：Ollama :11434/v1；Hy-VLM :8080/v1；RxBrain :8090/v1"
@@ -5639,7 +5674,7 @@ class ChatPanelWidget(QWidget):
         settings_layout.addLayout(settings_row)
         key_row = QHBoxLayout()
         key_row.addWidget(QLabel("Key"))
-        self.api_key_edit = QLineEdit(self._config.api_key)
+        self.api_key_edit = ImeSafeLineEdit(self._config.api_key)
         self.api_key_edit.setEchoMode(QLineEdit.Password)
         self.api_key_edit.setPlaceholderText(f"或设置 ${LLM_API_KEY_ENV}")
         self.api_key_edit.setToolTip(
@@ -5651,9 +5686,8 @@ class ChatPanelWidget(QWidget):
         system_label = QLabel("System")
         system_label.setToolTip("Lake / Qwen 推理时作为 system 角色发送；可编辑并保存到本地")
         settings_layout.addWidget(system_label)
-        self.system_prompt_edit = QTextEdit()
+        self.system_prompt_edit = ImeSafeTextEdit()
         self.system_prompt_edit.setPlainText(self._config.system_prompt)
-        self.system_prompt_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.system_prompt_edit.setPlaceholderText("System prompt…")
         self.system_prompt_edit.setMinimumHeight(72)
         self.system_prompt_edit.setMaximumHeight(140)
@@ -5799,6 +5833,12 @@ class ChatPanelWidget(QWidget):
     def _on_settings_toggled(self, checked: bool) -> None:
         self.settings_panel.setVisible(bool(checked))
         self.settings_toggle_btn.setText("收起" if checked else "设置")
+        if checked:
+            self.system_prompt_edit.setFocus(Qt.OtherFocusReason)
+            _schedule_fcitx_restore(self.system_prompt_edit)
+        else:
+            QTimer.singleShot(0, self._focus_chat_input)
+            _schedule_fcitx_restore(self.input_edit)
 
     def _on_probe_clicked(self) -> None:
         if self._busy:
@@ -6088,6 +6128,7 @@ class ChatPanelWidget(QWidget):
     def _focus_chat_input(self) -> None:
         self.input_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.input_edit.setFocus(Qt.OtherFocusReason)
+        _notify_ime_widget(self.input_edit)
 
     def _sync_config_from_ui(self) -> None:
         self._config.api_base = self.api_base_edit.text().strip() or LLM_API_BASE_DEFAULT

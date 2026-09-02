@@ -403,9 +403,10 @@ class HeadCameraTfPublisher:
             self._make_tf(self.base_frame, self.camera_frame, T),
         ]
         self._broadcaster.sendTransform(tfs)
-        now = time.time()
-        if now - self._last_log > 5.0:
-            self._last_log = now
+        # 仅 waist/head 到位状态变化时打 INFO，避免每 5s 刷屏
+        status = (have_waist, have_head)
+        if getattr(self, '_logged_status', None) != status:
+            self._logged_status = status
             xyz = T[:3, 3]
             self.node.get_logger().info(
                 f"camera TF ok: {self.base_frame}-> {self.camera_frame} "
