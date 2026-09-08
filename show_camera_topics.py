@@ -11,6 +11,8 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   python3.10 show_camera_topics.py --prefix /camera
 
 顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 测试。
+独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
+
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
 """
 
@@ -11594,7 +11596,6 @@ class CameraTopicWindow(QMainWindow):
             test_grid.setRowStretch(r, 1)
         test_outer.addWidget(test_grid_host, 1)
 
-        qwen_dir = resolve_local_qwen_model_dir()
         service_row = QHBoxLayout()
         service_row.setSpacing(6)
         service_row.addWidget(QLabel("部署位置"))
@@ -11611,31 +11612,21 @@ class CameraTopicWindow(QMainWindow):
             )
         tip_lines.append("远程适合 Qwen3.5-35B-A3B 等大模型。")
         self.test_qwen_target_combo.setToolTip("\n".join(tip_lines))
-        self.test_qwen_target_combo.currentIndexChanged.connect(
-            self._on_test_qwen_target_changed
-        )
         service_row.addWidget(self.test_qwen_target_combo)
         service_row.addWidget(QLabel("权重目录"))
         self.test_qwen_root_combo = ImeSafeComboBox()
         self.test_qwen_root_combo.setMinimumWidth(140)
-        self.test_qwen_root_combo.currentIndexChanged.connect(
-            self._on_test_qwen_root_changed
-        )
         service_row.addWidget(self.test_qwen_root_combo)
         self.test_qwen_refresh_btn = QPushButton("刷新")
         self.test_qwen_refresh_btn.setToolTip(
             "扫描所选根目录下含 config.json / adapter_config.json 的子目录"
         )
-        self.test_qwen_refresh_btn.clicked.connect(self._refresh_test_qwen_model_list)
         service_row.addWidget(self.test_qwen_refresh_btn)
         service_row.addWidget(QLabel("模型"))
         self.test_qwen_model_combo = ImeSafeComboBox()
         self.test_qwen_model_combo.setMinimumWidth(200)
         self.test_qwen_model_combo.setToolTip(
             "从上方根目录扫描到的可部署权重；选中后点「启动推理服务」。"
-        )
-        self.test_qwen_model_combo.currentIndexChanged.connect(
-            self._on_test_qwen_model_changed
         )
         service_row.addWidget(self.test_qwen_model_combo)
         self.test_model_path_label = QLabel("")
@@ -11652,7 +11643,6 @@ class CameraTopicWindow(QMainWindow):
         self.test_qwen_load_last_btn.setToolTip(
             "恢复上一次「启动推理服务」时使用的部署位置、权重目录与模型"
         )
-        self.test_qwen_load_last_btn.clicked.connect(self._on_test_qwen_load_last_clicked)
         service_row.addWidget(self.test_qwen_load_last_btn)
         self.test_qwen_start_btn = QPushButton("启动推理服务")
         self.test_qwen_start_btn.setToolTip(
@@ -11660,19 +11650,22 @@ class CameraTopicWindow(QMainWindow):
             "远程会自动 SSH 同步脚本、拉起模型，并建立本地隧道。\n"
             "首次加载可能需要数分钟。"
         )
-        self.test_qwen_start_btn.clicked.connect(self._on_test_qwen_start_clicked)
         service_row.addWidget(self.test_qwen_start_btn)
         self.test_qwen_stop_btn = QPushButton("停止")
         self.test_qwen_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
         self.test_qwen_stop_btn.setToolTip("停止当前部署位置对应的推理服务（远程含隧道）")
-        self.test_qwen_stop_btn.clicked.connect(self._on_test_qwen_stop_clicked)
         service_row.addWidget(self.test_qwen_stop_btn)
         self.test_qwen_start_btn.setFocusPolicy(Qt.NoFocus)
         self.test_qwen_stop_btn.setFocusPolicy(Qt.NoFocus)
         self.test_qwen_refresh_btn.setFocusPolicy(Qt.NoFocus)
+        self.test_open_studio_btn = QPushButton("打开测试工作室…")
+        self.test_open_studio_btn.setFocusPolicy(Qt.NoFocus)
+        self.test_open_studio_btn.setToolTip(
+            "另开独立前端窗口（非本 Tab）。等价于：bash test_studio/run_test_studio.sh"
+        )
+        self.test_open_studio_btn.clicked.connect(self._on_open_test_studio_clicked)
+        service_row.addWidget(self.test_open_studio_btn)
         test_outer.addLayout(service_row)
-        self._refresh_test_qwen_model_path_label()
-
 
         self.test_infer_log_edit = QTextEdit()
         self.test_infer_log_edit.setReadOnly(True)
@@ -11685,27 +11678,8 @@ class CameraTopicWindow(QMainWindow):
             "border: 1px solid #555; }}"
         )
         test_outer.addWidget(self.test_infer_log_edit)
-
-        self._local_qwen_launcher = LocalQwenServiceLauncher(self)
-        self._local_qwen_launcher.status_message.connect(self._on_test_qwen_status)
-        self._local_qwen_launcher.log_line.connect(self._append_test_infer_log)
-        self._local_qwen_launcher.running_changed.connect(self._update_test_qwen_ui)
-        self._remote_qwen_launcher = RemoteQwenServiceLauncher(self)
-        self._remote_qwen_launcher.status_message.connect(self._on_test_qwen_status)
-        self._remote_qwen_launcher.log_line.connect(self._append_test_infer_log)
-        self._remote_qwen_launcher.running_changed.connect(self._update_test_qwen_ui)
-        self._deploy_model_list_bridge = DeployModelListBridge(self)
-        self._deploy_model_list_bridge.finished.connect(
-            self._on_test_qwen_model_list_ready
-        )
-        self._test_qwen_model_list_refreshing = False
-        self._pending_test_qwen_model_path = ""
-        self._refresh_test_qwen_scan_roots()
-        self._refresh_test_qwen_model_list()
-        self._qwen_health_timer = QTimer(self)
-        self._qwen_health_timer.timeout.connect(self._refresh_test_qwen_status)
-        self._qwen_health_timer.start(4000)
-        self._update_test_qwen_ui()
+        # 推理部署后端在 chat_panel 创建后由 QwenDeployController 统一接管
+        self._qwen_deploy = None  # type: ignore
         control_tabs.addTab(test_tab, "测试")
 
         self._hand_skeleton_detector = None
@@ -11794,6 +11768,7 @@ class CameraTopicWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("就绪")
         self.chat_panel.status_message.connect(self.status_bar.showMessage)
+        self._init_qwen_deploy_controller()
         self._stack_launcher.status_message.connect(self.status_bar.showMessage)
         self._stack_launcher.stack_status_changed.connect(
             self._on_stack_status_changed, Qt.QueuedConnection
@@ -11928,6 +11903,68 @@ class CameraTopicWindow(QMainWindow):
         )
         self._update_train_ui()
 
+    def _init_qwen_deploy_controller(self) -> None:
+        """测试 Tab 挂载共享推理控制器（测试工作室为独立窗口，见 test_studio/run_test_studio.sh）。"""
+        if EAI_DIR not in sys.path:
+            sys.path.insert(0, EAI_DIR)
+        from test_studio import DeployView, QwenDeployController
+
+        self._qwen_deploy = QwenDeployController(self)
+        self._qwen_deploy.status_message.connect(self.status_bar.showMessage)
+        self._local_qwen_launcher = self._qwen_deploy.local_launcher
+        self._remote_qwen_launcher = self._qwen_deploy.remote_launcher
+        self._test_qwen_model_list_refreshing = False
+        self._pending_test_qwen_model_path = ""
+
+        legacy_view = DeployView(
+            target_combo=self.test_qwen_target_combo,
+            root_combo=self.test_qwen_root_combo,
+            model_combo=self.test_qwen_model_combo,
+            refresh_btn=self.test_qwen_refresh_btn,
+            load_last_btn=self.test_qwen_load_last_btn,
+            start_btn=self.test_qwen_start_btn,
+            stop_btn=self.test_qwen_stop_btn,
+            path_label=self.test_model_path_label,
+            status_label=self.test_qwen_status_label,
+            log_edit=self.test_infer_log_edit,
+            show_message=self.status_bar.showMessage,
+            get_chat_panel=lambda: self.chat_panel,
+            focus_host=self,
+        )
+        self._qwen_deploy.register_view(legacy_view)
+
+    def _on_open_test_studio_clicked(self) -> None:
+        """从「测试」Tab 拉起独立的测试工作室进程（不嵌入本窗口）。"""
+        try:
+            # 已在容器内时直接起独立进程；宿主机则走 test_studio/run_test_studio.sh
+            in_docker = os.path.exists("/.dockerenv") or os.environ.get(
+                "A2D_IN_DOCKER", ""
+            ).strip() in ("1", "true", "yes")
+            if in_docker:
+                env = os.environ.copy()
+                env["PYTHONPATH"] = (
+                    EAI_DIR + (":" + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+                )
+                subprocess.Popen(
+                    [sys.executable, "-m", "test_studio.main"],
+                    cwd=EAI_DIR,
+                    env=env,
+                    start_new_session=True,
+                )
+            else:
+                script = os.path.join(EAI_DIR, "test_studio", "run_test_studio.sh")
+                if not os.path.isfile(script):
+                    self.status_bar.showMessage(f"未找到: {script}")
+                    return
+                subprocess.Popen(
+                    ["bash", script],
+                    cwd=EAI_DIR,
+                    start_new_session=True,
+                )
+            self.status_bar.showMessage("已启动独立「测试工作室」窗口…")
+        except Exception as exc:
+            self.status_bar.showMessage(f"启动测试工作室失败: {exc}")
+
     def _on_train_stop_clicked(self) -> None:
         self._train_launcher.stop()
 
@@ -11958,6 +11995,9 @@ class CameraTopicWindow(QMainWindow):
                 return
 
     def _append_test_infer_log(self, line: str) -> None:
+        if getattr(self, "_qwen_deploy", None) is not None:
+            self._qwen_deploy.append_log(line)
+            return
         self.test_infer_log_edit.append(line)
         scrollbar = self.test_infer_log_edit.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
@@ -12232,6 +12272,9 @@ class CameraTopicWindow(QMainWindow):
         self._update_test_qwen_ui()
 
     def _update_test_qwen_ui(self, *_args) -> None:
+        if getattr(self, "_qwen_deploy", None) is not None:
+            self._qwen_deploy.update_all_ui()
+            return
         target = self._selected_test_qwen_target()
         if target == "remote":
             self._update_test_qwen_ui_remote()
