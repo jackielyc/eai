@@ -155,3 +155,39 @@ python3 remote_api_chat_example.py [prompt]
   --max-tokens N   --timeout SEC  --retries N
   --probe          --dump-request
 ```
+
+---
+
+## Isaac 头部相机 → ROS2 桥
+
+Isaac（宿主机 Python 3.11）与 ROS2（a2d Docker / Humble）分进程：仿真写共享目录，桥在 **Docker 内** 发 `/camera/*_color`。
+
+**不要用 `/tmp`**：容器通常禁挂 `/tmp`。默认目录：
+
+`eai/.cache/isaac_cam_bridge`（share_data 路径，两边都能访问）
+
+```bash
+# 终端 A：ROS 桥（宿主机无 Humble 时会自动 docker exec）
+bash /share_data/projects/mahjong/share/personal/liyichao/eai/run_isaac_cam_bridge.sh
+
+# 终端 B：启动 RoboDojo / Isaac 前必须同样设置目录
+export ISAAC_CAM_BRIDGE_DIR=/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/isaac_cam_bridge
+# 可选: export ISAAC_CAM_BRIDGE_EVERY=2
+# 然后启动评测（需重启已在跑的 Isaac 才能生效）
+
+# 终端 C：viewer（同一 Docker / 同一 ROS_DOMAIN_ID）
+bash run_in_docker.sh
+# 勾选 /camera/head_color
+```
+
+| Isaac 相机 | ROS topic |
+|------------|-----------|
+| `cam_head` / `cam_high` | `/camera/head_color` |
+| `cam_left_wrist` | `/camera/left_wrist_color` |
+| `cam_right_wrist` | `/camera/right_wrist_color` |
+
+检查帧是否写出：
+
+```bash
+ls -lh /share_data/projects/mahjong/share/personal/liyichao/eai/.cache/isaac_cam_bridge/
+```
