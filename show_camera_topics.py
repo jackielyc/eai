@@ -28,17 +28,24 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# 系统 apt Humble 绑定 Python 3.10；RoboStack conda Humble 可用环境内 Python（如 3.11）。
+# 以能否 import rclpy 为准，不再硬性要求 3.10。
 if sys.version_info[:2] != (3, 10):
-    print(
-        f"错误: 当前 Python {sys.version_info.major}.{sys.version_info.minor}，"
-        "ROS2 Humble 的 rclpy 仅支持 Python 3.10。\n\n"
-        "Conda 环境（如 Python 3.12）无法加载 ROS2 C 扩展，请改用系统 Python:\n"
-        "  source /opt/ros/humble/setup.bash\n"
-        "  python3.10 show_camera_topics.py\n\n"
-        "或直接使用: ./run.sh",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+    try:
+        import rclpy  # noqa: F401
+    except Exception as exc:
+        print(
+            f"错误: 当前 Python {sys.version_info.major}.{sys.version_info.minor}，"
+            f"无法加载 rclpy（{exc}）。\n\n"
+            "系统 apt Humble 请用 Python 3.10:\n"
+            "  source /opt/ros/humble/setup.bash\n"
+            "  python3.10 show_camera_topics.py\n"
+            "  或: ./run.sh\n\n"
+            "RoboStack Humble 请用该 conda 环境的 python，例如:\n"
+            "  bash run_local.sh",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 # opencv-python 可能污染 Qt 插件搜索路径，须在 import PyQt5 之前清除
 import os
