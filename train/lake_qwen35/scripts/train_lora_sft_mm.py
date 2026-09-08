@@ -17,7 +17,7 @@ import torch
 # cuDNN + DDP/dataloader workers can raise CUDNN_STATUS_NOT_INITIALIZED on this stack.
 torch.backends.cudnn.enabled = False
 
-from peft import LoraConfig, TaskType, get_peft_model
+from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from PIL import Image, UnidentifiedImageError
 from torch.utils.data import ConcatDataset, Dataset
 from transformers import (
@@ -180,6 +180,9 @@ class TrainConfig:
     dataset_path: str = ""
     output_dir: str = ""
     eval_dataset_path: str | None = None
+    # Load an existing LoRA adapter and continue training (incremental SFT).
+    # Distinct from resume_from_checkpoint (same-run trainer state resume).
+    adapter_name_or_path: str | None = None
     max_seq_length: int = 2048
     max_samples: int | None = None
     eval_max_samples: int | None = 512
@@ -590,6 +593,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset_path", type=str, default=None)
     parser.add_argument("--eval_dataset_path", type=str, default=None)
     parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument(
+        "--adapter_name_or_path",
+        type=str,
+        default=None,
+        help="Existing LoRA adapter to continue training from (incremental SFT)",
+    )
     parser.add_argument("--max_seq_length", type=int, default=None)
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--eval_max_samples", type=int, default=None)
@@ -674,16 +683,26 @@ def main() -> None:
             model.config.use_cache = False
         model.gradient_checkpointing_enable()
 
-    targets = [x.strip() for x in cfg.lora_target_modules.split(",") if x.strip()]
-    lora = LoraConfig(
-        task_type=TaskType.CAUSAL_LM,
-        r=cfg.lora_rank,
-        lora_alpha=cfg.lora_alpha,
-        lora_dropout=cfg.lora_dropout,
-        target_modules=targets,
-        bias="none",
-    )
-    model = get_peft_model(model, lora)
+    adapter_path = (cfg.adapter_name_or_path or "").strip() or None
+    if adapter_path:
+        adapter_dir = Path(adapter_path)
+        if not adapter_dir.is_dir():
+            raise ValueError(f"adapter_name_or_path not found: {adapter_path}")
+        # Continue an existing LoRA (weights only). Trainer resume is separate.
+        model = PeftModel.from_pretrained(model, str(adapter_dir), is_trainable=True)
+        if local_rank == 0:
+            print(f"[train] init adapter from {adapter_dir}", flush=True)
+    else:
+        targets = [x.strip() for x in cfg.lora_target_modules.split(",") if x.strip()]
+        lora = LoraConfig(
+            task_type=TaskType.CAUSAL_LM,
+            r=cfg.lora_rank,
+            lora_alpha=cfg.lora_alpha,
+            lora_dropout=cfg.lora_dropout,
+            target_modules=targets,
+            bias="none",
+        )
+        model = get_peft_model(model, lora)
     if local_rank == 0:
         model.print_trainable_parameters()
         if resume_ckpt:

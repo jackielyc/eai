@@ -267,33 +267,99 @@ dist_spawn_workers() {
 }
 
 dist_ensure_dataset() {
-  # Hermes all approved (main + supplement merged)
-  local train_jsonl="${ROOT}/data/hermas_sys2_train_approved.jsonl"
-  local val_jsonl="${ROOT}/data/hermas_sys2_val_approved.jsonl"
+  # Prefer paths from CONFIG (supports Hermes approved, VN, incremental, etc.).
   local wait_sec="${DATASET_WAIT_SEC:-1800}"
+  local train_jsonl="" val_jsonl="" adapter_path=""
+  local label="dataset"
 
-  if [[ -f "${train_jsonl}" && -f "${val_jsonl}" ]]; then
-    echo "[info] Hermes approved full dataset ready"
+  if [[ -n "${CONFIG:-}" && -f "${CONFIG}" ]]; then
+    local parsed
+    parsed="$(
+      "${PYTHON:-python3}" - "${CONFIG}" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+try:
+    import yaml
+    data = yaml.safe_load(text) or {}
+except Exception:
+    data = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        data[key.strip()] = val.strip().strip("'\"")
+
+def first_path(raw: object) -> str:
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    return s.split(",")[0].strip()
+
+train = first_path(data.get("dataset_path"))
+eval_ = first_path(data.get("eval_dataset_path"))
+adapter = first_path(data.get("adapter_name_or_path"))
+print(train)
+print(eval_)
+print(adapter)
+PY
+    )" || parsed=$'\n\n'
+    train_jsonl="$(printf '%s\n' "${parsed}" | sed -n '1p')"
+    val_jsonl="$(printf '%s\n' "${parsed}" | sed -n '2p')"
+    adapter_path="$(printf '%s\n' "${parsed}" | sed -n '3p')"
+    label="config dataset"
+  fi
+
+  if [[ -z "${train_jsonl}" || -z "${val_jsonl}" ]]; then
+    train_jsonl="${ROOT}/data/hermas_sys2_train_approved.jsonl"
+    val_jsonl="${ROOT}/data/hermas_sys2_val_approved.jsonl"
+    label="Hermes approved"
+  fi
+
+  _paths_ready() {
+    [[ -f "${train_jsonl}" && -f "${val_jsonl}" ]] || return 1
+    if [[ -n "${adapter_path}" && ! -d "${adapter_path}" ]]; then
+      return 1
+    fi
+    return 0
+  }
+
+  if _paths_ready; then
+    echo "[info] ${label} ready"
+    echo "[info]   train=${train_jsonl}"
+    echo "[info]   val=${val_jsonl}"
+    if [[ -n "${adapter_path}" ]]; then
+      echo "[info]   adapter=${adapter_path}"
+    fi
     return 0
   fi
 
   if [[ "${NODE_RANK}" -eq 0 ]]; then
-    echo "[error] Hermes approved full dataset missing:" >&2
-    echo "[error]   need: hermas_sys2_{train,val}_approved.jsonl" >&2
+    echo "[error] ${label} missing:" >&2
+    echo "[error]   train: ${train_jsonl}" >&2
+    echo "[error]   val:   ${val_jsonl}" >&2
+    if [[ -n "${adapter_path}" ]]; then
+      echo "[error]   adapter: ${adapter_path}" >&2
+    fi
     exit 1
   fi
 
-  echo "[info] node_rank=${NODE_RANK}: waiting up to ${wait_sec}s for Hermes approved dataset..."
+  echo "[info] node_rank=${NODE_RANK}: waiting up to ${wait_sec}s for ${label}..."
   local elapsed=0
   while [[ "${elapsed}" -lt "${wait_sec}" ]]; do
-    if [[ -f "${train_jsonl}" && -f "${val_jsonl}" ]]; then
-      echo "[info] Hermes approved full dataset ready"
+    if _paths_ready; then
+      echo "[info] ${label} ready"
       return 0
     fi
     sleep 5
     elapsed=$((elapsed + 5))
   done
-  echo "[error] Hermes approved still missing after ${wait_sec}s; export/merge on node 0 or share data/" >&2
+  echo "[error] ${label} still missing after ${wait_sec}s" >&2
   exit 1
 }
 

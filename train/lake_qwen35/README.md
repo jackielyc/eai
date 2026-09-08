@@ -198,6 +198,17 @@ HOSTS=<node0-ip>,<node1-ip> DEVICE_MAP=none bash scripts/run_train_35b.sh
 - 从头训练：`FRESH=1 bash scripts/run_train_4b.sh`
 - 显式指定 checkpoint：`--resume_from_checkpoint /path/to/checkpoint-1234` 或 `RESUME=1`（等价于 latest）
 
+**增量训练（换数据集继续训同一 LoRA）**
+
+与断点续训不同：加载已有 adapter 权重，换新数据、新 `output_dir`，重新开一轮优化（不恢复 Hermes 的 optimizer/步数）。
+
+```bash
+# Hermes approved → VN：使用 configs/qwen35_4b_lora_vn_from_hermas.yaml
+CONFIG=configs/qwen35_4b_lora_vn_from_hermas.yaml FRESH=1 bash scripts/run_train_4b.sh
+```
+
+yaml 里设 `adapter_name_or_path` 指向已训完的 adapter 目录（含 `adapter_model.safetensors`）；学习率建议低于首轮（该配置默认 `5e-5`）。
+
 ## 与 cortex_qwen35 的区别
 
 | | cortex_qwen35 | lake_qwen35 |
