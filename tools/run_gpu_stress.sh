@@ -15,8 +15,10 @@ Options (passed to gpu_stress.py):
   -n, --num-gpus N       Use at most N selected GPUs (default: all idle)
   --gpu-ids IDS          Comma-separated GPU indices, e.g. 0,2,4
   --all-gpus             Stress all visible GPUs (skip idle auto-detect)
+  -t, --idle-util PCT    Idle-GPU util threshold (default: 5; util<=PCT counts idle)
   --hosts HOSTS          Remote host list, e.g. gpu-a,gpu-b
   --hosts-file FILE      Hosts file, one per line
+  -u, --max-util PCT     Cap GPU utilization at PCT% (default: 100)
   -d, --duration SEC     Run for SEC seconds (default: until Ctrl+C)
   -s, --matrix-size N    GEMM size (0 = auto from GPU memory)
   --dtype fp16|bf16|fp32 Compute dtype (default: fp16)
@@ -33,6 +35,8 @@ Examples:
   bash tools/run_gpu_stress.sh --all-gpus        # all visible GPUs
   bash tools/run_gpu_stress.sh --hosts gpu-a,gpu-b
   bash tools/run_gpu_stress.sh --gpu-ids 0,1 -d 300
+  bash tools/run_gpu_stress.sh -u 70              # cap utilization at 70%
+  bash tools/run_gpu_stress.sh -t 20              # treat util<=20% as idle
   CUDA_VISIBLE_DEVICES=2,3 bash tools/run_gpu_stress.sh
 EOF
 }

@@ -1,6 +1,6 @@
 # GPU Stress Test
 
-在多张 GPU 上持续执行 GEMM（矩阵乘法），把 SM 利用率拉满，用于压测、预热或验证 CUDA/PyTorch 环境。
+在多张 GPU 上持续执行 GEMM（矩阵乘法），把 SM 利用率拉高，用于压测、预热或验证 CUDA/PyTorch 环境。默认拉满；可用 `-u` / `--max-util` 设定最高利用率。
 
 ## 依赖
 
@@ -37,6 +37,8 @@ watch -n1 nvidia-smi
 | 多机远程压测（Ctrl+C 会同步停远程） | `bash tools/run_gpu_stress.sh --hosts gpu-a,gpu-b gpu-c` |
 | 从文件读 hosts | `bash tools/run_gpu_stress.sh --hosts-file tools/hosts.txt` |
 | 跑 5 分钟后自动停止 | `bash tools/run_gpu_stress.sh -d 300` |
+| 把利用率压到约 70% | `bash tools/run_gpu_stress.sh -u 70` |
+| 利用率 ≤20% 的卡视为空闲 | `bash tools/run_gpu_stress.sh -t 20` |
 | 限制可见设备后再压测 | `CUDA_VISIBLE_DEVICES=2,3 bash tools/run_gpu_stress.sh` |
 | 查看帮助 | `bash tools/run_gpu_stress.sh -h` |
 
@@ -61,6 +63,12 @@ $PYTHON tools/gpu_stress.py --all-gpus
 # 最多 2 张空闲 GPU，bf16，跑 600 秒
 $PYTHON tools/gpu_stress.py -n 2 --dtype bf16 -d 600
 
+# 最高利用率 70%
+$PYTHON tools/gpu_stress.py -u 70
+
+# 闲置门槛 20%（利用率不超过 20% 的卡才压）
+$PYTHON tools/gpu_stress.py -t 20
+
 # 手动指定矩阵规模（不自动估算显存）
 $PYTHON tools/gpu_stress.py --gpu-ids 0,1 -s 8192 --streams 8
 ```
@@ -72,10 +80,11 @@ $PYTHON tools/gpu_stress.py --gpu-ids 0,1 -s 8192 --streams 8
 | `-n`, `--num-gpus` | 全部空闲 | 在已选 GPU 中最多使用 N 张 |
 | `--gpu-ids` | — | 逗号分隔的 GPU 索引；默认仍会跳过繁忙卡 |
 | `--all-gpus` | 关闭 | 跳过空闲检测，使用所有可见 GPU |
-| `--idle-util-max` | `5` | 判定空闲的最大 GPU 利用率（%） |
+| `-t`, `--idle-util` | `5` | 闲置卡利用率门槛（%）。`nvidia-smi` 利用率不超过该值才视为空闲。`--idle-util-max` 为同义参数 |
 | `--idle-mem-mib` | `512` | 判定空闲的最大已用显存（MiB，与显存占比联合判断） |
 | `--idle-mem-frac-max` | `0.05` | 判定空闲的最大显存占用比例 |
 | `--allow-compute-procs` | 关闭 | 允许已有 compute 进程的 GPU 参与压测 |
+| `-u`, `--max-util` | `100` | 压测时的最高 GPU 利用率（%）。小于 100 时按实际 kernel 时间补偿休眠 |
 | `--hosts` | — | 远程主机列表（空格或逗号分隔）。对本机名会本地执行，其余走 ssh |
 | `--hosts-file` | — | 每行一个 host，`#` 开头为注释 |
 | `--ssh-user` | — | 未写 `user@host` 时使用的 SSH 用户 |
@@ -136,9 +145,10 @@ bash tools/run_gpu_stress.sh --hosts-file /tmp/gpu_hosts.txt --all-gpus -d 300
 ## 注意事项
 
 1. **默认只压空闲 GPU**（通过 `nvidia-smi` 看利用率、显存占用、compute 进程）；训练中的卡会被跳过。若要强制占满所有卡，加 `--all-gpus`。
-2. 自动矩阵大小基于**当前空闲显存**；若 GPU 已被其他进程部分占用，矩阵会变小。
-3. 若提示找不到 Python，设置 `PYTHON` 指向已安装 PyTorch CUDA 版的环境。
-4. 本工具只做计算压测，**不读写磁盘、不涉及模型权重**。
+2. **`--max-util` 按忙碌时间补偿休眠**。大矩阵单次 GEMM 可能超过 1 秒，旧的固定窗口会来不及休眠、看起来像没生效；现在会缩小计算 tile，并把 `nvidia-smi` 利用率打在日志里。
+3. 自动矩阵大小基于**当前空闲显存**；若 GPU 已被其他进程部分占用，矩阵会变小。
+4. 若提示找不到 Python，设置 `PYTHON` 指向已安装 PyTorch CUDA 版的环境。
+5. 本工具只做计算压测，**不读写磁盘、不涉及模型权重**。
 
 ## 文件
 

@@ -487,6 +487,46 @@ def _pick_matrix_size(
     return n
 
 
+def _interruptible_sleep(stop_event: mp.Event, seconds: float, slice_s: float = 0.02) -> None:
+    end = time.perf_counter() + seconds
+    while not stop_event.is_set():
+        remaining = end - time.perf_counter()
+        if remaining <= 0:
+            return
+        time.sleep(min(slice_s, remaining))
+
+
+def _fit_compute_tensors(a, b, device, *, max_kernel_s: float = 0.04):
+    """Pick a top-left tile whose single GEMM finishes within max_kernel_s.
+
+    Large auto-sized GEMMs can take >1s; a fixed 1s duty window then never
+    sleeps, so nvidia-smi stays at ~100%. Shorter kernels make the cap track.
+    """
+    import torch
+
+    n = int(a.shape[0])
+    n = max(2048, (n // 256) * 256)
+    last = None
+    while n >= 2048:
+        a_c = a[:n, :n].contiguous()
+        b_c = b[:n, :n].contiguous()
+        out_c = torch.empty_like(a_c)
+        out_c = torch.matmul(a_c, b_c)
+        torch.cuda.synchronize(device)
+        t0 = time.perf_counter()
+        out_c = torch.matmul(a_c, out_c)
+        torch.cuda.synchronize(device)
+        dt = time.perf_counter() - t0
+        last = (n, a_c, b_c, out_c, dt)
+        if dt <= max_kernel_s:
+            return last
+        nxt = max(2048, (n // 2 // 256) * 256)
+        if nxt == n:
+            return last
+        n = nxt
+    return last
+
+
 def _worker(
     gpu_id: int,
     stop_event: mp.Event,
@@ -495,6 +535,8 @@ def _worker(
     num_streams: int,
     mem_fraction: float,
     report_interval: float,
+    max_util: float,
+    physical_index: int,
 ) -> None:
     import torch
 
@@ -528,10 +570,8 @@ def _worker(
     else:
         raise RuntimeError(f"GPU {gpu_id} has insufficient free memory for stress test")
 
-    print(
-        f"[gpu {gpu_id}] {name} | size={matrix_size} dtype={dtype_name} streams={num_streams}",
-        flush=True,
-    )
+    duty = max(0.01, min(1.0, max_util / 100.0))
+    throttle = duty < 0.999
 
     streams = [torch.cuda.Stream(device=device) for _ in range(num_streams)]
 
@@ -541,25 +581,80 @@ def _worker(
             outs[i] = torch.matmul(a, b)
     torch.cuda.synchronize(device)
 
+    compute_n = matrix_size
+    gemm_s = 0.0
+    a_c = b_c = out_c = None
+    if throttle:
+        fitted = _fit_compute_tensors(a, b, device)
+        if fitted is None:
+            raise RuntimeError(f"GPU {gpu_id} failed to fit a throttle GEMM")
+        compute_n, a_c, b_c, out_c, gemm_s = fitted
+
+    extra = ""
+    if throttle:
+        extra = (
+            f" throttle=on compute={compute_n} ~{gemm_s * 1000:.0f}ms/gemm"
+        )
+    print(
+        f"[gpu {gpu_id}] {name} | size={matrix_size} dtype={dtype_name} "
+        f"streams={num_streams} max_util={max_util:.0f}%{extra}",
+        flush=True,
+    )
+
     start = time.time()
     last_report = start
     iters = 0
+    busy_s = 0.0
+    wall0 = time.perf_counter()
 
-    while not stop_event.is_set():
+    def _do_wave() -> None:
+        nonlocal iters
         for i in range(num_streams):
             with torch.cuda.stream(streams[i]):
                 outs[i] = torch.matmul(a, outs[i])
         iters += num_streams
 
+    def _maybe_report() -> None:
+        nonlocal last_report
         now = time.time()
         if report_interval > 0 and now - last_report >= report_interval:
             elapsed = now - start
+            suffix = ""
+            if throttle:
+                wall = max(time.perf_counter() - wall0, 1e-6)
+                duty_now = 100.0 * busy_s / wall
+                smi = ""
+                try:
+                    snap = _query_gpu_snapshots().get(physical_index)
+                    if snap is not None:
+                        smi = f" smi_util={snap.util_gpu:.0f}%"
+                except RuntimeError:
+                    pass
+                suffix = f" | duty={duty_now:.0f}% target={max_util:.0f}%{smi}"
             print(
                 f"[gpu {gpu_id}] {iters / elapsed:.1f} matmul/s | "
-                f"mem {torch.cuda.max_memory_allocated(device) / 1e9:.1f} GB",
+                f"mem {torch.cuda.max_memory_allocated(device) / 1e9:.1f} GB{suffix}",
                 flush=True,
             )
             last_report = now
+
+    while not stop_event.is_set():
+        if not throttle:
+            _do_wave()
+            _maybe_report()
+            continue
+
+        t0 = time.perf_counter()
+        out_c = torch.matmul(a_c, out_c)
+        torch.cuda.synchronize(device)
+        busy_s += time.perf_counter() - t0
+        iters += 1
+
+        elapsed = time.perf_counter() - wall0
+        rest = busy_s / duty - elapsed
+        if rest > 0:
+            _interruptible_sleep(stop_event, rest)
+        _maybe_report()
 
     torch.cuda.synchronize(device)
     elapsed = time.time() - start
@@ -568,7 +663,7 @@ def _worker(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Stress GPUs with continuous GEMM to drive utilization toward 100%.",
+        description="Stress GPUs with continuous GEMM; optionally cap SM utilization.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -590,10 +685,14 @@ def main() -> None:
         help="Use all visible GPUs instead of auto-detecting idle ones",
     )
     parser.add_argument(
+        "-t",
+        "--idle-util",
         "--idle-util-max",
+        dest="idle_util_max",
+        metavar="PCT",
         type=float,
         default=5.0,
-        help="Max GPU utilization %% to count as idle (via nvidia-smi)",
+        help="Idle-GPU threshold: treat a card as idle if nvidia-smi util is <= this percent",
     )
     parser.add_argument(
         "--idle-mem-mib",
@@ -611,6 +710,13 @@ def main() -> None:
         "--allow-compute-procs",
         action="store_true",
         help="Treat GPUs with existing compute processes as idle candidates",
+    )
+    parser.add_argument(
+        "-u",
+        "--max-util",
+        type=float,
+        default=100.0,
+        help="Cap GPU SM utilization at this percent via duty-cycle (1-100; 100 = full saturate)",
     )
     parser.add_argument(
         "-d",
@@ -672,6 +778,10 @@ def main() -> None:
         help="Extra ssh options as a single string, e.g. '-p 2222 -i /path/key'",
     )
     args = parser.parse_args()
+    if not 1.0 <= args.max_util <= 100.0:
+        raise SystemExit("--max-util must be in [1, 100]")
+    if not 0.0 <= args.idle_util_max <= 100.0:
+        raise SystemExit("--idle-util must be in [0, 100]")
 
     hosts = _collect_hosts(args)
     if hosts:
@@ -701,11 +811,15 @@ def main() -> None:
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "(all)")
     mode = "all visible" if args.all_gpus else "idle auto-detect"
     print(f"[info] visible={visible} mode={mode} using GPUs: {gpu_ids}", flush=True)
+    if not args.all_gpus:
+        print(f"[info] idle-util threshold={args.idle_util_max:.0f}%", flush=True)
+    print(f"[info] max-util={args.max_util:.0f}%", flush=True)
     if args.duration > 0:
         print(f"[info] duration={args.duration}s", flush=True)
     else:
         print("[info] running until Ctrl+C", flush=True)
 
+    physical_map = _visible_physical_indices(torch.cuda.device_count())
     ctx = mp.get_context("spawn")
     stop_event = ctx.Event()
     processes: List[mp.Process] = []
@@ -720,6 +834,7 @@ def main() -> None:
         signal.signal(signal.SIGHUP, _handle_sig)
 
     for gid in gpu_ids:
+        physical_idx = physical_map[gid] if gid < len(physical_map) else gid
         p = ctx.Process(
             target=_worker,
             args=(
@@ -730,6 +845,8 @@ def main() -> None:
                 args.streams,
                 args.mem_fraction,
                 args.report_interval,
+                args.max_util,
+                physical_idx,
             ),
             daemon=True,
         )
