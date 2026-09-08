@@ -1,4 +1,7 @@
 
+# Local launcher cache (deps_ok stamp etc.)
+.cache/
+
 # FoundationPose weights (download from HuggingFace; see weights/README.md)
 weights/**/*.pth
 weights/.cache/

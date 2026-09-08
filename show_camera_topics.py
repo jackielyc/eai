@@ -1622,27 +1622,13 @@ LAKE_ORCHESTRATOR_SYSTEM_PROMPT_TRAINING = (
 LAKE_DEFAULT_LANGUAGE_MEMORY = "尚无已完成子任务。"
 TRADITIONAL_CHAT_INPUT_PLACEHOLDER = "输入问题或指令，Enter 发送（传统对话，无 System/Lake 提示词）"
 LAKE_CHAT_INPUT_PLACEHOLDER = "输入高层任务名（如：合上后盖并拧紧）；Enter 发送"
-LAKE_USER_PROMPT_TEMPLATE = (
-    "任务：{task}\n"
-    "\n"
-    "{output_instruction}"
-)
+LAKE_USER_PROMPT_TEMPLATE = "任务：{task}"
 
 
 def lake_user_output_instruction(system_prompt: str = "") -> str:
-    """根据 system prompt 生成与之匹配的 user 末尾输出要求。"""
-    sp = (system_prompt or LAKE_ORCHESTRATOR_SYSTEM_PROMPT).strip()
-    if "上一个子任务" in sp and "下一个子任务" in sp:
-        return (
-            "请输出全部子任务，以及当前技能、当前子任务、"
-            "上一个子任务与下一个子任务。"
-        )
-    if "子任务" in sp:
-        return "请输出全部子任务，以及当前技能与子任务。"
-    return (
-        "请输出全部子任务，以及当前技能、当前子任务、"
-        "上一个子任务与下一个子任务。"
-    )
+    """User 末尾输出要求（已停用，保留函数供旧调用兼容）。"""
+    del system_prompt
+    return ""
 
 
 def format_lake_user_prompt(
@@ -1651,27 +1637,39 @@ def format_lake_user_prompt(
     *,
     system_prompt: str = "",
 ) -> str:
-    """把用户任务描述包装成与 system 对齐的 user 文本（不含语言记忆）。"""
+    """把用户任务描述包装成 Lake user 文本（不含语言记忆与输出要求尾句）。"""
     del memory  # 保留参数兼容旧调用，不再写入 prompt
+    del system_prompt
     task_line = _strip_language_memory_from_prompt((task or "").strip())
-    # 已手写完整模板（含输出要求）则透传
-    if (
-        (task_line.startswith("任务：") or task_line.startswith("Task:"))
-        and ("请输出" in task_line or "output" in task_line.lower())
-    ):
+    task_line = _strip_lake_output_instruction(task_line)
+    # 已带「任务：」前缀则直接返回
+    if task_line.startswith("任务：") or task_line.startswith("Task:"):
         return task_line
-    # 去掉可能自带的「任务：」前缀，避免套模板时重复
-    if task_line.startswith("任务："):
-        task_line = task_line[len("任务：") :].strip()
-    elif task_line.startswith("任务:"):
+    if task_line.startswith("任务:"):
         task_line = task_line[len("任务:") :].strip()
     elif task_line.lower().startswith("task:"):
         task_line = task_line.split(":", 1)[-1].strip()
-    output_instruction = lake_user_output_instruction(system_prompt)
-    return LAKE_USER_PROMPT_TEMPLATE.format(
-        task=task_line,
-        output_instruction=output_instruction,
+    return LAKE_USER_PROMPT_TEMPLATE.format(task=task_line)
+
+
+def _strip_lake_output_instruction(text: str) -> str:
+    """去掉 user prompt 末尾的「请输出全部子任务…」指令行。"""
+    lines = str(text).splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    drop_prefixes = (
+        "请输出全部子任务",
+        "请输出全部子任务，以及当前技能",
     )
+    while lines:
+        stripped = lines[-1].strip()
+        if any(stripped.startswith(p) for p in drop_prefixes):
+            lines.pop()
+            while lines and not lines[-1].strip():
+                lines.pop()
+            continue
+        break
+    return "\n".join(lines).strip()
 
 
 def _strip_language_memory_from_prompt(text: str) -> str:
@@ -6231,7 +6229,10 @@ class ChatPanelWidget(QWidget):
             preview = preview[:57] + "…"
         aligned = lake_user_output_instruction(self._config.system_prompt)
         self._append_system_line(f"已保存 System prompt: {preview}")
-        self._append_system_line(f"User 输出要求已对齐: {aligned}")
+        if aligned:
+            self._append_system_line(f"User 输出要求已对齐: {aligned}")
+        else:
+            self._append_system_line("User 不再附加「请输出全部子任务…」尾句")
         self.status_message.emit(f"System prompt 已保存: {path}")
 
     def _on_reset_system_prompt_clicked(self) -> None:
