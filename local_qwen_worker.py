@@ -459,14 +459,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         path = urlparse(self.path).path
         if path in ("/health", "/v1/health"):
+            ready = bool(_STATE["ready"])
+            err = str(_STATE.get("error") or "")
             self._send_json(
                 200,
                 {
-                    "ok": bool(_STATE["ready"]),
+                    "ok": ready,
+                    "loading": (not ready) and (not err),
                     "model": MODEL_ID,
                     "model_dir": _STATE.get("model_dir") or "",
                     "device": _STATE.get("device") or "",
-                    "error": _STATE.get("error") or "",
+                    "error": err,
                 },
             )
             return
@@ -565,7 +568,12 @@ def main() -> int:
     parser.add_argument(
         "--lazy",
         action="store_true",
-        help="先起 HTTP，首请求再加载模型（默认启动时加载）",
+        help="兼容旧参数：与默认相同（先起 HTTP，后台加载模型）",
+    )
+    parser.add_argument(
+        "--eager",
+        action="store_true",
+        help="启动时阻塞加载模型，就绪后再监听端口（旧行为）",
     )
     args = parser.parse_args()
     MODEL_ID = str(args.model_id or "").strip() or "qwen3.5-4b"
@@ -581,7 +589,17 @@ def main() -> int:
         return 1
 
     _STATE["model_dir"] = model_dir
-    if not args.lazy:
+
+    def _bg_load() -> None:
+        try:
+            _log("background loading model…")
+            load_model(model_dir)
+        except Exception as exc:
+            _STATE["error"] = str(exc)
+            _log(f"load failed: {exc}")
+            traceback.print_exc()
+
+    if args.eager and not args.lazy:
         try:
             load_model(model_dir)
         except Exception as exc:
@@ -590,20 +608,15 @@ def main() -> int:
             traceback.print_exc()
             return 1
     else:
-        def _bg_load() -> None:
-            try:
-                load_model(model_dir)
-            except Exception as exc:
-                _STATE["error"] = str(exc)
-                _log(f"lazy load failed: {exc}")
-                traceback.print_exc()
-
-        threading.Thread(target=_bg_load, daemon=True).start()
+        # 默认：先监听端口，再后台加载。UI/hostctl 可立刻探测到「启动中」。
+        threading.Thread(target=_bg_load, daemon=True, name="qwen-load").start()
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     _log(f"serving OpenAI-compatible API on http://{args.host}:{args.port}/v1")
     _log(f"model_id={MODEL_ID}")
     _log(f"model_dir={model_dir}")
+    if not _STATE["ready"]:
+        _log("model still loading in background; /health ok=false until ready")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

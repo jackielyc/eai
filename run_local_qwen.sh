@@ -21,7 +21,13 @@ MODEL_DIR="${LOCAL_QWEN_MODEL_DIR:-${WORKSPACE_DIR}/models/Qwen/Qwen3.5-4B}"
 PORT="${LOCAL_QWEN_PORT:-8100}"
 HOST="${LOCAL_QWEN_HOST:-127.0.0.1}"
 MODEL_ID="${LOCAL_QWEN_MODEL_ID:-qwen3.5-4b}"
+# 绝对路径默认值，避免依赖 HOME / 空的 LOCAL_QWEN_PYTHON
+DEFAULT_QWEN_PY="/home/psibot/miniconda3/envs/psi-policy/bin/python"
 PY="${LOCAL_QWEN_PYTHON:-}"
+
+# viewer / hostctl 常带 RoboStack PYTHONPATH，会污染 psi-policy 的 numpy/torch
+unset PYTHONPATH PYTHONHOME || true
+export PYTHONNOUSERSITE=1
 
 DO_CHECK=0
 LAZY=0
@@ -44,12 +50,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Docker 内 HOME 常为 /root，必须用绝对路径找宿主机 conda
+_py_ok() {
+  local cand="$1"
+  [[ -n "${cand}" && -x "${cand}" ]] || return 1
+  # 显式清空 PYTHONPATH，防止继承 viewer/RoboStack site-packages
+  PYTHONPATH= PYTHONHOME= "${cand}" -c "import torch, transformers" >/dev/null 2>&1
+}
+
 resolve_python() {
   local cand
   for cand in \
     "${PY}" \
     "${LOCAL_QWEN_PYTHON:-}" \
-    "/home/psibot/miniconda3/envs/psi-policy/bin/python" \
+    "${DEFAULT_QWEN_PY}" \
     "${PSIBOT_HOME:+${PSIBOT_HOME}/miniconda3/envs/psi-policy/bin/python}" \
     "${HOME}/miniconda3/envs/psi-policy/bin/python" \
     "/home/psibot/miniconda3/envs/robotics/bin/python" \
@@ -57,9 +70,7 @@ resolve_python() {
     "$(command -v python3 || true)"
   do
     [[ -z "${cand}" ]] && continue
-    [[ -x "${cand}" ]] || continue
-    # 只要能 import；CUDA 在无驱动容器内可能为 False，但仍可用于宿主机启动路径校验
-    if "${cand}" -c "import torch, transformers" >/dev/null 2>&1; then
+    if _py_ok "${cand}"; then
       echo "${cand}"
       return 0
     fi
@@ -67,7 +78,8 @@ resolve_python() {
   return 1
 }
 
-if [[ -z "${PY}" ]]; then
+# 空字符串或不可用路径时重新探测
+if [[ -z "${PY}" ]] || ! _py_ok "${PY}"; then
   PY="$(resolve_python || true)"
 fi
 
@@ -82,7 +94,8 @@ fi
 
 if [[ -z "${PY}" || ! -x "${PY}" ]]; then
   echo "错误: 未找到带 torch+transformers 的 Python。" >&2
-  echo "请设置: LOCAL_QWEN_PYTHON=/home/psibot/miniconda3/envs/psi-policy/bin/python" >&2
+  echo "请设置: LOCAL_QWEN_PYTHON=${DEFAULT_QWEN_PY}" >&2
+  echo "（并确保启动时未污染 PYTHONPATH；本脚本会自动 unset PYTHONPATH）" >&2
   exit 1
 fi
 
@@ -102,16 +115,17 @@ echo "    PYTHON=${PY}"
 echo "    MODEL_DIR=${MODEL_DIR}"
 echo "    API: http://${HOST}:${PORT}/v1   model=${MODEL_ID}"
 echo "    对话面板可选: 本地 Qwen 服务"
-"${PY}" -c "import torch; print('    CUDA:', torch.cuda.is_available(), 'devices=', torch.cuda.device_count())" 2>/dev/null || true
+PYTHONPATH= PYTHONHOME= "${PY}" -c "import torch; print('    CUDA:', torch.cuda.is_available(), 'devices=', torch.cuda.device_count())" 2>/dev/null || true
 
 export LOCAL_QWEN_MODEL_DIR="${MODEL_DIR}"
 export LOCAL_QWEN_MODEL_ID="${MODEL_ID}"
 export LOCAL_QWEN_HOST="${HOST}"
 export LOCAL_QWEN_PORT="${PORT}"
+export LOCAL_QWEN_PYTHON="${PY}"
 
 ARGS=(--host "${HOST}" --port "${PORT}" --model "${MODEL_DIR}" --model-id "${MODEL_ID}")
 if [[ "${LAZY}" == "1" ]]; then
   ARGS+=(--lazy)
 fi
 
-exec "${PY}" "${WORKER}" "${ARGS[@]}"
+exec env -u PYTHONPATH -u PYTHONHOME PYTHONNOUSERSITE=1 "${PY}" "${WORKER}" "${ARGS[@]}"

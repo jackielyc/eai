@@ -10,7 +10,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run.sh                    # ROS 在宿主机直接运行时用此方式
   python3.10 show_camera_topics.py --prefix /camera
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 测试。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 测试 / 仿真评测 / 真机评测 / 上下文学习。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -53,6 +53,7 @@ import os
 os.environ.pop("QT_PLUGIN_PATH", None)
 
 import shlex
+import socket
 import subprocess
 import shutil
 import tempfile
@@ -70,7 +71,7 @@ import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 import rclpy
 from cv_bridge import CvBridge, CvBridgeError
-from PyQt5.QtCore import Qt, QProcess, QTimer, pyqtSignal, QObject, QPoint, QEvent
+from PyQt5.QtCore import Qt, QProcess, QTimer, pyqtSignal, QObject, QPoint, QEvent, QUrl
 from PyQt5.QtGui import QCloseEvent, QFont, QImage, QMouseEvent, QPixmap, QPalette, QColor
 from PyQt5.QtWidgets import (
     QApplication,
@@ -101,10 +102,22 @@ from PyQt5.QtWidgets import (
     QTabWidget,
     QTextEdit,
     QToolButton,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
     QFileDialog,
 )
+
+try:
+    # 须在创建 QApplication 前 import，否则部分环境 WebEngine 初始化失败
+    from PyQt5.QtWebEngineWidgets import QWebEngineView  # type: ignore
+
+    _HAS_QT_WEBENGINE = True
+except Exception:
+    QWebEngineView = None  # type: ignore
+    _HAS_QT_WEBENGINE = False
+
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.duration import Duration
@@ -600,6 +613,30 @@ FP_MESH_DEFAULT = resolve_fp_mesh_path()
 EAI_DIR = os.path.dirname(os.path.abspath(__file__))
 CAD_MESHES_DIR = os.path.join(EAI_DIR, "meshes")
 TEST_IMAGES_DIR = os.path.join(EAI_DIR, "images")
+ISAAC_CAM_BRIDGE_SCRIPT = os.path.join(EAI_DIR, "run_isaac_cam_bridge.sh")
+ISAAC_CAM_BRIDGE_DIR_DEFAULT = os.path.join(EAI_DIR, ".cache", "isaac_cam_bridge")
+ISAAC_CAM_BRIDGE_KEYS: Tuple[str, ...] = (
+    "cam_head",
+    "cam_high",
+    "cam_left_wrist",
+    "cam_right_wrist",
+)
+ROBODOJO_EVAL_RESULT_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/eval_result/RoboDojo"
+)
+ROBODOJO_ROOT_DEFAULT = "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo"
+ROBODOJO_ENV_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/envs/RoboDojo"
+)
+ROBODOJO_STARVLA_ENV_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/envs/starvla"
+)
+ROBODOJO_GUI_EVAL_SCRIPT = os.path.join(
+    ROBODOJO_ROOT_DEFAULT, "scripts", "run_gui_eval.sh"
+)
+ROBODOJO_TASK_CONFIG_DIR = os.path.join(
+    ROBODOJO_ROOT_DEFAULT, "task", "RoboDojo", "config"
+)
 WORKSPACE_DIR = os.path.dirname(EAI_DIR)
 LOCAL_QWEN_MODELS_ROOT = os.path.join(WORKSPACE_DIR, "models", "Qwen")
 LAKE_QWEN35_OUTPUT_ROOT = (
@@ -758,6 +795,15 @@ REPLAY_STOP_SERVICE = "/rrd_replay/stop_replay"
 REPLAY_RUNNING_STATE_TOPIC = "/rrd_replay/running_state"
 REPLAY_LOOP_COUNT_DEFAULT = 1
 REPLAY_LOOP_COUNT_MAX = 99
+
+# 上下文学习 Tab 默认演示视频（存在则启动时自动选中并预览）
+CTX_DEFAULT_VIDEO_PATH = (
+    "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/eval_result/"
+    "RoboDojo/pack_objects_into_box/starVLA/arx_x5/"
+    "0_ckpt_name=hf_qwenpi_v3,action_type=joint/"
+    "gui_starvla_20260907_122225_pack_objects_into_box/"
+    "episode_0000000_cam_head_fail.mp4"
+)
 REPLAY_STATE_FINISHED = 3
 REPLAY_STATE_LABELS = {
     0: "空闲",
@@ -9660,6 +9706,219 @@ def resolve_rrd_path(path: str) -> str:
     return expanded
 
 
+_RERUN_ARGV_CACHE: Optional[List[str]] = None
+_RERUN_ARGV_RESOLVED = False
+
+
+def resolve_rerun_argv() -> Optional[List[str]]:
+    """解析用于打开 .rrd 的 Rerun 命令（可用环境变量 RERUN_BIN 覆盖）。"""
+    global _RERUN_ARGV_CACHE, _RERUN_ARGV_RESOLVED
+    if _RERUN_ARGV_RESOLVED and os.environ.get("RERUN_BIN", "").strip() == "":
+        return list(_RERUN_ARGV_CACHE) if _RERUN_ARGV_CACHE else None
+
+    result: Optional[List[str]] = None
+    env_bin = os.environ.get("RERUN_BIN", "").strip()
+    if env_bin:
+        parts = shlex.split(env_bin)
+        if parts and (os.path.isfile(parts[0]) or shutil.which(parts[0])):
+            result = parts
+    if result is None:
+        which = shutil.which("rerun")
+        if which:
+            result = [which]
+    if result is None:
+        # rerun-sdk 常以 python -m rerun 提供入口
+        for py in (sys.executable, shutil.which("python3"), shutil.which("python")):
+            if not py:
+                continue
+            try:
+                probe = subprocess.run(
+                    [py, "-c", "import rerun"],
+                    capture_output=True,
+                    timeout=8,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if probe.returncode == 0:
+                result = [py, "-m", "rerun"]
+                break
+
+    if not env_bin:
+        _RERUN_ARGV_CACHE = list(result) if result else None
+        _RERUN_ARGV_RESOLVED = True
+    return list(result) if result else None
+
+
+def resolve_modern_chromium_browser() -> Optional[str]:
+    """Chrome 91+ / Edge 等现代 Chromium（Qt5 WebEngine=Chrome87，无法跑 Rerun WASM）。"""
+    env = os.environ.get("RERUN_BROWSER", "").strip()
+    if env:
+        which = shutil.which(env) or (env if os.path.isfile(env) else "")
+        if which:
+            return which
+    for name in (
+        "microsoft-edge",
+        "microsoft-edge-stable",
+        "google-chrome-stable",
+        "google-chrome",
+        "chromium-browser",
+        "chromium",
+    ):
+        which = shutil.which(name)
+        if which:
+            return which
+    return None
+
+
+def open_url_in_chromium_app(url: str) -> Tuple[bool, str]:
+    """用系统 Chromium --app 打开 URL。返回 (ok, detail)。"""
+    browser = resolve_modern_chromium_browser()
+    if not browser:
+        return False, "未找到 Edge/Chrome/Chromium（可用 RERUN_BROWSER 指定）"
+    ok = QProcess.startDetached(browser, [f"--app={url}", "--new-window"])
+    if not ok:
+        quoted = " ".join(shlex.quote(x) for x in [browser, f"--app={url}", "--new-window"])
+        ok = QProcess.startDetached("bash", ["-lc", quoted])
+    if ok:
+        return True, browser
+    return False, f"启动失败: {browser}"
+
+
+def _pick_free_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+class RerunWebEmbedServer(QObject):
+    """后台 `rerun --serve-web`，供页内 QWebEngineView 连接（不弹原生窗口）。"""
+
+    ready = pyqtSignal(str)  # viewer http url
+    failed = pyqtSignal(str)
+    stopped = pyqtSignal()
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._viewer_url = ""
+        self._rrd_path = ""
+        self._ready_emitted = False
+        self._fallback_timer: Optional[QTimer] = None
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() == QProcess.Running
+
+    def current_url(self) -> str:
+        return self._viewer_url
+
+    def current_rrd(self) -> str:
+        return self._rrd_path
+
+    def stop(self) -> None:
+        if self._fallback_timer is not None:
+            self._fallback_timer.stop()
+            self._fallback_timer = None
+        proc = self._process
+        self._process = None
+        self._viewer_url = ""
+        self._ready_emitted = False
+        if proc is not None:
+            proc.readyReadStandardOutput.disconnect()
+            proc.readyReadStandardError.disconnect()
+            proc.finished.disconnect()
+            proc.errorOccurred.disconnect()
+            if proc.state() != QProcess.NotRunning:
+                proc.terminate()
+                if not proc.waitForFinished(2500):
+                    proc.kill()
+                    proc.waitForFinished(1000)
+            proc.deleteLater()
+        self.stopped.emit()
+
+    def start(self, rrd_path: str) -> None:
+        path = os.path.abspath(os.path.expanduser(rrd_path or ""))
+        if not path or not os.path.isfile(path):
+            self.failed.emit(f"RRD 不存在: {path}")
+            return
+        argv = resolve_rerun_argv()
+        if not argv:
+            self.failed.emit(
+                "未找到 Rerun。请安装 rerun-sdk，或设置 RERUN_BIN。"
+            )
+            return
+
+        self.stop()
+        web_port = _pick_free_tcp_port()
+        grpc_port = _pick_free_tcp_port()
+        while grpc_port == web_port:
+            grpc_port = _pick_free_tcp_port()
+
+        proxy = f"rerun+http://127.0.0.1:{grpc_port}/proxy"
+        self._viewer_url = (
+            f"http://127.0.0.1:{web_port}/?url="
+            + urllib.parse.quote(proxy, safe="")
+        )
+        self._rrd_path = path
+        self._ready_emitted = False
+
+        cmd = list(argv) + [
+            "--serve-web",
+            "--bind",
+            "127.0.0.1",
+            "--web-viewer-port",
+            str(web_port),
+            "--port",
+            str(grpc_port),
+            path,
+        ]
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_output)
+        proc.readyReadStandardError.connect(self._on_output)
+        proc.finished.connect(self._on_finished)
+        proc.errorOccurred.connect(self._on_error)
+        self._process = proc
+        proc.start(cmd[0], cmd[1:])
+        if not proc.waitForStarted(8000):
+            detail = bytes(proc.readAllStandardOutput()).decode("utf-8", "replace")
+            self.stop()
+            self.failed.emit(f"启动 serve-web 失败: {detail[:300] or cmd[0]}")
+            return
+
+        # 大文件加载可能较慢：日志就绪 或 超时兜底加载 URL
+        self._fallback_timer = QTimer(self)
+        self._fallback_timer.setSingleShot(True)
+        self._fallback_timer.timeout.connect(self._emit_ready_once)
+        self._fallback_timer.start(2500)
+
+    def _emit_ready_once(self) -> None:
+        if self._ready_emitted or not self.is_running() or not self._viewer_url:
+            return
+        self._ready_emitted = True
+        if self._fallback_timer is not None:
+            self._fallback_timer.stop()
+            self._fallback_timer = None
+        self.ready.emit(self._viewer_url)
+
+    def _on_output(self) -> None:
+        if self._process is None:
+            return
+        text = bytes(self._process.readAllStandardOutput()).decode("utf-8", "replace")
+        if "Hosting a web-viewer" in text or "web-viewer at" in text:
+            self._emit_ready_once()
+
+    def _on_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        if not self._ready_emitted and exit_code != 0:
+            self.failed.emit(f"Rerun serve-web 退出 (code={exit_code})")
+        self._process = None
+        self._viewer_url = ""
+        self.stopped.emit()
+
+    def _on_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.failed.emit("无法启动 Rerun 进程（FailedToStart）")
+
+
 def build_ros_shell_prefix() -> str:
     parts = ["set -e", "source /opt/ros/humble/setup.bash"]
     for setup in (
@@ -10605,6 +10864,486 @@ class PsiPolicyTrainLauncher(QObject):
             self.status_message.emit("训练已强制停止")
 
 
+class VideoPlayerWidget(QWidget):
+    """内嵌 OpenCV 视频播放（暂停 / 重头 / 循环 / 可拖动进度条）。"""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._path = ""
+        self._cap: Optional[cv2.VideoCapture] = None
+        self._playing = False
+        self._interval_ms = 33
+        self._fps = 30.0
+        self._frame_count = 0
+        self._current_frame = 0
+        self._scrubbing = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self._label = QLabel("请选择视频…")
+        self._label.setAlignment(Qt.AlignCenter)
+        self._label.setMinimumSize(480, 270)
+        self._label.setStyleSheet("background-color: #111; color: #ccc;")
+        layout.addWidget(self._label, 1)
+
+        prog = QHBoxLayout()
+        prog.setSpacing(6)
+        self._time_label = QLabel("00:00.00 / 00:00.00")
+        self._time_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self._time_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self._time_label.setMinimumWidth(130)
+        prog.addWidget(self._time_label)
+        self._slider = QSlider(Qt.Horizontal)
+        self._slider.setRange(0, 0)
+        self._slider.setEnabled(False)
+        self._slider.setFocusPolicy(Qt.NoFocus)
+        self._slider.setToolTip("拖动进度条跳转")
+        self._slider.sliderPressed.connect(self._on_slider_pressed)
+        self._slider.sliderReleased.connect(self._on_slider_released)
+        self._slider.sliderMoved.connect(self._on_slider_moved)
+        prog.addWidget(self._slider, 1)
+        layout.addLayout(prog)
+
+        ctrl = QHBoxLayout()
+        self._play_btn = QPushButton("播放")
+        self._play_btn.setFocusPolicy(Qt.NoFocus)
+        self._play_btn.clicked.connect(self.toggle_play)
+        ctrl.addWidget(self._play_btn)
+        self._restart_btn = QPushButton("重头")
+        self._restart_btn.setFocusPolicy(Qt.NoFocus)
+        self._restart_btn.clicked.connect(self.restart)
+        ctrl.addWidget(self._restart_btn)
+        self._info = QLabel("")
+        self._info.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self._info.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self._info.setWordWrap(True)
+        ctrl.addWidget(self._info, 1)
+        layout.addLayout(ctrl)
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._on_tick)
+
+    def video_path(self) -> str:
+        return self._path
+
+    def is_open(self) -> bool:
+        return self._cap is not None and self._cap.isOpened()
+
+    def is_playing(self) -> bool:
+        return self._playing and self.is_open()
+
+    @staticmethod
+    def _format_time(frame: int, fps: float) -> str:
+        if fps <= 1e-6:
+            return f"{max(0, frame)}"
+        secs = max(0.0, float(frame) / fps)
+        minutes = int(secs // 60)
+        rem = secs - minutes * 60
+        return f"{minutes:02d}:{rem:05.2f}"
+
+    def _update_time_label(self) -> None:
+        cur = self._format_time(self._current_frame, self._fps)
+        total_frames = max(0, self._frame_count - 1) if self._frame_count > 0 else 0
+        tot = self._format_time(total_frames, self._fps)
+        self._time_label.setText(f"{cur} / {tot}")
+
+    def _set_slider_frame(self, frame: int) -> None:
+        self._slider.blockSignals(True)
+        self._slider.setValue(max(0, min(frame, self._slider.maximum())))
+        self._slider.blockSignals(False)
+        self._update_time_label()
+
+    def _show_bgr_frame(self, frame) -> None:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+        pix = QPixmap.fromImage(qimg)
+        self._label.setPixmap(
+            pix.scaled(self._label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def _seek_to_frame(self, frame: int, *, preview: bool = True) -> None:
+        if self._cap is None or not self._cap.isOpened():
+            return
+        if self._frame_count > 0:
+            frame = max(0, min(int(frame), self._frame_count - 1))
+        else:
+            frame = max(0, int(frame))
+        self._cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
+        self._current_frame = frame
+        self._set_slider_frame(frame)
+        if not preview:
+            return
+        ok, img = self._cap.read()
+        if not ok or img is None:
+            return
+        self._show_bgr_frame(img)
+        # read 会前进一帧；暂停时回到目标帧，便于继续播放/再拖动
+        if not self._playing:
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, frame)
+            self._current_frame = frame
+
+    def load(self, video_path: str) -> bool:
+        self.stop()
+        self._path = os.path.abspath(os.path.expanduser(video_path or ""))
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+        self._frame_count = 0
+        self._current_frame = 0
+        self._slider.setEnabled(False)
+        self._slider.setRange(0, 0)
+        self._update_time_label()
+        if not self._path or not os.path.isfile(self._path):
+            self._label.setText("视频不存在")
+            self._info.setText(self._path or "")
+            return False
+        cap = cv2.VideoCapture(self._path)
+        if not cap.isOpened():
+            self._label.setText(f"无法打开视频:\n{self._path}")
+            self._info.setText(self._path)
+            return False
+        self._cap = cap
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        self._fps = fps if fps > 1e-3 else 30.0
+        self._interval_ms = max(15, int(1000.0 / self._fps))
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        self._frame_count = max(0, frame_count)
+        max_idx = max(0, self._frame_count - 1) if self._frame_count > 0 else 0
+        self._slider.setRange(0, max_idx)
+        self._slider.setEnabled(self._frame_count > 0)
+        self._info.setText(self._path)
+        self._playing = False
+        self._play_btn.setText("播放")
+        self._seek_to_frame(0, preview=True)
+        return True
+
+    def play(self) -> None:
+        if not self.is_open():
+            return
+        self._playing = True
+        self._play_btn.setText("暂停")
+        if not self._timer.isActive():
+            self._timer.start(self._interval_ms)
+
+    def pause(self) -> None:
+        self._playing = False
+        self._play_btn.setText("播放")
+        self._timer.stop()
+
+    def stop(self) -> None:
+        self.pause()
+
+    def toggle_play(self) -> None:
+        if self.is_playing():
+            self.pause()
+        else:
+            self.play()
+
+    def restart(self) -> None:
+        self._seek_to_frame(0, preview=True)
+        self.play()
+
+    def close_video(self) -> None:
+        self.stop()
+        if self._cap is not None:
+            self._cap.release()
+            self._cap = None
+        self._slider.setEnabled(False)
+
+    def _on_slider_pressed(self) -> None:
+        self._scrubbing = True
+
+    def _on_slider_released(self) -> None:
+        self._scrubbing = False
+        self._seek_to_frame(self._slider.value(), preview=True)
+
+    def _on_slider_moved(self, value: int) -> None:
+        if self._scrubbing:
+            self._current_frame = int(value)
+            self._update_time_label()
+            self._seek_to_frame(value, preview=True)
+
+    def _on_tick(self) -> None:
+        if self._cap is None or not self._cap.isOpened():
+            return
+        if not self._playing or self._scrubbing:
+            return
+        ok, frame = self._cap.read()
+        if not ok or frame is None:
+            # 循环到开头
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self._current_frame = 0
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                return
+        pos = int(self._cap.get(cv2.CAP_PROP_POS_FRAMES) or 0)
+        # POS_FRAMES 为下一帧索引
+        self._current_frame = max(0, pos - 1)
+        if not self._scrubbing:
+            self._set_slider_frame(self._current_frame)
+        self._show_bgr_frame(frame)
+
+
+class SimEvalVideoDialog(QDialog):
+    """用 OpenCV 在窗口内播放评测 mp4（本机常无桌面播放器，xdg-open 会失败）。"""
+
+    def __init__(self, video_path: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(os.path.basename(video_path))
+        self.resize(960, 600)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        self._player = VideoPlayerWidget(self)
+        layout.addWidget(self._player)
+        if self._player.load(video_path):
+            self._player.play()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self._player.close_video()
+        super().closeEvent(event)
+
+
+class IsaacCamBridgeLauncher(QObject):
+    """启动/停止 Isaac 共享帧 → ROS2 相机桥（run_isaac_cam_bridge.sh）。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() == QProcess.Running
+
+    def start(self, bridge_dir: str, *, hz: float = 30.0) -> None:
+        if self.is_running():
+            self.status_message.emit("相机桥已在运行")
+            return
+        if not os.path.isfile(ISAAC_CAM_BRIDGE_SCRIPT):
+            self.status_message.emit(f"未找到脚本: {ISAAC_CAM_BRIDGE_SCRIPT}")
+            return
+        bridge_dir = os.path.abspath(os.path.expanduser((bridge_dir or "").strip()))
+        if not bridge_dir:
+            self.status_message.emit("请填写共享帧目录")
+            return
+        os.makedirs(bridge_dir, exist_ok=True)
+        hz_val = max(1.0, float(hz))
+        env_exports = (
+            f"export ISAAC_CAM_BRIDGE_DIR={shlex.quote(bridge_dir)} "
+            f"PYTHONUNBUFFERED=1 && "
+            f"exec bash {shlex.quote(ISAAC_CAM_BRIDGE_SCRIPT)} --hz {hz_val}"
+        )
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(EAI_DIR)
+        proc.start("setsid", ["bash", "-lc", env_exports])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ ISAAC_CAM_BRIDGE_DIR={bridge_dir} bash run_isaac_cam_bridge.sh --hz {hz_val}")
+        self.status_message.emit("正在启动 Isaac 相机桥…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的相机桥")
+            return
+        self.status_message.emit("正在停止相机桥…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(3000, self._force_kill_process)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.terminate()
+            self._process.waitForFinished(2000)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            if line:
+                self.log_line.emit(line.rstrip())
+
+    def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        self._process = None
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- 相机桥正常退出 ---")
+            self.status_message.emit("Isaac 相机桥已停止")
+        else:
+            self.log_line.emit(f"--- 相机桥退出 (code={exit_code}) ---")
+            self.status_message.emit(f"Isaac 相机桥异常退出 (code={exit_code})")
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error != QProcess.Crashed:
+            self.status_message.emit(f"相机桥进程错误: {error}")
+
+    def _force_kill_process(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.kill()
+            self._process = None
+            self.running_changed.emit(False)
+            self.log_line.emit("--- 相机桥已被强制终止 ---")
+            self.status_message.emit("相机桥已强制停止")
+
+
+def list_robodojo_tasks() -> List[str]:
+    """从 RoboDojo task config 列出可评测任务名。"""
+    cfg_dir = ROBODOJO_TASK_CONFIG_DIR
+    if not os.path.isdir(cfg_dir):
+        return []
+    names: List[str] = []
+    try:
+        for fn in os.listdir(cfg_dir):
+            if not fn.endswith(".yml") or fn.startswith("_"):
+                continue
+            names.append(fn[: -len(".yml")])
+    except OSError:
+        return []
+    return sorted(names)
+
+
+class RoboDojoEvalLauncher(QObject):
+    """启动/停止 RoboDojo 单任务评测（scripts/run_gui_eval.sh）。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() == QProcess.Running
+
+    def start(
+        self,
+        task: str,
+        *,
+        bridge_dir: str = "",
+        policy_dir: str = "XPolicyLab/policy/demo_policy",
+        ckpt: str = "demo",
+        action_type: str = "ee",
+        policy_env: str = "",
+        eval_env: str = "",
+        robodojo_root: str = "",
+        display: str = "",
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("RoboDojo 评测已在运行")
+            return
+        task = (task or "").strip()
+        if not task:
+            self.status_message.emit("请选择评测任务")
+            return
+        root = os.path.abspath(
+            os.path.expanduser(robodojo_root or ROBODOJO_ROOT_DEFAULT)
+        )
+        script = os.path.join(root, "scripts", "run_gui_eval.sh")
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        eval_env = os.path.abspath(
+            os.path.expanduser(eval_env or ROBODOJO_ENV_DEFAULT)
+        )
+        policy_env = os.path.abspath(
+            os.path.expanduser(policy_env or eval_env)
+        )
+        bridge_dir = os.path.abspath(os.path.expanduser((bridge_dir or "").strip()))
+        disp = (display or os.environ.get("DISPLAY") or ":1.0").strip()
+        exports = [
+            f"export OMNI_KIT_ACCEPT_EULA=YES PYTHONUNBUFFERED=1",
+            f"export ROBODOJO_ENV={shlex.quote(eval_env)}",
+            f"export ROBODOJO_POLICY_ENV={shlex.quote(policy_env)}",
+            f"export ROBODOJO_POLICY_DIR={shlex.quote(policy_dir)}",
+            f"export ROBODOJO_CKPT={shlex.quote(ckpt)}",
+            f"export ROBODOJO_ACTION_TYPE={shlex.quote(action_type)}",
+            f"export ROBODOJO_DISPLAY={shlex.quote(disp)}",
+            f"export DISPLAY={shlex.quote(disp)}",
+        ]
+        if bridge_dir:
+            exports.append(f"export ISAAC_CAM_BRIDGE_DIR={shlex.quote(bridge_dir)}")
+            exports.append(f"export EAI_DIR={shlex.quote(EAI_DIR)}")
+        cmd = (
+            " && ".join(exports)
+            + f" && cd {shlex.quote(root)}"
+            + f" && exec bash {shlex.quote(script)} {shlex.quote(task)}"
+        )
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(root)
+        proc.start("setsid", ["bash", "-lc", cmd])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ bash scripts/run_gui_eval.sh {task}")
+        self.log_line.emit(
+            f"  policy={policy_dir} ckpt={ckpt} action={action_type} "
+            f"bridge={bridge_dir or '(unset)'}"
+        )
+        self.status_message.emit(f"正在启动 RoboDojo 评测: {task}…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 RoboDojo 评测")
+            return
+        self.status_message.emit("正在停止 RoboDojo 评测…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(5000, self._force_kill_process)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.terminate()
+            self._process.waitForFinished(3000)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            if line:
+                self.log_line.emit(line.rstrip())
+
+    def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        self._process = None
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- RoboDojo 评测正常结束 ---")
+            self.status_message.emit("RoboDojo 评测已结束")
+        else:
+            self.log_line.emit(f"--- RoboDojo 评测退出 (code={exit_code}) ---")
+            self.status_message.emit(f"RoboDojo 评测异常退出 (code={exit_code})")
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error != QProcess.Crashed:
+            self.status_message.emit(f"RoboDojo 评测进程错误: {error}")
+
+    def _force_kill_process(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.kill()
+            self._process = None
+            self.running_changed.emit(False)
+            self.log_line.emit("--- RoboDojo 评测已被强制终止 ---")
+            self.status_message.emit("RoboDojo 评测已强制停止")
+
+
 class CameraTopicWindow(QMainWindow):
     def __init__(
         self,
@@ -11226,6 +11965,333 @@ class CameraTopicWindow(QMainWindow):
             )
         control_tabs.addTab(train_tab, "训练")
 
+        sim_tab = QWidget()
+        sim_outer = QVBoxLayout(sim_tab)
+        sim_outer.setContentsMargins(8, 6, 8, 6)
+        sim_outer.setSpacing(6)
+
+        sim_hint = QLabel(
+            "Isaac / RoboDojo 写共享帧目录 → 本页启动相机桥发布 /camera/*_color。"
+            " Isaac 侧需 export 同一 ISAAC_CAM_BRIDGE_DIR 后再开评测。"
+        )
+        sim_hint.setWordWrap(True)
+        sim_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        sim_outer.addWidget(sim_hint)
+
+        sim_dir_row = QHBoxLayout()
+        sim_dir_row.setSpacing(6)
+        sim_dir_row.addWidget(QLabel("共享目录"))
+        self.sim_bridge_dir_edit = QLineEdit(
+            os.environ.get("ISAAC_CAM_BRIDGE_DIR", ISAAC_CAM_BRIDGE_DIR_DEFAULT)
+        )
+        self.sim_bridge_dir_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_bridge_dir_edit.setToolTip(
+            "宿主机与 Isaac / Docker 都能访问的路径（勿用 /tmp）"
+        )
+        sim_dir_row.addWidget(self.sim_bridge_dir_edit, 1)
+        self.sim_bridge_browse_btn = QPushButton("选择…")
+        self.sim_bridge_browse_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_bridge_browse_btn.clicked.connect(self._on_sim_bridge_browse_clicked)
+        sim_dir_row.addWidget(self.sim_bridge_browse_btn)
+        sim_outer.addLayout(sim_dir_row)
+
+        sim_ctrl_row = QHBoxLayout()
+        sim_ctrl_row.setSpacing(6)
+        sim_ctrl_row.addWidget(QLabel("Hz"))
+        self.sim_bridge_hz_spin = QDoubleSpinBox()
+        self.sim_bridge_hz_spin.setRange(1.0, 60.0)
+        self.sim_bridge_hz_spin.setSingleStep(1.0)
+        self.sim_bridge_hz_spin.setDecimals(0)
+        self.sim_bridge_hz_spin.setValue(30.0)
+        self.sim_bridge_hz_spin.setFixedWidth(64)
+        self.sim_bridge_hz_spin.setToolTip("桥轮询共享目录频率")
+        sim_ctrl_row.addWidget(self.sim_bridge_hz_spin)
+        self.sim_status_label = QLabel("桥: 空闲")
+        self.sim_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        sim_ctrl_row.addWidget(self.sim_status_label, 1)
+        self.sim_bridge_start_btn = QPushButton("启动相机桥")
+        self.sim_bridge_start_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_bridge_start_btn.setToolTip("运行 run_isaac_cam_bridge.sh（无 Humble 时自动进 Docker）")
+        self.sim_bridge_start_btn.clicked.connect(self._on_sim_bridge_start_clicked)
+        sim_ctrl_row.addWidget(self.sim_bridge_start_btn)
+        self.sim_bridge_stop_btn = QPushButton("停止")
+        self.sim_bridge_stop_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_bridge_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.sim_bridge_stop_btn.setEnabled(False)
+        self.sim_bridge_stop_btn.clicked.connect(self._on_sim_bridge_stop_clicked)
+        sim_ctrl_row.addWidget(self.sim_bridge_stop_btn)
+        self.sim_refresh_btn = QPushButton("刷新帧状态")
+        self.sim_refresh_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_refresh_btn.clicked.connect(self._refresh_sim_frame_status)
+        sim_ctrl_row.addWidget(self.sim_refresh_btn)
+        self.sim_clear_log_btn = QPushButton("清空日志")
+        self.sim_clear_log_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_clear_log_btn.clicked.connect(self._on_sim_clear_log_clicked)
+        sim_ctrl_row.addWidget(self.sim_clear_log_btn)
+        sim_outer.addLayout(sim_ctrl_row)
+
+        self.sim_frame_status_label = QLabel("")
+        self.sim_frame_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_frame_status_label.setWordWrap(True)
+        self.sim_frame_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        sim_outer.addWidget(self.sim_frame_status_label)
+
+        self.sim_log_edit = QTextEdit()
+        self.sim_log_edit.setReadOnly(True)
+        self.sim_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_log_edit.setMinimumHeight(60)
+        self.sim_log_edit.setMaximumHeight(100)
+        self.sim_log_edit.setPlaceholderText("相机桥日志…")
+        self.sim_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        sim_outer.addWidget(self.sim_log_edit)
+
+        sim_run_sep = QLabel("启动 RoboDojo 评测")
+        sim_run_sep.setStyleSheet(f"color: {UI_TEXT_PRIMARY}; font-weight: bold;")
+        sim_outer.addWidget(sim_run_sep)
+
+        sim_run_row = QHBoxLayout()
+        sim_run_row.setSpacing(6)
+        sim_run_row.addWidget(QLabel("任务"))
+        self.sim_eval_task_combo = ImeSafeComboBox()
+        self.sim_eval_task_combo.setMinimumWidth(180)
+        self.sim_eval_task_combo.setEditable(True)
+        self.sim_eval_task_combo.setToolTip("选择或输入 RoboDojo 任务名（如 build_tower）")
+        for task_name in list_robodojo_tasks():
+            self.sim_eval_task_combo.addItem(task_name, task_name)
+        if self.sim_eval_task_combo.count() == 0:
+            self.sim_eval_task_combo.addItem("build_tower", "build_tower")
+        idx_bt = self.sim_eval_task_combo.findData("build_tower")
+        if idx_bt >= 0:
+            self.sim_eval_task_combo.setCurrentIndex(idx_bt)
+        sim_run_row.addWidget(self.sim_eval_task_combo)
+        sim_run_row.addWidget(QLabel("策略"))
+        self.sim_eval_policy_combo = ImeSafeComboBox()
+        self.sim_eval_policy_combo.addItem(
+            "demo_policy", "XPolicyLab/policy/demo_policy"
+        )
+        self.sim_eval_policy_combo.addItem("starVLA", "XPolicyLab/policy/starVLA")
+        self.sim_eval_policy_combo.setToolTip("XPolicyLab 策略目录（相对 RoboDojo 根）")
+        self.sim_eval_policy_combo.currentIndexChanged.connect(
+            self._on_sim_eval_policy_changed
+        )
+        sim_run_row.addWidget(self.sim_eval_policy_combo)
+        sim_run_row.addWidget(QLabel("ckpt"))
+        self.sim_eval_ckpt_edit = QLineEdit("demo")
+        self.sim_eval_ckpt_edit.setFixedWidth(120)
+        self.sim_eval_ckpt_edit.setToolTip("checkpoint 名，如 demo / hf_qwenpi_v3")
+        sim_run_row.addWidget(self.sim_eval_ckpt_edit)
+        sim_run_row.addWidget(QLabel("action"))
+        self.sim_eval_action_combo = ImeSafeComboBox()
+        self.sim_eval_action_combo.addItem("ee", "ee")
+        self.sim_eval_action_combo.addItem("joint", "joint")
+        sim_run_row.addWidget(self.sim_eval_action_combo)
+        self.sim_eval_run_status = QLabel("评测: 空闲")
+        self.sim_eval_run_status.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        sim_run_row.addWidget(self.sim_eval_run_status, 1)
+        self.sim_eval_start_btn = QPushButton("启动评测")
+        self.sim_eval_start_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_start_btn.setToolTip(
+            "运行 scripts/run_gui_eval.sh <任务>\n"
+            "会导出当前共享目录为 ISAAC_CAM_BRIDGE_DIR"
+        )
+        self.sim_eval_start_btn.clicked.connect(self._on_sim_eval_start_clicked)
+        sim_run_row.addWidget(self.sim_eval_start_btn)
+        self.sim_eval_stop_run_btn = QPushButton("停止评测")
+        self.sim_eval_stop_run_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_stop_run_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.sim_eval_stop_run_btn.setEnabled(False)
+        self.sim_eval_stop_run_btn.clicked.connect(self._on_sim_eval_stop_run_clicked)
+        sim_run_row.addWidget(self.sim_eval_stop_run_btn)
+        sim_outer.addLayout(sim_run_row)
+
+        sim_eval_sep = QLabel("评测结果（RoboDojo）")
+        sim_eval_sep.setStyleSheet(f"color: {UI_TEXT_PRIMARY}; font-weight: bold;")
+        sim_outer.addWidget(sim_eval_sep)
+
+        sim_eval_root_row = QHBoxLayout()
+        sim_eval_root_row.setSpacing(6)
+        sim_eval_root_row.addWidget(QLabel("结果目录"))
+        self.sim_eval_root_edit = QLineEdit(
+            os.environ.get("ROBODOJO_EVAL_RESULT_ROOT", ROBODOJO_EVAL_RESULT_ROOT_DEFAULT)
+        )
+        self.sim_eval_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_eval_root_edit.setToolTip("RoboDojo eval_result 根目录（task / policy / robot / run）")
+        sim_eval_root_row.addWidget(self.sim_eval_root_edit, 1)
+        self.sim_eval_root_browse_btn = QPushButton("选择…")
+        self.sim_eval_root_browse_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_root_browse_btn.clicked.connect(self._on_sim_eval_root_browse_clicked)
+        sim_eval_root_row.addWidget(self.sim_eval_root_browse_btn)
+        self.sim_eval_refresh_btn = QPushButton("刷新")
+        self.sim_eval_refresh_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_refresh_btn.clicked.connect(self._refresh_sim_eval_tree)
+        sim_eval_root_row.addWidget(self.sim_eval_refresh_btn)
+        sim_outer.addLayout(sim_eval_root_row)
+
+        sim_eval_filter_row = QHBoxLayout()
+        sim_eval_filter_row.setSpacing(6)
+        sim_eval_filter_row.addWidget(QLabel("过滤"))
+        self.sim_eval_filter_edit = QLineEdit()
+        self.sim_eval_filter_edit.setPlaceholderText("按任务名过滤…")
+        self.sim_eval_filter_edit.textChanged.connect(self._on_sim_eval_filter_changed)
+        sim_eval_filter_row.addWidget(self.sim_eval_filter_edit, 1)
+        sim_eval_filter_row.addWidget(QLabel("结果"))
+        self.sim_eval_outcome_combo = ImeSafeComboBox()
+        self.sim_eval_outcome_combo.addItem("全部", "")
+        self.sim_eval_outcome_combo.addItem("success", "success")
+        self.sim_eval_outcome_combo.addItem("failed", "fail")
+        self.sim_eval_outcome_combo.setToolTip(
+            "按视频文件名筛选：success 匹配含 success 的 mp4；"
+            "failed 匹配含 fail 的 mp4（如 *_fail.mp4）"
+        )
+        self.sim_eval_outcome_combo.currentIndexChanged.connect(
+            self._on_sim_eval_outcome_changed
+        )
+        sim_eval_filter_row.addWidget(self.sim_eval_outcome_combo)
+        self.sim_eval_open_dir_btn = QPushButton("打开目录")
+        self.sim_eval_open_dir_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_open_dir_btn.clicked.connect(self._on_sim_eval_open_dir_clicked)
+        sim_eval_filter_row.addWidget(self.sim_eval_open_dir_btn)
+        self.sim_eval_open_video_btn = QPushButton("播放视频")
+        self.sim_eval_open_video_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_open_video_btn.setToolTip("窗口内播放选中 mp4（双击列表项亦可）")
+        self.sim_eval_open_video_btn.clicked.connect(self._on_sim_eval_open_video_clicked)
+        sim_eval_filter_row.addWidget(self.sim_eval_open_video_btn)
+        sim_outer.addLayout(sim_eval_filter_row)
+
+        sim_eval_split = QSplitter(Qt.Horizontal)
+        self.sim_eval_tree = QTreeWidget()
+        self.sim_eval_tree.setHeaderLabels(["任务 / 策略 / 机器人 / 运行"])
+        self.sim_eval_tree.setMinimumWidth(280)
+        self.sim_eval_tree.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_eval_tree.setStyleSheet(
+            "QTreeWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+        )
+        self.sim_eval_tree.itemExpanded.connect(self._on_sim_eval_item_expanded)
+        self.sim_eval_tree.currentItemChanged.connect(self._on_sim_eval_selection_changed)
+        sim_eval_split.addWidget(self.sim_eval_tree)
+
+        sim_eval_right = QWidget()
+        sim_eval_right_layout = QVBoxLayout(sim_eval_right)
+        sim_eval_right_layout.setContentsMargins(0, 0, 0, 0)
+        sim_eval_right_layout.setSpacing(4)
+        self.sim_eval_detail_edit = QTextEdit()
+        self.sim_eval_detail_edit.setReadOnly(True)
+        self.sim_eval_detail_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_eval_detail_edit.setPlaceholderText("选中含 _result.json 的运行后显示摘要…")
+        self.sim_eval_detail_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        self.sim_eval_detail_edit.setMinimumHeight(80)
+        sim_eval_right_layout.addWidget(self.sim_eval_detail_edit, 1)
+        self.sim_eval_files_list = QListWidget()
+        self.sim_eval_files_list.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_eval_files_list.setStyleSheet(
+            "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+        )
+        self.sim_eval_files_list.setMinimumHeight(60)
+        self.sim_eval_files_list.setMaximumHeight(180)
+        self.sim_eval_files_list.itemDoubleClicked.connect(
+            lambda _item: self._on_sim_eval_open_video_clicked()
+        )
+        sim_eval_right_layout.addWidget(self.sim_eval_files_list)
+        sim_eval_split.addWidget(sim_eval_right)
+        sim_eval_split.setStretchFactor(0, 2)
+        sim_eval_split.setStretchFactor(1, 3)
+        sim_outer.addWidget(sim_eval_split, 1)
+
+        self._sim_bridge_launcher = IsaacCamBridgeLauncher(self)
+        self._sim_bridge_launcher.log_line.connect(self._append_sim_log)
+        self._sim_bridge_launcher.running_changed.connect(self._update_sim_bridge_ui)
+        self._sim_eval_launcher = RoboDojoEvalLauncher(self)
+        self._sim_eval_launcher.log_line.connect(self._append_sim_log)
+        self._sim_eval_launcher.running_changed.connect(self._update_sim_eval_run_ui)
+        self._sim_frame_timer = QTimer(self)
+        self._sim_frame_timer.setInterval(2000)
+        self._sim_frame_timer.timeout.connect(self._refresh_sim_frame_status)
+        self._refresh_sim_frame_status()
+        self._refresh_sim_eval_tree()
+        self._on_sim_eval_policy_changed()
+        # 稍后 addTab：仿真评测 / 真机评测 放在末尾
+
+        real_tab = QWidget()
+        real_outer = QVBoxLayout(real_tab)
+        real_outer.setContentsMargins(8, 6, 8, 6)
+        real_outer.setSpacing(6)
+
+        real_hint = QLabel(
+            "真机评测使用现场 ROS 相机（/camera/*_color），无需 Isaac 桥。"
+            " 请确认机器人栈已启动、手臂/手已使能，并在「测试」页部署推理服务。"
+        )
+        real_hint.setWordWrap(True)
+        real_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        real_outer.addWidget(real_hint)
+
+        real_task_row = QHBoxLayout()
+        real_task_row.setSpacing(6)
+        real_task_row.addWidget(QLabel("任务"))
+        self.real_eval_task_edit = QLineEdit()
+        self.real_eval_task_edit.setPlaceholderText("评测任务描述（可选）")
+        real_task_row.addWidget(self.real_eval_task_edit, 1)
+        real_outer.addLayout(real_task_row)
+
+        real_ctrl_row = QHBoxLayout()
+        real_ctrl_row.setSpacing(6)
+        self.real_eval_status_label = QLabel("状态: 未开始")
+        self.real_eval_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        real_ctrl_row.addWidget(self.real_eval_status_label, 1)
+        self.real_eval_refresh_btn = QPushButton("刷新就绪检查")
+        self.real_eval_refresh_btn.setFocusPolicy(Qt.NoFocus)
+        self.real_eval_refresh_btn.clicked.connect(self._refresh_real_eval_status)
+        real_ctrl_row.addWidget(self.real_eval_refresh_btn)
+        self.real_eval_stack_btn = QPushButton("启动机器人栈")
+        self.real_eval_stack_btn.setFocusPolicy(Qt.NoFocus)
+        self.real_eval_stack_btn.setToolTip("与「回放」页相同：拉起 robot stack")
+        self.real_eval_stack_btn.clicked.connect(self._on_robot_stack_clicked)
+        real_ctrl_row.addWidget(self.real_eval_stack_btn)
+        self.real_eval_start_btn = QPushButton("开始评测")
+        self.real_eval_start_btn.setFocusPolicy(Qt.NoFocus)
+        self.real_eval_start_btn.setToolTip("检查真机就绪条件并进入评测记录（策略闭环可后续接入）")
+        self.real_eval_start_btn.clicked.connect(self._on_real_eval_start_clicked)
+        real_ctrl_row.addWidget(self.real_eval_start_btn)
+        self.real_eval_stop_btn = QPushButton("停止")
+        self.real_eval_stop_btn.setFocusPolicy(Qt.NoFocus)
+        self.real_eval_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.real_eval_stop_btn.setEnabled(False)
+        self.real_eval_stop_btn.clicked.connect(self._on_real_eval_stop_clicked)
+        real_ctrl_row.addWidget(self.real_eval_stop_btn)
+        self.real_eval_clear_log_btn = QPushButton("清空日志")
+        self.real_eval_clear_log_btn.setFocusPolicy(Qt.NoFocus)
+        self.real_eval_clear_log_btn.clicked.connect(self._on_real_eval_clear_log_clicked)
+        real_ctrl_row.addWidget(self.real_eval_clear_log_btn)
+        real_outer.addLayout(real_ctrl_row)
+
+        self.real_eval_ready_label = QLabel("")
+        self.real_eval_ready_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.real_eval_ready_label.setWordWrap(True)
+        self.real_eval_ready_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        real_outer.addWidget(self.real_eval_ready_label)
+
+        self.real_eval_log_edit = QTextEdit()
+        self.real_eval_log_edit.setReadOnly(True)
+        self.real_eval_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.real_eval_log_edit.setMinimumHeight(120)
+        self.real_eval_log_edit.setMaximumHeight(200)
+        self.real_eval_log_edit.setPlaceholderText("真机评测日志…")
+        self.real_eval_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        real_outer.addWidget(self.real_eval_log_edit)
+
+        self._real_eval_active = False
+        self._real_eval_timer = QTimer(self)
+        self._real_eval_timer.setInterval(2000)
+        self._real_eval_timer.timeout.connect(self._refresh_real_eval_status)
+
         control_tab = QWidget()
         control_layout = QVBoxLayout(control_tab)
         control_layout.setContentsMargins(8, 6, 8, 6)
@@ -11688,7 +12754,129 @@ class CameraTopicWindow(QMainWindow):
         test_outer.addWidget(self.test_infer_log_edit)
         # 推理部署后端在 chat_panel 创建后由 QwenDeployController 统一接管
         self._qwen_deploy = None  # type: ignore
+        # —— 上下文学习：演示视频 + 配对 RRD 同步驱臂 ——
+        ctx_tab = QWidget()
+        ctx_outer = QVBoxLayout(ctx_tab)
+        ctx_outer.setContentsMargins(8, 6, 8, 6)
+        ctx_outer.setSpacing(6)
+        ctx_hint = QLabel(
+            "播放演示视频作为视觉参考；机器人「照着做」需配对的 .rrd 关节轨迹同步回放"
+            "（当前栈无法仅从 RGB 视频推断动作）。选择视频后会自动尝试匹配同名 .rrd。"
+        )
+        ctx_hint.setWordWrap(True)
+        ctx_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        ctx_outer.addWidget(ctx_hint)
+
+        self._ctx_video_path = ""
+        self._ctx_rrd_path = ""
+
+        ctx_ctrl = QHBoxLayout()
+        ctx_ctrl.setSpacing(6)
+        self.ctx_select_video_btn = QPushButton("选择视频")
+        self.ctx_select_video_btn.setFocusPolicy(Qt.NoFocus)
+        self.ctx_select_video_btn.setToolTip(
+            "选择演示 mp4/avi/mkv/webm。\n若同目录存在同名 .rrd，将自动配对。"
+        )
+        self.ctx_select_video_btn.clicked.connect(self._on_ctx_select_video_clicked)
+        ctx_ctrl.addWidget(self.ctx_select_video_btn)
+        self.ctx_select_rrd_btn = QPushButton("选择 RRD")
+        self.ctx_select_rrd_btn.setFocusPolicy(Qt.NoFocus)
+        self.ctx_select_rrd_btn.setToolTip(
+            "选择与视频配对的 .rrd 轨迹；机器人跟做依赖此文件。"
+        )
+        self.ctx_select_rrd_btn.clicked.connect(self._on_ctx_select_rrd_clicked)
+        ctx_ctrl.addWidget(self.ctx_select_rrd_btn)
+        self.ctx_rerun_btn = QPushButton("Rerun 播放")
+        self.ctx_rerun_btn.setFocusPolicy(Qt.NoFocus)
+        self.ctx_rerun_btn.setEnabled(False)
+        self.ctx_rerun_btn.setToolTip(
+            "用 rerun-sdk 原生 Viewer 打开当前 .rrd（命令: rerun <file.rrd>）。\n"
+            "仅可视化，不驱臂。可用 RERUN_BIN 指定可执行文件。"
+        )
+        self.ctx_rerun_btn.clicked.connect(self._on_ctx_rerun_clicked)
+        ctx_ctrl.addWidget(self.ctx_rerun_btn)
+        ctx_ctrl.addWidget(QLabel("次数"))
+        self.ctx_loop_spin = QSpinBox()
+        self.ctx_loop_spin.setRange(1, REPLAY_LOOP_COUNT_MAX)
+        self.ctx_loop_spin.setValue(1)
+        self.ctx_loop_spin.setFixedWidth(52)
+        self.ctx_loop_spin.setToolTip("RRD 回放次数；视频会循环播放以匹配")
+        ctx_ctrl.addWidget(self.ctx_loop_spin)
+        self.ctx_status_label = QLabel("状态: 未开始")
+        self.ctx_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ctx_ctrl.addWidget(self.ctx_status_label, 1)
+        self.ctx_stack_btn = QPushButton("启动机器人栈")
+        self.ctx_stack_btn.setFocusPolicy(Qt.NoFocus)
+        self.ctx_stack_btn.setToolTip("与「回放」页相同：拉起 robot stack")
+        self.ctx_stack_btn.clicked.connect(self._on_robot_stack_clicked)
+        ctx_ctrl.addWidget(self.ctx_stack_btn)
+        self.ctx_sync_start_btn = QPushButton("同步开始")
+        self.ctx_sync_start_btn.setFocusPolicy(Qt.NoFocus)
+        self.ctx_sync_start_btn.setToolTip(
+            "同时播放视频并启动 RRD 回放，使机器人按轨迹跟做。\n"
+            "会自动切 control_mode=0 并使能手/臂（与「回放」页相同）。"
+        )
+        self.ctx_sync_start_btn.clicked.connect(self._on_ctx_sync_start_clicked)
+        ctx_ctrl.addWidget(self.ctx_sync_start_btn)
+        self.ctx_stop_btn = QPushButton("停止")
+        self.ctx_stop_btn.setFocusPolicy(Qt.NoFocus)
+        self.ctx_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.ctx_stop_btn.setEnabled(False)
+        self.ctx_stop_btn.clicked.connect(self._on_ctx_stop_clicked)
+        ctx_ctrl.addWidget(self.ctx_stop_btn)
+        ctx_outer.addLayout(ctx_ctrl)
+
+        ctx_paths = QHBoxLayout()
+        ctx_paths.setSpacing(6)
+        self.ctx_video_path_edit = QLineEdit()
+        self.ctx_video_path_edit.setReadOnly(True)
+        self.ctx_video_path_edit.setPlaceholderText("视频路径…")
+        self.ctx_video_path_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ctx_paths.addWidget(self.ctx_video_path_edit, 1)
+        self.ctx_rrd_path_edit = QLineEdit()
+        self.ctx_rrd_path_edit.setReadOnly(True)
+        self.ctx_rrd_path_edit.setPlaceholderText("配对 RRD 路径（机器人跟做必需）…")
+        self.ctx_rrd_path_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ctx_paths.addWidget(self.ctx_rrd_path_edit, 1)
+        ctx_outer.addLayout(ctx_paths)
+
+        ctx_media_split = QSplitter(Qt.Horizontal)
+        self.ctx_video_player = VideoPlayerWidget(ctx_tab)
+        self.ctx_video_player.setMinimumHeight(280)
+        ctx_media_split.addWidget(self.ctx_video_player)
+
+        self.ctx_rerun_host = QWidget()
+        ctx_rerun_layout = QVBoxLayout(self.ctx_rerun_host)
+        ctx_rerun_layout.setContentsMargins(0, 0, 0, 0)
+        ctx_rerun_layout.setSpacing(4)
+        self.ctx_rerun_title = QLabel("Rerun（rerun-sdk）")
+        self.ctx_rerun_title.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        ctx_rerun_layout.addWidget(self.ctx_rerun_title)
+        self.ctx_rerun_placeholder = QLabel(
+            "选择 .rrd 后点「Rerun 播放」，\n"
+            "将用 rerun-sdk 原生 Viewer 打开该文件。\n\n"
+            "等价命令: rerun <file.rrd>"
+        )
+        self.ctx_rerun_placeholder.setAlignment(Qt.AlignCenter)
+        self.ctx_rerun_placeholder.setWordWrap(True)
+        self.ctx_rerun_placeholder.setStyleSheet(
+            "background-color: #111; color: #ccc; padding: 12px;"
+        )
+        self.ctx_rerun_placeholder.setMinimumHeight(280)
+        ctx_rerun_layout.addWidget(self.ctx_rerun_placeholder, 1)
+        ctx_media_split.addWidget(self.ctx_rerun_host)
+        ctx_media_split.setStretchFactor(0, 1)
+        ctx_media_split.setStretchFactor(1, 1)
+        ctx_outer.addWidget(ctx_media_split, 1)
+
+        self._load_ctx_default_video()
+
         control_tabs.addTab(test_tab, "测试")
+        control_tabs.addTab(sim_tab, "仿真评测")
+        control_tabs.addTab(real_tab, "真机评测")
+        control_tabs.addTab(ctx_tab, "上下文学习")
+        self._refresh_real_eval_status()
+        self._update_ctx_ui()
 
         self._hand_skeleton_detector = None
         self._skeleton_tracking = False
@@ -11717,6 +12905,34 @@ class CameraTopicWindow(QMainWindow):
         self._update_enable_status_ui()
         self._on_arm_move_speed_changed(self.arm_move_speed_slider.value())
         self._update_arm_move_btns_ui(force=True)
+
+        # Topic + 图像预览 + AI 对话：整块工作区，统一折叠
+        workspace = QWidget()
+        workspace.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_layout.setSpacing(0)
+
+        workspace_header = QWidget()
+        workspace_header_layout = QHBoxLayout(workspace_header)
+        workspace_header_layout.setContentsMargins(6, 4, 4, 4)
+        workspace_header_layout.setSpacing(6)
+        self._workspace_title_label = QLabel("Topic / 图像预览 / AI 对话")
+        self._workspace_title_label.setStyleSheet("font-weight: bold;")
+        workspace_header_layout.addWidget(self._workspace_title_label)
+        workspace_header_layout.addStretch(1)
+        self._workspace_toggle_btn = QToolButton()
+        self._workspace_toggle_btn.setFocusPolicy(Qt.NoFocus)
+        self._workspace_toggle_btn.setText("折叠")
+        self._workspace_toggle_btn.setToolTip("折叠下方工作区（Topic、图像预览、AI 对话）")
+        self._workspace_toggle_btn.clicked.connect(self._toggle_workspace_panel)
+        workspace_header_layout.addWidget(self._workspace_toggle_btn)
+        workspace_layout.addWidget(workspace_header)
+
+        workspace_body = QWidget()
+        workspace_body_layout = QVBoxLayout(workspace_body)
+        workspace_body_layout.setContentsMargins(0, 0, 0, 0)
+        workspace_body_layout.setSpacing(0)
 
         self._main_splitter = QSplitter(Qt.Horizontal)
 
@@ -11757,7 +12973,6 @@ class CameraTopicWindow(QMainWindow):
         )
         self.chat_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         chat_layout.addWidget(self.chat_panel)
-        # 给对话区更大默认宽度，并允许拖拽继续加宽
         chat_group.setMinimumWidth(380)
         chat_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         self._chat_group = chat_group
@@ -11770,7 +12985,14 @@ class CameraTopicWindow(QMainWindow):
         chat_w = max(480, int(win_w * 0.36))
         preview_w = max(480, win_w - topic_w - chat_w - 40)
         self._main_splitter.setSizes([topic_w, preview_w, chat_w])
-        root_layout.addWidget(self._main_splitter, stretch=1)
+        workspace_body_layout.addWidget(self._main_splitter, stretch=1)
+        workspace_layout.addWidget(workspace_body, stretch=1)
+
+        self._workspace_panel = workspace
+        self._workspace_body = workspace_body
+        self._workspace_collapsed = False
+        root_layout.addWidget(workspace, stretch=1)
+        self._toggle_workspace_panel()  # 默认折叠工作区，给上方 Tab 更多空间
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -11790,6 +13012,8 @@ class CameraTopicWindow(QMainWindow):
         self._train_launcher.running_changed.connect(self._update_train_ui)
         self._cad_launcher.log_line.connect(self._append_cad_log)
         self._cad_launcher.status_message.connect(self.status_bar.showMessage)
+        self._sim_bridge_launcher.status_message.connect(self.status_bar.showMessage)
+        self._sim_eval_launcher.status_message.connect(self.status_bar.showMessage)
         self._cad_launcher.running_changed.connect(self._update_cad_ui)
         self._cad_launcher.mesh_ready.connect(self._on_cad_mesh_ready)
         bridge.replay_state_changed.connect(self._update_replay_ui)
@@ -11911,6 +13135,482 @@ class CameraTopicWindow(QMainWindow):
         )
         self._update_train_ui()
 
+    def _on_sim_bridge_browse_clicked(self) -> None:
+        current = self.sim_bridge_dir_edit.text().strip()
+        initial = current if current and os.path.isdir(current) else EAI_DIR
+        selected = QFileDialog.getExistingDirectory(self, "选择 Isaac 共享帧目录", initial)
+        if selected:
+            self.sim_bridge_dir_edit.setText(selected)
+            self._refresh_sim_frame_status()
+
+    def _append_sim_log(self, line: str) -> None:
+        self.sim_log_edit.append(line)
+        scrollbar = self.sim_log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _update_sim_bridge_ui(self, *_args) -> None:
+        running = self._sim_bridge_launcher.is_running()
+        self.sim_bridge_stop_btn.setEnabled(running)
+        self.sim_bridge_start_btn.setEnabled(not running)
+        self.sim_bridge_dir_edit.setEnabled(not running)
+        self.sim_bridge_browse_btn.setEnabled(not running)
+        self.sim_bridge_hz_spin.setEnabled(not running)
+        if running:
+            self.sim_status_label.setText("桥: 运行中")
+            self.sim_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            if not self._sim_frame_timer.isActive():
+                self._sim_frame_timer.start()
+        else:
+            self.sim_status_label.setText("桥: 空闲")
+            self.sim_status_label.setStyleSheet("")
+            self._sim_frame_timer.stop()
+        self._refresh_sim_frame_status()
+
+    def _refresh_sim_frame_status(self) -> None:
+        bridge_dir = os.path.abspath(
+            os.path.expanduser(self.sim_bridge_dir_edit.text().strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT)
+        )
+        if not os.path.isdir(bridge_dir):
+            self.sim_frame_status_label.setText(f"目录不存在: {bridge_dir}")
+            return
+        parts: List[str] = []
+        now = time.time()
+        for key in ISAAC_CAM_BRIDGE_KEYS:
+            npy = os.path.join(bridge_dir, f"{key}.npy")
+            stamp = os.path.join(bridge_dir, f"{key}.stamp")
+            if not os.path.isfile(npy):
+                parts.append(f"{key}=无")
+                continue
+            age = "?"
+            try:
+                if os.path.isfile(stamp):
+                    mtime = os.path.getmtime(stamp)
+                else:
+                    mtime = os.path.getmtime(npy)
+                age = f"{max(0.0, now - mtime):.1f}s"
+            except OSError:
+                pass
+            parts.append(f"{key}={age}")
+        self.sim_frame_status_label.setText(
+            f"{bridge_dir}  |  " + "  ".join(parts)
+            + "  → /camera/head_color, left_wrist_color, right_wrist_color"
+        )
+
+    def _on_sim_bridge_start_clicked(self) -> None:
+        self._sim_bridge_launcher.start(
+            self.sim_bridge_dir_edit.text(),
+            hz=float(self.sim_bridge_hz_spin.value()),
+        )
+        self._update_sim_bridge_ui()
+
+    def _on_sim_bridge_stop_clicked(self) -> None:
+        self._sim_bridge_launcher.stop()
+        self._update_sim_bridge_ui()
+
+    def _on_sim_clear_log_clicked(self) -> None:
+        self.sim_log_edit.clear()
+
+    def _on_sim_eval_policy_changed(self, _index: int = 0) -> None:
+        policy = str(self.sim_eval_policy_combo.currentData() or "")
+        if "starVLA" in policy:
+            if not self.sim_eval_ckpt_edit.text().strip() or self.sim_eval_ckpt_edit.text().strip() == "demo":
+                self.sim_eval_ckpt_edit.setText("hf_qwenpi_v3")
+            idx = self.sim_eval_action_combo.findData("joint")
+            if idx >= 0:
+                self.sim_eval_action_combo.setCurrentIndex(idx)
+        else:
+            if not self.sim_eval_ckpt_edit.text().strip() or "hf_" in self.sim_eval_ckpt_edit.text():
+                self.sim_eval_ckpt_edit.setText("demo")
+            idx = self.sim_eval_action_combo.findData("ee")
+            if idx >= 0:
+                self.sim_eval_action_combo.setCurrentIndex(idx)
+
+    def _update_sim_eval_run_ui(self, *_args) -> None:
+        running = self._sim_eval_launcher.is_running()
+        self.sim_eval_start_btn.setEnabled(not running)
+        self.sim_eval_stop_run_btn.setEnabled(running)
+        self.sim_eval_task_combo.setEnabled(not running)
+        self.sim_eval_policy_combo.setEnabled(not running)
+        self.sim_eval_ckpt_edit.setEnabled(not running)
+        self.sim_eval_action_combo.setEnabled(not running)
+        if running:
+            self.sim_eval_run_status.setText("评测: 运行中")
+            self.sim_eval_run_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.sim_eval_run_status.setText("评测: 空闲")
+            self.sim_eval_run_status.setStyleSheet("")
+
+    def _on_sim_eval_start_clicked(self) -> None:
+        task = str(
+            self.sim_eval_task_combo.currentData()
+            or self.sim_eval_task_combo.currentText()
+            or ""
+        ).strip()
+        policy_dir = str(
+            self.sim_eval_policy_combo.currentData()
+            or "XPolicyLab/policy/demo_policy"
+        )
+        policy_env = ROBODOJO_ENV_DEFAULT
+        if "starVLA" in policy_dir and os.path.isdir(ROBODOJO_STARVLA_ENV_DEFAULT):
+            policy_env = ROBODOJO_STARVLA_ENV_DEFAULT
+        self._sim_eval_launcher.start(
+            task,
+            bridge_dir=self.sim_bridge_dir_edit.text(),
+            policy_dir=policy_dir,
+            ckpt=self.sim_eval_ckpt_edit.text().strip() or "demo",
+            action_type=str(self.sim_eval_action_combo.currentData() or "ee"),
+            policy_env=policy_env,
+            eval_env=ROBODOJO_ENV_DEFAULT,
+            robodojo_root=ROBODOJO_ROOT_DEFAULT,
+            display=os.environ.get("DISPLAY", ":1.0"),
+        )
+        self._update_sim_eval_run_ui()
+
+    def _on_sim_eval_stop_run_clicked(self) -> None:
+        self._sim_eval_launcher.stop()
+        self._update_sim_eval_run_ui()
+
+    def _sim_eval_root_path(self) -> str:
+        return os.path.abspath(
+            os.path.expanduser(
+                self.sim_eval_root_edit.text().strip() or ROBODOJO_EVAL_RESULT_ROOT_DEFAULT
+            )
+        )
+
+    @staticmethod
+    def _sim_eval_read_rate(result_json: str) -> str:
+        try:
+            with open(result_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            rate = data.get("success_rate", data.get("score"))
+            if rate is None:
+                return "?"
+            return f"{float(rate):.2f}"
+        except Exception:
+            return "?"
+
+    def _on_sim_eval_root_browse_clicked(self) -> None:
+        current = self._sim_eval_root_path()
+        initial = current if os.path.isdir(current) else EAI_DIR
+        selected = QFileDialog.getExistingDirectory(self, "选择 RoboDojo 评测结果目录", initial)
+        if selected:
+            self.sim_eval_root_edit.setText(selected)
+            self._refresh_sim_eval_tree()
+
+    def _refresh_sim_eval_tree(self) -> None:
+        root = self._sim_eval_root_path()
+        self.sim_eval_tree.clear()
+        self.sim_eval_detail_edit.clear()
+        self.sim_eval_files_list.clear()
+        if not os.path.isdir(root):
+            self.sim_eval_detail_edit.setPlainText(f"目录不存在:\n{root}")
+            return
+        filter_text = self.sim_eval_filter_edit.text().strip().lower()
+        try:
+            names = sorted(os.listdir(root))
+        except OSError as exc:
+            self.sim_eval_detail_edit.setPlainText(f"无法读取目录: {exc}")
+            return
+        for name in names:
+            if name.startswith("."):
+                continue
+            path = os.path.join(root, name)
+            if not os.path.isdir(path):
+                continue
+            if filter_text and filter_text not in name.lower():
+                continue
+            item = QTreeWidgetItem([name])
+            item.setData(0, Qt.UserRole, path)
+            item.setData(0, Qt.UserRole + 1, "dir")
+            item.addChild(QTreeWidgetItem(["…"]))
+            self.sim_eval_tree.addTopLevelItem(item)
+        if getattr(self, "status_bar", None) is not None:
+            self.status_bar.showMessage(
+                f"评测结果: {self.sim_eval_tree.topLevelItemCount()} 个任务 @ {root}", 4000
+            )
+        if self._sim_eval_outcome_keyword():
+            self._refresh_sim_eval_mp4_by_outcome()
+
+    def _on_sim_eval_filter_changed(self, _text: str = "") -> None:
+        self._refresh_sim_eval_tree()
+        if self._sim_eval_outcome_keyword():
+            self._refresh_sim_eval_mp4_by_outcome()
+
+    def _sim_eval_outcome_keyword(self) -> str:
+        data = self.sim_eval_outcome_combo.currentData()
+        return str(data or "").strip().lower()
+
+    def _on_sim_eval_outcome_changed(self, _index: int = 0) -> None:
+        keyword = self._sim_eval_outcome_keyword()
+        if not keyword:
+            self._on_sim_eval_selection_changed(self.sim_eval_tree.currentItem(), None)
+            return
+        self._refresh_sim_eval_mp4_by_outcome()
+
+    def _refresh_sim_eval_mp4_by_outcome(self) -> None:
+        keyword = self._sim_eval_outcome_keyword()
+        self.sim_eval_files_list.clear()
+        if not keyword:
+            return
+        root = self._sim_eval_root_path()
+        if not os.path.isdir(root):
+            self.sim_eval_detail_edit.setPlainText(f"目录不存在:\n{root}")
+            return
+        task_filter = self.sim_eval_filter_edit.text().strip().lower()
+        label = str(self.sim_eval_outcome_combo.currentText() or keyword)
+        if getattr(self, "status_bar", None) is not None:
+            self.status_bar.showMessage(f"正在扫描 {label} 视频…", 0)
+        QApplication.processEvents()
+        matches: List[Tuple[str, str]] = []  # (display, abs_path)
+        try:
+            task_names = sorted(os.listdir(root))
+        except OSError as exc:
+            self.sim_eval_detail_edit.setPlainText(f"无法读取目录: {exc}")
+            return
+        for task in task_names:
+            if task.startswith("."):
+                continue
+            task_path = os.path.join(root, task)
+            if not os.path.isdir(task_path):
+                continue
+            if task_filter and task_filter not in task.lower():
+                continue
+            for dirpath, _dirnames, filenames in os.walk(task_path):
+                for name in filenames:
+                    lower = name.lower()
+                    if not lower.endswith((".mp4", ".avi", ".mkv", ".webm")):
+                        continue
+                    if keyword not in lower:
+                        continue
+                    abs_path = os.path.join(dirpath, name)
+                    rel = os.path.relpath(abs_path, root)
+                    matches.append((rel, abs_path))
+        matches.sort(key=lambda x: x[0].lower())
+        for display, abs_path in matches:
+            item = QListWidgetItem(display)
+            item.setData(Qt.UserRole, abs_path)
+            item.setToolTip(abs_path)
+            self.sim_eval_files_list.addItem(item)
+        if self.sim_eval_files_list.count() > 0:
+            self.sim_eval_files_list.setCurrentRow(0)
+        summary = (
+            f"结果筛选: {label}（文件名含「{keyword}」）\n"
+            f"任务过滤: {task_filter or '(无)'}\n"
+            f"共 {len(matches)} 个视频\n"
+            f"根目录: {root}"
+        )
+        self.sim_eval_detail_edit.setPlainText(summary)
+        if getattr(self, "status_bar", None) is not None:
+            self.status_bar.showMessage(f"{label}: 找到 {len(matches)} 个视频", 5000)
+
+    def _on_sim_eval_item_expanded(self, item: QTreeWidgetItem) -> None:
+        if item.childCount() == 1 and item.child(0).text(0) == "…":
+            item.takeChild(0)
+            self._fill_sim_eval_children(item)
+
+    def _fill_sim_eval_children(self, item: QTreeWidgetItem) -> None:
+        path = str(item.data(0, Qt.UserRole) or "")
+        if not path or not os.path.isdir(path):
+            return
+        try:
+            entries = sorted(os.listdir(path))
+        except OSError:
+            return
+        for name in entries:
+            if name.startswith("."):
+                continue
+            child_path = os.path.join(path, name)
+            if not os.path.isdir(child_path):
+                continue
+            result_json = os.path.join(child_path, "_result.json")
+            child = QTreeWidgetItem([name])
+            child.setData(0, Qt.UserRole, child_path)
+            if os.path.isfile(result_json):
+                rate = self._sim_eval_read_rate(result_json)
+                child.setText(0, f"{name}  (sr={rate})")
+                child.setData(0, Qt.UserRole + 1, "run")
+            else:
+                child.setData(0, Qt.UserRole + 1, "dir")
+                child.addChild(QTreeWidgetItem(["…"]))
+            item.addChild(child)
+
+    def _on_sim_eval_selection_changed(
+        self, current: Optional[QTreeWidgetItem], _previous: Optional[QTreeWidgetItem]
+    ) -> None:
+        self.sim_eval_detail_edit.clear()
+        outcome_kw = self._sim_eval_outcome_keyword()
+        if not outcome_kw:
+            self.sim_eval_files_list.clear()
+        if current is None:
+            return
+        path = str(current.data(0, Qt.UserRole) or "")
+        if not path:
+            return
+        kind = str(current.data(0, Qt.UserRole + 1) or "")
+        result_json = os.path.join(path, "_result.json")
+        if kind != "run" and not os.path.isfile(result_json):
+            if not outcome_kw:
+                self.sim_eval_detail_edit.setPlainText(path)
+            return
+        lines: List[str] = [path, ""]
+        if os.path.isfile(result_json):
+            try:
+                with open(result_json, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                lines.append(json.dumps(data, ensure_ascii=False, indent=2))
+            except Exception as exc:
+                lines.append(f"读取 _result.json 失败: {exc}")
+        else:
+            lines.append("(无 _result.json)")
+        self.sim_eval_detail_edit.setPlainText("\n".join(lines))
+        # 已按 success/failed 全局列出时，保留扫描结果，不按当前目录覆盖
+        if outcome_kw:
+            return
+        try:
+            files = sorted(os.listdir(path))
+        except OSError:
+            files = []
+        for name in files:
+            if not name.lower().endswith((".mp4", ".avi", ".mkv", ".webm")):
+                continue
+            item = QListWidgetItem(name)
+            item.setData(Qt.UserRole, os.path.join(path, name))
+            self.sim_eval_files_list.addItem(item)
+        if self.sim_eval_files_list.count() > 0:
+            self.sim_eval_files_list.setCurrentRow(0)
+
+    def _on_sim_eval_open_dir_clicked(self) -> None:
+        item = self.sim_eval_tree.currentItem()
+        path = ""
+        if item is not None:
+            path = str(item.data(0, Qt.UserRole) or "")
+        if not path or not os.path.isdir(path):
+            path = self._sim_eval_root_path()
+        if not os.path.isdir(path):
+            self.status_bar.showMessage(f"目录不存在: {path}", 4000)
+            return
+        try:
+            subprocess.Popen(["xdg-open", path], start_new_session=True)
+        except Exception as exc:
+            self.status_bar.showMessage(f"打开目录失败: {exc}", 5000)
+
+    def _on_sim_eval_open_video_clicked(self) -> None:
+        item = self.sim_eval_files_list.currentItem()
+        if item is None and self.sim_eval_files_list.count() > 0:
+            self.sim_eval_files_list.setCurrentRow(0)
+            item = self.sim_eval_files_list.currentItem()
+        if item is None:
+            self.status_bar.showMessage("请先在右侧列表选择一个视频", 3000)
+            return
+        path = str(item.data(Qt.UserRole) or "")
+        if not path or not os.path.isfile(path):
+            self.status_bar.showMessage("视频文件不存在", 3000)
+            return
+        # 内置播放器（不依赖系统默认关联）
+        try:
+            dlg = SimEvalVideoDialog(path, self)
+            dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+            dlg.show()
+            self.status_bar.showMessage(f"播放: {os.path.basename(path)}", 3000)
+            return
+        except Exception as exc:
+            self.status_bar.showMessage(f"内置播放失败: {exc}", 4000)
+        # 回退 ffplay / xdg-open
+        candidates: List[List[str]] = []
+        ffplay = shutil.which("ffplay")
+        if ffplay:
+            candidates.append(
+                [ffplay, "-autoexit", "-window_title", os.path.basename(path), path]
+            )
+        if shutil.which("xdg-open"):
+            candidates.append(["xdg-open", path])
+        for cmd in candidates:
+            try:
+                subprocess.Popen(cmd, start_new_session=True)
+                self.status_bar.showMessage(f"已用 {cmd[0]} 打开视频", 3000)
+                return
+            except Exception:
+                continue
+        self.status_bar.showMessage("无法播放视频（内置与外部播放器均失败）", 5000)
+
+    def _append_real_eval_log(self, line: str) -> None:
+        self.real_eval_log_edit.append(line)
+        scrollbar = self.real_eval_log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _refresh_real_eval_status(self) -> None:
+        cams = 0
+        try:
+            names = list(dict(self.node.get_topic_names_and_types()))
+            cams = sum(1 for t in names if t.startswith("/camera") and t.endswith("_color"))
+        except Exception:
+            names = []
+        arm = self.node.get_arm_enable_label()
+        hand = (
+            f"手: {'已使能' if self.node.is_hand_enabled() else '未使能'}"
+        )
+        mode = self.node.get_control_mode_label()
+        parts = [
+            f"/camera*_color={cams}",
+            arm,
+            hand,
+            mode,
+        ]
+        if self._real_eval_active:
+            parts.append("评测中")
+            self.real_eval_status_label.setText("状态: 评测中")
+            self.real_eval_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.real_eval_status_label.setText("状态: 未开始")
+            self.real_eval_status_label.setStyleSheet("")
+        self.real_eval_ready_label.setText("  |  ".join(parts))
+
+    def _on_real_eval_start_clicked(self) -> None:
+        warnings: List[str] = []
+        try:
+            names = list(dict(self.node.get_topic_names_and_types()))
+            cams = sum(1 for t in names if t.startswith("/camera") and t.endswith("_color"))
+            if cams <= 0:
+                warnings.append("未发现 /camera/*_color topic（确认相机/栈是否在同一 ROS_DOMAIN）")
+        except Exception as exc:
+            warnings.append(f"topic 查询失败: {exc}")
+        if not self.node.is_arm_enabled():
+            warnings.append("手臂未使能")
+        if not self.node.is_hand_enabled():
+            warnings.append("手部未使能")
+        task = self.real_eval_task_edit.text().strip()
+        if warnings:
+            for w in warnings:
+                self._append_real_eval_log(f"[就绪检查] {w}")
+            self.status_bar.showMessage("真机评测：存在未就绪项，请查看日志", 5000)
+        else:
+            self._append_real_eval_log("[就绪检查] OK")
+        self._real_eval_active = True
+        self.real_eval_start_btn.setEnabled(False)
+        self.real_eval_stop_btn.setEnabled(True)
+        self.real_eval_task_edit.setEnabled(False)
+        if not self._real_eval_timer.isActive():
+            self._real_eval_timer.start()
+        msg = f"开始真机评测" + (f"：{task}" if task else "")
+        self._append_real_eval_log(f"--- {msg} ---")
+        self.status_bar.showMessage(msg, 4000)
+        self._refresh_real_eval_status()
+
+    def _on_real_eval_stop_clicked(self) -> None:
+        if not self._real_eval_active:
+            return
+        self._real_eval_active = False
+        self.real_eval_start_btn.setEnabled(True)
+        self.real_eval_stop_btn.setEnabled(False)
+        self.real_eval_task_edit.setEnabled(True)
+        self._real_eval_timer.stop()
+        self._append_real_eval_log("--- 真机评测已停止 ---")
+        self.status_bar.showMessage("真机评测已停止", 3000)
+        self._refresh_real_eval_status()
+
+    def _on_real_eval_clear_log_clicked(self) -> None:
+        self.real_eval_log_edit.clear()
+
     def _init_qwen_deploy_controller(self) -> None:
         """测试 Tab 挂载共享推理控制器（测试工作室为独立窗口，见 test_studio/run_test_studio.sh）。"""
         if EAI_DIR not in sys.path:
@@ -11992,6 +13692,33 @@ class CameraTopicWindow(QMainWindow):
         self._test_selected_scenario = title
         for name, label in self._test_image_labels.items():
             label.set_selected(name == title)
+
+    def _toggle_workspace_panel(self) -> None:
+        """折叠 / 展开下方工作区（Topic + 图像预览 + AI 对话）。"""
+        if not self._workspace_collapsed:
+            self._workspace_body.hide()
+            self._workspace_title_label.setText("工作区已折叠")
+            self._workspace_toggle_btn.setText("展开")
+            self._workspace_toggle_btn.setToolTip("展开 Topic / 图像预览 / AI 对话")
+            self._workspace_panel.setMaximumHeight(40)
+            self._workspace_panel.setMinimumHeight(36)
+            self._workspace_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self._workspace_collapsed = True
+            if getattr(self, "status_bar", None) is not None:
+                self.status_bar.showMessage("已折叠工作区", 2000)
+        else:
+            self._workspace_body.show()
+            self._workspace_title_label.setText("Topic / 图像预览 / AI 对话")
+            self._workspace_toggle_btn.setText("折叠")
+            self._workspace_toggle_btn.setToolTip("折叠下方工作区（Topic、图像预览、AI 对话）")
+            self._workspace_panel.setMaximumHeight(16777215)
+            self._workspace_panel.setMinimumHeight(0)
+            self._workspace_panel.setSizePolicy(
+                QSizePolicy.Expanding, QSizePolicy.Expanding
+            )
+            self._workspace_collapsed = False
+            if getattr(self, "status_bar", None) is not None:
+                self.status_bar.showMessage("已展开工作区", 2000)
 
     def _on_chat_attached_image_changed(self, path: str) -> None:
         if not path:
@@ -12389,8 +14116,14 @@ class CameraTopicWindow(QMainWindow):
             self.test_qwen_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
         elif starting:
             label = self._local_qwen_launcher.last_model_label()
-            self.test_qwen_status_label.setText(f"服务: 启动中（加载 {label}）…")
+            self.test_qwen_status_label.setText(
+                f"服务: 启动中（加载 {label}，约 1–3 分钟）…"
+            )
             self.test_qwen_status_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+            self.test_qwen_status_label.setToolTip(
+                "正在向 GPU 加载权重；端口就绪前 / 加载完成前状态会保持「启动中」。\n"
+                "日志: log/local_qwen_service.log"
+            )
         elif hostctl_error and not healthy:
             short = hostctl_error if len(hostctl_error) <= 80 else hostctl_error[:77] + "…"
             self.test_qwen_status_label.setText(f"服务: 启动失败 · {short}")
@@ -13103,11 +14836,21 @@ class CameraTopicWindow(QMainWindow):
         self._ui_timer.stop()
         self._sam3_health_timer.stop()
         self._fp_health_timer.stop()
+        if hasattr(self, "_sim_frame_timer"):
+            self._sim_frame_timer.stop()
         self._stack_launcher.shutdown()
         self._replay_launcher.shutdown()
+        if getattr(self, "ctx_video_player", None) is not None:
+            self.ctx_video_player.close_video()
+        self._stop_ctx_rerun_embed()
         self._local_ai_launcher.shutdown()
         self._train_launcher.shutdown()
         self._cad_launcher.shutdown()
+        self._sim_bridge_launcher.shutdown()
+        self._sim_eval_launcher.shutdown()
+        if getattr(self, "_real_eval_timer", None) is not None:
+            self._real_eval_timer.stop()
+        self._real_eval_active = False
         self._local_qwen_launcher.shutdown()
         self._remote_qwen_launcher.shutdown()
         for panel in self.panels.values():
@@ -13161,7 +14904,10 @@ class CameraTopicWindow(QMainWindow):
                 f"文件不存在：\n{path}",
             )
             return
+        self._start_rrd_replay(path, self.replay_count_spin.value())
 
+    def _start_rrd_replay(self, path: str, loop_count: int) -> bool:
+        """启动 RRD 回放（回放页 / 上下文学习共用）。成功返回 True。"""
         robot, stack = self._stack_launcher.get_cached_status()
         if stack != "运行中":
             if self.node.is_hal_arm_ready() or robot in ("就绪", "启动中"):
@@ -13180,7 +14926,7 @@ class CameraTopicWindow(QMainWindow):
                     QMessageBox.No,
                 )
                 if reply != QMessageBox.Yes:
-                    return
+                    return False
 
         warnings = self.node.prepare_for_rrd_replay()
         if warnings:
@@ -13195,15 +14941,262 @@ class CameraTopicWindow(QMainWindow):
             )
             if reply != QMessageBox.Yes:
                 self.node._stop_replay_prep_mode_timer()
-                return
+                return False
 
-        self._replay_launcher.start(
-            path, loop_count=self.replay_count_spin.value()
-        )
+        self._replay_launcher.start(path, loop_count=loop_count)
+        self._update_replay_ui()
+        self._update_ctx_ui()
+        return self._replay_launcher.is_running()
 
     def _on_replay_stop_clicked(self) -> None:
         if self._replay_launcher.is_running():
             self._replay_launcher.stop()
+        self._update_ctx_ui()
+
+    def _ctx_default_media_dir(self) -> str:
+        if self._ctx_video_path and os.path.isfile(self._ctx_video_path):
+            return os.path.dirname(self._ctx_video_path)
+        if os.path.isfile(CTX_DEFAULT_VIDEO_PATH):
+            return os.path.dirname(CTX_DEFAULT_VIDEO_PATH)
+        repo_datasets = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "datasets"
+        )
+        if os.path.isdir(repo_datasets):
+            return repo_datasets
+        d = default_rrd_dataset_dir()
+        return d if os.path.isdir(d) else os.path.expanduser("~")
+
+    def _load_ctx_default_video(self) -> None:
+        path = CTX_DEFAULT_VIDEO_PATH
+        if not os.path.isfile(path):
+            return
+        self._ctx_video_path = path
+        self.ctx_video_path_edit.setText(path)
+        self.ctx_video_path_edit.setToolTip(path)
+        self.ctx_video_player.load(path)
+        sibling = self._ctx_find_sibling(path, (".rrd",))
+        if sibling:
+            self._ctx_rrd_path = sibling
+            self.ctx_rrd_path_edit.setText(sibling)
+            self.ctx_rrd_path_edit.setToolTip(sibling)
+
+    def _ctx_find_sibling(self, path: str, exts: tuple[str, ...]) -> str:
+        stem, _ = os.path.splitext(path)
+        for ext in exts:
+            candidate = stem + ext
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+        parent = os.path.dirname(path)
+        base = os.path.basename(stem)
+        try:
+            for name in os.listdir(parent):
+                lower = name.lower()
+                if not any(lower.endswith(e.lower()) for e in exts):
+                    continue
+                if os.path.splitext(name)[0] == base or base in os.path.splitext(name)[0]:
+                    full = os.path.join(parent, name)
+                    if os.path.isfile(full):
+                        return os.path.abspath(full)
+        except OSError:
+            pass
+        return ""
+
+    def _on_ctx_select_video_clicked(self) -> None:
+        if self._replay_launcher.is_running():
+            return
+        initial = self._ctx_default_media_dir()
+        if self._ctx_video_path and os.path.isfile(self._ctx_video_path):
+            initial = os.path.dirname(self._ctx_video_path)
+        video_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择演示视频",
+            initial,
+            "Video Files (*.mp4 *.avi *.mkv *.webm);;All Files (*)",
+        )
+        if not video_path:
+            return
+        resolved = os.path.abspath(os.path.expanduser(video_path))
+        self._ctx_video_path = resolved
+        self.ctx_video_path_edit.setText(resolved)
+        self.ctx_video_path_edit.setToolTip(resolved)
+        if not self.ctx_video_player.load(resolved):
+            QMessageBox.warning(self, "上下文学习", f"无法打开视频：\n{resolved}")
+        if not (self._ctx_rrd_path and os.path.isfile(self._ctx_rrd_path)):
+            sibling = self._ctx_find_sibling(resolved, (".rrd",))
+            if sibling:
+                self._ctx_rrd_path = sibling
+                self.ctx_rrd_path_edit.setText(sibling)
+                self.ctx_rrd_path_edit.setToolTip(sibling)
+                self.status_bar.showMessage(f"已自动配对 RRD: {os.path.basename(sibling)}", 5000)
+        self._update_ctx_ui()
+
+    def _on_ctx_select_rrd_clicked(self) -> None:
+        if self._replay_launcher.is_running():
+            return
+        initial = self._ctx_default_media_dir()
+        if self._ctx_rrd_path and os.path.isfile(self._ctx_rrd_path):
+            initial = os.path.dirname(self._ctx_rrd_path)
+        rrd_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择配对 RRD 轨迹",
+            initial,
+            "RRD Files (*.rrd);;All Files (*)",
+        )
+        if not rrd_path:
+            return
+        resolved = resolve_rrd_path(rrd_path)
+        self._ctx_rrd_path = resolved
+        self.ctx_rrd_path_edit.setText(resolved)
+        self.ctx_rrd_path_edit.setToolTip(resolved)
+        if not (self._ctx_video_path and os.path.isfile(self._ctx_video_path)):
+            sibling = self._ctx_find_sibling(
+                resolved, (".mp4", ".avi", ".mkv", ".webm")
+            )
+            if sibling:
+                self._ctx_video_path = sibling
+                self.ctx_video_path_edit.setText(sibling)
+                self.ctx_video_path_edit.setToolTip(sibling)
+                self.ctx_video_player.load(sibling)
+                self.status_bar.showMessage(
+                    f"已自动配对视频: {os.path.basename(sibling)}", 5000
+                )
+        self._update_ctx_ui()
+
+    def _on_ctx_rerun_clicked(self) -> None:
+        path = (self._ctx_rrd_path or "").strip()
+        if not path or not os.path.isfile(path):
+            QMessageBox.information(
+                self,
+                "Rerun 播放",
+                "请先选择有效的 .rrd 文件。",
+            )
+            return
+        if not self._open_rrd_in_native_rerun(path):
+            return
+        argv = resolve_rerun_argv() or ["rerun"]
+        cmd_preview = " ".join(shlex.quote(x) for x in list(argv) + [path])
+        self.ctx_rerun_title.setText(f"Rerun · {os.path.basename(path)}")
+        self.ctx_rerun_placeholder.setText(
+            "已用 rerun-sdk 原生 Viewer 打开。\n\n"
+            f"文件:\n{path}\n\n"
+            f"命令:\n{cmd_preview}"
+        )
+
+    def _open_rrd_in_native_rerun(self, path: str) -> bool:
+        argv = resolve_rerun_argv()
+        if not argv:
+            QMessageBox.warning(
+                self,
+                "Rerun 播放",
+                "未找到 Rerun。请安装 rerun-sdk，或设置 RERUN_BIN。\n"
+                "例如: pip install rerun-sdk",
+            )
+            return False
+        cmd = list(argv) + [path]
+        ok = QProcess.startDetached(cmd[0], cmd[1:])
+        if not ok:
+            quoted = " ".join(shlex.quote(x) for x in cmd)
+            ok = QProcess.startDetached("bash", ["-lc", quoted])
+        if ok:
+            self.status_bar.showMessage(
+                f"已启动 rerun-sdk: {os.path.basename(path)}",
+                6000,
+            )
+            return True
+        QMessageBox.warning(
+            self,
+            "Rerun 播放",
+            "启动 Rerun 失败：\n" + " ".join(cmd),
+        )
+        return False
+
+    def _stop_ctx_rerun_embed(self) -> None:
+        # 兼容关闭窗口时清理；原生 Viewer 为独立进程，此处仅复位面板文案
+        if getattr(self, "ctx_rerun_title", None) is not None:
+            self.ctx_rerun_title.setText("Rerun（rerun-sdk）")
+        if getattr(self, "ctx_rerun_placeholder", None) is not None:
+            self.ctx_rerun_placeholder.setText(
+                "选择 .rrd 后点「Rerun 播放」，\n"
+                "将用 rerun-sdk 原生 Viewer 打开该文件。\n\n"
+                "等价命令: rerun <file.rrd>"
+            )
+
+    def _on_ctx_sync_start_clicked(self) -> None:
+        if self._replay_launcher.is_running():
+            return
+        video = (self._ctx_video_path or "").strip()
+        rrd = (self._ctx_rrd_path or "").strip()
+        if not video or not os.path.isfile(video):
+            QMessageBox.information(
+                self,
+                "上下文学习",
+                "请先选择演示视频。",
+            )
+            return
+        if not rrd or not os.path.isfile(rrd):
+            QMessageBox.information(
+                self,
+                "上下文学习",
+                "请先选择配对的 .rrd 轨迹文件。\n"
+                "机器人跟做依赖关节回放；纯 RGB 视频无法驱臂。",
+            )
+            return
+        if not self.ctx_video_player.is_open():
+            if not self.ctx_video_player.load(video):
+                QMessageBox.warning(self, "上下文学习", f"无法打开视频：\n{video}")
+                return
+        if not self._start_rrd_replay(rrd, self.ctx_loop_spin.value()):
+            return
+        self.ctx_video_player.restart()
+        self.status_bar.showMessage(
+            f"上下文学习：视频 + RRD 同步开始（{os.path.basename(rrd)}）",
+            6000,
+        )
+        self._update_ctx_ui()
+
+    def _on_ctx_stop_clicked(self) -> None:
+        if getattr(self, "ctx_video_player", None) is not None:
+            self.ctx_video_player.pause()
+        if self._replay_launcher.is_running():
+            self._replay_launcher.stop()
+        self.ctx_status_label.setText("状态: 已停止")
+        self._update_ctx_ui()
+
+    def _update_ctx_ui(self, *_args) -> None:
+        if not hasattr(self, "ctx_sync_start_btn"):
+            return
+        node_running = self._replay_launcher.is_running()
+        has_video = bool((self._ctx_video_path or "").strip()) and os.path.isfile(
+            self._ctx_video_path or ""
+        )
+        has_rrd = bool((self._ctx_rrd_path or "").strip()) and os.path.isfile(
+            self._ctx_rrd_path or ""
+        )
+        self.ctx_select_video_btn.setEnabled(not node_running)
+        self.ctx_select_rrd_btn.setEnabled(not node_running)
+        self.ctx_rerun_btn.setEnabled(has_rrd)
+        self.ctx_loop_spin.setEnabled(not node_running)
+        self.ctx_sync_start_btn.setEnabled(not node_running and has_video and has_rrd)
+        self.ctx_stop_btn.setEnabled(
+            node_running
+            or (
+                getattr(self, "ctx_video_player", None) is not None
+                and self.ctx_video_player.is_playing()
+            )
+        )
+        if node_running:
+            label = self.node.get_replay_state_label()
+            completed, total = self._replay_launcher.get_loop_progress()
+            loop_hint = f" [{min(completed + 1, total)}/{total}]" if total > 1 else ""
+            self.ctx_status_label.setText(f"状态: 同步中 · {label}{loop_hint}")
+        elif has_video and has_rrd:
+            self.ctx_status_label.setText("状态: 已就绪（可同步开始）")
+        elif has_video:
+            self.ctx_status_label.setText("状态: 已选视频（需配对 RRD）")
+        elif has_rrd:
+            self.ctx_status_label.setText("状态: 已选 RRD（需选视频）")
+        else:
+            self.ctx_status_label.setText("状态: 未开始")
 
     def _update_replay_rrd_path_display(self, path: str) -> None:
         text = (path or "").strip()
@@ -13236,6 +15229,7 @@ class CameraTopicWindow(QMainWindow):
         self.replay_select_btn.setEnabled(not node_running)
         self.replay_start_btn.setEnabled(not node_running and has_path)
         self.replay_stop_btn.setEnabled(node_running)
+        self._update_ctx_ui()
 
         if state == 1:
             color = "#50fa7b"
@@ -14913,6 +16907,11 @@ def main() -> int:
     args = parse_args()
     configure_qt_ime_for_chinese()
     rclpy.init()
+
+    # QWebEngineView 需要在创建 QApplication 前设置
+    from PyQt5.QtCore import QCoreApplication
+
+    QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")

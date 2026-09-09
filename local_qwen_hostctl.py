@@ -202,11 +202,16 @@ def start_service(opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         env = os.environ.copy()
         env.setdefault("LOCAL_QWEN_HOST", "0.0.0.0")
         env.setdefault("LOCAL_QWEN_PORT", str(QWEN_PORT))
-        # 宿主机绝对路径，避免 Docker 内 HOME=/root 找不到 conda
-        env.setdefault(
-            "LOCAL_QWEN_PYTHON",
-            os.path.expanduser("~/miniconda3/envs/psi-policy/bin/python"),
-        )
+        # 宿主机绝对路径；空字符串也覆盖（setdefault 不会覆盖已存在的空值）
+        default_py = "/home/psibot/miniconda3/envs/psi-policy/bin/python"
+        py = str(env.get("LOCAL_QWEN_PYTHON") or "").strip()
+        if not py or not os.path.isfile(py):
+            py = default_py
+        env["LOCAL_QWEN_PYTHON"] = py
+        # 去掉 viewer/RoboStack 传入的 PYTHONPATH，否则 psi-policy 会误用其 numpy
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
+        env["PYTHONNOUSERSITE"] = "1"
         env["LOCAL_QWEN_MODEL_DIR"] = model_dir
         env["LOCAL_QWEN_MODEL_ID"] = normalized["model_id"]
         cmd = [
