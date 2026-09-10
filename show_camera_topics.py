@@ -760,7 +760,7 @@ LOCAL_QWEN_API_BASE_DEFAULT = os.environ.get(
 )
 LOCAL_QWEN_PYTHON_DEFAULT = os.environ.get(
     "LOCAL_QWEN_PYTHON",
-    "/home/psibot/miniconda3/envs/psi-policy/bin/python",
+    "/home/psibot/miniconda3/envs/eai/bin/python",
 )
 LOCAL_QWEN_CHAT_PRESET_NAME = "本地 Qwen 服务"
 # 远程部署主机列表：(id, 显示名)。路径细节在 remote_qwen_ctl.HOST_PROFILES

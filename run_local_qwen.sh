@@ -22,7 +22,7 @@ PORT="${LOCAL_QWEN_PORT:-8100}"
 HOST="${LOCAL_QWEN_HOST:-127.0.0.1}"
 MODEL_ID="${LOCAL_QWEN_MODEL_ID:-qwen3.5-4b}"
 # 绝对路径默认值，避免依赖 HOME / 空的 LOCAL_QWEN_PYTHON
-DEFAULT_QWEN_PY="/home/psibot/miniconda3/envs/psi-policy/bin/python"
+DEFAULT_QWEN_PY="/home/psibot/miniconda3/envs/eai/bin/python"
 PY="${LOCAL_QWEN_PYTHON:-}"
 
 # viewer / hostctl 常带 RoboStack PYTHONPATH，会污染 psi-policy 的 numpy/torch
@@ -63,6 +63,8 @@ resolve_python() {
     "${PY}" \
     "${LOCAL_QWEN_PYTHON:-}" \
     "${DEFAULT_QWEN_PY}" \
+    "/home/psibot/miniconda3/envs/eai/bin/python" \
+    "${HOME}/miniconda3/envs/eai/bin/python" \
     "${PSIBOT_HOME:+${PSIBOT_HOME}/miniconda3/envs/psi-policy/bin/python}" \
     "${HOME}/miniconda3/envs/psi-policy/bin/python" \
     "/home/psibot/miniconda3/envs/robotics/bin/python" \
