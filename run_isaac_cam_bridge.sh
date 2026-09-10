@@ -49,6 +49,30 @@ run_native() {
   exec "${py}" "${EAI_DIR_HOST}/isaac_cam_ros_bridge.py" --dir "${ISAAC_CAM_BRIDGE_DIR}" "$@"
 }
 
+run_robostack() {
+  # run_local.sh 使用 RoboStack Humble（无 /opt/ros/humble、也无 a2d 容器）
+  local env="${ROS_HUMBLE_CONDA:-/share_data/projects/mahjong/share/personal/liyichao/envs/ros-humble}"
+  local py="${env}/bin/python"
+  if [[ ! -x "${py}" ]]; then
+    echo "错误: RoboStack python 不存在: ${py}" >&2
+    exit 1
+  fi
+  export CONDA_PREFIX="${env}"
+  export PATH="${env}/bin:${PATH}"
+  # shellcheck disable=SC1091
+  set +u
+  # shellcheck source=/dev/null
+  source "${env}/setup.bash"
+  set -e
+  echo ">>> 模式: RoboStack Humble (${env})"
+  echo ">>> ISAAC_CAM_BRIDGE_DIR=${ISAAC_CAM_BRIDGE_DIR}"
+  echo ">>> ROS_DOMAIN_ID=${ROS_DOMAIN_ID}  ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY}"
+  echo ">>> 发布: /camera/head_color /camera/left_wrist_color /camera/right_wrist_color"
+  # 与 viewer 同 domain；本地预览主要靠 .npy 直读，ROS 桥作旁路
+  exec "${py}" "${EAI_DIR_HOST}/isaac_cam_ros_bridge.py" \
+    --dir "${ISAAC_CAM_BRIDGE_DIR}" --qos-best-effort "$@"
+}
+
 run_in_container() {
   if ! command -v docker >/dev/null 2>&1; then
     echo "错误: 未找到 ROS2 Humble，且没有 docker 可用" >&2
@@ -98,6 +122,8 @@ run_in_container() {
 
 if [[ -f /opt/ros/humble/setup.bash ]]; then
   run_native "$@"
+elif [[ -f "${ROS_HUMBLE_CONDA:-/share_data/projects/mahjong/share/personal/liyichao/envs/ros-humble}/setup.bash" ]]; then
+  run_robostack "$@"
 else
   run_in_container "$@"
 fi

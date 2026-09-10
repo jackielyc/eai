@@ -71,7 +71,17 @@ import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 import rclpy
 from cv_bridge import CvBridge, CvBridgeError
-from PyQt5.QtCore import Qt, QProcess, QTimer, pyqtSignal, QObject, QPoint, QEvent, QUrl
+from PyQt5.QtCore import (
+    Qt,
+    QProcess,
+    QProcessEnvironment,
+    QTimer,
+    pyqtSignal,
+    QObject,
+    QPoint,
+    QEvent,
+    QUrl,
+)
 from PyQt5.QtGui import QCloseEvent, QFont, QImage, QMouseEvent, QPixmap, QPalette, QColor
 from PyQt5.QtWidgets import (
     QApplication,
@@ -621,6 +631,13 @@ ISAAC_CAM_BRIDGE_KEYS: Tuple[str, ...] = (
     "cam_left_wrist",
     "cam_right_wrist",
 )
+# 仿真评测预览：左腕 → 头部 → 右腕（与图像预览网格顺序一致）
+SIM_PREVIEW_CAM_TOPICS: Tuple[Tuple[str, str], ...] = (
+    ("cam_left_wrist", "/camera/left_wrist_color"),
+    ("cam_head", "/camera/head_color"),
+    ("cam_right_wrist", "/camera/right_wrist_color"),
+)
+SIM_PREVIEW_TOPICS: Tuple[str, ...] = tuple(topic for _, topic in SIM_PREVIEW_CAM_TOPICS)
 ROBODOJO_EVAL_RESULT_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/eval_result/RoboDojo"
 )
@@ -631,12 +648,74 @@ ROBODOJO_ENV_DEFAULT = (
 ROBODOJO_STARVLA_ENV_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/envs/starvla"
 )
+ROBODOJO_STARVLA_HF_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/starvla_hf"
+)
+ROBODOJO_STARVLA_BASE_VLM_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/models/"
+    "Qwen3-VL-4B-Instruct"
+)
 ROBODOJO_GUI_EVAL_SCRIPT = os.path.join(
     ROBODOJO_ROOT_DEFAULT, "scripts", "run_gui_eval.sh"
+)
+ROBODOJO_GUI_STARVLA_SCRIPT = os.path.join(
+    ROBODOJO_ROOT_DEFAULT, "scripts", "run_gui_starvla_pi_v3.sh"
+)
+ROBODOJO_STARVLA_HF_EVAL_SCRIPT = os.path.join(
+    ROBODOJO_ROOT_DEFAULT,
+    "XPolicyLab",
+    "policy",
+    "starVLA",
+    "scripts",
+    "eval_hf_robodojo.sh",
 )
 ROBODOJO_TASK_CONFIG_DIR = os.path.join(
     ROBODOJO_ROOT_DEFAULT, "task", "RoboDojo", "config"
 )
+
+
+def resolve_starvla_hf_variant(ckpt: str) -> str:
+    """Map UI ckpt label → eval_hf_robodojo variant (oft|groot|pi_v3)."""
+    key = (ckpt or "").strip().lower().replace("-", "_")
+    if not key or key in ("demo", "default"):
+        return "pi_v3"
+    if "oft" in key:
+        return "oft"
+    if "groot" in key or "gr00t" in key:
+        return "groot"
+    if "pi" in key or "qwenpi" in key:
+        return "pi_v3"
+    return "pi_v3"
+
+
+def resolve_starvla_ckpt_file(variant: str = "pi_v3") -> str:
+    """Locate materialized HF .pt under STARVLA_HF_ROOT/<variant>/checkpoints/."""
+    env_override = os.environ.get("STARVLA_CKPT_PATH", "").strip()
+    if env_override and os.path.isfile(env_override):
+        return os.path.abspath(env_override)
+    hf_root = os.environ.get(
+        "STARVLA_HF_ROOT", ROBODOJO_STARVLA_HF_ROOT_DEFAULT
+    ).strip() or ROBODOJO_STARVLA_HF_ROOT_DEFAULT
+    ckpt_dir = os.path.join(hf_root, variant, "checkpoints")
+    if not os.path.isdir(ckpt_dir):
+        return ""
+    preferred = os.path.join(ckpt_dir, "steps_100000_pytorch_model.pt")
+    if os.path.isfile(preferred):
+        return preferred
+    candidates: List[str] = []
+    try:
+        for name in os.listdir(ckpt_dir):
+            lower = name.lower()
+            if lower.endswith((".pt", ".safetensors")):
+                candidates.append(os.path.join(ckpt_dir, name))
+    except OSError:
+        return ""
+    if not candidates:
+        return ""
+    candidates.sort()
+    return candidates[-1]
+
+
 WORKSPACE_DIR = os.path.dirname(EAI_DIR)
 LOCAL_QWEN_MODELS_ROOT = os.path.join(WORKSPACE_DIR, "models", "Qwen")
 LAKE_QWEN35_OUTPUT_ROOT = (
@@ -11213,7 +11292,7 @@ def list_robodojo_tasks() -> List[str]:
 
 
 class RoboDojoEvalLauncher(QObject):
-    """启动/停止 RoboDojo 单任务评测（scripts/run_gui_eval.sh）。"""
+    """启动/停止 RoboDojo 单任务评测（GUI: run_gui_eval.sh / headless: robodojo.sh eval）。"""
 
     log_line = pyqtSignal(str)
     status_message = pyqtSignal(str)
@@ -11222,9 +11301,17 @@ class RoboDojoEvalLauncher(QObject):
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._process: Optional[QProcess] = None
+        self._pgid: Optional[int] = None
+        self._stopping = False
+        self._use_gui = True
 
     def is_running(self) -> bool:
-        return self._process is not None and self._process.state() == QProcess.Running
+        if self._stopping:
+            return True
+        if self._process is None:
+            return False
+        # start() 后短暂处于 Starting，也要算运行中，否则「停止」按钮会被立刻禁用
+        return self._process.state() in (QProcess.Starting, QProcess.Running)
 
     def start(
         self,
@@ -11238,6 +11325,7 @@ class RoboDojoEvalLauncher(QObject):
         eval_env: str = "",
         robodojo_root: str = "",
         display: str = "",
+        use_gui: bool = True,
     ) -> None:
         if self.is_running():
             self.status_message.emit("RoboDojo 评测已在运行")
@@ -11249,10 +11337,6 @@ class RoboDojoEvalLauncher(QObject):
         root = os.path.abspath(
             os.path.expanduser(robodojo_root or ROBODOJO_ROOT_DEFAULT)
         )
-        script = os.path.join(root, "scripts", "run_gui_eval.sh")
-        if not os.path.isfile(script):
-            self.status_message.emit(f"未找到脚本: {script}")
-            return
         eval_env = os.path.abspath(
             os.path.expanduser(eval_env or ROBODOJO_ENV_DEFAULT)
         )
@@ -11261,54 +11345,263 @@ class RoboDojoEvalLauncher(QObject):
         )
         bridge_dir = os.path.abspath(os.path.expanduser((bridge_dir or "").strip()))
         disp = (display or os.environ.get("DISPLAY") or ":1.0").strip()
+        self._use_gui = bool(use_gui)
+        is_starvla = "starVLA" in policy_dir or "starvla" in policy_dir.lower()
+
+        # Viewer (RoboStack) injects ros-humble into PYTHONPATH; that makes
+        # transformers see numpy version as None inside starvla/RoboDojo envs.
+        # demo_policy's setup_eval_policy_server.sh also needs CONDA_ROOT when
+        # `conda` is not on PATH (path-prefix envs still expand conda info --base).
+        # /tmp/isaaclab is often root-owned (755) here → IsaacLab FileHandler
+        # PermissionError; mirror run_gui_eval.sh and use /dev/shm TMPDIR.
+        conda_base = "/home/psibot/miniconda3"
+        tmpdir = "/dev/shm/robodojo_tmp"
         exports = [
-            f"export OMNI_KIT_ACCEPT_EULA=YES PYTHONUNBUFFERED=1",
+            "unset PYTHONPATH PYTHONHOME || true",
+            "export PYTHONNOUSERSITE=1 OMNI_KIT_ACCEPT_EULA=YES PYTHONUNBUFFERED=1",
+            f"export TMPDIR={shlex.quote(tmpdir)} TEMP={shlex.quote(tmpdir)} TMP={shlex.quote(tmpdir)}",
+            f"mkdir -p {shlex.quote(tmpdir)}/isaaclab/logs",
+            f"export CONDA_ROOT={shlex.quote(conda_base)}",
+            f"export CONDA_EXE={shlex.quote(os.path.join(conda_base, 'bin', 'conda'))}",
+            f"export PATH={shlex.quote(os.path.join(conda_base, 'bin'))}:\"${{PATH}}\"",
             f"export ROBODOJO_ENV={shlex.quote(eval_env)}",
             f"export ROBODOJO_POLICY_ENV={shlex.quote(policy_env)}",
             f"export ROBODOJO_POLICY_DIR={shlex.quote(policy_dir)}",
             f"export ROBODOJO_CKPT={shlex.quote(ckpt)}",
             f"export ROBODOJO_ACTION_TYPE={shlex.quote(action_type)}",
-            f"export ROBODOJO_DISPLAY={shlex.quote(disp)}",
-            f"export DISPLAY={shlex.quote(disp)}",
+            "unset RANK WORLD_SIZE LOCAL_RANK LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT "
+            "GROUP_RANK ROLE_RANK TORCHELASTIC_RUN_ID PMI_RANK PMI_SIZE 2>/dev/null || true",
         ]
         if bridge_dir:
             exports.append(f"export ISAAC_CAM_BRIDGE_DIR={shlex.quote(bridge_dir)}")
             exports.append(f"export EAI_DIR={shlex.quote(EAI_DIR)}")
-        cmd = (
-            " && ".join(exports)
-            + f" && cd {shlex.quote(root)}"
-            + f" && exec bash {shlex.quote(script)} {shlex.quote(task)}"
-        )
+
+        starvla_ckpt_note = ""
+        if is_starvla:
+            variant = resolve_starvla_hf_variant(ckpt)
+            ckpt_path = resolve_starvla_ckpt_file(variant)
+            if not ckpt_path:
+                msg = (
+                    f"未找到 starVLA HF 权重（variant={variant}）。"
+                    f"请准备 {ROBODOJO_STARVLA_HF_ROOT_DEFAULT}/{variant}/checkpoints/*.pt"
+                    " 或设置 STARVLA_CKPT_PATH"
+                )
+                self.status_message.emit(msg)
+                self.log_line.emit(f"[ERROR] {msg}")
+                return
+            hf_root = (
+                os.environ.get("STARVLA_HF_ROOT", "").strip()
+                or ROBODOJO_STARVLA_HF_ROOT_DEFAULT
+            )
+            base_vlm = (
+                os.environ.get("STARVLA_BASE_VLM", "").strip()
+                or ROBODOJO_STARVLA_BASE_VLM_DEFAULT
+            )
+            exports.extend(
+                [
+                    f"export STARVLA_HF_ROOT={shlex.quote(hf_root)}",
+                    f"export STARVLA_BASE_VLM={shlex.quote(base_vlm)}",
+                    f"export STARVLA_CKPT_PATH={shlex.quote(ckpt_path)}",
+                    "export STARVLA_HF_VERIFY_ONLY=1",
+                    "export STARVLA_HF_SKIP_WEIGHT_HASH=1",
+                    "export STARVLA_ROBODOJO_NUM_ENVS=1",
+                    "export STARVLA_INCLUDE_STATE=True",
+                    "export STARVLA_UNNORM_KEY=arx_x5",
+                    f"export STARVLA_ROBODOJO_HEADLESS={'1' if not self._use_gui else '0'}",
+                ]
+            )
+            starvla_ckpt_note = f"  STARVLA_CKPT_PATH={ckpt_path}"
+            if self._use_gui:
+                gui_script = os.path.join(root, "scripts", "run_gui_starvla_pi_v3.sh")
+                if not os.path.isfile(gui_script):
+                    self.status_message.emit(f"未找到脚本: {gui_script}")
+                    return
+                exports.extend(
+                    [
+                        f"export ROBODOJO_DISPLAY={shlex.quote(disp)}",
+                        f"export DISPLAY={shlex.quote(disp)}",
+                    ]
+                )
+                run_cmd = f"exec bash {shlex.quote(gui_script)} {shlex.quote(task)}"
+                log_cmd = (
+                    f"$ bash scripts/run_gui_starvla_pi_v3.sh {task}  # GUI starVLA"
+                )
+                status_msg = f"正在启动 starVLA GUI 评测: {task}…"
+            else:
+                hf_eval = os.path.join(
+                    root,
+                    "XPolicyLab",
+                    "policy",
+                    "starVLA",
+                    "scripts",
+                    "eval_hf_robodojo.sh",
+                )
+                if not os.path.isfile(hf_eval):
+                    self.status_message.emit(f"未找到脚本: {hf_eval}")
+                    return
+                run_cmd = (
+                    f"exec bash {shlex.quote(hf_eval)} {shlex.quote(variant)} "
+                    f"{shlex.quote(task)} 0 0 0 "
+                    f"{shlex.quote(policy_env)} {shlex.quote(eval_env)} 1"
+                )
+                log_cmd = (
+                    f"$ bash …/eval_hf_robodojo.sh {variant} {task} … "
+                    f"# headless starVLA"
+                )
+                status_msg = f"正在启动 starVLA headless 评测: {task}…"
+        elif self._use_gui:
+            gui_script = os.path.join(root, "scripts", "run_gui_eval.sh")
+            if not os.path.isfile(gui_script):
+                self.status_message.emit(f"未找到脚本: {gui_script}")
+                return
+            exports.extend(
+                [
+                    f"export ROBODOJO_DISPLAY={shlex.quote(disp)}",
+                    f"export DISPLAY={shlex.quote(disp)}",
+                ]
+            )
+            run_cmd = f"exec bash {shlex.quote(gui_script)} {shlex.quote(task)}"
+            log_cmd = f"$ bash scripts/run_gui_eval.sh {task}  # GUI"
+            status_msg = f"正在启动 RoboDojo GUI 评测: {task}…"
+        else:
+            robodojo_sh = os.path.join(root, "scripts", "robodojo.sh")
+            if not os.path.isfile(robodojo_sh):
+                self.status_message.emit(f"未找到脚本: {robodojo_sh}")
+                return
+            run_cmd = (
+                f"exec bash {shlex.quote(robodojo_sh)} eval "
+                f"--policy-dir {shlex.quote(policy_dir)} "
+                f"--task {shlex.quote(task)} "
+                f"--ckpt {shlex.quote(ckpt)} "
+                f"--policy-env {shlex.quote(policy_env)} "
+                f"--eval-env {shlex.quote(eval_env)} "
+                f"--eval-num 1 "
+                f"--action-type {shlex.quote(action_type)} "
+                f"--seed 0"
+            )
+            log_cmd = (
+                f"$ bash scripts/robodojo.sh eval --task {task} "
+                f"--policy-dir {policy_dir} --ckpt {ckpt}  # headless"
+            )
+            status_msg = f"正在启动 RoboDojo headless 评测: {task}…"
+
+        cmd = " && ".join(exports) + f" && cd {shlex.quote(root)} && {run_cmd}"
+        self._stopping = False
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_process_output)
         proc.finished.connect(self._on_process_finished)
         proc.errorOccurred.connect(self._on_process_error)
         proc.setWorkingDirectory(root)
+        # Drop RoboStack PYTHONPATH at the process boundary (not only in bash).
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("TMPDIR", tmpdir)
+        qenv.insert("TEMP", tmpdir)
+        qenv.insert("TMP", tmpdir)
+        qenv.insert("CONDA_ROOT", conda_base)
+        qenv.insert("CONDA_EXE", os.path.join(conda_base, "bin", "conda"))
+        conda_bin = os.path.join(conda_base, "bin")
+        path_now = qenv.value("PATH", "")
+        if conda_bin not in path_now.split(":"):
+            qenv.insert("PATH", f"{conda_bin}:{path_now}" if path_now else conda_bin)
+        try:
+            os.makedirs(tmpdir, exist_ok=True)
+        except OSError:
+            pass
+        proc.setProcessEnvironment(qenv)
         proc.start("setsid", ["bash", "-lc", cmd])
         self._process = proc
+        self._pgid = None
+        if proc.waitForStarted(5000):
+            try:
+                self._pgid = int(proc.processId())
+            except Exception:
+                self._pgid = None
         self.running_changed.emit(True)
-        self.log_line.emit(f"$ bash scripts/run_gui_eval.sh {task}")
+        self.log_line.emit(log_cmd)
+        if starvla_ckpt_note:
+            self.log_line.emit(starvla_ckpt_note)
         self.log_line.emit(
-            f"  policy={policy_dir} ckpt={ckpt} action={action_type} "
+            f"  mode={'GUI' if self._use_gui else 'headless'} "
+            f"policy={policy_dir} ckpt={ckpt} action={action_type} "
             f"bridge={bridge_dir or '(unset)'}"
         )
-        self.status_message.emit(f"正在启动 RoboDojo 评测: {task}…")
+        self.status_message.emit(status_msg)
 
     def stop(self) -> None:
-        if not self.is_running():
+        if not self.is_running() and self._process is None:
             self.status_message.emit("当前没有运行中的 RoboDojo 评测")
             return
-        self.status_message.emit("正在停止 RoboDojo 评测…")
-        if self._process is not None:
-            self._process.terminate()
-            QTimer.singleShot(5000, self._force_kill_process)
+        if self._stopping:
+            self.status_message.emit("正在强制停止 RoboDojo 评测…")
+            self._force_kill_process()
+            return
+        self._stopping = True
+        self.status_message.emit("正在停止 RoboDojo 评测（可再次点击强制结束）…")
+        self.log_line.emit("--- 请求停止 RoboDojo 评测 ---")
+        self.running_changed.emit(True)  # 保持 UI「可停」状态
+        self._signal_process_group(signal.SIGTERM)
+        # 2s 后仍未退出则 SIGKILL 整组
+        QTimer.singleShot(2000, self._force_kill_process)
+
+    def _signal_process_group(self, sig: int) -> None:
+        pgid = self._pgid
+        if pgid is None and self._process is not None:
+            try:
+                pgid = int(self._process.processId())
+            except Exception:
+                pgid = None
+        if pgid and pgid > 1:
+            try:
+                os.killpg(pgid, sig)
+                return
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                self.log_line.emit(f"killpg({pgid}, {sig}) 失败: {exc}")
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            if sig == signal.SIGKILL:
+                self._process.kill()
+            else:
+                self._process.terminate()
+
+    @staticmethod
+    def _pkill_eval_leftovers() -> None:
+        """清理可能脱离会话的 Isaac / eval 残留（尽力而为）。"""
+        patterns = (
+            "scripts/run_gui_eval.sh",
+            "run_gui_eval.sh",
+            "run_gui_starvla_pi_v3.sh",
+            "eval_hf_robodojo.sh",
+            "scripts/robodojo.sh eval",
+            "isaacsim",
+            "isaac-sim",
+            "kit/kit ",
+        )
+        for pat in patterns:
+            try:
+                subprocess.run(
+                    ["pkill", "-f", pat],
+                    capture_output=True,
+                    timeout=2,
+                )
+            except Exception:
+                pass
 
     def shutdown(self) -> None:
-        if self._process is not None and self._process.state() == QProcess.Running:
-            self._process.terminate()
-            self._process.waitForFinished(3000)
+        self._stopping = True
+        self._signal_process_group(signal.SIGTERM)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.waitForFinished(2000)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._signal_process_group(signal.SIGKILL)
+            self._process.waitForFinished(1000)
         self._process = None
+        self._pgid = None
+        self._stopping = False
         self.running_changed.emit(False)
 
     def _on_process_output(self) -> None:
@@ -11322,9 +11615,15 @@ class RoboDojoEvalLauncher(QObject):
                 self.log_line.emit(line.rstrip())
 
     def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        was_stopping = self._stopping
         self._process = None
+        self._pgid = None
+        self._stopping = False
         self.running_changed.emit(False)
-        if exit_code == 0:
+        if was_stopping:
+            self.log_line.emit("--- RoboDojo 评测已停止 ---")
+            self.status_message.emit("RoboDojo 评测已停止")
+        elif exit_code == 0:
             self.log_line.emit("--- RoboDojo 评测正常结束 ---")
             self.status_message.emit("RoboDojo 评测已结束")
         else:
@@ -11336,9 +11635,24 @@ class RoboDojoEvalLauncher(QObject):
             self.status_message.emit(f"RoboDojo 评测进程错误: {error}")
 
     def _force_kill_process(self) -> None:
-        if self._process is not None and self._process.state() == QProcess.Running:
+        if not self._stopping and (
+            self._process is None or self._process.state() == QProcess.NotRunning
+        ):
+            return
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._signal_process_group(signal.SIGKILL)
+            try:
+                self._process.waitForFinished(1500)
+            except Exception:
+                pass
+        self._pkill_eval_leftovers()
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
             self._process.kill()
+        still = self._process is not None and self._process.state() != QProcess.NotRunning
+        if not still:
             self._process = None
+            self._pgid = None
+            self._stopping = False
             self.running_changed.emit(False)
             self.log_line.emit("--- RoboDojo 评测已被强制终止 ---")
             self.status_message.emit("RoboDojo 评测已强制停止")
@@ -11971,8 +12285,8 @@ class CameraTopicWindow(QMainWindow):
         sim_outer.setSpacing(6)
 
         sim_hint = QLabel(
-            "Isaac / RoboDojo 写共享帧目录 → 本页启动相机桥发布 /camera/*_color。"
-            " Isaac 侧需 export 同一 ISAAC_CAM_BRIDGE_DIR 后再开评测。"
+            "启动 RoboDojo 评测后，会自动启相机桥，并在「图像预览」显示左腕 / 头部 / 右腕实时画面"
+            "（共享目录 .npy → ROS /camera/*_color；预览同时直读 .npy，不依赖 topic 勾选时机）。"
         )
         sim_hint.setWordWrap(True)
         sim_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
@@ -12081,21 +12395,36 @@ class CameraTopicWindow(QMainWindow):
         sim_run_row.addWidget(QLabel("ckpt"))
         self.sim_eval_ckpt_edit = QLineEdit("demo")
         self.sim_eval_ckpt_edit.setFixedWidth(120)
-        self.sim_eval_ckpt_edit.setToolTip("checkpoint 名，如 demo / hf_qwenpi_v3")
+        self.sim_eval_ckpt_edit.setToolTip(
+            "checkpoint 名，如 demo / hf_qwenpi_v3。\n"
+            "starVLA 的 hf_qwenpi_v3 会自动映射到 "
+            "RoboDojo_cache/starvla_hf/pi_v3/checkpoints/*.pt"
+        )
         sim_run_row.addWidget(self.sim_eval_ckpt_edit)
         sim_run_row.addWidget(QLabel("action"))
         self.sim_eval_action_combo = ImeSafeComboBox()
         self.sim_eval_action_combo.addItem("ee", "ee")
         self.sim_eval_action_combo.addItem("joint", "joint")
         sim_run_row.addWidget(self.sim_eval_action_combo)
+        self.sim_eval_use_gui_check = QCheckBox("仿真界面")
+        self.sim_eval_use_gui_check.setChecked(False)
+        self.sim_eval_use_gui_check.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_use_gui_check.setToolTip(
+            "勾选：Isaac Sim GUI（starVLA→run_gui_starvla_pi_v3.sh，其它→run_gui_eval.sh）。\n"
+            "不勾选：headless（starVLA→eval_hf_robodojo.sh + STARVLA_CKPT_PATH，"
+            "其它→robodojo.sh eval；eval_policy 带 --headless，不弹仿真窗口）。"
+        )
+        sim_run_row.addWidget(self.sim_eval_use_gui_check)
         self.sim_eval_run_status = QLabel("评测: 空闲")
         self.sim_eval_run_status.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         sim_run_row.addWidget(self.sim_eval_run_status, 1)
         self.sim_eval_start_btn = QPushButton("启动评测")
         self.sim_eval_start_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_eval_start_btn.setToolTip(
-            "运行 scripts/run_gui_eval.sh <任务>\n"
-            "会导出当前共享目录为 ISAAC_CAM_BRIDGE_DIR"
+            "按「仿真界面」选项启动评测：\n"
+            "• 勾选 → scripts/run_gui_eval.sh（GUI）\n"
+            "• 不勾选 → scripts/robodojo.sh eval（headless）\n"
+            "GUI 模式会自动启相机桥并打开三路预览。"
         )
         self.sim_eval_start_btn.clicked.connect(self._on_sim_eval_start_clicked)
         sim_run_row.addWidget(self.sim_eval_start_btn)
@@ -12103,6 +12432,10 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_stop_run_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_eval_stop_run_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
         self.sim_eval_stop_run_btn.setEnabled(False)
+        self.sim_eval_stop_run_btn.setToolTip(
+            "随时停止当前评测（含 Isaac / policy 子进程）。\n"
+            "首次点击发 SIGTERM；若未退出可再点一次强制 SIGKILL。"
+        )
         self.sim_eval_stop_run_btn.clicked.connect(self._on_sim_eval_stop_run_clicked)
         sim_run_row.addWidget(self.sim_eval_stop_run_btn)
         sim_outer.addLayout(sim_run_row)
@@ -12212,6 +12545,14 @@ class CameraTopicWindow(QMainWindow):
         self._sim_frame_timer = QTimer(self)
         self._sim_frame_timer.setInterval(2000)
         self._sim_frame_timer.timeout.connect(self._refresh_sim_frame_status)
+        self._sim_npy_last_mtime: Dict[str, float] = {}
+        self._sim_npy_preview_timer = QTimer(self)
+        self._sim_npy_preview_timer.setInterval(50)  # ~20 Hz 直读共享帧
+        self._sim_npy_preview_timer.timeout.connect(self._poll_sim_npy_preview)
+        self._sim_preview_retry_timer = QTimer(self)
+        self._sim_preview_retry_timer.setInterval(1500)
+        self._sim_preview_retry_timer.timeout.connect(self._retry_enable_sim_preview_topics)
+        self._sim_preview_retry_left = 0
         self._refresh_sim_frame_status()
         self._refresh_sim_eval_tree()
         self._on_sim_eval_policy_changed()
@@ -13227,18 +13568,174 @@ class CameraTopicWindow(QMainWindow):
 
     def _update_sim_eval_run_ui(self, *_args) -> None:
         running = self._sim_eval_launcher.is_running()
+        stopping = bool(getattr(self._sim_eval_launcher, "_stopping", False))
         self.sim_eval_start_btn.setEnabled(not running)
         self.sim_eval_stop_run_btn.setEnabled(running)
         self.sim_eval_task_combo.setEnabled(not running)
         self.sim_eval_policy_combo.setEnabled(not running)
         self.sim_eval_ckpt_edit.setEnabled(not running)
         self.sim_eval_action_combo.setEnabled(not running)
-        if running:
-            self.sim_eval_run_status.setText("评测: 运行中")
+        if hasattr(self, "sim_eval_use_gui_check"):
+            self.sim_eval_use_gui_check.setEnabled(not running)
+        if stopping:
+            self.sim_eval_run_status.setText("评测: 正在停止…")
+            self.sim_eval_run_status.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        elif running:
+            self.sim_eval_run_status.setText("评测: 运行中（可随时停止）")
             self.sim_eval_run_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            if not self._sim_npy_preview_timer.isActive():
+                self._sim_npy_preview_timer.start()
         else:
             self.sim_eval_run_status.setText("评测: 空闲")
             self.sim_eval_run_status.setStyleSheet("")
+            self._sim_npy_preview_timer.stop()
+            self._sim_preview_retry_timer.stop()
+            self._sim_preview_retry_left = 0
+
+    def _ensure_workspace_expanded(self) -> None:
+        if getattr(self, "_workspace_collapsed", False):
+            self._toggle_workspace_panel()
+
+    def _reset_sim_bridge_frames(self) -> None:
+        """清掉旧共享帧，避免预览一直显示上次评测的静止画面。"""
+        bridge_dir = os.path.abspath(
+            os.path.expanduser(
+                self.sim_bridge_dir_edit.text().strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
+            )
+        )
+        os.makedirs(bridge_dir, exist_ok=True)
+        removed = 0
+        for key in ISAAC_CAM_BRIDGE_KEYS:
+            for suffix in (".npy", ".npy.stamp", ".npy.writing"):
+                path = os.path.join(bridge_dir, f"{key}{suffix}")
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                        removed += 1
+                except OSError:
+                    pass
+        self._sim_npy_last_mtime.clear()
+        for topic in SIM_PREVIEW_TOPICS:
+            self._frame_cache.pop(topic, None)
+            panel = self.panels.get(topic)
+            if isinstance(panel, CameraPanel):
+                try:
+                    panel.update_frame(np.zeros((240, 320, 3), dtype=np.uint8))
+                except Exception:
+                    pass
+        self._append_sim_log(
+            f"已清空共享帧目录 {bridge_dir}（删除 {removed} 个旧文件），等待本轮 Isaac 写出"
+        )
+
+    def _activate_sim_camera_preview(self) -> None:
+        """展开图像预览并订阅左腕 / 头部 / 右腕三路（含 .npy 直读兜底）。"""
+        self._ensure_workspace_expanded()
+        enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
+        enabled.update(SIM_PREVIEW_TOPICS)
+        for topic in SIM_PREVIEW_TOPICS:
+            checkbox = self.topic_checks.get(topic)
+            if checkbox is not None:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(True)
+                checkbox.blockSignals(False)
+        self._apply_selection(enabled)
+        if not self._sim_npy_preview_timer.isActive():
+            self._sim_npy_preview_timer.start()
+        self._sim_preview_retry_left = 20
+        if not self._sim_preview_retry_timer.isActive():
+            self._sim_preview_retry_timer.start()
+        if getattr(self, "status_bar", None) is not None:
+            self.status_bar.showMessage(
+                "已打开仿真预览：左腕 / 头部 / 右腕（直读共享 .npy，等待 RoboDojo 写出帧）",
+                5000,
+            )
+
+    def _retry_enable_sim_preview_topics(self) -> None:
+        """topic 列表稍后才发现时，补勾三路相机。"""
+        if self._sim_preview_retry_left <= 0 or not self._sim_eval_launcher.is_running():
+            self._sim_preview_retry_timer.stop()
+            self._sim_preview_retry_left = 0
+            return
+        self._sim_preview_retry_left -= 1
+        found = 0
+        for topic in SIM_PREVIEW_TOPICS:
+            checkbox = self.topic_checks.get(topic)
+            if checkbox is None:
+                continue
+            found += 1
+            if not checkbox.isChecked():
+                checkbox.blockSignals(True)
+                checkbox.setChecked(True)
+                checkbox.blockSignals(False)
+        if found:
+            enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
+            enabled.update(SIM_PREVIEW_TOPICS)
+            self._apply_selection(enabled)
+        if found >= len(SIM_PREVIEW_TOPICS):
+            self._sim_preview_retry_timer.stop()
+            self._sim_preview_retry_left = 0
+
+    def _poll_sim_npy_preview(self) -> None:
+        """直读 ISAAC_CAM_BRIDGE_DIR 下三路 .npy，刷新图像预览（不依赖 ROS）。"""
+        if not self._sim_eval_launcher.is_running():
+            return
+        bridge_dir = os.path.abspath(
+            os.path.expanduser(
+                self.sim_bridge_dir_edit.text().strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
+            )
+        )
+        if not os.path.isdir(bridge_dir):
+            return
+        # 保证三路面板存在（topic 尚未发现时也能看图）
+        missing = [t for t in SIM_PREVIEW_TOPICS if t not in self.panels]
+        if missing:
+            enabled = set(self.panels.keys()) | set(SIM_PREVIEW_TOPICS)
+            for topic in SIM_PREVIEW_TOPICS:
+                checkbox = self.topic_checks.get(topic)
+                if checkbox is not None and not checkbox.isChecked():
+                    checkbox.blockSignals(True)
+                    checkbox.setChecked(True)
+                    checkbox.blockSignals(False)
+                    enabled.add(topic)
+            self._apply_selection(enabled)
+
+        now = time.time()
+        fresh = 0
+        for cam_key, topic in SIM_PREVIEW_CAM_TOPICS:
+            npy_path = os.path.join(bridge_dir, f"{cam_key}.npy")
+            stamp_path = npy_path + ".stamp"
+            try:
+                mtime = os.path.getmtime(stamp_path if os.path.isfile(stamp_path) else npy_path)
+            except OSError:
+                continue
+            # 拒绝过旧帧（例如上次评测残留），等本轮写出
+            if now - mtime > 120.0:
+                continue
+            if self._sim_npy_last_mtime.get(topic) == mtime:
+                fresh += 1
+                continue
+            try:
+                with open(npy_path, "rb") as f:
+                    arr = np.load(f)
+                arr = np.asarray(arr)
+            except Exception:
+                continue
+            if arr.ndim != 3 or arr.shape[2] < 3:
+                continue
+            rgb = np.ascontiguousarray(arr[..., :3], dtype=np.uint8)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            self._sim_npy_last_mtime[topic] = mtime
+            self._frame_cache[topic] = bgr
+            self._received_topics[topic] = self._received_topics.get(topic, 0) + 1
+            panel = self.panels.get(topic)
+            if isinstance(panel, CameraPanel):
+                panel.update_frame(bgr)
+            fresh += 1
+        if fresh == 0 and getattr(self, "_sim_preview_wait_logged", False) is False:
+            self._sim_preview_wait_logged = True
+            self._append_sim_log(
+                "图像预览：尚无本轮共享帧（需评测写出 ISAAC_CAM_BRIDGE_DIR/*.npy）"
+            )
 
     def _on_sim_eval_start_clicked(self) -> None:
         task = str(
@@ -13253,9 +13750,36 @@ class CameraTopicWindow(QMainWindow):
         policy_env = ROBODOJO_ENV_DEFAULT
         if "starVLA" in policy_dir and os.path.isdir(ROBODOJO_STARVLA_ENV_DEFAULT):
             policy_env = ROBODOJO_STARVLA_ENV_DEFAULT
+        use_gui = bool(
+            getattr(self, "sim_eval_use_gui_check", None) is not None
+            and self.sim_eval_use_gui_check.isChecked()
+        )
+        bridge_dir = os.path.abspath(
+            os.path.expanduser(
+                self.sim_bridge_dir_edit.text().strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
+            )
+        )
+        # 始终写出共享帧供预览；GUI 时再启 ROS 桥（RoboStack 本地也可）
+        self._reset_sim_bridge_frames()
+        self._sim_preview_wait_logged = False
+        if use_gui:
+            if not self._sim_bridge_launcher.is_running():
+                self._sim_bridge_launcher.start(
+                    bridge_dir,
+                    hz=float(self.sim_bridge_hz_spin.value()),
+                )
+                self._update_sim_bridge_ui()
+        elif self._sim_bridge_launcher.is_running():
+            self._append_sim_log("headless：停止已在运行的相机桥（预览改直读 .npy）")
+            self._sim_bridge_launcher.stop()
+            self._update_sim_bridge_ui()
+        self._append_sim_log(
+            f"评测模式: {'GUI（仿真界面）' if use_gui else 'headless（无 Isaac 窗口）'}；"
+            f"共享帧={bridge_dir}"
+        )
         self._sim_eval_launcher.start(
             task,
-            bridge_dir=self.sim_bridge_dir_edit.text(),
+            bridge_dir=bridge_dir,
             policy_dir=policy_dir,
             ckpt=self.sim_eval_ckpt_edit.text().strip() or "demo",
             action_type=str(self.sim_eval_action_combo.currentData() or "ee"),
@@ -13263,10 +13787,18 @@ class CameraTopicWindow(QMainWindow):
             eval_env=ROBODOJO_ENV_DEFAULT,
             robodojo_root=ROBODOJO_ROOT_DEFAULT,
             display=os.environ.get("DISPLAY", ":1.0"),
+            use_gui=use_gui,
         )
         self._update_sim_eval_run_ui()
+        # headless / GUI 都开图像预览（直读 .npy，不依赖 Docker 相机桥）
+        self._activate_sim_camera_preview()
+        self._append_sim_log(
+            "已激活图像预览 /camera/left_wrist_color, head_color, right_wrist_color"
+            "（优先共享 .npy，忽略同名真机 ROS 流）"
+        )
 
     def _on_sim_eval_stop_run_clicked(self) -> None:
+        self._append_sim_log("--- 用户点击停止评测 ---")
         self._sim_eval_launcher.stop()
         self._update_sim_eval_run_ui()
 
@@ -16611,6 +17143,16 @@ class CameraTopicWindow(QMainWindow):
             if is_default:
                 default_enabled.add(topic)
 
+        # RoboDojo 评测运行中：始终保留三路仿真预览
+        if getattr(self, "_sim_eval_launcher", None) is not None and self._sim_eval_launcher.is_running():
+            for topic in SIM_PREVIEW_TOPICS:
+                checkbox = self.topic_checks.get(topic)
+                if checkbox is not None:
+                    checkbox.blockSignals(True)
+                    checkbox.setChecked(True)
+                    checkbox.blockSignals(False)
+                default_enabled.add(topic)
+
         self.topic_list_layout.addStretch()
         self._apply_selection(default_enabled)
         self._refresh_skeleton_camera_list()
@@ -16683,7 +17225,11 @@ class CameraTopicWindow(QMainWindow):
         while self.grid_layout.count():
             self.grid_layout.takeAt(0)
 
-        topics = sorted(self.panels.keys())
+        order_index = {t: i for i, t in enumerate(SIM_PREVIEW_TOPICS)}
+        topics = sorted(
+            self.panels.keys(),
+            key=lambda t: (order_index.get(t, 1000), t),
+        )
         has_depth = any(is_depth_topic(t) for t in topics)
         rows, cols = self._grid_dimensions(len(topics), has_depth)
         for idx, topic in enumerate(topics):
@@ -16727,6 +17273,14 @@ class CameraTopicWindow(QMainWindow):
         return frame
 
     def _on_frame_updated(self, topic: str, cv_image: object) -> None:
+        # 仿真评测预览期间：同名 /camera/* 可能来自真机，优先用共享 .npy
+        if (
+            topic in SIM_PREVIEW_TOPICS
+            and getattr(self, "_sim_npy_preview_timer", None) is not None
+            and self._sim_npy_preview_timer.isActive()
+            and self._sim_eval_launcher.is_running()
+        ):
+            return
         image = np.asarray(cv_image)
         self._frame_cache[topic] = image
         panel = self.panels.get(topic)
