@@ -10,7 +10,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run.sh                    # ROS 在宿主机直接运行时用此方式
   python3.10 show_camera_topics.py --prefix /camera
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 测试 / 仿真评测 / 真机评测 / 上下文学习。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 测试 / 仿真评测 / 真机评测 / 上下文学习。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -82,7 +82,16 @@ from PyQt5.QtCore import (
     QEvent,
     QUrl,
 )
-from PyQt5.QtGui import QCloseEvent, QFont, QImage, QMouseEvent, QPixmap, QPalette, QColor
+from PyQt5.QtGui import (
+    QCloseEvent,
+    QDesktopServices,
+    QFont,
+    QImage,
+    QMouseEvent,
+    QPixmap,
+    QPalette,
+    QColor,
+)
 from PyQt5.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -621,6 +630,57 @@ def resolve_fp_mesh_path() -> str:
 
 FP_MESH_DEFAULT = resolve_fp_mesh_path()
 EAI_DIR = os.path.dirname(os.path.abspath(__file__))
+LINGBOT_VISION_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/lingbot-vision"
+)
+LINGBOT_VISION_PYTHON_DEFAULT = "/home/psibot/miniconda3/envs/eai/bin/python"
+LINGBOT_VISION_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_vision.sh")
+LINGBOT_VISION_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_vision")
+LINGBOT_VISION_EXAMPLE = os.path.join(
+    LINGBOT_VISION_ROOT_DEFAULT, "examples", "example.png"
+)
+LINGBOT_DEPTH_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/lingbot-depth"
+)
+LINGBOT_DEPTH_PYTHON_DEFAULT = "/home/psibot/miniconda3/envs/eai/bin/python"
+LINGBOT_DEPTH_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_depth.sh")
+LINGBOT_DEPTH_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_depth")
+LINGBOT_DEPTH_MODEL_DEFAULT = "robbyant/lingbot-depth-pretrain-vitl-14-v0.5"
+LINGBOT_MAP_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/lingbot-map"
+)
+LINGBOT_MAP_PYTHON_DEFAULT = "/home/psibot/miniconda3/envs/eai/bin/python"
+LINGBOT_MAP_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_map.sh")
+LINGBOT_MAP_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_map")
+LINGBOT_MAP_MODEL_CACHE = os.path.join(LINGBOT_MAP_CACHE_DIR, "models")
+LINGBOT_MAP_CKPT_DEFAULT = "lingbot-map.pt"
+LINGBOT_MAP_PORT_DEFAULT = 8080
+LINGBOT_VIDEO_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/lingbot-video"
+)
+LINGBOT_VIDEO_PYTHON_DEFAULT = "/home/psibot/miniconda3/envs/eai/bin/python"
+LINGBOT_VIDEO_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_video.sh")
+LINGBOT_VIDEO_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_video")
+LINGBOT_VIDEO_MODEL_CACHE = os.path.join(LINGBOT_VIDEO_CACHE_DIR, "models")
+LINGBOT_VIDEO_OUTPUT_DIR = os.path.join(LINGBOT_VIDEO_CACHE_DIR, "outputs")
+LINGBOT_VIDEO_HF_DENSE = "robbyant/lingbot-video-dense-1.3b"
+LINGBOT_WORLD_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/lingbot-world-v2"
+)
+LINGBOT_WORLD_VENV_PYTHON = os.path.join(
+    LINGBOT_WORLD_ROOT_DEFAULT, ".venv", "bin", "python"
+)
+LINGBOT_WORLD_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_world.sh")
+LINGBOT_WORLD_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_world")
+LINGBOT_WORLD_OUTPUT_DIR = os.path.join(LINGBOT_WORLD_CACHE_DIR, "outputs")
+LINGBOT_WORLD_CKPT_DEFAULT = os.path.join(
+    LINGBOT_WORLD_ROOT_DEFAULT, "lingbot-world-v2-1.3b-causal-fast"
+)
+LINGBOT_WORLD_PROMPT_DEFAULT = (
+    "A serene lakeside scene with a lone tree standing in calm water, "
+    "surrounded by distant snow-capped mountains under a bright blue sky "
+    "with drifting white clouds."
+)
 CAD_MESHES_DIR = os.path.join(EAI_DIR, "meshes")
 TEST_IMAGES_DIR = os.path.join(EAI_DIR, "images")
 ISAAC_CAM_BRIDGE_SCRIPT = os.path.join(EAI_DIR, "run_isaac_cam_bridge.sh")
@@ -11694,6 +11754,831 @@ class RoboDojoEvalLauncher(QObject):
             self.status_message.emit("RoboDojo 评测已强制停止")
 
 
+class LingbotVisionLauncher(QObject):
+    """在独立进程跑 LingBot-Vision PCA，避免污染 viewer 的 ROS PYTHONPATH。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    result_ready = pyqtSignal(dict)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._result: Optional[dict] = None
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        input_path: str,
+        *,
+        variant: str = "small",
+        ckpt: str = "",
+        size: int = 512,
+        mode: str = "square",
+        dtype: str = "auto",
+        device: str = "",
+        out_dir: str = "",
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("LingBot-Vision 正在运行")
+            return
+        script = LINGBOT_VISION_RUN_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        input_path = os.path.abspath(os.path.expanduser(input_path))
+        if not os.path.isfile(input_path):
+            self.status_message.emit(f"输入图像不存在: {input_path}")
+            return
+        out_dir = os.path.abspath(
+            os.path.expanduser(out_dir or LINGBOT_VISION_CACHE_DIR)
+        )
+        os.makedirs(out_dir, exist_ok=True)
+        cache_dir = os.path.join(EAI_DIR, ".cache", "huggingface")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        args = [
+            "--input",
+            input_path,
+            "--out",
+            out_dir,
+            "--variant",
+            variant,
+            "--size",
+            str(int(size)),
+            "--mode",
+            mode,
+            "--dtype",
+            dtype or "auto",
+            "--cache-dir",
+            cache_dir,
+        ]
+        if ckpt.strip():
+            args.extend(["--ckpt", os.path.abspath(os.path.expanduser(ckpt.strip()))])
+        if device.strip():
+            args.extend(["--device", device.strip()])
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("LINGBOT_VISION_ROOT", LINGBOT_VISION_ROOT_DEFAULT)
+        if os.path.isfile(LINGBOT_VISION_PYTHON_DEFAULT):
+            qenv.insert("LINGBOT_VISION_PYTHON", LINGBOT_VISION_PYTHON_DEFAULT)
+        qenv.insert("HF_HOME", cache_dir)
+        qenv.insert("HUGGINGFACE_HUB_CACHE", cache_dir)
+
+        self._result = None
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(LINGBOT_VISION_ROOT_DEFAULT)
+        proc.setProcessEnvironment(qenv)
+        proc.start("bash", [script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ bash run_lingbot_vision.sh --variant {variant} --input {input_path}")
+        self.status_message.emit(f"正在运行 LingBot-Vision PCA（{variant}）…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 LingBot-Vision")
+            return
+        self.status_message.emit("正在停止 LingBot-Vision…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(2500, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.terminate()
+            self._process.waitForFinished(1500)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[RESULT] "):
+                raw = text[len("[RESULT] ") :].strip()
+                try:
+                    self._result = json.loads(raw)
+                except json.JSONDecodeError:
+                    self.log_line.emit(text)
+                    continue
+                continue
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        result = self._result or {}
+        if result.get("ok"):
+            self.result_ready.emit(result)
+            self.status_message.emit("LingBot-Vision PCA 完成")
+        else:
+            err = str(result.get("error") or f"退出码 {exit_code}")
+            self.status_message.emit(f"LingBot-Vision 失败: {err}")
+            self.log_line.emit(f"[ERROR] {err}")
+            self.result_ready.emit({"ok": False, "error": err})
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 run_lingbot_vision.sh")
+            self.status_message.emit("无法启动 LingBot-Vision")
+            self.running_changed.emit(False)
+
+
+class LingbotDepthLauncher(QObject):
+    """在独立进程跑 LingBot-Depth，避免污染 viewer 的 ROS PYTHONPATH。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    result_ready = pyqtSignal(dict)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._result: Optional[dict] = None
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        example: str = "",
+        rgb: str = "",
+        depth: str = "",
+        intrinsics: str = "",
+        model: str = "",
+        device: str = "auto",
+        no_mask: bool = False,
+        out_dir: str = "",
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("LingBot-Depth 正在运行")
+            return
+        script = LINGBOT_DEPTH_RUN_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        out_dir = os.path.abspath(
+            os.path.expanduser(out_dir or LINGBOT_DEPTH_CACHE_DIR)
+        )
+        os.makedirs(out_dir, exist_ok=True)
+        cache_dir = os.path.join(EAI_DIR, ".cache", "huggingface")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        model = (model or LINGBOT_DEPTH_MODEL_DEFAULT).strip()
+        args = [
+            "--out",
+            out_dir,
+            "--model",
+            model,
+            "--device",
+            device or "auto",
+            "--cache-dir",
+            cache_dir,
+        ]
+        if example.strip():
+            args.extend(["--example", example.strip()])
+        else:
+            args.extend(
+                [
+                    "--rgb",
+                    os.path.abspath(os.path.expanduser(rgb)),
+                    "--depth",
+                    os.path.abspath(os.path.expanduser(depth)),
+                    "--intrinsics",
+                    os.path.abspath(os.path.expanduser(intrinsics)),
+                ]
+            )
+        if no_mask:
+            args.append("--no-mask")
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("LINGBOT_DEPTH_ROOT", LINGBOT_DEPTH_ROOT_DEFAULT)
+        if os.path.isfile(LINGBOT_DEPTH_PYTHON_DEFAULT):
+            qenv.insert("LINGBOT_DEPTH_PYTHON", LINGBOT_DEPTH_PYTHON_DEFAULT)
+        qenv.insert("HF_HOME", cache_dir)
+        qenv.insert("HUGGINGFACE_HUB_CACHE", cache_dir)
+
+        self._result = None
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(LINGBOT_DEPTH_ROOT_DEFAULT)
+        proc.setProcessEnvironment(qenv)
+        proc.start("bash", [script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        src = f"example={example}" if example.strip() else f"rgb={rgb}"
+        self.log_line.emit(f"$ bash run_lingbot_depth.sh --model {model} {src}")
+        self.status_message.emit("正在运行 LingBot-Depth…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 LingBot-Depth")
+            return
+        self.status_message.emit("正在停止 LingBot-Depth…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(2500, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.terminate()
+            self._process.waitForFinished(1500)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[RESULT] "):
+                raw = text[len("[RESULT] ") :].strip()
+                try:
+                    self._result = json.loads(raw)
+                except json.JSONDecodeError:
+                    self.log_line.emit(text)
+                    continue
+                continue
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        result = self._result or {}
+        if result.get("ok"):
+            self.result_ready.emit(result)
+            self.status_message.emit("LingBot-Depth 完成")
+        else:
+            err = str(result.get("error") or f"退出码 {exit_code}")
+            self.status_message.emit(f"LingBot-Depth 失败: {err}")
+            self.log_line.emit(f"[ERROR] {err}")
+            self.result_ready.emit({"ok": False, "error": err})
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 run_lingbot_depth.sh")
+            self.status_message.emit("无法启动 LingBot-Depth")
+            self.running_changed.emit(False)
+
+
+class LingbotMapLauncher(QObject):
+    """在独立进程跑 LingBot-Map demo.py（viser 交互式 3D 重建）。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    viser_ready = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._viser_url: str = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        image_folder: str = "",
+        video_path: str = "",
+        model: str = "",
+        port: int = LINGBOT_MAP_PORT_DEFAULT,
+        first_k: int = 0,
+        stride: int = 1,
+        fps: int = 10,
+        mode: str = "streaming",
+        mask_sky: bool = False,
+        use_sdpa: bool = True,
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("LingBot-Map 正在运行")
+            return
+        script = LINGBOT_MAP_RUN_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        if not image_folder and not video_path:
+            self.status_message.emit("需要图像目录或视频")
+            return
+
+        cache_dir = os.path.join(EAI_DIR, ".cache", "huggingface")
+        os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs(LINGBOT_MAP_MODEL_CACHE, exist_ok=True)
+
+        args = [
+            "--port",
+            str(int(port)),
+            "--mode",
+            mode or "streaming",
+            "--stride",
+            str(max(1, int(stride))),
+            "--fps",
+            str(max(1, int(fps))),
+            "--cache-dir",
+            LINGBOT_MAP_MODEL_CACHE,
+            "--model",
+            (model or LINGBOT_MAP_CKPT_DEFAULT).strip(),
+        ]
+        if image_folder:
+            args.extend(
+                ["--image_folder", os.path.abspath(os.path.expanduser(image_folder))]
+            )
+        if video_path:
+            args.extend(
+                ["--video_path", os.path.abspath(os.path.expanduser(video_path))]
+            )
+        if int(first_k) > 0:
+            args.extend(["--first_k", str(int(first_k))])
+        if mask_sky:
+            args.append("--mask_sky")
+        if use_sdpa:
+            args.append("--use_sdpa")
+        else:
+            args.append("--no_use_sdpa")
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("LINGBOT_MAP_ROOT", LINGBOT_MAP_ROOT_DEFAULT)
+        if os.path.isfile(LINGBOT_MAP_PYTHON_DEFAULT):
+            qenv.insert("LINGBOT_MAP_PYTHON", LINGBOT_MAP_PYTHON_DEFAULT)
+        qenv.insert("HF_HOME", cache_dir)
+        qenv.insert("HUGGINGFACE_HUB_CACHE", cache_dir)
+
+        self._viser_url = f"http://127.0.0.1:{int(port)}"
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(LINGBOT_MAP_ROOT_DEFAULT)
+        proc.setProcessEnvironment(qenv)
+        proc.start("bash", [script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        src = image_folder or video_path
+        self.log_line.emit(f"$ bash run_lingbot_map.sh … {src}")
+        self.status_message.emit(f"正在运行 LingBot-Map（viser {self._viser_url}）…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 LingBot-Map")
+            return
+        self.status_message.emit("正在停止 LingBot-Map…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(3000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.terminate()
+            self._process.waitForFinished(2000)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[VISER] "):
+                url = text[len("[VISER] ") :].strip()
+                if url:
+                    self._viser_url = url
+                    self.viser_ready.emit(url)
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.status_message.emit("LingBot-Map 已结束")
+        else:
+            self.status_message.emit(f"LingBot-Map 退出码 {exit_code}")
+            self.log_line.emit(f"[ERROR] 退出码 {exit_code}")
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 run_lingbot_map.sh")
+            self.status_message.emit("无法启动 LingBot-Map")
+            self.running_changed.emit(False)
+
+
+class LingbotVideoLauncher(QObject):
+    """在独立进程跑 LingBot-Video DiT 推理。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    result_ready = pyqtSignal(dict)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._result: Optional[dict] = None
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        mode: str,
+        output: str,
+        prompt_json: str = "",
+        prompt: str = "",
+        image: str = "",
+        model_dir: str = "",
+        height: int = 480,
+        width: int = 832,
+        num_frames: int = 49,
+        steps: int = 40,
+        seed: int = 42,
+        fps: int = 24,
+        guidance_scale: float = 3.0,
+        run_refiner: bool = False,
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("LingBot-Video 正在运行")
+            return
+        script = LINGBOT_VIDEO_RUN_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        if not prompt_json and not prompt:
+            self.status_message.emit("需要 prompt_json 或文本 prompt")
+            return
+
+        out_path = os.path.abspath(os.path.expanduser(output))
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        os.makedirs(LINGBOT_VIDEO_MODEL_CACHE, exist_ok=True)
+        cache_dir = os.path.join(EAI_DIR, ".cache", "huggingface")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        args = [
+            "--mode",
+            mode,
+            "--output",
+            out_path,
+            "--cache-dir",
+            LINGBOT_VIDEO_MODEL_CACHE,
+            "--height",
+            str(int(height)),
+            "--width",
+            str(int(width)),
+            "--num_frames",
+            str(int(num_frames)),
+            "--steps",
+            str(int(steps)),
+            "--seed",
+            str(int(seed)),
+            "--fps",
+            str(int(fps)),
+            "--guidance_scale",
+            str(float(guidance_scale)),
+            "--backend",
+            "diffusers",
+        ]
+        if model_dir.strip():
+            args.extend(
+                ["--model_dir", os.path.abspath(os.path.expanduser(model_dir.strip()))]
+            )
+        if prompt_json.strip():
+            args.extend(
+                [
+                    "--prompt_json",
+                    os.path.abspath(os.path.expanduser(prompt_json.strip())),
+                ]
+            )
+        if prompt.strip():
+            args.extend(["--prompt", prompt.strip()])
+        if image.strip():
+            args.extend(
+                ["--image", os.path.abspath(os.path.expanduser(image.strip()))]
+            )
+        if run_refiner:
+            args.append("--run_refiner")
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("LINGBOT_VIDEO_ROOT", LINGBOT_VIDEO_ROOT_DEFAULT)
+        if os.path.isfile(LINGBOT_VIDEO_PYTHON_DEFAULT):
+            qenv.insert("LINGBOT_VIDEO_PYTHON", LINGBOT_VIDEO_PYTHON_DEFAULT)
+        qenv.insert("HF_HOME", cache_dir)
+        qenv.insert("HUGGINGFACE_HUB_CACHE", cache_dir)
+        qenv.insert("DIFFUSERS_ATTN_BACKEND", "_native_flash")
+        qenv.insert("LINGBOT_QWEN_ATTN_IMPLEMENTATION", "sdpa")
+
+        self._result = None
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(LINGBOT_VIDEO_ROOT_DEFAULT)
+        proc.setProcessEnvironment(qenv)
+        proc.start("bash", [script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ bash run_lingbot_video.sh --mode {mode} --output {out_path}")
+        self.status_message.emit(f"正在运行 LingBot-Video（{mode}）…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 LingBot-Video")
+            return
+        self.status_message.emit("正在停止 LingBot-Video…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(4000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.terminate()
+            self._process.waitForFinished(2000)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[RESULT] "):
+                raw = text[len("[RESULT] ") :].strip()
+                try:
+                    self._result = json.loads(raw)
+                except json.JSONDecodeError:
+                    self.log_line.emit(text)
+                    continue
+                continue
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        result = self._result or {}
+        if result.get("ok"):
+            self.result_ready.emit(result)
+            self.status_message.emit("LingBot-Video 完成")
+        else:
+            err = str(result.get("error") or f"退出码 {exit_code}")
+            self.status_message.emit(f"LingBot-Video 失败: {err}")
+            self.log_line.emit(f"[ERROR] {err}")
+            self.result_ready.emit({"ok": False, "error": err})
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 run_lingbot_video.sh")
+            self.status_message.emit("无法启动 LingBot-Video")
+            self.running_changed.emit(False)
+
+
+class LingbotWorldLauncher(QObject):
+    """在独立进程跑 LingBot-World-V2 generate.py。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    result_ready = pyqtSignal(dict)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._result: Optional[dict] = None
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        image: str,
+        action_path: str,
+        prompt: str,
+        output: str,
+        ckpt_dir: str = "",
+        size: str = "480*832",
+        frame_num: int = 17,
+        seed: int = 42,
+        local_attn_size: int = 18,
+        sink_size: int = 6,
+        t5_cpu: bool = True,
+        offload_model: bool = True,
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("LingBot-World 正在运行")
+            return
+        script = LINGBOT_WORLD_RUN_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        out_path = os.path.abspath(os.path.expanduser(output))
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+        args = [
+            "--image",
+            os.path.abspath(os.path.expanduser(image)),
+            "--action_path",
+            os.path.abspath(os.path.expanduser(action_path)),
+            "--prompt",
+            prompt or LINGBOT_WORLD_PROMPT_DEFAULT,
+            "--output",
+            out_path,
+            "--ckpt_dir",
+            (ckpt_dir or LINGBOT_WORLD_CKPT_DEFAULT).strip(),
+            "--size",
+            size or "480*832",
+            "--frame_num",
+            str(int(frame_num)),
+            "--seed",
+            str(int(seed)),
+            "--local_attn_size",
+            str(int(local_attn_size)),
+            "--sink_size",
+            str(int(sink_size)),
+        ]
+        if t5_cpu:
+            args.append("--t5_cpu")
+        else:
+            args.append("--no_t5_cpu")
+        if offload_model:
+            args.append("--offload_model")
+        else:
+            args.append("--no_offload_model")
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("LINGBOT_WORLD_ROOT", LINGBOT_WORLD_ROOT_DEFAULT)
+        if os.path.isfile(LINGBOT_WORLD_VENV_PYTHON):
+            qenv.insert("LINGBOT_WORLD_PYTHON", LINGBOT_WORLD_VENV_PYTHON)
+
+        self._result = None
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(LINGBOT_WORLD_ROOT_DEFAULT)
+        proc.setProcessEnvironment(qenv)
+        proc.start("bash", [script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ bash run_lingbot_world.sh --image {image}")
+        self.status_message.emit("正在运行 LingBot-World…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 LingBot-World")
+            return
+        self.status_message.emit("正在停止 LingBot-World…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(5000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.terminate()
+            self._process.waitForFinished(2500)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[RESULT] "):
+                raw = text[len("[RESULT] ") :].strip()
+                try:
+                    self._result = json.loads(raw)
+                except json.JSONDecodeError:
+                    self.log_line.emit(text)
+                    continue
+                continue
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        result = self._result or {}
+        if result.get("ok"):
+            self.result_ready.emit(result)
+            self.status_message.emit("LingBot-World 完成")
+        else:
+            err = str(result.get("error") or f"退出码 {exit_code}")
+            self.status_message.emit(f"LingBot-World 失败: {err}")
+            self.log_line.emit(f"[ERROR] {err}")
+            self.result_ready.emit({"ok": False, "error": err})
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 run_lingbot_world.sh")
+            self.status_message.emit("无法启动 LingBot-World")
+            self.running_changed.emit(False)
+
+
 class CameraTopicWindow(QMainWindow):
     def __init__(
         self,
@@ -12041,6 +12926,766 @@ class CameraTopicWindow(QMainWindow):
         segment_outer.addWidget(self.fp_result_edit)
 
         control_tabs.addTab(segment_tab, "分割")
+
+        vis_tab = QWidget()
+        vis_outer = QVBoxLayout(vis_tab)
+        vis_outer.setContentsMargins(8, 6, 8, 6)
+        vis_outer.setSpacing(6)
+        vis_hint = QLabel(
+            "LingBot-Vision：对当前相机 / 示例图 / 本地文件跑 patch-token PCA，"
+            "展示密集空间特征。首次会从 Hugging Face 下载对应 backbone。"
+        )
+        vis_hint.setWordWrap(True)
+        vis_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        vis_outer.addWidget(vis_hint)
+
+        vis_row = QHBoxLayout()
+        vis_row.setSpacing(6)
+        vis_row.addWidget(QLabel("模型"))
+        self.lingbot_variant_combo = ImeSafeComboBox()
+        self.lingbot_variant_combo.addItem("small（演示）", "small")
+        self.lingbot_variant_combo.addItem("base", "base")
+        self.lingbot_variant_combo.addItem("large（推荐）", "large")
+        self.lingbot_variant_combo.addItem("giant", "giant")
+        self.lingbot_variant_combo.setToolTip(
+            "small 最快；large 为官方推荐；giant 最强但更吃显存。\n"
+            "未指定本地 ckpt 时会按 variant 下载 HF 权重。"
+        )
+        vis_row.addWidget(self.lingbot_variant_combo)
+        vis_row.addWidget(QLabel("输入"))
+        self.lingbot_source_combo = ImeSafeComboBox()
+        self.lingbot_source_combo.addItem("当前相机", "camera")
+        self.lingbot_source_combo.addItem("示例图", "example")
+        self.lingbot_source_combo.addItem("本地文件", "file")
+        self.lingbot_source_combo.setToolTip("PCA 输入图像来源")
+        self.lingbot_source_combo.currentIndexChanged.connect(
+            self._on_lingbot_source_changed
+        )
+        vis_row.addWidget(self.lingbot_source_combo)
+        vis_row.addWidget(QLabel("size"))
+        self.lingbot_size_spin = QSpinBox()
+        self.lingbot_size_spin.setRange(224, 1024)
+        self.lingbot_size_spin.setSingleStep(32)
+        self.lingbot_size_spin.setValue(512)
+        self.lingbot_size_spin.setToolTip("输入边长（会对齐到 patch size 16）")
+        vis_row.addWidget(self.lingbot_size_spin)
+        vis_outer.addLayout(vis_row)
+
+        vis_path_row = QHBoxLayout()
+        vis_path_row.setSpacing(6)
+        vis_path_row.addWidget(QLabel("图像"))
+        self.lingbot_path_edit = QLineEdit()
+        self.lingbot_path_edit.setPlaceholderText("本地图像路径…")
+        self.lingbot_path_edit.setText(LINGBOT_VISION_EXAMPLE)
+        vis_path_row.addWidget(self.lingbot_path_edit, 1)
+        self.lingbot_browse_btn = QPushButton("…")
+        self.lingbot_browse_btn.setFixedWidth(28)
+        self.lingbot_browse_btn.setToolTip("选择输入图像")
+        self.lingbot_browse_btn.clicked.connect(self._on_lingbot_browse_clicked)
+        vis_path_row.addWidget(self.lingbot_browse_btn)
+        vis_path_row.addWidget(QLabel("ckpt"))
+        self.lingbot_ckpt_edit = QLineEdit()
+        self.lingbot_ckpt_edit.setPlaceholderText("可选本地 model.pt（空则自动下载）")
+        vis_path_row.addWidget(self.lingbot_ckpt_edit, 1)
+        self.lingbot_ckpt_browse_btn = QPushButton("…")
+        self.lingbot_ckpt_browse_btn.setFixedWidth(28)
+        self.lingbot_ckpt_browse_btn.setToolTip("选择本地 backbone .pt")
+        self.lingbot_ckpt_browse_btn.clicked.connect(self._on_lingbot_ckpt_browse_clicked)
+        vis_path_row.addWidget(self.lingbot_ckpt_browse_btn)
+        vis_outer.addLayout(vis_path_row)
+
+        vis_run_row = QHBoxLayout()
+        vis_run_row.setSpacing(6)
+        self.lingbot_run_btn = QPushButton("运行 PCA")
+        self.lingbot_run_btn.setToolTip(
+            "启动子进程跑 LingBot-Vision，并将输入 / PCA 显示在下方。"
+        )
+        self.lingbot_run_btn.clicked.connect(self._on_lingbot_run_clicked)
+        vis_run_row.addWidget(self.lingbot_run_btn)
+        self.lingbot_stop_btn = QPushButton("停止")
+        self.lingbot_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.lingbot_stop_btn.setEnabled(False)
+        self.lingbot_stop_btn.clicked.connect(self._on_lingbot_stop_clicked)
+        vis_run_row.addWidget(self.lingbot_stop_btn)
+        self.lingbot_status_label = QLabel("空闲")
+        self.lingbot_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        vis_run_row.addWidget(self.lingbot_status_label, 1)
+        vis_outer.addLayout(vis_run_row)
+
+        vis_preview = QHBoxLayout()
+        vis_preview.setSpacing(8)
+        self.lingbot_input_label = ScaledPixmapLabel("输入图像")
+        self.lingbot_input_label.setMinimumHeight(180)
+        vis_preview.addWidget(self.lingbot_input_label, 1)
+        self.lingbot_pca_label = ScaledPixmapLabel("Patch PCA")
+        self.lingbot_pca_label.setMinimumHeight(180)
+        vis_preview.addWidget(self.lingbot_pca_label, 1)
+        vis_outer.addLayout(vis_preview, 1)
+
+        self.lingbot_log_edit = QTextEdit()
+        self.lingbot_log_edit.setReadOnly(True)
+        self.lingbot_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.lingbot_log_edit.setMaximumHeight(120)
+        self.lingbot_log_edit.setPlaceholderText("LingBot-Vision 日志…")
+        self.lingbot_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        vis_outer.addWidget(self.lingbot_log_edit)
+
+        self._lingbot_launcher = LingbotVisionLauncher(self)
+        self._lingbot_launcher.log_line.connect(self._append_lingbot_log)
+        self._lingbot_launcher.status_message.connect(self._on_lingbot_status)
+        self._lingbot_launcher.running_changed.connect(self._update_lingbot_ui)
+        self._lingbot_launcher.result_ready.connect(self._on_lingbot_result)
+        self._on_lingbot_source_changed()
+
+        control_tabs.addTab(vis_tab, "视觉基础模型")
+
+        depth_tab = QWidget()
+        depth_outer = QVBoxLayout(depth_tab)
+        depth_outer.setContentsMargins(8, 6, 8, 6)
+        depth_outer.setSpacing(6)
+        depth_hint = QLabel(
+            "LingBot-Depth：用 RGB + 原始深度 + 内参做深度精修 / 补全，"
+            "展示输入深度与精修结果。首次会从 Hugging Face 下载模型。"
+        )
+        depth_hint.setWordWrap(True)
+        depth_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        depth_outer.addWidget(depth_hint)
+
+        depth_row = QHBoxLayout()
+        depth_row.setSpacing(6)
+        depth_row.addWidget(QLabel("模型"))
+        self.lingbot_depth_model_combo = ImeSafeComboBox()
+        self.lingbot_depth_model_combo.addItem(
+            "v0.5（推荐）", "robbyant/lingbot-depth-pretrain-vitl-14-v0.5"
+        )
+        self.lingbot_depth_model_combo.addItem(
+            "v0.1", "robbyant/lingbot-depth-pretrain-vitl-14"
+        )
+        self.lingbot_depth_model_combo.addItem(
+            "DC（稀疏深度）", "robbyant/lingbot-depth-postrain-dc-vitl14"
+        )
+        self.lingbot_depth_model_combo.setToolTip(
+            "默认 v0.5；DC 更适合稀疏深度补全。也可在下方填写本地 model.pt。"
+        )
+        depth_row.addWidget(self.lingbot_depth_model_combo)
+        depth_row.addWidget(QLabel("输入"))
+        self.lingbot_depth_source_combo = ImeSafeComboBox()
+        self.lingbot_depth_source_combo.addItem("当前相机 RGB-D", "camera")
+        self.lingbot_depth_source_combo.addItem("官方示例", "example")
+        self.lingbot_depth_source_combo.addItem("本地文件", "file")
+        self.lingbot_depth_source_combo.setToolTip(
+            "相机：抓取当前彩色 + 配对深度 + CameraInfo 内参\n"
+            "示例：lingbot-depth/examples/<id>\n"
+            "文件：指定 rgb / depth / intrinsics"
+        )
+        self.lingbot_depth_source_combo.currentIndexChanged.connect(
+            self._on_lingbot_depth_source_changed
+        )
+        depth_row.addWidget(self.lingbot_depth_source_combo)
+        depth_row.addWidget(QLabel("示例"))
+        self.lingbot_depth_example_spin = QSpinBox()
+        self.lingbot_depth_example_spin.setRange(0, 7)
+        self.lingbot_depth_example_spin.setValue(0)
+        self.lingbot_depth_example_spin.setToolTip("官方 examples/0..7")
+        depth_row.addWidget(self.lingbot_depth_example_spin)
+        depth_row.addWidget(QLabel("设备"))
+        self.lingbot_depth_device_combo = ImeSafeComboBox()
+        self.lingbot_depth_device_combo.addItem("auto", "auto")
+        self.lingbot_depth_device_combo.addItem("cuda", "cuda")
+        self.lingbot_depth_device_combo.addItem("cpu", "cpu")
+        depth_row.addWidget(self.lingbot_depth_device_combo)
+        depth_outer.addLayout(depth_row)
+
+        depth_model_row = QHBoxLayout()
+        depth_model_row.setSpacing(6)
+        depth_model_row.addWidget(QLabel("model"))
+        self.lingbot_depth_model_edit = QLineEdit()
+        self.lingbot_depth_model_edit.setPlaceholderText(
+            "可选：覆盖上方模型（HF id 或本地 model.pt）"
+        )
+        depth_model_row.addWidget(self.lingbot_depth_model_edit, 1)
+        self.lingbot_depth_model_browse_btn = QPushButton("…")
+        self.lingbot_depth_model_browse_btn.setFixedWidth(28)
+        self.lingbot_depth_model_browse_btn.setToolTip("选择本地 model.pt")
+        self.lingbot_depth_model_browse_btn.clicked.connect(
+            self._on_lingbot_depth_model_browse_clicked
+        )
+        depth_model_row.addWidget(self.lingbot_depth_model_browse_btn)
+        depth_outer.addLayout(depth_model_row)
+
+        depth_path_row = QHBoxLayout()
+        depth_path_row.setSpacing(6)
+        depth_path_row.addWidget(QLabel("RGB"))
+        self.lingbot_depth_rgb_edit = QLineEdit()
+        self.lingbot_depth_rgb_edit.setPlaceholderText("rgb.png / .jpg")
+        depth_path_row.addWidget(self.lingbot_depth_rgb_edit, 1)
+        self.lingbot_depth_rgb_browse_btn = QPushButton("…")
+        self.lingbot_depth_rgb_browse_btn.setFixedWidth(28)
+        self.lingbot_depth_rgb_browse_btn.clicked.connect(
+            self._on_lingbot_depth_rgb_browse_clicked
+        )
+        depth_path_row.addWidget(self.lingbot_depth_rgb_browse_btn)
+        depth_path_row.addWidget(QLabel("Depth"))
+        self.lingbot_depth_depth_edit = QLineEdit()
+        self.lingbot_depth_depth_edit.setPlaceholderText("raw_depth.png（16-bit mm）")
+        depth_path_row.addWidget(self.lingbot_depth_depth_edit, 1)
+        self.lingbot_depth_depth_browse_btn = QPushButton("…")
+        self.lingbot_depth_depth_browse_btn.setFixedWidth(28)
+        self.lingbot_depth_depth_browse_btn.clicked.connect(
+            self._on_lingbot_depth_depth_browse_clicked
+        )
+        depth_path_row.addWidget(self.lingbot_depth_depth_browse_btn)
+        depth_path_row.addWidget(QLabel("K"))
+        self.lingbot_depth_intrinsics_edit = QLineEdit()
+        self.lingbot_depth_intrinsics_edit.setPlaceholderText("intrinsics.txt")
+        depth_path_row.addWidget(self.lingbot_depth_intrinsics_edit, 1)
+        self.lingbot_depth_intrinsics_browse_btn = QPushButton("…")
+        self.lingbot_depth_intrinsics_browse_btn.setFixedWidth(28)
+        self.lingbot_depth_intrinsics_browse_btn.clicked.connect(
+            self._on_lingbot_depth_intrinsics_browse_clicked
+        )
+        depth_path_row.addWidget(self.lingbot_depth_intrinsics_browse_btn)
+        depth_outer.addLayout(depth_path_row)
+
+        depth_run_row = QHBoxLayout()
+        depth_run_row.setSpacing(6)
+        self.lingbot_depth_run_btn = QPushButton("运行精修")
+        self.lingbot_depth_run_btn.setToolTip(
+            "启动子进程跑 LingBot-Depth，并在下方显示结果。"
+        )
+        self.lingbot_depth_run_btn.clicked.connect(self._on_lingbot_depth_run_clicked)
+        depth_run_row.addWidget(self.lingbot_depth_run_btn)
+        self.lingbot_depth_stop_btn = QPushButton("停止")
+        self.lingbot_depth_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.lingbot_depth_stop_btn.setEnabled(False)
+        self.lingbot_depth_stop_btn.clicked.connect(self._on_lingbot_depth_stop_clicked)
+        depth_run_row.addWidget(self.lingbot_depth_stop_btn)
+        self.lingbot_depth_status_label = QLabel("空闲")
+        self.lingbot_depth_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        depth_run_row.addWidget(self.lingbot_depth_status_label, 1)
+        depth_outer.addLayout(depth_run_row)
+
+        depth_preview = QHBoxLayout()
+        depth_preview.setSpacing(8)
+        self.lingbot_depth_rgb_label = ScaledPixmapLabel("RGB")
+        self.lingbot_depth_rgb_label.setMinimumHeight(160)
+        depth_preview.addWidget(self.lingbot_depth_rgb_label, 1)
+        self.lingbot_depth_input_label = ScaledPixmapLabel("输入深度")
+        self.lingbot_depth_input_label.setMinimumHeight(160)
+        depth_preview.addWidget(self.lingbot_depth_input_label, 1)
+        self.lingbot_depth_refined_label = ScaledPixmapLabel("精修深度")
+        self.lingbot_depth_refined_label.setMinimumHeight(160)
+        depth_preview.addWidget(self.lingbot_depth_refined_label, 1)
+        depth_outer.addLayout(depth_preview, 1)
+
+        self.lingbot_depth_log_edit = QTextEdit()
+        self.lingbot_depth_log_edit.setReadOnly(True)
+        self.lingbot_depth_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.lingbot_depth_log_edit.setMaximumHeight(120)
+        self.lingbot_depth_log_edit.setPlaceholderText("LingBot-Depth 日志…")
+        self.lingbot_depth_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        depth_outer.addWidget(self.lingbot_depth_log_edit)
+
+        self._lingbot_depth_launcher = LingbotDepthLauncher(self)
+        self._lingbot_depth_launcher.log_line.connect(self._append_lingbot_depth_log)
+        self._lingbot_depth_launcher.status_message.connect(self._on_lingbot_depth_status)
+        self._lingbot_depth_launcher.running_changed.connect(self._update_lingbot_depth_ui)
+        self._lingbot_depth_launcher.result_ready.connect(self._on_lingbot_depth_result)
+        self._on_lingbot_depth_source_changed()
+
+        control_tabs.addTab(depth_tab, "空间感知模型")
+
+        map_tab = QWidget()
+        map_outer = QVBoxLayout(map_tab)
+        map_outer.setContentsMargins(8, 6, 8, 6)
+        map_outer.setSpacing(6)
+        map_hint = QLabel(
+            "LingBot-Map：流式多视角 3D 重建。运行后在浏览器打开 viser 查看点云"
+            "（默认 http://127.0.0.1:8080）。首次会从 Hugging Face 下载 lingbot-map.pt。"
+        )
+        map_hint.setWordWrap(True)
+        map_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        map_outer.addWidget(map_hint)
+
+        map_row = QHBoxLayout()
+        map_row.setSpacing(6)
+        map_row.addWidget(QLabel("场景"))
+        self.lingbot_map_scene_combo = ImeSafeComboBox()
+        self.lingbot_map_scene_combo.addItem("courthouse（示例）", "courthouse")
+        self.lingbot_map_scene_combo.addItem("university（示例）", "university")
+        self.lingbot_map_scene_combo.addItem("loop（示例）", "loop")
+        self.lingbot_map_scene_combo.addItem("图像目录", "folder")
+        self.lingbot_map_scene_combo.addItem("视频文件", "video")
+        self.lingbot_map_scene_combo.addItem("当前相机采集", "camera")
+        self.lingbot_map_scene_combo.setToolTip(
+            "示例场景在 lingbot-map/example/；\n"
+            "相机采集：把当前彩色帧写入缓存目录后再重建。"
+        )
+        self.lingbot_map_scene_combo.currentIndexChanged.connect(
+            self._on_lingbot_map_scene_changed
+        )
+        map_row.addWidget(self.lingbot_map_scene_combo)
+        map_row.addWidget(QLabel("ckpt"))
+        self.lingbot_map_ckpt_combo = ImeSafeComboBox()
+        self.lingbot_map_ckpt_combo.addItem("lingbot-map.pt（推荐）", "lingbot-map.pt")
+        self.lingbot_map_ckpt_combo.addItem("lingbot-map-long.pt", "lingbot-map-long.pt")
+        self.lingbot_map_ckpt_combo.setToolTip("空本地路径时从 HF robbyant/lingbot-map 下载")
+        map_row.addWidget(self.lingbot_map_ckpt_combo)
+        map_row.addWidget(QLabel("port"))
+        self.lingbot_map_port_spin = QSpinBox()
+        self.lingbot_map_port_spin.setRange(1024, 65535)
+        self.lingbot_map_port_spin.setValue(LINGBOT_MAP_PORT_DEFAULT)
+        map_row.addWidget(self.lingbot_map_port_spin)
+        map_outer.addLayout(map_row)
+
+        map_path_row = QHBoxLayout()
+        map_path_row.setSpacing(6)
+        map_path_row.addWidget(QLabel("路径"))
+        self.lingbot_map_path_edit = QLineEdit()
+        self.lingbot_map_path_edit.setPlaceholderText("图像目录或视频路径…")
+        self.lingbot_map_path_edit.setText(
+            os.path.join(LINGBOT_MAP_ROOT_DEFAULT, "example", "courthouse")
+        )
+        map_path_row.addWidget(self.lingbot_map_path_edit, 1)
+        self.lingbot_map_browse_btn = QPushButton("…")
+        self.lingbot_map_browse_btn.setFixedWidth(28)
+        self.lingbot_map_browse_btn.clicked.connect(self._on_lingbot_map_browse_clicked)
+        map_path_row.addWidget(self.lingbot_map_browse_btn)
+        map_path_row.addWidget(QLabel("本地ckpt"))
+        self.lingbot_map_model_edit = QLineEdit()
+        self.lingbot_map_model_edit.setPlaceholderText("可选本地 .pt（优先于上方 ckpt）")
+        map_path_row.addWidget(self.lingbot_map_model_edit, 1)
+        self.lingbot_map_model_browse_btn = QPushButton("…")
+        self.lingbot_map_model_browse_btn.setFixedWidth(28)
+        self.lingbot_map_model_browse_btn.clicked.connect(
+            self._on_lingbot_map_model_browse_clicked
+        )
+        map_path_row.addWidget(self.lingbot_map_model_browse_btn)
+        map_outer.addLayout(map_path_row)
+
+        map_opt_row = QHBoxLayout()
+        map_opt_row.setSpacing(6)
+        map_opt_row.addWidget(QLabel("first_k"))
+        self.lingbot_map_first_k_spin = QSpinBox()
+        self.lingbot_map_first_k_spin.setRange(0, 10000)
+        self.lingbot_map_first_k_spin.setValue(48)
+        self.lingbot_map_first_k_spin.setToolTip("只用前 K 帧；0=全部（大场景更慢）")
+        map_opt_row.addWidget(self.lingbot_map_first_k_spin)
+        map_opt_row.addWidget(QLabel("stride"))
+        self.lingbot_map_stride_spin = QSpinBox()
+        self.lingbot_map_stride_spin.setRange(1, 64)
+        self.lingbot_map_stride_spin.setValue(1)
+        map_opt_row.addWidget(self.lingbot_map_stride_spin)
+        map_opt_row.addWidget(QLabel("fps"))
+        self.lingbot_map_fps_spin = QSpinBox()
+        self.lingbot_map_fps_spin.setRange(1, 60)
+        self.lingbot_map_fps_spin.setValue(10)
+        self.lingbot_map_fps_spin.setToolTip("仅视频抽帧用")
+        map_opt_row.addWidget(self.lingbot_map_fps_spin)
+        self.lingbot_map_mask_sky_check = QCheckBox("mask_sky")
+        self.lingbot_map_mask_sky_check.setChecked(True)
+        self.lingbot_map_mask_sky_check.setToolTip("室外场景建议开启（需 onnxruntime）")
+        map_opt_row.addWidget(self.lingbot_map_mask_sky_check)
+        self.lingbot_map_sdpa_check = QCheckBox("use_sdpa")
+        self.lingbot_map_sdpa_check.setChecked(True)
+        self.lingbot_map_sdpa_check.setToolTip("无 FlashInfer 时请保持开启")
+        map_opt_row.addWidget(self.lingbot_map_sdpa_check)
+        map_opt_row.addWidget(QLabel("采集帧"))
+        self.lingbot_map_capture_spin = QSpinBox()
+        self.lingbot_map_capture_spin.setRange(8, 200)
+        self.lingbot_map_capture_spin.setValue(24)
+        self.lingbot_map_capture_spin.setToolTip("「当前相机采集」模式下抓取的帧数")
+        map_opt_row.addWidget(self.lingbot_map_capture_spin)
+        map_outer.addLayout(map_opt_row)
+
+        map_run_row = QHBoxLayout()
+        map_run_row.setSpacing(6)
+        self.lingbot_map_run_btn = QPushButton("运行重建")
+        self.lingbot_map_run_btn.setToolTip("启动 demo.py；完成后用浏览器打开 viser")
+        self.lingbot_map_run_btn.clicked.connect(self._on_lingbot_map_run_clicked)
+        map_run_row.addWidget(self.lingbot_map_run_btn)
+        self.lingbot_map_stop_btn = QPushButton("停止")
+        self.lingbot_map_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.lingbot_map_stop_btn.setEnabled(False)
+        self.lingbot_map_stop_btn.clicked.connect(self._on_lingbot_map_stop_clicked)
+        map_run_row.addWidget(self.lingbot_map_stop_btn)
+        self.lingbot_map_open_btn = QPushButton("打开 viser")
+        self.lingbot_map_open_btn.setEnabled(False)
+        self.lingbot_map_open_btn.clicked.connect(self._on_lingbot_map_open_clicked)
+        map_run_row.addWidget(self.lingbot_map_open_btn)
+        self.lingbot_map_capture_btn = QPushButton("拍一帧")
+        self.lingbot_map_capture_btn.setToolTip("相机采集模式：把当前彩色帧写入缓存目录")
+        self.lingbot_map_capture_btn.clicked.connect(self._on_lingbot_map_capture_clicked)
+        map_run_row.addWidget(self.lingbot_map_capture_btn)
+        self.lingbot_map_status_label = QLabel("空闲")
+        self.lingbot_map_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        map_run_row.addWidget(self.lingbot_map_status_label, 1)
+        map_outer.addLayout(map_run_row)
+
+        self.lingbot_map_url_label = QLabel("")
+        self.lingbot_map_url_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.lingbot_map_url_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        map_outer.addWidget(self.lingbot_map_url_label)
+
+        self.lingbot_map_preview_label = ScaledPixmapLabel("输入预览（首帧）")
+        self.lingbot_map_preview_label.setMinimumHeight(160)
+        map_outer.addWidget(self.lingbot_map_preview_label, 1)
+
+        self.lingbot_map_log_edit = QTextEdit()
+        self.lingbot_map_log_edit.setReadOnly(True)
+        self.lingbot_map_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.lingbot_map_log_edit.setMaximumHeight(140)
+        self.lingbot_map_log_edit.setPlaceholderText("LingBot-Map 日志…")
+        self.lingbot_map_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        map_outer.addWidget(self.lingbot_map_log_edit)
+
+        self._lingbot_map_launcher = LingbotMapLauncher(self)
+        self._lingbot_map_launcher.log_line.connect(self._append_lingbot_map_log)
+        self._lingbot_map_launcher.status_message.connect(self._on_lingbot_map_status)
+        self._lingbot_map_launcher.running_changed.connect(self._update_lingbot_map_ui)
+        self._lingbot_map_launcher.viser_ready.connect(self._on_lingbot_map_viser_ready)
+        self._lingbot_map_capture_count = 0
+        self._on_lingbot_map_scene_changed()
+
+        control_tabs.addTab(map_tab, "3D重建模型")
+
+        video_tab = QWidget()
+        video_outer = QVBoxLayout(video_tab)
+        video_outer.setContentsMargins(8, 6, 8, 6)
+        video_outer.setSpacing(6)
+        video_hint = QLabel(
+            "LingBot-Video：T2I / T2V / TI2V 生成。推荐用官方 cases 的结构化 prompt.json；"
+            "首次会下载 Dense-1.3B 权重。默认「快速预览」分辨率更低、帧数更少。"
+        )
+        video_hint.setWordWrap(True)
+        video_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        video_outer.addWidget(video_hint)
+
+        video_row = QHBoxLayout()
+        video_row.setSpacing(6)
+        video_row.addWidget(QLabel("模式"))
+        self.lingbot_video_mode_combo = ImeSafeComboBox()
+        self.lingbot_video_mode_combo.addItem("T2V 文生视频", "t2v")
+        self.lingbot_video_mode_combo.addItem("T2I 文生图", "t2i")
+        self.lingbot_video_mode_combo.addItem("TI2V 图生视频", "ti2v")
+        self.lingbot_video_mode_combo.currentIndexChanged.connect(
+            self._on_lingbot_video_mode_changed
+        )
+        video_row.addWidget(self.lingbot_video_mode_combo)
+        video_row.addWidget(QLabel("案例"))
+        self.lingbot_video_case_combo = ImeSafeComboBox()
+        self.lingbot_video_case_combo.setToolTip("assets/cases 下官方结构化 prompt")
+        self.lingbot_video_case_combo.currentIndexChanged.connect(
+            self._on_lingbot_video_case_changed
+        )
+        video_row.addWidget(self.lingbot_video_case_combo, 1)
+        video_row.addWidget(QLabel("预设"))
+        self.lingbot_video_preset_combo = ImeSafeComboBox()
+        self.lingbot_video_preset_combo.addItem("快速预览", "fast")
+        self.lingbot_video_preset_combo.addItem("标准 (480p)", "standard")
+        self.lingbot_video_preset_combo.addItem("自定义", "custom")
+        self.lingbot_video_preset_combo.currentIndexChanged.connect(
+            self._on_lingbot_video_preset_changed
+        )
+        video_row.addWidget(self.lingbot_video_preset_combo)
+        video_outer.addLayout(video_row)
+
+        video_path_row = QHBoxLayout()
+        video_path_row.setSpacing(6)
+        video_path_row.addWidget(QLabel("prompt.json"))
+        self.lingbot_video_prompt_edit = QLineEdit()
+        self.lingbot_video_prompt_edit.setPlaceholderText("结构化 JSON Prompt 路径…")
+        video_path_row.addWidget(self.lingbot_video_prompt_edit, 1)
+        self.lingbot_video_prompt_browse_btn = QPushButton("…")
+        self.lingbot_video_prompt_browse_btn.setFixedWidth(28)
+        self.lingbot_video_prompt_browse_btn.clicked.connect(
+            self._on_lingbot_video_prompt_browse_clicked
+        )
+        video_path_row.addWidget(self.lingbot_video_prompt_browse_btn)
+        video_path_row.addWidget(QLabel("首帧"))
+        self.lingbot_video_image_edit = QLineEdit()
+        self.lingbot_video_image_edit.setPlaceholderText("TI2V 首帧图（可选）")
+        video_path_row.addWidget(self.lingbot_video_image_edit, 1)
+        self.lingbot_video_image_browse_btn = QPushButton("…")
+        self.lingbot_video_image_browse_btn.setFixedWidth(28)
+        self.lingbot_video_image_browse_btn.clicked.connect(
+            self._on_lingbot_video_image_browse_clicked
+        )
+        video_path_row.addWidget(self.lingbot_video_image_browse_btn)
+        self.lingbot_video_cam_btn = QPushButton("相机首帧")
+        self.lingbot_video_cam_btn.setToolTip("从当前彩色相机抓一帧作 TI2V 首帧")
+        self.lingbot_video_cam_btn.clicked.connect(self._on_lingbot_video_cam_clicked)
+        video_path_row.addWidget(self.lingbot_video_cam_btn)
+        video_outer.addLayout(video_path_row)
+
+        video_model_row = QHBoxLayout()
+        video_model_row.setSpacing(6)
+        video_model_row.addWidget(QLabel("model_dir"))
+        self.lingbot_video_model_edit = QLineEdit()
+        self.lingbot_video_model_edit.setPlaceholderText(
+            f"空则自动下载 {LINGBOT_VIDEO_HF_DENSE}"
+        )
+        video_model_row.addWidget(self.lingbot_video_model_edit, 1)
+        self.lingbot_video_model_browse_btn = QPushButton("…")
+        self.lingbot_video_model_browse_btn.setFixedWidth(28)
+        self.lingbot_video_model_browse_btn.clicked.connect(
+            self._on_lingbot_video_model_browse_clicked
+        )
+        video_model_row.addWidget(self.lingbot_video_model_browse_btn)
+        video_outer.addLayout(video_model_row)
+
+        video_opt_row = QHBoxLayout()
+        video_opt_row.setSpacing(6)
+        video_opt_row.addWidget(QLabel("H"))
+        self.lingbot_video_h_spin = QSpinBox()
+        self.lingbot_video_h_spin.setRange(64, 2160)
+        self.lingbot_video_h_spin.setSingleStep(16)
+        video_opt_row.addWidget(self.lingbot_video_h_spin)
+        video_opt_row.addWidget(QLabel("W"))
+        self.lingbot_video_w_spin = QSpinBox()
+        self.lingbot_video_w_spin.setRange(64, 3840)
+        self.lingbot_video_w_spin.setSingleStep(16)
+        video_opt_row.addWidget(self.lingbot_video_w_spin)
+        video_opt_row.addWidget(QLabel("frames"))
+        self.lingbot_video_frames_spin = QSpinBox()
+        self.lingbot_video_frames_spin.setRange(1, 241)
+        self.lingbot_video_frames_spin.setToolTip("须为 1 或 4n+1（如 9/49/121）")
+        video_opt_row.addWidget(self.lingbot_video_frames_spin)
+        video_opt_row.addWidget(QLabel("steps"))
+        self.lingbot_video_steps_spin = QSpinBox()
+        self.lingbot_video_steps_spin.setRange(1, 100)
+        video_opt_row.addWidget(self.lingbot_video_steps_spin)
+        video_opt_row.addWidget(QLabel("seed"))
+        self.lingbot_video_seed_spin = QSpinBox()
+        self.lingbot_video_seed_spin.setRange(0, 2_147_483_647)
+        self.lingbot_video_seed_spin.setValue(42)
+        video_opt_row.addWidget(self.lingbot_video_seed_spin)
+        self.lingbot_video_refiner_check = QCheckBox("refiner")
+        self.lingbot_video_refiner_check.setToolTip("Dense 通常无 refiner；MoE 才需要")
+        video_opt_row.addWidget(self.lingbot_video_refiner_check)
+        video_outer.addLayout(video_opt_row)
+
+        video_run_row = QHBoxLayout()
+        video_run_row.setSpacing(6)
+        self.lingbot_video_run_btn = QPushButton("运行生成")
+        self.lingbot_video_run_btn.clicked.connect(self._on_lingbot_video_run_clicked)
+        video_run_row.addWidget(self.lingbot_video_run_btn)
+        self.lingbot_video_stop_btn = QPushButton("停止")
+        self.lingbot_video_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.lingbot_video_stop_btn.setEnabled(False)
+        self.lingbot_video_stop_btn.clicked.connect(self._on_lingbot_video_stop_clicked)
+        video_run_row.addWidget(self.lingbot_video_stop_btn)
+        self.lingbot_video_open_btn = QPushButton("播放结果")
+        self.lingbot_video_open_btn.setEnabled(False)
+        self.lingbot_video_open_btn.setToolTip("在弹窗中播放生成的视频 / 打开图像")
+        self.lingbot_video_open_btn.clicked.connect(self._on_lingbot_video_open_clicked)
+        video_run_row.addWidget(self.lingbot_video_open_btn)
+        self.lingbot_video_status_label = QLabel("空闲")
+        self.lingbot_video_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        video_run_row.addWidget(self.lingbot_video_status_label, 1)
+        video_outer.addLayout(video_run_row)
+
+        video_preview = QHBoxLayout()
+        video_preview.setSpacing(8)
+        self.lingbot_video_input_label = ScaledPixmapLabel("输入 / 首帧")
+        self.lingbot_video_input_label.setMinimumHeight(180)
+        video_preview.addWidget(self.lingbot_video_input_label, 1)
+
+        self.lingbot_video_output_stack = QWidget()
+        out_stack_layout = QVBoxLayout(self.lingbot_video_output_stack)
+        out_stack_layout.setContentsMargins(0, 0, 0, 0)
+        out_stack_layout.setSpacing(0)
+        self.lingbot_video_output_label = ScaledPixmapLabel("输出图像（T2I）")
+        self.lingbot_video_output_label.setMinimumHeight(180)
+        out_stack_layout.addWidget(self.lingbot_video_output_label)
+        self.lingbot_video_player = VideoPlayerWidget(self.lingbot_video_output_stack)
+        self.lingbot_video_player.setMinimumHeight(220)
+        self.lingbot_video_player.setVisible(False)
+        out_stack_layout.addWidget(self.lingbot_video_player, 1)
+        video_preview.addWidget(self.lingbot_video_output_stack, 2)
+        video_outer.addLayout(video_preview, 1)
+
+        self.lingbot_video_log_edit = QTextEdit()
+        self.lingbot_video_log_edit.setReadOnly(True)
+        self.lingbot_video_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.lingbot_video_log_edit.setMaximumHeight(140)
+        self.lingbot_video_log_edit.setPlaceholderText("LingBot-Video 日志…")
+        self.lingbot_video_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        video_outer.addWidget(self.lingbot_video_log_edit)
+
+        self._lingbot_video_launcher = LingbotVideoLauncher(self)
+        self._lingbot_video_launcher.log_line.connect(self._append_lingbot_video_log)
+        self._lingbot_video_launcher.status_message.connect(self._on_lingbot_video_status)
+        self._lingbot_video_launcher.running_changed.connect(self._update_lingbot_video_ui)
+        self._lingbot_video_launcher.result_ready.connect(self._on_lingbot_video_result)
+        self._lingbot_video_last_output = ""
+        self._populate_lingbot_video_cases()
+        self._on_lingbot_video_preset_changed()
+        self._on_lingbot_video_mode_changed()
+
+        control_tabs.addTab(video_tab, "视频生成模型")
+
+        world_tab = QWidget()
+        world_outer = QVBoxLayout(world_tab)
+        world_outer.setContentsMargins(8, 6, 8, 6)
+        world_outer.setSpacing(6)
+        world_hint = QLabel(
+            "LingBot-World-V2：图像 + 相机轨迹 → 交互世界视频。默认使用本地 "
+            "1.3B-causal-fast（单卡）。需提供 image.jpg 与含 poses/intrinsics 的 action 目录。"
+        )
+        world_hint.setWordWrap(True)
+        world_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        world_outer.addWidget(world_hint)
+
+        world_row = QHBoxLayout()
+        world_row.setSpacing(6)
+        world_row.addWidget(QLabel("示例"))
+        self.lingbot_world_example_combo = ImeSafeComboBox()
+        for ex in ("00", "01", "02", "03", "04", "05"):
+            self.lingbot_world_example_combo.addItem(f"examples/{ex}", ex)
+        self.lingbot_world_example_combo.addItem("自定义 / 相机", "custom")
+        self.lingbot_world_example_combo.setCurrentIndex(3)  # examples/03
+        self.lingbot_world_example_combo.currentIndexChanged.connect(
+            self._on_lingbot_world_example_changed
+        )
+        world_row.addWidget(self.lingbot_world_example_combo)
+        world_row.addWidget(QLabel("size"))
+        self.lingbot_world_size_combo = ImeSafeComboBox()
+        self.lingbot_world_size_combo.addItem("480×832", "480*832")
+        self.lingbot_world_size_combo.addItem("720×1280", "720*1280")
+        self.lingbot_world_size_combo.addItem("1280×720", "1280*720")
+        world_row.addWidget(self.lingbot_world_size_combo)
+        world_row.addWidget(QLabel("frames"))
+        self.lingbot_world_frames_spin = QSpinBox()
+        self.lingbot_world_frames_spin.setRange(5, 361)
+        self.lingbot_world_frames_spin.setValue(17)
+        self.lingbot_world_frames_spin.setToolTip("须为 4n+1，如 17/81/361")
+        world_row.addWidget(self.lingbot_world_frames_spin)
+        world_row.addWidget(QLabel("seed"))
+        self.lingbot_world_seed_spin = QSpinBox()
+        self.lingbot_world_seed_spin.setRange(0, 2_147_483_647)
+        self.lingbot_world_seed_spin.setValue(42)
+        world_row.addWidget(self.lingbot_world_seed_spin)
+        self.lingbot_world_t5_cpu_check = QCheckBox("t5_cpu")
+        self.lingbot_world_t5_cpu_check.setChecked(True)
+        world_row.addWidget(self.lingbot_world_t5_cpu_check)
+        self.lingbot_world_offload_check = QCheckBox("offload")
+        self.lingbot_world_offload_check.setChecked(True)
+        world_row.addWidget(self.lingbot_world_offload_check)
+        world_outer.addLayout(world_row)
+
+        world_path_row = QHBoxLayout()
+        world_path_row.setSpacing(6)
+        world_path_row.addWidget(QLabel("图像"))
+        self.lingbot_world_image_edit = QLineEdit()
+        world_path_row.addWidget(self.lingbot_world_image_edit, 1)
+        self.lingbot_world_image_browse_btn = QPushButton("…")
+        self.lingbot_world_image_browse_btn.setFixedWidth(28)
+        self.lingbot_world_image_browse_btn.clicked.connect(
+            self._on_lingbot_world_image_browse_clicked
+        )
+        world_path_row.addWidget(self.lingbot_world_image_browse_btn)
+        self.lingbot_world_cam_btn = QPushButton("相机抓帧")
+        self.lingbot_world_cam_btn.setToolTip(
+            "从当前彩色相机抓帧；轨迹仍用所选示例的 action_path"
+        )
+        self.lingbot_world_cam_btn.clicked.connect(self._on_lingbot_world_cam_clicked)
+        world_path_row.addWidget(self.lingbot_world_cam_btn)
+        world_path_row.addWidget(QLabel("action"))
+        self.lingbot_world_action_edit = QLineEdit()
+        self.lingbot_world_action_edit.setPlaceholderText("含 poses.npy / intrinsics.npy 的目录")
+        world_path_row.addWidget(self.lingbot_world_action_edit, 1)
+        self.lingbot_world_action_browse_btn = QPushButton("…")
+        self.lingbot_world_action_browse_btn.setFixedWidth(28)
+        self.lingbot_world_action_browse_btn.clicked.connect(
+            self._on_lingbot_world_action_browse_clicked
+        )
+        world_path_row.addWidget(self.lingbot_world_action_browse_btn)
+        world_outer.addLayout(world_path_row)
+
+        world_ckpt_row = QHBoxLayout()
+        world_ckpt_row.setSpacing(6)
+        world_ckpt_row.addWidget(QLabel("ckpt"))
+        self.lingbot_world_ckpt_edit = QLineEdit(LINGBOT_WORLD_CKPT_DEFAULT)
+        world_ckpt_row.addWidget(self.lingbot_world_ckpt_edit, 1)
+        self.lingbot_world_ckpt_browse_btn = QPushButton("…")
+        self.lingbot_world_ckpt_browse_btn.setFixedWidth(28)
+        self.lingbot_world_ckpt_browse_btn.clicked.connect(
+            self._on_lingbot_world_ckpt_browse_clicked
+        )
+        world_ckpt_row.addWidget(self.lingbot_world_ckpt_browse_btn)
+        world_outer.addLayout(world_ckpt_row)
+
+        world_prompt_row = QHBoxLayout()
+        world_prompt_row.setSpacing(6)
+        world_prompt_row.addWidget(QLabel("prompt"))
+        self.lingbot_world_prompt_edit = QTextEdit()
+        self.lingbot_world_prompt_edit.setMaximumHeight(64)
+        self.lingbot_world_prompt_edit.setPlainText(LINGBOT_WORLD_PROMPT_DEFAULT)
+        world_prompt_row.addWidget(self.lingbot_world_prompt_edit, 1)
+        world_outer.addLayout(world_prompt_row)
+
+        world_run_row = QHBoxLayout()
+        world_run_row.setSpacing(6)
+        self.lingbot_world_run_btn = QPushButton("运行生成")
+        self.lingbot_world_run_btn.clicked.connect(self._on_lingbot_world_run_clicked)
+        world_run_row.addWidget(self.lingbot_world_run_btn)
+        self.lingbot_world_stop_btn = QPushButton("停止")
+        self.lingbot_world_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.lingbot_world_stop_btn.setEnabled(False)
+        self.lingbot_world_stop_btn.clicked.connect(self._on_lingbot_world_stop_clicked)
+        world_run_row.addWidget(self.lingbot_world_stop_btn)
+        self.lingbot_world_play_btn = QPushButton("播放结果")
+        self.lingbot_world_play_btn.setEnabled(False)
+        self.lingbot_world_play_btn.clicked.connect(self._on_lingbot_world_play_clicked)
+        world_run_row.addWidget(self.lingbot_world_play_btn)
+        self.lingbot_world_status_label = QLabel("空闲")
+        self.lingbot_world_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        world_run_row.addWidget(self.lingbot_world_status_label, 1)
+        world_outer.addLayout(world_run_row)
+
+        world_preview = QHBoxLayout()
+        world_preview.setSpacing(8)
+        self.lingbot_world_input_label = ScaledPixmapLabel("输入图像")
+        self.lingbot_world_input_label.setMinimumHeight(160)
+        world_preview.addWidget(self.lingbot_world_input_label, 1)
+        self.lingbot_world_player = VideoPlayerWidget(world_tab)
+        self.lingbot_world_player.setMinimumHeight(220)
+        world_preview.addWidget(self.lingbot_world_player, 2)
+        world_outer.addLayout(world_preview, 1)
+
+        self.lingbot_world_log_edit = QTextEdit()
+        self.lingbot_world_log_edit.setReadOnly(True)
+        self.lingbot_world_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.lingbot_world_log_edit.setMaximumHeight(120)
+        self.lingbot_world_log_edit.setPlaceholderText("LingBot-World 日志…")
+        self.lingbot_world_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        world_outer.addWidget(self.lingbot_world_log_edit)
+
+        self._lingbot_world_launcher = LingbotWorldLauncher(self)
+        self._lingbot_world_launcher.log_line.connect(self._append_lingbot_world_log)
+        self._lingbot_world_launcher.status_message.connect(self._on_lingbot_world_status)
+        self._lingbot_world_launcher.running_changed.connect(self._update_lingbot_world_ui)
+        self._lingbot_world_launcher.result_ready.connect(self._on_lingbot_world_result)
+        self._lingbot_world_last_output = ""
+        self._on_lingbot_world_example_changed()
+
+        control_tabs.addTab(world_tab, "世界模型")
 
         cad_tab = QWidget()
         cad_outer = QVBoxLayout(cad_tab)
@@ -15446,6 +17091,20 @@ class CameraTopicWindow(QMainWindow):
         self._cad_launcher.shutdown()
         self._sim_bridge_launcher.shutdown()
         self._sim_eval_launcher.shutdown()
+        if getattr(self, "_lingbot_launcher", None) is not None:
+            self._lingbot_launcher.shutdown()
+        if getattr(self, "_lingbot_depth_launcher", None) is not None:
+            self._lingbot_depth_launcher.shutdown()
+        if getattr(self, "_lingbot_map_launcher", None) is not None:
+            self._lingbot_map_launcher.shutdown()
+        if getattr(self, "_lingbot_video_launcher", None) is not None:
+            self._lingbot_video_launcher.shutdown()
+        if getattr(self, "lingbot_video_player", None) is not None:
+            self.lingbot_video_player.close_video()
+        if getattr(self, "_lingbot_world_launcher", None) is not None:
+            self._lingbot_world_launcher.shutdown()
+        if getattr(self, "lingbot_world_player", None) is not None:
+            self.lingbot_world_player.close_video()
         if getattr(self, "_real_eval_timer", None) is not None:
             self._real_eval_timer.stop()
         self._real_eval_active = False
@@ -15838,6 +17497,1087 @@ class CameraTopicWindow(QMainWindow):
         else:
             color = "#7ec8ff"
         self.replay_status_label.setStyleSheet(f"color: {color};")
+
+    def _append_lingbot_log(self, line: str) -> None:
+        if not hasattr(self, "lingbot_log_edit"):
+            return
+        self.lingbot_log_edit.append(line)
+        bar = self.lingbot_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_lingbot_status(self, msg: str) -> None:
+        if hasattr(self, "lingbot_status_label"):
+            self.lingbot_status_label.setText(msg)
+        self.status_bar.showMessage(msg)
+
+    def _update_lingbot_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_lingbot_launcher", None)
+            and self._lingbot_launcher.is_running()
+        )
+        self.lingbot_run_btn.setEnabled(not running)
+        self.lingbot_stop_btn.setEnabled(running)
+        self.lingbot_variant_combo.setEnabled(not running)
+        self.lingbot_source_combo.setEnabled(not running)
+        self.lingbot_size_spin.setEnabled(not running)
+        file_mode = str(self.lingbot_source_combo.currentData() or "") == "file"
+        self.lingbot_path_edit.setEnabled(not running and file_mode)
+        self.lingbot_browse_btn.setEnabled(not running and file_mode)
+        self.lingbot_ckpt_edit.setEnabled(not running)
+        self.lingbot_ckpt_browse_btn.setEnabled(not running)
+        if running:
+            self.lingbot_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.lingbot_status_label.setStyleSheet("")
+
+    def _on_lingbot_source_changed(self, *_args) -> None:
+        source = str(self.lingbot_source_combo.currentData() or "camera")
+        file_mode = source == "file"
+        self.lingbot_path_edit.setEnabled(file_mode)
+        self.lingbot_browse_btn.setEnabled(file_mode)
+        if source == "example":
+            self.lingbot_path_edit.setText(LINGBOT_VISION_EXAMPLE)
+        elif source == "camera":
+            self.lingbot_path_edit.setPlaceholderText("运行时从当前彩色相机抓帧")
+        self._update_lingbot_ui()
+
+    def _on_lingbot_browse_clicked(self) -> None:
+        current = self.lingbot_path_edit.text().strip() or LINGBOT_VISION_EXAMPLE
+        initial = current if os.path.isfile(current) else EAI_DIR
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择输入图像",
+            initial,
+            "Images (*.png *.jpg *.jpeg *.bmp);;All files (*)",
+        )
+        if selected:
+            self.lingbot_path_edit.setText(selected)
+
+    def _on_lingbot_ckpt_browse_clicked(self) -> None:
+        current = self.lingbot_ckpt_edit.text().strip()
+        initial = current if os.path.isfile(current) else LINGBOT_VISION_ROOT_DEFAULT
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 LingBot-Vision checkpoint",
+            initial,
+            "PyTorch (*.pt *.pth);;All files (*)",
+        )
+        if selected:
+            self.lingbot_ckpt_edit.setText(selected)
+
+    def _resolve_lingbot_input_image(self) -> Optional[str]:
+        source = str(self.lingbot_source_combo.currentData() or "camera")
+        if source == "camera":
+            picked = self._pick_sam3_color_source()
+            if picked is None:
+                self._append_lingbot_log(
+                    "[ERROR] 无可用彩色图像，请勾选 color topic 或改用示例图/文件"
+                )
+                self._on_lingbot_status("无可用相机图像")
+                return None
+            topic, image, _panel = picked
+            out_dir = LINGBOT_VISION_CACHE_DIR
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, "input_camera.png")
+            rgb = image
+            if rgb.ndim == 2:
+                rgb = cv2.cvtColor(rgb, cv2.COLOR_GRAY2BGR)
+            cv2.imwrite(path, rgb)
+            self._append_lingbot_log(f"已从 {topic} 抓帧 -> {path}")
+            return path
+        if source == "example":
+            path = LINGBOT_VISION_EXAMPLE
+        else:
+            path = os.path.abspath(
+                os.path.expanduser(self.lingbot_path_edit.text().strip())
+            )
+        if not os.path.isfile(path):
+            self._append_lingbot_log(f"[ERROR] 输入图像不存在: {path}")
+            self._on_lingbot_status("输入图像不存在")
+            return None
+        return path
+
+    def _on_lingbot_run_clicked(self) -> None:
+        if self._lingbot_launcher.is_running():
+            return
+        input_path = self._resolve_lingbot_input_image()
+        if not input_path:
+            return
+        self.lingbot_input_label.set_source_pixmap(QPixmap(input_path))
+        self.lingbot_pca_label.set_source_pixmap(None)
+        variant = str(self.lingbot_variant_combo.currentData() or "small")
+        self._lingbot_launcher.start(
+            input_path,
+            variant=variant,
+            ckpt=self.lingbot_ckpt_edit.text().strip(),
+            size=int(self.lingbot_size_spin.value()),
+        )
+        self._update_lingbot_ui()
+
+    def _on_lingbot_stop_clicked(self) -> None:
+        self._append_lingbot_log("--- 用户停止 LingBot-Vision ---")
+        self._lingbot_launcher.stop()
+        self._update_lingbot_ui()
+
+    def _on_lingbot_result(self, result: dict) -> None:
+        if not result.get("ok"):
+            return
+        pca_path = str(result.get("pca") or "")
+        if pca_path and os.path.isfile(pca_path):
+            self.lingbot_pca_label.set_source_pixmap(QPixmap(pca_path))
+        input_path = str(result.get("input") or "")
+        if input_path and os.path.isfile(input_path):
+            self.lingbot_input_label.set_source_pixmap(QPixmap(input_path))
+        grid = result.get("grid") or []
+        self._append_lingbot_log(
+            f"完成 variant={result.get('variant')} "
+            f"grid={grid} embed_dim={result.get('embed_dim')} "
+            f"device={result.get('device')}"
+        )
+
+    def _append_lingbot_depth_log(self, line: str) -> None:
+        if not hasattr(self, "lingbot_depth_log_edit"):
+            return
+        self.lingbot_depth_log_edit.append(line)
+        bar = self.lingbot_depth_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_lingbot_depth_status(self, msg: str) -> None:
+        if hasattr(self, "lingbot_depth_status_label"):
+            self.lingbot_depth_status_label.setText(msg)
+        self.status_bar.showMessage(msg)
+
+    def _update_lingbot_depth_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_lingbot_depth_launcher", None)
+            and self._lingbot_depth_launcher.is_running()
+        )
+        source = str(self.lingbot_depth_source_combo.currentData() or "camera")
+        file_mode = source == "file"
+        example_mode = source == "example"
+        self.lingbot_depth_run_btn.setEnabled(not running)
+        self.lingbot_depth_stop_btn.setEnabled(running)
+        self.lingbot_depth_model_combo.setEnabled(not running)
+        self.lingbot_depth_source_combo.setEnabled(not running)
+        self.lingbot_depth_device_combo.setEnabled(not running)
+        self.lingbot_depth_example_spin.setEnabled(not running and example_mode)
+        self.lingbot_depth_model_edit.setEnabled(not running)
+        self.lingbot_depth_model_browse_btn.setEnabled(not running)
+        for w in (
+            self.lingbot_depth_rgb_edit,
+            self.lingbot_depth_rgb_browse_btn,
+            self.lingbot_depth_depth_edit,
+            self.lingbot_depth_depth_browse_btn,
+            self.lingbot_depth_intrinsics_edit,
+            self.lingbot_depth_intrinsics_browse_btn,
+        ):
+            w.setEnabled(not running and file_mode)
+        if running:
+            self.lingbot_depth_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.lingbot_depth_status_label.setStyleSheet("")
+
+    def _on_lingbot_depth_source_changed(self, *_args) -> None:
+        source = str(self.lingbot_depth_source_combo.currentData() or "camera")
+        if source == "example":
+            ex = int(self.lingbot_depth_example_spin.value())
+            ex_dir = os.path.join(LINGBOT_DEPTH_ROOT_DEFAULT, "examples", str(ex))
+            self.lingbot_depth_rgb_edit.setPlaceholderText(os.path.join(ex_dir, "rgb.*"))
+            self.lingbot_depth_depth_edit.setPlaceholderText(
+                os.path.join(ex_dir, "raw_depth.png")
+            )
+            self.lingbot_depth_intrinsics_edit.setPlaceholderText(
+                os.path.join(ex_dir, "intrinsics.txt")
+            )
+        elif source == "camera":
+            self.lingbot_depth_rgb_edit.setPlaceholderText("运行时从当前 RGB-D 抓帧")
+            self.lingbot_depth_depth_edit.setPlaceholderText("配对 depth topic")
+            self.lingbot_depth_intrinsics_edit.setPlaceholderText("CameraInfo / 默认内参")
+        self._update_lingbot_depth_ui()
+
+    def _on_lingbot_depth_model_browse_clicked(self) -> None:
+        current = self.lingbot_depth_model_edit.text().strip()
+        initial = current if os.path.isfile(current) else LINGBOT_DEPTH_ROOT_DEFAULT
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 LingBot-Depth checkpoint",
+            initial,
+            "PyTorch (*.pt *.pth);;All files (*)",
+        )
+        if selected:
+            self.lingbot_depth_model_edit.setText(selected)
+
+    def _on_lingbot_depth_rgb_browse_clicked(self) -> None:
+        current = self.lingbot_depth_rgb_edit.text().strip()
+        initial = current if os.path.isfile(current) else LINGBOT_DEPTH_ROOT_DEFAULT
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 RGB 图像",
+            initial,
+            "Images (*.png *.jpg *.jpeg *.bmp);;All files (*)",
+        )
+        if selected:
+            self.lingbot_depth_rgb_edit.setText(selected)
+
+    def _on_lingbot_depth_depth_browse_clicked(self) -> None:
+        current = self.lingbot_depth_depth_edit.text().strip()
+        initial = current if os.path.isfile(current) else LINGBOT_DEPTH_ROOT_DEFAULT
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择原始深度图",
+            initial,
+            "Depth (*.png);;All files (*)",
+        )
+        if selected:
+            self.lingbot_depth_depth_edit.setText(selected)
+
+    def _on_lingbot_depth_intrinsics_browse_clicked(self) -> None:
+        current = self.lingbot_depth_intrinsics_edit.text().strip()
+        initial = current if os.path.isfile(current) else LINGBOT_DEPTH_ROOT_DEFAULT
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择内参文件",
+            initial,
+            "Intrinsics (*.txt *.json);;All files (*)",
+        )
+        if selected:
+            self.lingbot_depth_intrinsics_edit.setText(selected)
+
+    def _resolve_lingbot_depth_inputs(
+        self,
+    ) -> Optional[Tuple[str, str, str, str]]:
+        """返回 (example_id, rgb, depth, intrinsics)；example 模式时后三者为空。"""
+        source = str(self.lingbot_depth_source_combo.currentData() or "camera")
+        if source == "example":
+            return str(int(self.lingbot_depth_example_spin.value())), "", "", ""
+
+        if source == "camera":
+            color_source = self._pick_sam3_color_source()
+            if color_source is None:
+                self._append_lingbot_depth_log(
+                    "[ERROR] 无可用彩色图像，请勾选 color topic 或改用示例/文件"
+                )
+                self._on_lingbot_depth_status("无可用相机图像")
+                return None
+            color_topic, color_bgr, _panel = color_source
+            if not self._is_paired_depth_enabled(color_topic):
+                self._append_lingbot_depth_log(
+                    "[ERROR] 请勾选与彩色配对的 depth topic"
+                )
+                self._on_lingbot_depth_status("缺少配对深度")
+                return None
+            depth_topic = self._get_paired_depth_topic_name(color_topic)
+            depth = self._get_paired_depth_frame(color_topic)
+            if not depth_topic or depth is None:
+                self._append_lingbot_depth_log("[ERROR] 无法读取配对深度帧")
+                self._on_lingbot_depth_status("无深度帧")
+                return None
+
+            out_dir = os.path.join(LINGBOT_DEPTH_CACHE_DIR, "camera_input")
+            os.makedirs(out_dir, exist_ok=True)
+            rgb_path = os.path.join(out_dir, "rgb.png")
+            depth_path = os.path.join(out_dir, "raw_depth.png")
+            K_path = os.path.join(out_dir, "intrinsics.txt")
+
+            bgr = np.asarray(color_bgr)
+            if bgr.ndim == 2:
+                bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+            depth_arr = np.asarray(depth)
+            if depth_arr.ndim == 3:
+                depth_arr = depth_arr[:, :, 0]
+            if depth_arr.shape[:2] != bgr.shape[:2]:
+                depth_arr = cv2.resize(
+                    depth_arr,
+                    (bgr.shape[1], bgr.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            if depth_arr.dtype == np.float32 or depth_arr.dtype == np.float64:
+                depth_u16 = np.clip(depth_arr * 1000.0, 0, 65535).astype(np.uint16)
+            else:
+                depth_u16 = depth_arr.astype(np.uint16)
+
+            h, w = bgr.shape[:2]
+            fx, fy, cx, cy = self.node.get_intrinsics(depth_topic, w, h)
+            if abs(fx - 0.9 * max(w, h)) < 1e-3:
+                fx, fy, cx, cy = self.node.get_intrinsics(color_topic, w, h)
+            K = np.array(
+                [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64
+            )
+            cv2.imwrite(rgb_path, bgr)
+            cv2.imwrite(depth_path, depth_u16)
+            np.savetxt(K_path, K, fmt="%.6f")
+            self._append_lingbot_depth_log(
+                f"已抓帧 color={color_topic} depth={depth_topic} -> {out_dir}"
+            )
+            return "", rgb_path, depth_path, K_path
+
+        rgb = os.path.abspath(
+            os.path.expanduser(self.lingbot_depth_rgb_edit.text().strip())
+        )
+        depth = os.path.abspath(
+            os.path.expanduser(self.lingbot_depth_depth_edit.text().strip())
+        )
+        intrinsics = os.path.abspath(
+            os.path.expanduser(self.lingbot_depth_intrinsics_edit.text().strip())
+        )
+        for label, path in (("RGB", rgb), ("Depth", depth), ("Intrinsics", intrinsics)):
+            if not os.path.isfile(path):
+                self._append_lingbot_depth_log(f"[ERROR] {label} 不存在: {path}")
+                self._on_lingbot_depth_status(f"{label} 不存在")
+                return None
+        return "", rgb, depth, intrinsics
+
+    def _on_lingbot_depth_run_clicked(self) -> None:
+        if self._lingbot_depth_launcher.is_running():
+            return
+        resolved = self._resolve_lingbot_depth_inputs()
+        if resolved is None:
+            return
+        example, rgb, depth, intrinsics = resolved
+        self.lingbot_depth_rgb_label.set_source_pixmap(
+            QPixmap(rgb) if rgb and os.path.isfile(rgb) else None
+        )
+        self.lingbot_depth_input_label.set_source_pixmap(None)
+        self.lingbot_depth_refined_label.set_source_pixmap(None)
+
+        model_override = self.lingbot_depth_model_edit.text().strip()
+        model = model_override or str(
+            self.lingbot_depth_model_combo.currentData() or LINGBOT_DEPTH_MODEL_DEFAULT
+        )
+        device = str(self.lingbot_depth_device_combo.currentData() or "auto")
+        self._lingbot_depth_launcher.start(
+            example=example,
+            rgb=rgb,
+            depth=depth,
+            intrinsics=intrinsics,
+            model=model,
+            device=device,
+        )
+        self._update_lingbot_depth_ui()
+
+    def _on_lingbot_depth_stop_clicked(self) -> None:
+        self._append_lingbot_depth_log("--- 用户停止 LingBot-Depth ---")
+        self._lingbot_depth_launcher.stop()
+        self._update_lingbot_depth_ui()
+
+    def _on_lingbot_depth_result(self, result: dict) -> None:
+        if not result.get("ok"):
+            return
+        for key, label in (
+            ("rgb", self.lingbot_depth_rgb_label),
+            ("depth_input", self.lingbot_depth_input_label),
+            ("depth_refined", self.lingbot_depth_refined_label),
+        ):
+            path = str(result.get(key) or "")
+            if path and os.path.isfile(path):
+                label.set_source_pixmap(QPixmap(path))
+        self._append_lingbot_depth_log(
+            f"完成 model={result.get('model')} "
+            f"load={result.get('load_s')}s infer={result.get('infer_s')}s "
+            f"points={result.get('points')} device={result.get('device')}"
+        )
+
+    def _append_lingbot_map_log(self, line: str) -> None:
+        if not hasattr(self, "lingbot_map_log_edit"):
+            return
+        self.lingbot_map_log_edit.append(line)
+        bar = self.lingbot_map_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_lingbot_map_status(self, msg: str) -> None:
+        if hasattr(self, "lingbot_map_status_label"):
+            self.lingbot_map_status_label.setText(msg)
+        self.status_bar.showMessage(msg)
+
+    def _update_lingbot_map_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_lingbot_map_launcher", None)
+            and self._lingbot_map_launcher.is_running()
+        )
+        scene = str(self.lingbot_map_scene_combo.currentData() or "courthouse")
+        path_editable = scene in ("folder", "video")
+        camera_mode = scene == "camera"
+        self.lingbot_map_run_btn.setEnabled(not running)
+        self.lingbot_map_stop_btn.setEnabled(running)
+        self.lingbot_map_open_btn.setEnabled(
+            bool(getattr(self, "_lingbot_map_viser_url", ""))
+        )
+        self.lingbot_map_scene_combo.setEnabled(not running)
+        self.lingbot_map_ckpt_combo.setEnabled(not running)
+        self.lingbot_map_port_spin.setEnabled(not running)
+        self.lingbot_map_path_edit.setEnabled(not running and path_editable)
+        self.lingbot_map_browse_btn.setEnabled(not running and path_editable)
+        self.lingbot_map_model_edit.setEnabled(not running)
+        self.lingbot_map_model_browse_btn.setEnabled(not running)
+        self.lingbot_map_first_k_spin.setEnabled(not running)
+        self.lingbot_map_stride_spin.setEnabled(not running)
+        self.lingbot_map_fps_spin.setEnabled(not running)
+        self.lingbot_map_mask_sky_check.setEnabled(not running)
+        self.lingbot_map_sdpa_check.setEnabled(not running)
+        self.lingbot_map_capture_spin.setEnabled(not running and camera_mode)
+        self.lingbot_map_capture_btn.setEnabled(not running and camera_mode)
+        if running:
+            self.lingbot_map_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.lingbot_map_status_label.setStyleSheet("")
+
+    def _on_lingbot_map_scene_changed(self, *_args) -> None:
+        scene = str(self.lingbot_map_scene_combo.currentData() or "courthouse")
+        if scene in ("courthouse", "university", "loop"):
+            path = os.path.join(LINGBOT_MAP_ROOT_DEFAULT, "example", scene)
+            self.lingbot_map_path_edit.setText(path)
+            self.lingbot_map_mask_sky_check.setChecked(scene != "loop")
+            self._lingbot_map_set_preview_from_folder(path)
+        elif scene == "camera":
+            path = os.path.join(LINGBOT_MAP_CACHE_DIR, "camera_frames")
+            self.lingbot_map_path_edit.setText(path)
+            self.lingbot_map_mask_sky_check.setChecked(False)
+        self._update_lingbot_map_ui()
+
+    def _lingbot_map_set_preview_from_folder(self, folder: str) -> None:
+        if not os.path.isdir(folder):
+            self.lingbot_map_preview_label.set_source_pixmap(None)
+            return
+        for name in sorted(os.listdir(folder)):
+            if name.lower().endswith((".png", ".jpg", ".jpeg")):
+                path = os.path.join(folder, name)
+                self.lingbot_map_preview_label.set_source_pixmap(QPixmap(path))
+                return
+        self.lingbot_map_preview_label.set_source_pixmap(None)
+
+    def _on_lingbot_map_browse_clicked(self) -> None:
+        scene = str(self.lingbot_map_scene_combo.currentData() or "")
+        current = self.lingbot_map_path_edit.text().strip() or LINGBOT_MAP_ROOT_DEFAULT
+        if scene == "video":
+            initial = current if os.path.isfile(current) else LINGBOT_MAP_ROOT_DEFAULT
+            selected, _ = QFileDialog.getOpenFileName(
+                self,
+                "选择视频",
+                initial,
+                "Video (*.mp4 *.avi *.mov *.mkv);;All files (*)",
+            )
+            if selected:
+                self.lingbot_map_path_edit.setText(selected)
+        else:
+            initial = current if os.path.isdir(current) else LINGBOT_MAP_ROOT_DEFAULT
+            selected = QFileDialog.getExistingDirectory(self, "选择图像目录", initial)
+            if selected:
+                self.lingbot_map_path_edit.setText(selected)
+                self._lingbot_map_set_preview_from_folder(selected)
+
+    def _on_lingbot_map_model_browse_clicked(self) -> None:
+        current = self.lingbot_map_model_edit.text().strip()
+        initial = current if os.path.isfile(current) else LINGBOT_MAP_MODEL_CACHE
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 LingBot-Map checkpoint",
+            initial,
+            "PyTorch (*.pt *.pth);;All files (*)",
+        )
+        if selected:
+            self.lingbot_map_model_edit.setText(selected)
+
+    def _lingbot_map_camera_dir(self) -> str:
+        path = os.path.join(LINGBOT_MAP_CACHE_DIR, "camera_frames")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _on_lingbot_map_capture_clicked(self) -> None:
+        picked = self._pick_sam3_color_source()
+        if picked is None:
+            self._append_lingbot_map_log("[ERROR] 无可用彩色图像，请勾选 color topic")
+            self._on_lingbot_map_status("无可用相机图像")
+            return
+        topic, image, _panel = picked
+        out_dir = self._lingbot_map_camera_dir()
+        self._lingbot_map_capture_count = len(
+            [
+                n
+                for n in os.listdir(out_dir)
+                if n.lower().endswith((".png", ".jpg", ".jpeg"))
+            ]
+        )
+        idx = self._lingbot_map_capture_count
+        path = os.path.join(out_dir, f"{idx:06d}.png")
+        bgr = np.asarray(image)
+        if bgr.ndim == 2:
+            bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+        cv2.imwrite(path, bgr)
+        self._lingbot_map_capture_count += 1
+        self.lingbot_map_path_edit.setText(out_dir)
+        self.lingbot_map_preview_label.set_source_pixmap(QPixmap(path))
+        target = int(self.lingbot_map_capture_spin.value())
+        self._append_lingbot_map_log(
+            f"采集 [{self._lingbot_map_capture_count}/{target}] {topic} -> {path}"
+        )
+        self._on_lingbot_map_status(
+            f"已采集 {self._lingbot_map_capture_count}/{target} 帧"
+        )
+
+    def _resolve_lingbot_map_input(self) -> Optional[Tuple[str, str]]:
+        """返回 (image_folder, video_path)。"""
+        scene = str(self.lingbot_map_scene_combo.currentData() or "courthouse")
+        if scene in ("courthouse", "university", "loop"):
+            folder = os.path.join(LINGBOT_MAP_ROOT_DEFAULT, "example", scene)
+            if not os.path.isdir(folder):
+                self._append_lingbot_map_log(f"[ERROR] 示例目录不存在: {folder}")
+                return None
+            return folder, ""
+        if scene == "camera":
+            folder = self._lingbot_map_camera_dir()
+            n = len(
+                [
+                    n
+                    for n in os.listdir(folder)
+                    if n.lower().endswith((".png", ".jpg", ".jpeg"))
+                ]
+            )
+            if n < 8:
+                self._append_lingbot_map_log(
+                    f"[ERROR] 相机采集帧数过少（{n}），请先点「拍一帧」至少 8 张"
+                )
+                self._on_lingbot_map_status("采集帧不足")
+                return None
+            return folder, ""
+        path = os.path.abspath(
+            os.path.expanduser(self.lingbot_map_path_edit.text().strip())
+        )
+        if scene == "video":
+            if not os.path.isfile(path):
+                self._append_lingbot_map_log(f"[ERROR] 视频不存在: {path}")
+                return None
+            return "", path
+        if not os.path.isdir(path):
+            self._append_lingbot_map_log(f"[ERROR] 图像目录不存在: {path}")
+            return None
+        return path, ""
+
+    def _on_lingbot_map_run_clicked(self) -> None:
+        if self._lingbot_map_launcher.is_running():
+            return
+        resolved = self._resolve_lingbot_map_input()
+        if resolved is None:
+            return
+        image_folder, video_path = resolved
+        if image_folder:
+            self._lingbot_map_set_preview_from_folder(image_folder)
+        model_override = self.lingbot_map_model_edit.text().strip()
+        model = model_override or str(
+            self.lingbot_map_ckpt_combo.currentData() or LINGBOT_MAP_CKPT_DEFAULT
+        )
+        self._lingbot_map_viser_url = ""
+        self.lingbot_map_url_label.setText("")
+        self.lingbot_map_open_btn.setEnabled(False)
+        self._lingbot_map_launcher.start(
+            image_folder=image_folder,
+            video_path=video_path,
+            model=model,
+            port=int(self.lingbot_map_port_spin.value()),
+            first_k=int(self.lingbot_map_first_k_spin.value()),
+            stride=int(self.lingbot_map_stride_spin.value()),
+            fps=int(self.lingbot_map_fps_spin.value()),
+            mask_sky=bool(self.lingbot_map_mask_sky_check.isChecked()),
+            use_sdpa=bool(self.lingbot_map_sdpa_check.isChecked()),
+        )
+        self._update_lingbot_map_ui()
+
+    def _on_lingbot_map_stop_clicked(self) -> None:
+        self._append_lingbot_map_log("--- 用户停止 LingBot-Map ---")
+        self._lingbot_map_launcher.stop()
+        self._update_lingbot_map_ui()
+
+    def _on_lingbot_map_viser_ready(self, url: str) -> None:
+        self._lingbot_map_viser_url = url
+        self.lingbot_map_url_label.setText(f"viser: {url}  （推理结束后可打开）")
+        self.lingbot_map_open_btn.setEnabled(True)
+        self._append_lingbot_map_log(f"viser URL: {url}")
+
+    def _on_lingbot_map_open_clicked(self) -> None:
+        url = getattr(self, "_lingbot_map_viser_url", "") or (
+            f"http://127.0.0.1:{int(self.lingbot_map_port_spin.value())}"
+        )
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _append_lingbot_video_log(self, line: str) -> None:
+        if not hasattr(self, "lingbot_video_log_edit"):
+            return
+        self.lingbot_video_log_edit.append(line)
+        bar = self.lingbot_video_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_lingbot_video_status(self, msg: str) -> None:
+        if hasattr(self, "lingbot_video_status_label"):
+            self.lingbot_video_status_label.setText(msg)
+        self.status_bar.showMessage(msg)
+
+    def _update_lingbot_video_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_lingbot_video_launcher", None)
+            and self._lingbot_video_launcher.is_running()
+        )
+        mode = str(self.lingbot_video_mode_combo.currentData() or "t2v")
+        ti2v = mode == "ti2v"
+        custom_preset = str(self.lingbot_video_preset_combo.currentData() or "") == "custom"
+        self.lingbot_video_run_btn.setEnabled(not running)
+        self.lingbot_video_stop_btn.setEnabled(running)
+        self.lingbot_video_open_btn.setEnabled(
+            bool(getattr(self, "_lingbot_video_last_output", ""))
+            and os.path.isfile(self._lingbot_video_last_output)
+        )
+        for w in (
+            self.lingbot_video_mode_combo,
+            self.lingbot_video_case_combo,
+            self.lingbot_video_preset_combo,
+            self.lingbot_video_prompt_edit,
+            self.lingbot_video_prompt_browse_btn,
+            self.lingbot_video_model_edit,
+            self.lingbot_video_model_browse_btn,
+            self.lingbot_video_seed_spin,
+            self.lingbot_video_refiner_check,
+        ):
+            w.setEnabled(not running)
+        for w in (
+            self.lingbot_video_h_spin,
+            self.lingbot_video_w_spin,
+            self.lingbot_video_frames_spin,
+            self.lingbot_video_steps_spin,
+        ):
+            w.setEnabled(not running and custom_preset)
+        self.lingbot_video_image_edit.setEnabled(not running and ti2v)
+        self.lingbot_video_image_browse_btn.setEnabled(not running and ti2v)
+        self.lingbot_video_cam_btn.setEnabled(not running and ti2v)
+        if running:
+            self.lingbot_video_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.lingbot_video_status_label.setStyleSheet("")
+
+    def _populate_lingbot_video_cases(self) -> None:
+        self.lingbot_video_case_combo.blockSignals(True)
+        self.lingbot_video_case_combo.clear()
+        mode = str(self.lingbot_video_mode_combo.currentData() or "t2v")
+        manifest_path = os.path.join(
+            LINGBOT_VIDEO_ROOT_DEFAULT, "assets", "cases", "manifest.json"
+        )
+        cases: List[dict] = []
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                cases = [
+                    c
+                    for c in (data.get("examples") or [])
+                    if str(c.get("mode") or "") == mode
+                ]
+            except Exception as exc:
+                self._append_lingbot_video_log(f"[WARN] 读取 manifest 失败: {exc}")
+        if not cases:
+            cases_dir = os.path.join(LINGBOT_VIDEO_ROOT_DEFAULT, "assets", "cases", mode)
+            if os.path.isdir(cases_dir):
+                for name in sorted(os.listdir(cases_dir)):
+                    prompt = os.path.join(cases_dir, name, "prompt.json")
+                    if os.path.isfile(prompt):
+                        item = {"mode": mode, "name": name, "prompt_json": prompt}
+                        img = os.path.join(cases_dir, name, "first_frame.png")
+                        if os.path.isfile(img):
+                            item["image"] = img
+                        cases.append(item)
+        for case in cases:
+            name = str(case.get("name") or "case")
+            prompt = str(case.get("prompt_json") or "")
+            if not os.path.isabs(prompt):
+                prompt = os.path.join(LINGBOT_VIDEO_ROOT_DEFAULT, prompt)
+            image = str(case.get("image") or "")
+            if image and not os.path.isabs(image):
+                image = os.path.join(LINGBOT_VIDEO_ROOT_DEFAULT, image)
+            self.lingbot_video_case_combo.addItem(
+                name, {"prompt_json": prompt, "image": image}
+            )
+        self.lingbot_video_case_combo.addItem("自定义路径…", {"prompt_json": "", "image": ""})
+        self.lingbot_video_case_combo.blockSignals(False)
+        self._on_lingbot_video_case_changed()
+
+    def _on_lingbot_video_mode_changed(self, *_args) -> None:
+        self._populate_lingbot_video_cases()
+        self._on_lingbot_video_preset_changed()
+        self._update_lingbot_video_ui()
+
+    def _on_lingbot_video_case_changed(self, *_args) -> None:
+        data = self.lingbot_video_case_combo.currentData() or {}
+        if not isinstance(data, dict):
+            data = {}
+        prompt = str(data.get("prompt_json") or "")
+        image = str(data.get("image") or "")
+        if prompt:
+            self.lingbot_video_prompt_edit.setText(prompt)
+        if image:
+            self.lingbot_video_image_edit.setText(image)
+            self.lingbot_video_input_label.set_source_pixmap(QPixmap(image))
+        elif prompt and os.path.isfile(prompt):
+            # no image — clear preview
+            self.lingbot_video_input_label.set_source_pixmap(None)
+        self._update_lingbot_video_ui()
+
+    def _on_lingbot_video_preset_changed(self, *_args) -> None:
+        preset = str(self.lingbot_video_preset_combo.currentData() or "fast")
+        mode = str(self.lingbot_video_mode_combo.currentData() or "t2v")
+        if preset == "fast":
+            self.lingbot_video_h_spin.setValue(192)
+            self.lingbot_video_w_spin.setValue(320)
+            self.lingbot_video_frames_spin.setValue(9 if mode != "t2i" else 1)
+            self.lingbot_video_steps_spin.setValue(20)
+        elif preset == "standard":
+            self.lingbot_video_h_spin.setValue(480)
+            self.lingbot_video_w_spin.setValue(832)
+            self.lingbot_video_frames_spin.setValue(121 if mode != "t2i" else 1)
+            self.lingbot_video_steps_spin.setValue(40)
+        self._update_lingbot_video_ui()
+
+    def _on_lingbot_video_prompt_browse_clicked(self) -> None:
+        current = self.lingbot_video_prompt_edit.text().strip()
+        initial = (
+            current
+            if os.path.isfile(current)
+            else os.path.join(LINGBOT_VIDEO_ROOT_DEFAULT, "assets", "cases")
+        )
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 prompt.json",
+            initial,
+            "JSON (*.json);;All files (*)",
+        )
+        if selected:
+            self.lingbot_video_prompt_edit.setText(selected)
+
+    def _on_lingbot_video_image_browse_clicked(self) -> None:
+        current = self.lingbot_video_image_edit.text().strip()
+        initial = current if os.path.isfile(current) else LINGBOT_VIDEO_ROOT_DEFAULT
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 TI2V 首帧",
+            initial,
+            "Images (*.png *.jpg *.jpeg *.bmp);;All files (*)",
+        )
+        if selected:
+            self.lingbot_video_image_edit.setText(selected)
+            self.lingbot_video_input_label.set_source_pixmap(QPixmap(selected))
+
+    def _on_lingbot_video_model_browse_clicked(self) -> None:
+        current = self.lingbot_video_model_edit.text().strip()
+        initial = current if os.path.isdir(current) else LINGBOT_VIDEO_MODEL_CACHE
+        selected = QFileDialog.getExistingDirectory(self, "选择 model_dir", initial)
+        if selected:
+            self.lingbot_video_model_edit.setText(selected)
+
+    def _on_lingbot_video_cam_clicked(self) -> None:
+        picked = self._pick_sam3_color_source()
+        if picked is None:
+            self._append_lingbot_video_log("[ERROR] 无可用彩色图像")
+            self._on_lingbot_video_status("无可用相机图像")
+            return
+        topic, image, _panel = picked
+        out_dir = os.path.join(LINGBOT_VIDEO_CACHE_DIR, "camera_frames")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "ti2v_first_frame.png")
+        bgr = np.asarray(image)
+        if bgr.ndim == 2:
+            bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+        cv2.imwrite(path, bgr)
+        self.lingbot_video_image_edit.setText(path)
+        self.lingbot_video_input_label.set_source_pixmap(QPixmap(path))
+        self._append_lingbot_video_log(f"已抓首帧 {topic} -> {path}")
+
+    def _on_lingbot_video_run_clicked(self) -> None:
+        if self._lingbot_video_launcher.is_running():
+            return
+        mode = str(self.lingbot_video_mode_combo.currentData() or "t2v")
+        prompt_json = self.lingbot_video_prompt_edit.text().strip()
+        if not prompt_json or not os.path.isfile(prompt_json):
+            self._append_lingbot_video_log(f"[ERROR] prompt.json 不存在: {prompt_json}")
+            self._on_lingbot_video_status("prompt.json 不存在")
+            return
+        image = self.lingbot_video_image_edit.text().strip()
+        if mode == "ti2v" and (not image or not os.path.isfile(image)):
+            self._append_lingbot_video_log("[ERROR] TI2V 需要有效首帧图像")
+            self._on_lingbot_video_status("缺少首帧")
+            return
+
+        os.makedirs(LINGBOT_VIDEO_OUTPUT_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        ext = ".png" if mode == "t2i" else ".mp4"
+        output = os.path.join(LINGBOT_VIDEO_OUTPUT_DIR, f"{mode}_{stamp}{ext}")
+        self.lingbot_video_output_label.set_source_pixmap(None)
+        if getattr(self, "lingbot_video_player", None) is not None:
+            self.lingbot_video_player.close_video()
+            self.lingbot_video_player.setVisible(False)
+        self.lingbot_video_output_label.setVisible(True)
+        self._lingbot_video_last_output = ""
+        self.lingbot_video_open_btn.setEnabled(False)
+
+        frames = int(self.lingbot_video_frames_spin.value())
+        if mode == "t2i":
+            frames = 1
+        elif frames > 1 and (frames - 1) % 4 != 0:
+            # snap down to valid 4n+1
+            frames = max(1, ((frames - 1) // 4) * 4 + 1)
+            self.lingbot_video_frames_spin.setValue(frames)
+            self._append_lingbot_video_log(f"frames 已对齐为 4n+1: {frames}")
+
+        self._lingbot_video_launcher.start(
+            mode=mode,
+            output=output,
+            prompt_json=prompt_json,
+            image=image if mode == "ti2v" else "",
+            model_dir=self.lingbot_video_model_edit.text().strip(),
+            height=int(self.lingbot_video_h_spin.value()),
+            width=int(self.lingbot_video_w_spin.value()),
+            num_frames=frames,
+            steps=int(self.lingbot_video_steps_spin.value()),
+            seed=int(self.lingbot_video_seed_spin.value()),
+            run_refiner=bool(self.lingbot_video_refiner_check.isChecked()),
+        )
+        self._update_lingbot_video_ui()
+
+    def _on_lingbot_video_stop_clicked(self) -> None:
+        self._append_lingbot_video_log("--- 用户停止 LingBot-Video ---")
+        self._lingbot_video_launcher.stop()
+        self._update_lingbot_video_ui()
+
+    def _lingbot_video_preview_output(self, path: str) -> None:
+        if not path or not os.path.isfile(path):
+            return
+        lower = path.lower()
+        if lower.endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp")):
+            if getattr(self, "lingbot_video_player", None) is not None:
+                self.lingbot_video_player.close_video()
+                self.lingbot_video_player.setVisible(False)
+            self.lingbot_video_output_label.setVisible(True)
+            self.lingbot_video_output_label.set_source_pixmap(QPixmap(path))
+            return
+        if lower.endswith((".mp4", ".avi", ".mov", ".mkv", ".webm")):
+            self.lingbot_video_output_label.setVisible(False)
+            self.lingbot_video_output_label.set_source_pixmap(None)
+            player = getattr(self, "lingbot_video_player", None)
+            if player is None:
+                self._append_lingbot_video_log("[WARN] 视频播放器未初始化")
+                return
+            player.setVisible(True)
+            if player.load(path):
+                player.play()
+                self._append_lingbot_video_log(f"已加载视频并开始播放: {path}")
+            else:
+                self._append_lingbot_video_log(f"[WARN] 无法打开视频: {path}")
+
+    def _on_lingbot_video_result(self, result: dict) -> None:
+        if not result.get("ok"):
+            return
+        output = str(result.get("output") or "")
+        self._lingbot_video_last_output = output
+        self._lingbot_video_preview_output(output)
+        self.lingbot_video_open_btn.setEnabled(bool(output and os.path.isfile(output)))
+        self._append_lingbot_video_log(
+            f"完成 mode={result.get('mode')} "
+            f"{result.get('width')}x{result.get('height')} "
+            f"frames={result.get('num_frames')} steps={result.get('steps')} "
+            f"-> {output}"
+        )
+
+    def _on_lingbot_video_open_clicked(self) -> None:
+        path = getattr(self, "_lingbot_video_last_output", "")
+        if not path or not os.path.isfile(path):
+            return
+        lower = path.lower()
+        if lower.endswith((".mp4", ".avi", ".mov", ".mkv", ".webm")):
+            # 内嵌播放器再播一次；同时弹窗方便放大浏览
+            if getattr(self, "lingbot_video_player", None) is not None:
+                self.lingbot_video_output_label.setVisible(False)
+                self.lingbot_video_player.setVisible(True)
+                if self.lingbot_video_player.load(path):
+                    self.lingbot_video_player.play()
+            dlg = SimEvalVideoDialog(path, self)
+            dlg.exec_()
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _append_lingbot_world_log(self, line: str) -> None:
+        if not hasattr(self, "lingbot_world_log_edit"):
+            return
+        self.lingbot_world_log_edit.append(line)
+        bar = self.lingbot_world_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_lingbot_world_status(self, msg: str) -> None:
+        if hasattr(self, "lingbot_world_status_label"):
+            self.lingbot_world_status_label.setText(msg)
+        self.status_bar.showMessage(msg)
+
+    def _update_lingbot_world_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_lingbot_world_launcher", None)
+            and self._lingbot_world_launcher.is_running()
+        )
+        custom = str(self.lingbot_world_example_combo.currentData() or "") == "custom"
+        self.lingbot_world_run_btn.setEnabled(not running)
+        self.lingbot_world_stop_btn.setEnabled(running)
+        self.lingbot_world_play_btn.setEnabled(
+            bool(getattr(self, "_lingbot_world_last_output", ""))
+            and os.path.isfile(self._lingbot_world_last_output)
+        )
+        for w in (
+            self.lingbot_world_example_combo,
+            self.lingbot_world_size_combo,
+            self.lingbot_world_frames_spin,
+            self.lingbot_world_seed_spin,
+            self.lingbot_world_t5_cpu_check,
+            self.lingbot_world_offload_check,
+            self.lingbot_world_ckpt_edit,
+            self.lingbot_world_ckpt_browse_btn,
+            self.lingbot_world_prompt_edit,
+            self.lingbot_world_cam_btn,
+        ):
+            w.setEnabled(not running)
+        self.lingbot_world_image_edit.setEnabled(not running and custom)
+        self.lingbot_world_image_browse_btn.setEnabled(not running and custom)
+        self.lingbot_world_action_edit.setEnabled(not running and custom)
+        self.lingbot_world_action_browse_btn.setEnabled(not running and custom)
+        if running:
+            self.lingbot_world_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.lingbot_world_status_label.setStyleSheet("")
+
+    def _on_lingbot_world_example_changed(self, *_args) -> None:
+        ex = str(self.lingbot_world_example_combo.currentData() or "03")
+        if ex != "custom":
+            action = os.path.join(LINGBOT_WORLD_ROOT_DEFAULT, "examples", ex)
+            image = os.path.join(action, "image.jpg")
+            self.lingbot_world_action_edit.setText(action)
+            self.lingbot_world_image_edit.setText(image)
+            if os.path.isfile(image):
+                self.lingbot_world_input_label.set_source_pixmap(QPixmap(image))
+        self._update_lingbot_world_ui()
+
+    def _on_lingbot_world_image_browse_clicked(self) -> None:
+        current = self.lingbot_world_image_edit.text().strip()
+        initial = current if os.path.isfile(current) else LINGBOT_WORLD_ROOT_DEFAULT
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择输入图像",
+            initial,
+            "Images (*.png *.jpg *.jpeg *.bmp);;All files (*)",
+        )
+        if selected:
+            self.lingbot_world_image_edit.setText(selected)
+            self.lingbot_world_input_label.set_source_pixmap(QPixmap(selected))
+
+    def _on_lingbot_world_action_browse_clicked(self) -> None:
+        current = self.lingbot_world_action_edit.text().strip()
+        initial = current if os.path.isdir(current) else LINGBOT_WORLD_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 action 目录", initial)
+        if selected:
+            self.lingbot_world_action_edit.setText(selected)
+
+    def _on_lingbot_world_ckpt_browse_clicked(self) -> None:
+        current = self.lingbot_world_ckpt_edit.text().strip()
+        initial = current if os.path.isdir(current) else LINGBOT_WORLD_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 ckpt 目录", initial)
+        if selected:
+            self.lingbot_world_ckpt_edit.setText(selected)
+
+    def _on_lingbot_world_cam_clicked(self) -> None:
+        picked = self._pick_sam3_color_source()
+        if picked is None:
+            self._append_lingbot_world_log("[ERROR] 无可用彩色图像")
+            self._on_lingbot_world_status("无可用相机图像")
+            return
+        topic, image, _panel = picked
+        out_dir = os.path.join(LINGBOT_WORLD_CACHE_DIR, "camera_input")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "image.jpg")
+        bgr = np.asarray(image)
+        if bgr.ndim == 2:
+            bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+        cv2.imwrite(path, bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+        # keep current action_path (example poses); switch combo to custom
+        idx = self.lingbot_world_example_combo.findData("custom")
+        if idx >= 0:
+            self.lingbot_world_example_combo.setCurrentIndex(idx)
+        self.lingbot_world_image_edit.setText(path)
+        self.lingbot_world_input_label.set_source_pixmap(QPixmap(path))
+        if not self.lingbot_world_action_edit.text().strip():
+            self.lingbot_world_action_edit.setText(
+                os.path.join(LINGBOT_WORLD_ROOT_DEFAULT, "examples", "03")
+            )
+        self._append_lingbot_world_log(f"已抓帧 {topic} -> {path}")
+        self._update_lingbot_world_ui()
+
+    def _on_lingbot_world_run_clicked(self) -> None:
+        if self._lingbot_world_launcher.is_running():
+            return
+        image = self.lingbot_world_image_edit.text().strip()
+        action = self.lingbot_world_action_edit.text().strip()
+        if not image or not os.path.isfile(image):
+            self._append_lingbot_world_log(f"[ERROR] 图像不存在: {image}")
+            return
+        if not action or not os.path.isdir(action):
+            self._append_lingbot_world_log(f"[ERROR] action 目录不存在: {action}")
+            return
+        frames = int(self.lingbot_world_frames_spin.value())
+        if frames > 1 and (frames - 1) % 4 != 0:
+            frames = max(5, ((frames - 1) // 4) * 4 + 1)
+            self.lingbot_world_frames_spin.setValue(frames)
+            self._append_lingbot_world_log(f"frames 已对齐为 4n+1: {frames}")
+
+        os.makedirs(LINGBOT_WORLD_OUTPUT_DIR, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        output = os.path.join(LINGBOT_WORLD_OUTPUT_DIR, f"world_{stamp}.mp4")
+        if getattr(self, "lingbot_world_player", None) is not None:
+            self.lingbot_world_player.close_video()
+        self._lingbot_world_last_output = ""
+        self.lingbot_world_play_btn.setEnabled(False)
+        self.lingbot_world_input_label.set_source_pixmap(QPixmap(image))
+
+        self._lingbot_world_launcher.start(
+            image=image,
+            action_path=action,
+            prompt=self.lingbot_world_prompt_edit.toPlainText().strip()
+            or LINGBOT_WORLD_PROMPT_DEFAULT,
+            output=output,
+            ckpt_dir=self.lingbot_world_ckpt_edit.text().strip(),
+            size=str(self.lingbot_world_size_combo.currentData() or "480*832"),
+            frame_num=frames,
+            seed=int(self.lingbot_world_seed_spin.value()),
+            t5_cpu=bool(self.lingbot_world_t5_cpu_check.isChecked()),
+            offload_model=bool(self.lingbot_world_offload_check.isChecked()),
+        )
+        self._update_lingbot_world_ui()
+
+    def _on_lingbot_world_stop_clicked(self) -> None:
+        self._append_lingbot_world_log("--- 用户停止 LingBot-World ---")
+        self._lingbot_world_launcher.stop()
+        self._update_lingbot_world_ui()
+
+    def _on_lingbot_world_result(self, result: dict) -> None:
+        if not result.get("ok"):
+            return
+        output = str(result.get("output") or "")
+        self._lingbot_world_last_output = output
+        self.lingbot_world_play_btn.setEnabled(bool(output and os.path.isfile(output)))
+        if output and os.path.isfile(output) and getattr(self, "lingbot_world_player", None):
+            if self.lingbot_world_player.load(output):
+                self.lingbot_world_player.play()
+        self._append_lingbot_world_log(
+            f"完成 frames={result.get('frame_num')} size={result.get('size')} "
+            f"-> {output}"
+        )
+
+    def _on_lingbot_world_play_clicked(self) -> None:
+        path = getattr(self, "_lingbot_world_last_output", "")
+        if not path or not os.path.isfile(path):
+            return
+        if getattr(self, "lingbot_world_player", None) is not None:
+            if self.lingbot_world_player.load(path):
+                self.lingbot_world_player.play()
+        dlg = SimEvalVideoDialog(path, self)
+        dlg.exec_()
 
     def _set_sam3_result_text(self, text: str) -> None:
         self.sam3_result_edit.setPlainText(text)
