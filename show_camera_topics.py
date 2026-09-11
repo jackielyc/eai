@@ -11346,7 +11346,13 @@ class RoboDojoEvalLauncher(QObject):
         bridge_dir = os.path.abspath(os.path.expanduser((bridge_dir or "").strip()))
         disp = (display or os.environ.get("DISPLAY") or ":1.0").strip()
         self._use_gui = bool(use_gui)
-        is_starvla = "starVLA" in policy_dir or "starvla" in policy_dir.lower()
+        # 「无」：只启评测客户端；仍用 demo_policy 目录提供 client adapter 脚本
+        skip_policy = not (policy_dir or "").strip()
+        if skip_policy:
+            policy_dir = "XPolicyLab/policy/demo_policy"
+        is_starvla = (not skip_policy) and (
+            "starVLA" in policy_dir or "starvla" in policy_dir.lower()
+        )
 
         # Viewer (RoboStack) injects ros-humble into PYTHONPATH; that makes
         # transformers see numpy version as None inside starvla/RoboDojo envs.
@@ -11372,6 +11378,16 @@ class RoboDojoEvalLauncher(QObject):
             "unset RANK WORLD_SIZE LOCAL_RANK LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT "
             "GROUP_RANK ROLE_RANK TORCHELASTIC_RUN_ID PMI_RANK PMI_SIZE 2>/dev/null || true",
         ]
+        if skip_policy:
+            exports.append("export ROBODOJO_SKIP_POLICY_SERVER=1")
+            exports.append("export ROBODOJO_FORCE_PROTOCOL=none")
+            # port still required by eval_policy.sh argv plumbing; unused for noop
+            skip_policy_port = (
+                os.environ.get("ROBODOJO_POLICY_PORT", "").strip() or "18765"
+            )
+            exports.append(f"export ROBODOJO_POLICY_PORT={shlex.quote(skip_policy_port)}")
+        else:
+            exports.append("unset ROBODOJO_SKIP_POLICY_SERVER ROBODOJO_FORCE_PROTOCOL || true")
         if bridge_dir:
             exports.append(f"export ISAAC_CAM_BRIDGE_DIR={shlex.quote(bridge_dir)}")
             exports.append(f"export EAI_DIR={shlex.quote(EAI_DIR)}")
@@ -11462,7 +11478,11 @@ class RoboDojoEvalLauncher(QObject):
             )
             run_cmd = f"exec bash {shlex.quote(gui_script)} {shlex.quote(task)}"
             log_cmd = f"$ bash scripts/run_gui_eval.sh {task}  # GUI"
-            status_msg = f"正在启动 RoboDojo GUI 评测: {task}…"
+            if skip_policy:
+                status_msg = f"正在启动评测（无策略 / GUI）: {task}…"
+                log_cmd += "  # skip policy server"
+            else:
+                status_msg = f"正在启动 RoboDojo GUI 评测: {task}…"
         else:
             robodojo_sh = os.path.join(root, "scripts", "robodojo.sh")
             if not os.path.isfile(robodojo_sh):
@@ -11483,7 +11503,11 @@ class RoboDojoEvalLauncher(QObject):
                 f"$ bash scripts/robodojo.sh eval --task {task} "
                 f"--policy-dir {policy_dir} --ckpt {ckpt}  # headless"
             )
-            status_msg = f"正在启动 RoboDojo headless 评测: {task}…"
+            if skip_policy:
+                status_msg = f"正在启动评测（无策略 / headless）: {task}…"
+                log_cmd += "  # skip policy server"
+            else:
+                status_msg = f"正在启动 RoboDojo headless 评测: {task}…"
 
         cmd = " && ".join(exports) + f" && cd {shlex.quote(root)} && {run_cmd}"
         self._stopping = False
@@ -11503,6 +11527,13 @@ class RoboDojoEvalLauncher(QObject):
         qenv.insert("TMP", tmpdir)
         qenv.insert("CONDA_ROOT", conda_base)
         qenv.insert("CONDA_EXE", os.path.join(conda_base, "bin", "conda"))
+        if skip_policy:
+            qenv.insert("ROBODOJO_SKIP_POLICY_SERVER", "1")
+            qenv.insert("ROBODOJO_FORCE_PROTOCOL", "none")
+            qenv.insert("ROBODOJO_POLICY_PORT", skip_policy_port)
+        else:
+            qenv.remove("ROBODOJO_SKIP_POLICY_SERVER")
+            qenv.remove("ROBODOJO_FORCE_PROTOCOL")
         conda_bin = os.path.join(conda_base, "bin")
         path_now = qenv.value("PATH", "")
         if conda_bin not in path_now.split(":"):
@@ -11524,11 +11555,16 @@ class RoboDojoEvalLauncher(QObject):
         self.log_line.emit(log_cmd)
         if starvla_ckpt_note:
             self.log_line.emit(starvla_ckpt_note)
+        policy_label = "(无 / 进程内零动作，不启策略服务)" if skip_policy else policy_dir
         self.log_line.emit(
             f"  mode={'GUI' if self._use_gui else 'headless'} "
-            f"policy={policy_dir} ckpt={ckpt} action={action_type} "
+            f"policy={policy_label} ckpt={ckpt} action={action_type} "
             f"bridge={bridge_dir or '(unset)'}"
         )
+        if skip_policy:
+            self.log_line.emit(
+                "  策略=无：仅启评测；Isaac 使用进程内零动作，不会连接 WebSocket 策略服务"
+            )
         self.status_message.emit(status_msg)
 
     def stop(self) -> None:
@@ -12383,11 +12419,22 @@ class CameraTopicWindow(QMainWindow):
         sim_run_row.addWidget(self.sim_eval_task_combo)
         sim_run_row.addWidget(QLabel("策略"))
         self.sim_eval_policy_combo = ImeSafeComboBox()
+        self.sim_eval_policy_combo.addItem("无", "")
         self.sim_eval_policy_combo.addItem(
             "demo_policy", "XPolicyLab/policy/demo_policy"
         )
         self.sim_eval_policy_combo.addItem("starVLA", "XPolicyLab/policy/starVLA")
-        self.sim_eval_policy_combo.setToolTip("XPolicyLab 策略目录（相对 RoboDojo 根）")
+        # 默认仍选 demo_policy（「无」= 仅启评测、不启策略服务）
+        idx_demo = self.sim_eval_policy_combo.findData(
+            "XPolicyLab/policy/demo_policy"
+        )
+        if idx_demo >= 0:
+            self.sim_eval_policy_combo.setCurrentIndex(idx_demo)
+        self.sim_eval_policy_combo.setToolTip(
+            "XPolicyLab 策略目录（相对 RoboDojo 根）。\n"
+            "选「无」：只启动评测（Isaac / eval client），不启动策略服务；\n"
+            "评测侧用进程内零动作推进，相机可预览。"
+        )
         self.sim_eval_policy_combo.currentIndexChanged.connect(
             self._on_sim_eval_policy_changed
         )
@@ -12424,6 +12471,7 @@ class CameraTopicWindow(QMainWindow):
             "按「仿真界面」选项启动评测：\n"
             "• 勾选 → scripts/run_gui_eval.sh（GUI）\n"
             "• 不勾选 → scripts/robodojo.sh eval（headless）\n"
+            "策略选「无」时只启评测客户端，不启策略服务。\n"
             "GUI 模式会自动启相机桥并打开三路预览。"
         )
         self.sim_eval_start_btn.clicked.connect(self._on_sim_eval_start_clicked)
@@ -13553,6 +13601,12 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_sim_eval_policy_changed(self, _index: int = 0) -> None:
         policy = str(self.sim_eval_policy_combo.currentData() or "")
+        no_policy = not policy
+        running = self._sim_eval_launcher.is_running()
+        self.sim_eval_ckpt_edit.setEnabled(not running and not no_policy)
+        self.sim_eval_action_combo.setEnabled(not running and not no_policy)
+        if no_policy:
+            return
         if "starVLA" in policy:
             if not self.sim_eval_ckpt_edit.text().strip() or self.sim_eval_ckpt_edit.text().strip() == "demo":
                 self.sim_eval_ckpt_edit.setText("hf_qwenpi_v3")
@@ -13569,12 +13623,13 @@ class CameraTopicWindow(QMainWindow):
     def _update_sim_eval_run_ui(self, *_args) -> None:
         running = self._sim_eval_launcher.is_running()
         stopping = bool(getattr(self._sim_eval_launcher, "_stopping", False))
+        no_policy = not str(self.sim_eval_policy_combo.currentData() or "")
         self.sim_eval_start_btn.setEnabled(not running)
         self.sim_eval_stop_run_btn.setEnabled(running)
         self.sim_eval_task_combo.setEnabled(not running)
         self.sim_eval_policy_combo.setEnabled(not running)
-        self.sim_eval_ckpt_edit.setEnabled(not running)
-        self.sim_eval_action_combo.setEnabled(not running)
+        self.sim_eval_ckpt_edit.setEnabled(not running and not no_policy)
+        self.sim_eval_action_combo.setEnabled(not running and not no_policy)
         if hasattr(self, "sim_eval_use_gui_check"):
             self.sim_eval_use_gui_check.setEnabled(not running)
         if stopping:
@@ -13743,12 +13798,17 @@ class CameraTopicWindow(QMainWindow):
             or self.sim_eval_task_combo.currentText()
             or ""
         ).strip()
-        policy_dir = str(
-            self.sim_eval_policy_combo.currentData()
-            or "XPolicyLab/policy/demo_policy"
-        )
+        # currentData() 为 "" 表示「无」：勿回落到 demo_policy
+        policy_data = self.sim_eval_policy_combo.currentData()
+        if policy_data is None:
+            policy_dir = "XPolicyLab/policy/demo_policy"
+        else:
+            policy_dir = str(policy_data)
+        skip_policy = not policy_dir.strip()
         policy_env = ROBODOJO_ENV_DEFAULT
-        if "starVLA" in policy_dir and os.path.isdir(ROBODOJO_STARVLA_ENV_DEFAULT):
+        if (not skip_policy) and "starVLA" in policy_dir and os.path.isdir(
+            ROBODOJO_STARVLA_ENV_DEFAULT
+        ):
             policy_env = ROBODOJO_STARVLA_ENV_DEFAULT
         use_gui = bool(
             getattr(self, "sim_eval_use_gui_check", None) is not None
@@ -13773,10 +13833,16 @@ class CameraTopicWindow(QMainWindow):
             self._append_sim_log("headless：停止已在运行的相机桥（预览改直读 .npy）")
             self._sim_bridge_launcher.stop()
             self._update_sim_bridge_ui()
-        self._append_sim_log(
-            f"评测模式: {'GUI（仿真界面）' if use_gui else 'headless（无 Isaac 窗口）'}；"
-            f"共享帧={bridge_dir}"
-        )
+        mode_note = "GUI（仿真界面）" if use_gui else "headless（无 Isaac 窗口）"
+        if skip_policy:
+            self._append_sim_log(
+                f"评测模式: {mode_note}；策略=无（只启评测，不启策略服务）；"
+                f"共享帧={bridge_dir}"
+            )
+        else:
+            self._append_sim_log(
+                f"评测模式: {mode_note}；共享帧={bridge_dir}"
+            )
         self._sim_eval_launcher.start(
             task,
             bridge_dir=bridge_dir,

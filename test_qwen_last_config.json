@@ -1,8 +1,8 @@
 {
   "target": "local",
   "scan_root": "/share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output",
-  "model_path": "/share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-lake-hermas-20260827-epoch1-tain14703-val14028",
-  "model_id": "qwen35-4b-lora-lake-hermas-20260827-epoch1-tain14703-val14028",
-  "model_label": "qwen35-4b-lora-lake-hermas-20260827-epoch1-tain14703-val14028",
-  "saved_at": "2026-09-10T09:14:59Z"
+  "model_path": "/share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-vn-from-hermas-approved-20260911",
+  "model_id": "qwen35-4b-lora-vn-from-hermas-approved-20260911",
+  "model_label": "qwen35-4b-lora-vn-from-hermas-approved-20260911",
+  "saved_at": "2026-09-11T06:28:46Z"
 }

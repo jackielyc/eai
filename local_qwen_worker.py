@@ -252,6 +252,30 @@ def load_lora_model(adapter_dir: str) -> None:
     if not base_dir or not os.path.isfile(os.path.join(base_dir, "config.json")):
         raise FileNotFoundError(f"LoRA base model not found: {base_dir}")
 
+    weight_candidates = (
+        "adapter_model.safetensors",
+        "adapter_model.bin",
+        "pytorch_model.bin",
+    )
+    weight_path = ""
+    for name in weight_candidates:
+        cand = os.path.join(adapter_dir, name)
+        if os.path.isfile(cand):
+            weight_path = cand
+            break
+    if not weight_path:
+        raise FileNotFoundError(
+            f"LoRA adapter weights missing under {adapter_dir} "
+            f"(expected one of {', '.join(weight_candidates)})"
+        )
+    if not os.access(weight_path, os.R_OK):
+        st = os.stat(weight_path)
+        raise PermissionError(
+            f"LoRA adapter weights not readable by current user: {weight_path} "
+            f"(mode={oct(st.st_mode & 0o777)}, uid={st.st_uid}). "
+            f"Fix with: sudo chmod a+r {weight_path}"
+        )
+
     _log(f"loading LoRA adapter from {adapter_dir}, base={base_dir}")
     proc_dir = (
         adapter_dir
@@ -293,7 +317,15 @@ def load_lora_model(adapter_dir: str) -> None:
     except TypeError:
         load_kwargs.pop("low_cpu_mem_usage", None)
         base_model = AutoModelForImageTextToText.from_pretrained(base_dir, **load_kwargs)
-    model = PeftModel.from_pretrained(base_model, adapter_dir)
+    try:
+        model = PeftModel.from_pretrained(base_model, adapter_dir)
+    except FileNotFoundError as exc:
+        # safetensors may raise FileNotFoundError for EACCES on root-owned 600 files
+        raise PermissionError(
+            f"Failed to open LoRA weights at {weight_path}. "
+            f"If the file exists, check permissions (often root:root mode 600). "
+            f"Fix: sudo chmod a+r {weight_path}"
+        ) from exc
     if not torch.cuda.is_available():
         model = model.to("cpu")
     model.eval()

@@ -183,9 +183,16 @@ def deploy_scan_roots(host_id: Optional[str] = None) -> List[Tuple[str, str]]:
 
 
 def _is_deployable_model_dir(path: str) -> bool:
-    return os.path.isfile(os.path.join(path, "config.json")) or os.path.isfile(
-        os.path.join(path, "adapter_config.json")
-    )
+    if os.path.isfile(os.path.join(path, "config.json")):
+        return True
+    if not os.path.isfile(os.path.join(path, "adapter_config.json")):
+        return False
+    # LoRA: require readable adapter weights so the UI does not list broken dirs
+    for name in ("adapter_model.safetensors", "adapter_model.bin"):
+        weight = os.path.join(path, name)
+        if os.path.isfile(weight) and os.access(weight, os.R_OK):
+            return True
+    return False
 
 
 def _model_entry_from_path(path: str, root: str = "") -> Dict[str, str]:
