@@ -1,0 +1,37 @@
+### Incremental LoRA SFT — VN-20260901 adapter → Hermes approved train
+model_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-4B
+adapter_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-vn-20260901-epoch1-sample-train1739303-val90816-episode-train313669-val16404
+dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/hermas_sys2_train_approved.jsonl
+eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/hermas_sys2_val_approved.jsonl
+output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-hermas-from-vn-20260901
+
+max_seq_length: 2048
+max_samples: null
+eval_max_samples: 256
+image_max_pixels: 262144
+
+num_train_epochs: 1.0
+learning_rate: 5.0e-5
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+warmup_steps: 100
+logging_steps: 1
+save_steps: 500
+save_interval_hours: 12
+eval_steps: 500
+
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target_modules: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
+
+bf16: true
+gradient_checkpointing: true
+dataloader_num_workers: 4
+save_total_limit: 5
+auto_resume: true
+report_to: none
+seed: 42
+device_map: none
+fsdp: none

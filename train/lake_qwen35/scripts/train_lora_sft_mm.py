@@ -321,13 +321,21 @@ def _scan_jsonl_offsets(path: Path, max_samples: int | None) -> list[int]:
 
 
 def build_jsonl_offsets(path: Path, max_samples: int | None = None) -> list[int]:
-    """Byte offsets for each JSONL row; rank 0 builds, others wait (multi-node safe)."""
-    idx_path = Path(f"{path}.offsets.npy")
+    """Byte offsets for each JSONL row; rank 0 builds, others wait (multi-node safe).
+
+    Full-file and capped indexes use different filenames so an old eval subset
+    index (e.g. 256 rows) cannot silently truncate a later full training run.
+    """
+    if max_samples is None:
+        idx_path = Path(f"{path}.offsets.npy")
+    else:
+        idx_path = Path(f"{path}.offsets.{max_samples}.npy")
     if idx_path.exists() and idx_path.stat().st_mtime >= path.stat().st_mtime:
-        return _load_jsonl_offsets(idx_path, max_samples)
+        return _load_jsonl_offsets(idx_path, max_samples=None)
 
     rank = int(os.environ.get("RANK", "0"))
-    tmp_path = idx_path.with_suffix(".offsets.tmp.npy")
+    # Must end with .npy so np.save does not append another extension.
+    tmp_path = Path(str(idx_path) + ".tmp.npy")
     if rank == 0:
         offsets = _scan_jsonl_offsets(path, max_samples)
         import numpy as np
@@ -345,7 +353,7 @@ def build_jsonl_offsets(path: Path, max_samples: int | None = None) -> list[int]
         else:
             raise TimeoutError(f"Timed out waiting for index: {idx_path}")
 
-    return _load_jsonl_offsets(idx_path, max_samples)
+    return _load_jsonl_offsets(idx_path, max_samples=None)
 
 
 def _training_nnodes(world_size: int) -> int:
