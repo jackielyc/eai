@@ -15,13 +15,18 @@
 帧文件:
   {DIR}/{cam_key}.npy         HxWx3 uint8 RGB
   {DIR}/{cam_key}_depth.npy   HxW uint16 毫米深度（与真机 /camera/*_depth 一致）
+
+遥控（策略=无）:
+  {DIR}/gui_robot_cmd.json    UI → Isaac 目标位姿 / 夹爪
+  {DIR}/sim_robot_state.json  Isaac → UI 当前 TCP / 夹爪
 """
 
 from __future__ import annotations
 
+import json
 import os
 import time
-from typing import Dict, Optional
+from typing import Any, Dict, Mapping, Optional
 
 import numpy as np
 
@@ -142,3 +147,187 @@ def write_cam_depth(cam_key: str, depth: object, *, every: Optional[int] = None)
         _log_fail(f"{key}_depth", exc)
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# GUI ↔ Isaac 手臂/手遥控（策略=无 / NoopModelClient 时生效）
+# ---------------------------------------------------------------------------
+# gui_robot_cmd.json   UI 写入的目标位姿/夹爪
+# sim_robot_state.json 仿真回写的当前 TCP / 夹爪
+#
+# ee_pose: [x, y, z, qw, qx, qy, qz]（与 RoboDojo get_real_endpose 一致）
+# gripper: 0=开, 1=合
+
+GUI_ROBOT_CMD_NAME = "gui_robot_cmd.json"
+SIM_ROBOT_STATE_NAME = "sim_robot_state.json"
+
+
+def _atomic_json_write(path: str, data: Mapping[str, Any]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".writing"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _read_json(path: str) -> Optional[dict]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except FileNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def _as_pose7(val: Any) -> Optional[list]:
+    if val is None:
+        return None
+    try:
+        arr = [float(x) for x in list(val)]
+    except (TypeError, ValueError):
+        return None
+    if len(arr) != 7:
+        return None
+    if not all(np.isfinite(x) for x in arr):
+        return None
+    return arr
+
+
+def _as_gripper(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        if isinstance(val, (list, tuple)) and val:
+            v = float(val[0])
+        else:
+            v = float(val)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(v):
+        return None
+    return float(np.clip(v, 0.0, 1.0))
+
+
+def gui_robot_cmd_path(root: Optional[str] = None) -> str:
+    d = (root or bridge_dir() or "").strip()
+    return os.path.join(d, GUI_ROBOT_CMD_NAME) if d else ""
+
+
+def sim_robot_state_path(root: Optional[str] = None) -> str:
+    d = (root or bridge_dir() or "").strip()
+    return os.path.join(d, SIM_ROBOT_STATE_NAME) if d else ""
+
+
+def read_gui_robot_cmd(root: Optional[str] = None) -> Optional[dict]:
+    path = gui_robot_cmd_path(root)
+    if not path:
+        return None
+    data = _read_json(path)
+    if not data:
+        return None
+    return data
+
+
+def write_gui_robot_cmd(
+    *,
+    root: Optional[str] = None,
+    left_ee_pose: Any = None,
+    right_ee_pose: Any = None,
+    left_gripper: Any = None,
+    right_gripper: Any = None,
+    enabled: bool = True,
+    merge: bool = True,
+) -> bool:
+    """写入 GUI 遥控指令。merge=True 时保留未传入字段的旧值。"""
+    d = (root or bridge_dir() or "").strip()
+    if not d:
+        return False
+    path = os.path.join(d, GUI_ROBOT_CMD_NAME)
+    prev = _read_json(path) if merge else None
+    if not isinstance(prev, dict):
+        prev = {}
+    out: dict = {
+        "ts": time.time(),
+        "enabled": bool(enabled if enabled is not None else prev.get("enabled", True)),
+    }
+    for key, val, caster in (
+        ("left_ee_pose", left_ee_pose, _as_pose7),
+        ("right_ee_pose", right_ee_pose, _as_pose7),
+        ("left_gripper", left_gripper, _as_gripper),
+        ("right_gripper", right_gripper, _as_gripper),
+    ):
+        casted = caster(val) if val is not None else None
+        if casted is not None:
+            out[key] = casted
+        elif merge and key in prev:
+            out[key] = prev[key]
+    try:
+        _atomic_json_write(path, out)
+    except Exception as exc:
+        _log_fail("gui_robot_cmd", exc)
+        return False
+    return True
+
+
+def clear_gui_robot_cmd(root: Optional[str] = None) -> None:
+    path = gui_robot_cmd_path(root)
+    if not path:
+        return
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def read_sim_robot_state(root: Optional[str] = None) -> Optional[dict]:
+    path = sim_robot_state_path(root)
+    if not path:
+        return None
+    return _read_json(path)
+
+
+def write_sim_robot_state(
+    *,
+    root: Optional[str] = None,
+    left_ee_pose: Any = None,
+    right_ee_pose: Any = None,
+    left_gripper: Any = None,
+    right_gripper: Any = None,
+) -> bool:
+    d = (root or bridge_dir() or "").strip()
+    if not d:
+        return False
+    out: dict = {"ts": time.time()}
+    lp = _as_pose7(left_ee_pose)
+    rp = _as_pose7(right_ee_pose)
+    lg = _as_gripper(left_gripper)
+    rg = _as_gripper(right_gripper)
+    if lp is not None:
+        out["left_ee_pose"] = lp
+    if rp is not None:
+        out["right_ee_pose"] = rp
+    if lg is not None:
+        out["left_gripper"] = lg
+    if rg is not None:
+        out["right_gripper"] = rg
+    try:
+        _atomic_json_write(os.path.join(d, SIM_ROBOT_STATE_NAME), out)
+    except Exception as exc:
+        _log_fail("sim_robot_state", exc)
+        return False
+    return True
+
+
+def sim_state_is_fresh(state: Optional[Mapping[str, Any]], max_age_s: float = 2.0) -> bool:
+    if not state:
+        return False
+    try:
+        ts = float(state.get("ts", 0.0))
+    except (TypeError, ValueError):
+        return False
+    return ts > 0 and (time.time() - ts) <= max_age_s

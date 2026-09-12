@@ -15,6 +15,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
+仿真评测（策略=无）时，「手臂/手」页通过共享目录 gui_robot_cmd.json 遥控 Isaac 双臂/夹爪。
 """
 
 from __future__ import annotations
@@ -757,6 +758,20 @@ ISAAC_CAM_BRIDGE_KEYS: Tuple[str, ...] = (
     "cam_left_wrist",
     "cam_right_wrist",
 )
+try:
+    from isaac_cam_bridge_sink import (
+        clear_gui_robot_cmd,
+        read_sim_robot_state,
+        sim_state_is_fresh,
+        write_gui_robot_cmd,
+    )
+except ImportError:  # pragma: no cover
+    clear_gui_robot_cmd = None  # type: ignore[assignment]
+    read_sim_robot_state = None  # type: ignore[assignment]
+    sim_state_is_fresh = None  # type: ignore[assignment]
+    write_gui_robot_cmd = None  # type: ignore[assignment]
+SIM_TELEOP_STATE_MAX_AGE_S = 2.5
+SIM_ARM_MOVE_TICK_MS = 50
 # 仿真评测预览：左腕 → 头部 → 右腕（与图像预览网格顺序一致）
 SIM_PREVIEW_CAM_TOPICS: Tuple[Tuple[str, str], ...] = (
     ("cam_left_wrist", "/camera/left_wrist_color"),
@@ -4175,6 +4190,62 @@ class ResolvedArmMoveGoal:
 
 def arm_side_label(side: str) -> str:
     return "左臂" if side == "left" else "右臂"
+
+
+def xyzw_to_wxyz(
+    quat_xyzw: Sequence[float],
+) -> Tuple[float, float, float, float]:
+    x, y, z, w = [float(v) for v in quat_xyzw]
+    return (w, x, y, z)
+
+
+def wxyz_to_xyzw(
+    quat_wxyz: Sequence[float],
+) -> Tuple[float, float, float, float]:
+    w, x, y, z = [float(v) for v in quat_wxyz]
+    return (x, y, z, w)
+
+
+def pose7_wxyz_from_xyz_xyzw(
+    xyz: Sequence[float],
+    quat_xyzw: Sequence[float],
+) -> List[float]:
+    w, x, y, z = xyzw_to_wxyz(quat_xyzw)
+    return [float(xyz[0]), float(xyz[1]), float(xyz[2]), w, x, y, z]
+
+
+def xyz_xyzw_from_pose7_wxyz(
+    pose7: Sequence[float],
+) -> Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]:
+    x, y, z, qw, qx, qy, qz = [float(v) for v in pose7]
+    return (x, y, z), (qx, qy, qz, qw)
+
+
+def slerp_xyzw(
+    q0: Sequence[float],
+    q1: Sequence[float],
+    t: float,
+) -> Tuple[float, float, float, float]:
+    """Spherical linear interpolation for xyzw quaternions."""
+    a = np.asarray(q0, dtype=np.float64)
+    b = np.asarray(q1, dtype=np.float64)
+    a = a / (np.linalg.norm(a) + 1e-12)
+    b = b / (np.linalg.norm(b) + 1e-12)
+    dot = float(np.clip(np.dot(a, b), -1.0, 1.0))
+    if dot < 0.0:
+        b = -b
+        dot = -dot
+    if dot > 0.9995:
+        out = a + t * (b - a)
+        out = out / (np.linalg.norm(out) + 1e-12)
+        return (float(out[0]), float(out[1]), float(out[2]), float(out[3]))
+    theta_0 = math.acos(dot)
+    sin_0 = math.sin(theta_0)
+    theta = theta_0 * t
+    s0 = math.sin(theta_0 - theta) / sin_0
+    s1 = math.sin(theta) / sin_0
+    out = s0 * a + s1 * b
+    return (float(out[0]), float(out[1]), float(out[2]), float(out[3]))
 
 
 def make_manual_offset_spinbox() -> QDoubleSpinBox:
@@ -13314,6 +13385,10 @@ class CameraTopicWindow(QMainWindow):
         self._arm_enable_wait_timer = QTimer(self)
         self._arm_enable_wait_timer.setInterval(200)
         self._arm_enable_wait_timer.timeout.connect(self._on_arm_enable_wait_tick)
+        self._sim_arm_move: Optional[dict] = None
+        self._sim_arm_move_timer = QTimer(self)
+        self._sim_arm_move_timer.setInterval(SIM_ARM_MOVE_TICK_MS)
+        self._sim_arm_move_timer.timeout.connect(self._on_sim_arm_move_tick)
         self._psi_policy_dir_override: Optional[str] = None
         self._cad_capture_dir = ""
         self._cad_capture_saved = 0
@@ -14857,7 +14932,8 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_policy_combo.setToolTip(
             "XPolicyLab 策略目录（相对 RoboDojo 根）。\n"
             "选「无」：只启动评测（Isaac / eval client），不启动策略服务；\n"
-            "评测侧用进程内零动作推进，相机可预览。"
+            "评测侧用进程内 hold-pose / GUI 遥控推进，相机可预览；\n"
+            "「手臂/手」页可控制仿真双臂与夹爪。"
         )
         self.sim_eval_policy_combo.currentIndexChanged.connect(
             self._on_sim_eval_policy_changed
@@ -16084,12 +16160,22 @@ class CameraTopicWindow(QMainWindow):
             self.sim_eval_task_combo.setEnabled(True)
             if not self._sim_npy_preview_timer.isActive():
                 self._sim_npy_preview_timer.start()
+            self._update_enable_status_ui()
+            self._update_arm_move_btns_ui()
         else:
             self.sim_eval_run_status.setText("评测: 空闲")
             self.sim_eval_run_status.setStyleSheet("")
             self.sim_eval_start_btn.setText("启动评测")
             self.sim_eval_start_btn.setEnabled(True)
             self.sim_eval_task_combo.setEnabled(True)
+            self._cancel_sim_arm_move("")
+            if clear_gui_robot_cmd is not None:
+                try:
+                    clear_gui_robot_cmd(self._sim_bridge_dir())
+                except Exception:
+                    pass
+            self._update_enable_status_ui()
+            self._update_arm_move_btns_ui()
             # 评测未跑时，若相机桥仍在或共享帧仍在，继续预览；否则停
             if self._sim_bridge_launcher.is_running():
                 if not self._sim_npy_preview_timer.isActive():
@@ -20578,6 +20664,163 @@ class CameraTopicWindow(QMainWindow):
             self.prefix_edit.setText(prefix)
         self.node.set_prefix(prefix)
 
+    def _sim_bridge_dir(self) -> str:
+        edit = getattr(self, "sim_bridge_dir_edit", None)
+        raw = edit.text().strip() if edit is not None else ""
+        return os.path.abspath(
+            os.path.expanduser(raw or ISAAC_CAM_BRIDGE_DIR_DEFAULT)
+        )
+
+    def _read_sim_robot_state(self) -> Optional[dict]:
+        if read_sim_robot_state is None:
+            return None
+        try:
+            return read_sim_robot_state(self._sim_bridge_dir())
+        except Exception:
+            return None
+
+    def _sim_teleop_active(self) -> bool:
+        """仿真评测常驻且策略=无（或已有新鲜 sim_robot_state）时，手臂/手走共享指令桥。"""
+        launcher = getattr(self, "_sim_eval_launcher", None)
+        if launcher is None or not launcher.is_running():
+            return False
+        if write_gui_robot_cmd is None:
+            return False
+        combo = getattr(self, "sim_eval_policy_combo", None)
+        no_policy = True
+        if combo is not None:
+            no_policy = not str(combo.currentData() or "")
+        if no_policy:
+            return True
+        state = self._read_sim_robot_state()
+        if sim_state_is_fresh is None:
+            return False
+        return bool(sim_state_is_fresh(state, SIM_TELEOP_STATE_MAX_AGE_S))
+
+    def _sim_tcp_pose(
+        self, arm_side: str
+    ) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]]:
+        state = self._read_sim_robot_state()
+        if not state:
+            return None
+        if sim_state_is_fresh is not None and not sim_state_is_fresh(
+            state, SIM_TELEOP_STATE_MAX_AGE_S
+        ):
+            return None
+        key = "left_ee_pose" if arm_side == "left" else "right_ee_pose"
+        pose = state.get(key)
+        if not isinstance(pose, (list, tuple)) or len(pose) != 7:
+            return None
+        try:
+            return xyz_xyzw_from_pose7_wxyz(pose)
+        except Exception:
+            return None
+
+    def _write_sim_gui_cmd(self, **kwargs) -> bool:
+        if write_gui_robot_cmd is None:
+            return False
+        try:
+            return bool(
+                write_gui_robot_cmd(root=self._sim_bridge_dir(), merge=True, **kwargs)
+            )
+        except Exception:
+            return False
+
+    def _apply_sim_gripper(self, side: str, position: float) -> bool:
+        pos = max(0.0, min(1.0, float(position)))
+        if side == "right":
+            return self._write_sim_gui_cmd(right_gripper=pos, enabled=True)
+        return self._write_sim_gui_cmd(left_gripper=pos, enabled=True)
+
+    def _is_sim_arm_moving(self) -> bool:
+        return self._sim_arm_move is not None and self._sim_arm_move_timer.isActive()
+
+    def _cancel_sim_arm_move(self, message: str = "已取消仿真手臂移动") -> str:
+        self._sim_arm_move = None
+        self._sim_arm_move_timer.stop()
+        return message
+
+    def _sim_move_duration_s(self, dist_m: float) -> float:
+        slider = getattr(self, "arm_move_speed_slider", None)
+        pct = 0.5 if slider is None else max(0.1, min(1.0, slider.value() / 100.0))
+        # ~3–25 cm/s，与真机「慢速移动」手感接近
+        speed_m_s = 0.03 + pct * 0.22
+        return max(0.25, min(8.0, float(dist_m) / speed_m_s))
+
+    def _start_sim_arm_move(self, arm_side: str, goal: ResolvedArmMoveGoal) -> str:
+        start = self._sim_tcp_pose(arm_side)
+        if start is None:
+            return "无法移动: 尚无仿真 TCP（请确认策略=无且评测已写出 sim_robot_state）"
+        start_xyz, start_quat = start
+        goal_xyz = goal.position_xyz
+        goal_quat = goal.quaternion_xyzw
+        dist = math.sqrt(
+            sum((float(goal_xyz[i]) - float(start_xyz[i])) ** 2 for i in range(3))
+        )
+        duration = self._sim_move_duration_s(dist)
+        hold_side = "right" if arm_side == "left" else "left"
+        hold = self._sim_tcp_pose(hold_side)
+        self._sim_arm_move = {
+            "arm_side": arm_side,
+            "start_xyz": start_xyz,
+            "start_quat": start_quat,
+            "goal_xyz": goal_xyz,
+            "goal_quat": goal_quat,
+            "hold_side": hold_side,
+            "hold_pose": hold,
+            "t0": time.time(),
+            "duration": duration,
+            "label": goal.label,
+        }
+        # 立即写一帧目标，避免等待首个 tick
+        self._on_sim_arm_move_tick()
+        if not self._sim_arm_move_timer.isActive():
+            self._sim_arm_move_timer.start()
+        side_name = arm_side_label(arm_side)
+        return f"仿真{side_name}移动中… ({duration:.1f}s) → {goal.label}"
+
+    def _on_sim_arm_move_tick(self) -> None:
+        move = self._sim_arm_move
+        if move is None:
+            self._sim_arm_move_timer.stop()
+            return
+        duration = max(1e-3, float(move["duration"]))
+        t = (time.time() - float(move["t0"])) / duration
+        done = t >= 1.0
+        t = min(1.0, max(0.0, t))
+        sx, sy, sz = move["start_xyz"]
+        gx, gy, gz = move["goal_xyz"]
+        xyz = (
+            float(sx) + (float(gx) - float(sx)) * t,
+            float(sy) + (float(gy) - float(sy)) * t,
+            float(sz) + (float(gz) - float(sz)) * t,
+        )
+        quat = slerp_xyzw(move["start_quat"], move["goal_quat"], t)
+        pose7 = pose7_wxyz_from_xyz_xyzw(xyz, quat)
+        kwargs: dict = {"enabled": True}
+        if move["arm_side"] == "right":
+            kwargs["right_ee_pose"] = pose7
+        else:
+            kwargs["left_ee_pose"] = pose7
+        hold = move.get("hold_pose")
+        if hold is not None:
+            h_xyz, h_quat = hold
+            hold7 = pose7_wxyz_from_xyz_xyzw(h_xyz, h_quat)
+            if move["hold_side"] == "right":
+                kwargs["right_ee_pose"] = hold7
+            else:
+                kwargs["left_ee_pose"] = hold7
+        self._write_sim_gui_cmd(**kwargs)
+        if done:
+            side_name = arm_side_label(str(move["arm_side"]))
+            label = str(move.get("label") or "")
+            self._sim_arm_move = None
+            self._sim_arm_move_timer.stop()
+            self.status_bar.showMessage(f"仿真{side_name}移动完成" + (f" → {label}" if label else ""))
+            self._update_arm_move_btns_ui()
+            return
+        self._update_arm_move_btns_ui()
+
     def _on_left_hand_sliders_changed(self, _value: int = 0) -> None:
         self.left_hand_label_a.setText(format_hand_angle_label(self.left_hand_slider_a.value()))
         self.left_hand_label_b.setText(format_hand_angle_label(self.left_hand_slider_b.value()))
@@ -20595,6 +20838,24 @@ class CameraTopicWindow(QMainWindow):
         self.left_hand_label_b.setStyleSheet(active_style if not at_a else idle_style)
 
     def _on_left_hand_toggle(self) -> None:
+        if self._sim_teleop_active():
+            self.node._left_hand_at_a = not self.node._left_hand_at_a
+            at_a = self.node._left_hand_at_a
+            slider = (
+                self.left_hand_slider_a.value()
+                if at_a
+                else self.left_hand_slider_b.value()
+            )
+            pos = slider_to_hand_position(slider)
+            ok = self._apply_sim_gripper("left", pos)
+            self._update_left_hand_toggle_ui(at_a)
+            self.node.ros_bridge.left_hand_preset_changed.emit(at_a)
+            preset = "A" if at_a else "B"
+            self.status_bar.showMessage(
+                f"仿真左手 → 状态{preset} gripper={pos:.3f}"
+                + ("" if ok else "（写入失败）")
+            )
+            return
         at_a, sent_pos = self.node.toggle_left_hand_between(
             self.left_hand_slider_a.value(),
             self.left_hand_slider_b.value(),
@@ -20622,6 +20883,24 @@ class CameraTopicWindow(QMainWindow):
         self.right_hand_label_b.setStyleSheet(active_style if not at_a else idle_style)
 
     def _on_right_hand_toggle(self) -> None:
+        if self._sim_teleop_active():
+            self.node._right_hand_at_a = not self.node._right_hand_at_a
+            at_a = self.node._right_hand_at_a
+            slider = (
+                self.right_hand_slider_a.value()
+                if at_a
+                else self.right_hand_slider_b.value()
+            )
+            pos = slider_to_hand_position(slider)
+            ok = self._apply_sim_gripper("right", pos)
+            self._update_right_hand_toggle_ui(at_a)
+            self.node.ros_bridge.right_hand_preset_changed.emit(at_a)
+            preset = "A" if at_a else "B"
+            self.status_bar.showMessage(
+                f"仿真右手 → 状态{preset} gripper={pos:.3f}"
+                + ("" if ok else "（写入失败）")
+            )
+            return
         at_a, sent_pos = self.node.toggle_right_hand_between(
             self.right_hand_slider_a.value(),
             self.right_hand_slider_b.value(),
@@ -20656,6 +20935,10 @@ class CameraTopicWindow(QMainWindow):
     def _tcp_for_relative_goal(
         self, arm_side: str
     ) -> Optional[Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]]:
+        if self._sim_teleop_active():
+            sim_tcp = self._sim_tcp_pose(arm_side)
+            if sim_tcp is not None:
+                return sim_tcp
         tcp = self.node._tcp_pose_in_ik_frame(arm_side, timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
         if tcp is not None:
             return tcp
@@ -20767,6 +21050,23 @@ class CameraTopicWindow(QMainWindow):
             self.robot_hand_enable_btn.setText(btn_text)
 
     def _update_enable_status_ui(self) -> None:
+        if self._sim_teleop_active():
+            self.arm_enable_label.setText("手臂: 仿真遥控")
+            self._style_enable_label(self.arm_enable_label, True, True)
+            self.hand_enable_label.setText("手: 仿真夹爪")
+            self._style_enable_label(self.hand_enable_label, True, True)
+            self.control_mode_label.setText("mode: sim-gui")
+            self.control_mode_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            if hasattr(self, "robot_arm_enable_label"):
+                self.robot_arm_enable_label.setText("手臂: 仿真遥控")
+                self._style_enable_label(self.robot_arm_enable_label, True, True)
+            if hasattr(self, "robot_hand_enable_label"):
+                self.robot_hand_enable_label.setText("手: 仿真夹爪")
+                self._style_enable_label(self.robot_hand_enable_label, True, True)
+            if hasattr(self, "robot_control_mode_label"):
+                self.robot_control_mode_label.setText("mode: sim-gui")
+                self.robot_control_mode_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            return
         self._update_arm_enable_ui()
         self._update_hand_enable_ui()
         self._update_robot_enable_status_ui()
@@ -20816,18 +21116,41 @@ class CameraTopicWindow(QMainWindow):
             self.robot_arm_enable_btn.setText(btn_text)
 
     def _can_start_arm_move(self, arm_side: str = "left") -> bool:
-        if self.node.is_slow_motion_busy():
+        if self._is_sim_arm_moving() or self.node.is_slow_motion_busy():
             return True
         if self.move_target_segment_radio.isChecked():
             return self._resolve_move_goal(arm_side) is not None
+        if self._sim_teleop_active():
+            left_ok = self._sim_tcp_pose("left") is not None
+            right_ok = self._sim_tcp_pose("right") is not None
+            return left_ok and right_ok
         state = self.node.get_robot_state()
         left_ok = state.left_tcp is not None and state.left_tcp.valid
         right_ok = state.right_tcp is not None and state.right_tcp.valid
         return left_ok and right_ok
 
     def _disabled_move_btn_tooltip(self, arm_side: str = "left") -> str:
-        blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
         hints: List[str] = []
+        if self._sim_teleop_active():
+            left_ok = self._sim_tcp_pose("left") is not None
+            right_ok = self._sim_tcp_pose("right") is not None
+            if not left_ok or not right_ok:
+                hints.append(
+                    "等待仿真 TCP（策略=无 评测写出 sim_robot_state.json）"
+                )
+            side_name = arm_side_label(arm_side)
+            if self.move_target_segment_radio.isChecked():
+                if self._last_segment_target is None:
+                    hints.append("请先点击图像选点，再点「调用分割」")
+                elif self._resolve_move_goal(arm_side) is None:
+                    frame = self._last_segment_target.camera_frame or "未知"
+                    hints.append(f"分割 TF 不可用 ({frame} -> {IK_TARGET_FRAME})")
+            elif self._resolve_move_goal(arm_side) is None:
+                hints.append(f"相对当前模式：请为{side_name}设置非零偏移（如 ΔX=0.05 m）")
+            if not hints:
+                hints.append("仿真遥控就绪：设置偏移后点「移动」")
+            return "\n".join(hints)
+        blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
         if blockers:
             hints.append("点击后可能无法移动:")
             hints.extend(blockers)
@@ -20850,11 +21173,23 @@ class CameraTopicWindow(QMainWindow):
         return "\n".join(hints)
 
     def _update_arm_pose_display(self) -> None:
-        self.arm_pose_current_label.setText(self.node.get_arm_move_current_label_both())
+        if self._sim_teleop_active():
+            parts: List[str] = []
+            for side in ("left", "right"):
+                tcp = self._sim_tcp_pose(side)
+                name = arm_side_label(side)
+                if tcp is None:
+                    parts.append(f"{name} TCP: (等待仿真)")
+                else:
+                    xyz, quat = tcp
+                    parts.append(format_xyz_rpy_line(name, xyz, quat) + "  [sim]")
+            self.arm_pose_current_label.setText("当前  " + "  |  ".join(parts))
+        else:
+            self.arm_pose_current_label.setText(self.node.get_arm_move_current_label_both())
         left_goal = self._resolve_move_goal("left")
         right_goal = self._resolve_move_goal("right")
         if left_goal is not None or right_goal is not None:
-            parts: List[str] = []
+            parts = []
             if left_goal is not None:
                 parts.append(
                     format_xyz_rpy_line(
@@ -20893,8 +21228,10 @@ class CameraTopicWindow(QMainWindow):
         if now - self._robot_ui_last_update < UI_ROBOT_STATE_MIN_INTERVAL_S:
             return
         self._robot_ui_last_update = now
+        if self._sim_teleop_active():
+            self._update_enable_status_ui()
         self._update_arm_pose_display()
-        if not self.node.is_slow_motion_busy():
+        if not self.node.is_slow_motion_busy() and not self._is_sim_arm_moving():
             for side, btn in (
                 ("left", self.left_arm_move_btn),
                 ("right", self.right_arm_move_btn),
@@ -20918,6 +21255,19 @@ class CameraTopicWindow(QMainWindow):
             else self._right_arm_move_btn_cancel_style
         )
         side_name = arm_side_label(arm_side)
+        if self._is_sim_arm_moving():
+            moving = str((self._sim_arm_move or {}).get("arm_side", ""))
+            if moving == arm_side:
+                btn.setText("取消仿真移动")
+                btn.setEnabled(True)
+                btn.setStyleSheet(cancel_style)
+                btn.setToolTip("停止当前仿真手臂插值移动")
+            else:
+                btn.setText(f"{side_name}: 移动")
+                btn.setEnabled(False)
+                btn.setStyleSheet(idle_style)
+                btn.setToolTip("另一侧手臂正在仿真移动")
+            return
         pending = self._pending_arm_move_goal
         if pending is not None and not self.node.is_arm_enabled():
             if pending.arm_side == arm_side:
@@ -20960,25 +21310,37 @@ class CameraTopicWindow(QMainWindow):
         can_move = self._can_start_arm_move(arm_side)
         btn.setEnabled(can_move)
         if can_move:
-            blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
-            extra = ""
-            if blockers:
-                extra = "\n注意: " + "；".join(blockers)
-            elif (
-                not self.move_target_segment_radio.isChecked()
-                and self._resolve_move_goal(arm_side) is None
-            ):
-                extra = "\n请设置非零偏移后再点击"
-            btn.setToolTip(
-                f"将{side_name} TCP 移动到目标位姿（时长随距离与「移动速度」滑块自适应）。\n"
-                f"目标可为分割位姿，或相对当前位置的手动偏移。\n"
-                f"未使能时将自动启用手臂；同时发布左右臂 IK 目标。{extra}"
-            )
+            if self._sim_teleop_active():
+                extra = ""
+                if (
+                    not self.move_target_segment_radio.isChecked()
+                    and self._resolve_move_goal(arm_side) is None
+                ):
+                    extra = "\n请设置非零偏移后再点击"
+                btn.setToolTip(
+                    f"仿真遥控：将{side_name} TCP 移到目标（策略=无）。\n"
+                    f"目标写入共享目录 gui_robot_cmd.json，由 NoopModelClient 执行。{extra}"
+                )
+            else:
+                blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
+                extra = ""
+                if blockers:
+                    extra = "\n注意: " + "；".join(blockers)
+                elif (
+                    not self.move_target_segment_radio.isChecked()
+                    and self._resolve_move_goal(arm_side) is None
+                ):
+                    extra = "\n请设置非零偏移后再点击"
+                btn.setToolTip(
+                    f"将{side_name} TCP 移动到目标位姿（时长随距离与「移动速度」滑块自适应）。\n"
+                    f"目标可为分割位姿，或相对当前位置的手动偏移。\n"
+                    f"未使能时将自动启用手臂；同时发布左右臂 IK 目标。{extra}"
+                )
         else:
             btn.setToolTip(self._disabled_move_btn_tooltip(arm_side))
 
     def _update_arm_move_btns_ui(self, force: bool = False) -> None:
-        speed_busy = self.node.is_slow_motion_busy()
+        speed_busy = self.node.is_slow_motion_busy() or self._is_sim_arm_moving()
         self.arm_move_speed_slider.setEnabled(not speed_busy)
         self._update_one_arm_move_btn_ui("left", force=force)
         self._update_one_arm_move_btn_ui("right", force=force)
@@ -21007,17 +21369,25 @@ class CameraTopicWindow(QMainWindow):
 
     def _try_auto_move_to_segment_target(self) -> None:
         """分割/FP 完成后，按绝对位姿目标移动左臂（非相对当前）。"""
-        if self.node.is_slow_motion_busy():
+        if self.node.is_slow_motion_busy() or self._is_sim_arm_moving():
             return
         if not self.move_target_segment_radio.isChecked():
             return
         goal = self._resolve_move_goal("left")
         if goal is None:
+            if self._sim_teleop_active():
+                self.status_bar.showMessage("绝对位姿已记录，等待仿真 TCP 或 TF…")
+                return
             blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
             if blockers:
                 self.status_bar.showMessage(
                     "绝对位姿已记录，暂无法移动: " + "；".join(blockers)
                 )
+            return
+        if self._sim_teleop_active():
+            msg = self._start_sim_arm_move("left", goal)
+            self.status_bar.showMessage(msg)
+            self._update_arm_move_btns_ui()
             return
         if not self.node.is_arm_enabled():
             self._pending_arm_move_goal = goal
@@ -21033,6 +21403,14 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_arm_move_clicked(self, arm_side: str) -> None:
         side_name = arm_side_label(arm_side)
+        if self._is_sim_arm_moving():
+            moving = str((self._sim_arm_move or {}).get("arm_side", ""))
+            if moving != arm_side:
+                return
+            msg = self._cancel_sim_arm_move()
+            self.status_bar.showMessage(msg)
+            self._update_arm_move_btns_ui()
+            return
         if self.node.is_slow_motion_busy():
             if self.node._slow_motion_moving_side != arm_side:
                 return
@@ -21057,6 +21435,11 @@ class CameraTopicWindow(QMainWindow):
                 self.status_bar.showMessage(
                     f"请设置非零偏移量，或等待{side_name} TCP 数据"
                 )
+            return
+        if self._sim_teleop_active():
+            msg = self._start_sim_arm_move(arm_side, goal)
+            self.status_bar.showMessage(msg)
+            self._update_arm_move_btns_ui()
             return
         if not self.node.is_arm_enabled():
             self._pending_arm_move_goal = goal
@@ -21085,6 +21468,15 @@ class CameraTopicWindow(QMainWindow):
     def _on_left_hand_apply_active(self) -> None:
         at_a = self.node.is_left_hand_at_a()
         slider = self.left_hand_slider_a.value() if at_a else self.left_hand_slider_b.value()
+        if self._sim_teleop_active():
+            pos = slider_to_hand_position(slider)
+            ok = self._apply_sim_gripper("left", pos)
+            preset = "A" if at_a else "B"
+            self.status_bar.showMessage(
+                f"仿真左手状态{preset} gripper={pos:.3f}"
+                + ("" if ok else "（写入失败）")
+            )
+            return
         sent_pos = self.node.apply_left_hand_angle(slider)
         preset = "A" if at_a else "B"
         self.status_bar.showMessage(
@@ -21094,6 +21486,15 @@ class CameraTopicWindow(QMainWindow):
     def _on_right_hand_apply_active(self) -> None:
         at_a = self.node.is_right_hand_at_a()
         slider = self.right_hand_slider_a.value() if at_a else self.right_hand_slider_b.value()
+        if self._sim_teleop_active():
+            pos = slider_to_hand_position(slider)
+            ok = self._apply_sim_gripper("right", pos)
+            preset = "A" if at_a else "B"
+            self.status_bar.showMessage(
+                f"仿真右手状态{preset} gripper={pos:.3f}"
+                + ("" if ok else "（写入失败）")
+            )
+            return
         sent_pos = self.node.apply_right_hand_angle(slider)
         preset = "A" if at_a else "B"
         self.status_bar.showMessage(
