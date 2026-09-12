@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Isaac 共享帧 → ROS2 /camera/*_color 发布桥
+# Isaac 共享帧 → ROS2 /camera/*_color + /camera/*_depth 发布桥
 #
 # 本机通常没有 ROS2 Humble（在 a2d Docker 内），脚本会自动 docker exec 进容器启动。
 # 共享目录必须放在宿主机与容器都能访问的路径（不要用 /tmp：容器常禁挂 /tmp）。
@@ -13,7 +13,7 @@
 #   # 然后启动评测
 #
 #   # 终端 C：viewer
-#   bash run_in_docker.sh   # 勾选 /camera/head_color
+#   bash run_in_docker.sh   # 勾选 /camera/head_color 与 /camera/head_depth
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

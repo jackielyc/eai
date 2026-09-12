@@ -9,6 +9,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_in_docker.sh          # ROS 在 Docker 内运行时用此方式（推荐）
   bash run.sh                    # ROS 在宿主机直接运行时用此方式
   python3.10 show_camera_topics.py --prefix /camera
+  bash run_local.sh --tab 测试   # 只展示「测试」tab（也可用 --tab test）
 
 顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 测试 / 仿真评测 / 真机评测 / 上下文学习。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
@@ -681,6 +682,71 @@ LINGBOT_WORLD_PROMPT_DEFAULT = (
     "surrounded by distant snow-capped mountains under a bright blue sky "
     "with drifting white clouds."
 )
+# 控制区 tab 正式标题（与 addTab 一致）
+CONTROL_TAB_TITLES: Tuple[str, ...] = (
+    "大脑",
+    "回放",
+    "分割",
+    "视觉基础模型",
+    "空间感知模型",
+    "3D重建模型",
+    "视频生成模型",
+    "世界模型",
+    "CAD",
+    "训练",
+    "手臂/手",
+    "手骨架遥控",
+    "测试",
+    "仿真评测",
+    "真机评测",
+    "上下文学习",
+)
+# 启动 --tab 可用的别名 → 正式标题
+CONTROL_TAB_ALIASES: Dict[str, str] = {
+    "brain": "大脑",
+    "camera": "大脑",
+    "大脑": "大脑",
+    "replay": "回放",
+    "robot": "回放",
+    "回放": "回放",
+    "segment": "分割",
+    "sam": "分割",
+    "分割": "分割",
+    "vision": "视觉基础模型",
+    "lingbot-vision": "视觉基础模型",
+    "视觉基础模型": "视觉基础模型",
+    "depth": "空间感知模型",
+    "空间感知模型": "空间感知模型",
+    "map": "3D重建模型",
+    "3d": "3D重建模型",
+    "3d重建模型": "3D重建模型",
+    "3D重建模型": "3D重建模型",
+    "video": "视频生成模型",
+    "视频生成模型": "视频生成模型",
+    "world": "世界模型",
+    "世界模型": "世界模型",
+    "cad": "CAD",
+    "CAD": "CAD",
+    "train": "训练",
+    "训练": "训练",
+    "arm": "手臂/手",
+    "hand": "手臂/手",
+    "手臂/手": "手臂/手",
+    "手臂·手": "手臂/手",
+    "skeleton": "手骨架遥控",
+    "手骨架遥控": "手骨架遥控",
+    "test": "测试",
+    "测试": "测试",
+    "sim": "仿真评测",
+    "sim_eval": "仿真评测",
+    "仿真评测": "仿真评测",
+    "real": "真机评测",
+    "real_eval": "真机评测",
+    "真机评测": "真机评测",
+    "ctx": "上下文学习",
+    "context": "上下文学习",
+    "上下文学习": "上下文学习",
+}
 CAD_MESHES_DIR = os.path.join(EAI_DIR, "meshes")
 TEST_IMAGES_DIR = os.path.join(EAI_DIR, "images")
 ISAAC_CAM_BRIDGE_SCRIPT = os.path.join(EAI_DIR, "run_isaac_cam_bridge.sh")
@@ -697,7 +763,16 @@ SIM_PREVIEW_CAM_TOPICS: Tuple[Tuple[str, str], ...] = (
     ("cam_head", "/camera/head_color"),
     ("cam_right_wrist", "/camera/right_wrist_color"),
 )
+SIM_PREVIEW_DEPTH_CAM_TOPICS: Tuple[Tuple[str, str], ...] = (
+    ("cam_left_wrist", "/camera/left_wrist_depth"),
+    ("cam_head", "/camera/head_depth"),
+    ("cam_right_wrist", "/camera/right_wrist_depth"),
+)
 SIM_PREVIEW_TOPICS: Tuple[str, ...] = tuple(topic for _, topic in SIM_PREVIEW_CAM_TOPICS)
+SIM_PREVIEW_DEPTH_TOPICS: Tuple[str, ...] = tuple(
+    topic for _, topic in SIM_PREVIEW_DEPTH_CAM_TOPICS
+)
+SIM_PREVIEW_ALL_TOPICS: Tuple[str, ...] = SIM_PREVIEW_TOPICS + SIM_PREVIEW_DEPTH_TOPICS
 ROBODOJO_EVAL_RESULT_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/eval_result/RoboDojo"
 )
@@ -732,6 +807,8 @@ ROBODOJO_STARVLA_HF_EVAL_SCRIPT = os.path.join(
 ROBODOJO_TASK_CONFIG_DIR = os.path.join(
     ROBODOJO_ROOT_DEFAULT, "task", "RoboDojo", "config"
 )
+# UI「启动评测」默认常驻：Isaac / policy / 相机桥直到「停止评测」才退出。
+ROBODOJO_EVAL_NUM_KEEP = "keep"
 
 
 def resolve_starvla_hf_variant(ckpt: str) -> str:
@@ -2300,8 +2377,6 @@ def resize_mask_to_shape(mask: np.ndarray, shape: Tuple[int, int]) -> np.ndarray
 
 def find_paired_depth_topic(color_topic: str, available: List[str]) -> Optional[str]:
     depth_topics = [t for t in available if is_depth_topic(t)]
-    if not depth_topics:
-        return None
     candidates = [
         color_topic.replace("_color", "_depth"),
         color_topic.replace("_color", "_depth_z"),
@@ -2314,6 +2389,12 @@ def find_paired_depth_topic(color_topic: str, available: List[str]) -> Optional[
     for t in depth_topics:
         if stem and stem in t:
             return t
+    # 尚无 depth 帧入缓存时，仍返回命名约定（便于自动勾选 / 订阅）
+    for c in candidates:
+        if c != color_topic and is_depth_topic(c):
+            return c
+    if is_head_color_topic(color_topic):
+        return CAD_CAPTURE_DEPTH_DEFAULT
     return None
 
 
@@ -7416,7 +7497,10 @@ class CameraPanel(QWidget):
 
 
 class DepthPanel3D(QWidget):
-    """深度图 3D 点云显示面板。"""
+    """深度图面板：默认 2D 伪彩；3D 点云按需启用（全局仅允许一个 GL 上下文）。"""
+
+    # 多路 depth 同时建 GLViewWidget 会触发 OpenGL context 丢失 / SIGSEGV
+    _active_gl_panel: Optional["DepthPanel3D"] = None
 
     def __init__(
         self,
@@ -7466,6 +7550,16 @@ class DepthPanel3D(QWidget):
         self._pose_busy = False
         self._depth_viz_busy = False
         self._depth_viz_pending = False
+        self._gl_ready = False
+        self.view = None
+        self.scatter = None
+        self.segment_scatter = None
+        self.pose_obb_lines = None
+        self.pose_axes_lines = None
+        self.robot_left_scatter = None
+        self.robot_right_scatter = None
+        self.robot_left_axes = None
+        self.robot_right_axes = None
 
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         layout = QVBoxLayout(self)
@@ -7473,94 +7567,41 @@ class DepthPanel3D(QWidget):
         layout.setSpacing(2)
 
         title = topic.split("/")[-1] or topic
-        self.title_label = QLabel(f"{title}  [3D]")
+        self._title_base = title
+        self.title_label = QLabel(f"{title}  [depth]")
         self.title_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_TITLE, QFont.Bold))
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         layout.addWidget(self.title_label)
 
-        self.view = gl.GLViewWidget()
-        self.view.setMinimumSize(80, 60)
-        self.view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.view.setBackgroundColor((30, 30, 30))
-        self.view.opts["distance"] = 2.0
-        layout.addWidget(self.view, stretch=3)
+        gl_bar = QHBoxLayout()
+        gl_bar.setContentsMargins(0, 0, 0, 0)
+        self._gl_enable_btn = QPushButton("启用 3D 点云")
+        self._gl_enable_btn.setToolTip(
+            "默认仅显示 2D 深度图。多路 depth 同时开 OpenGL 易崩溃，故按需启用且全局仅一路。"
+        )
+        self._gl_enable_btn.clicked.connect(self._on_enable_gl_clicked)
+        self._gl_disable_btn = QPushButton("关闭 3D")
+        self._gl_disable_btn.setVisible(False)
+        self._gl_disable_btn.clicked.connect(self._teardown_gl)
+        gl_bar.addWidget(self._gl_enable_btn)
+        gl_bar.addWidget(self._gl_disable_btn)
+        gl_bar.addStretch(1)
+        layout.addLayout(gl_bar)
 
-        grid = gl.GLGridItem()
-        grid.setSize(2, 2)
-        grid.setSpacing(0.2, 0.2)
-        self.view.addItem(grid)
-
-        self.scatter = gl.GLScatterPlotItem(
-            pos=np.zeros((1, 3), dtype=np.float32),
-            color=np.array([[0.5, 0.5, 0.5, 1.0]], dtype=np.float32),
-            size=3,
-            pxMode=True,
-        )
-        self.view.addItem(self.scatter)
-
-        self.segment_scatter = gl.GLScatterPlotItem(
-            pos=np.zeros((1, 3), dtype=np.float32),
-            color=np.array([[1.0, 0.85, 0.1, 1.0]], dtype=np.float32),
-            size=6,
-            pxMode=True,
-        )
-        self.view.addItem(self.segment_scatter)
-
-        self.pose_obb_lines = gl.GLLinePlotItem(
-            pos=np.zeros((2, 3), dtype=np.float32),
-            color=(0.2, 0.9, 1.0, 1.0),
-            width=2,
-            antialias=True,
-            mode="lines",
-        )
-        self.view.addItem(self.pose_obb_lines)
-
-        self.pose_axes_lines = gl.GLLinePlotItem(
-            pos=np.zeros((2, 3), dtype=np.float32),
-            color=(1.0, 1.0, 1.0, 1.0),
-            width=3,
-            antialias=True,
-            mode="lines",
-        )
-        self.view.addItem(self.pose_axes_lines)
-
-        self.robot_left_scatter = gl.GLScatterPlotItem(
-            pos=np.zeros((1, 3), dtype=np.float32),
-            color=np.array([[1.0, 0.2, 0.8, 1.0]], dtype=np.float32),
-            size=14,
-            pxMode=False,
-        )
-        self.robot_right_scatter = gl.GLScatterPlotItem(
-            pos=np.zeros((1, 3), dtype=np.float32),
-            color=np.array([[0.2, 0.85, 1.0, 1.0]], dtype=np.float32),
-            size=14,
-            pxMode=False,
-        )
-        self.robot_left_axes = gl.GLLinePlotItem(
-            pos=np.zeros((2, 3), dtype=np.float32),
-            color=(1.0, 0.3, 0.8, 1.0),
-            width=2,
-            antialias=True,
-            mode="lines",
-        )
-        self.robot_right_axes = gl.GLLinePlotItem(
-            pos=np.zeros((2, 3), dtype=np.float32),
-            color=(0.3, 0.85, 1.0, 1.0),
-            width=2,
-            antialias=True,
-            mode="lines",
-        )
-        self.view.addItem(self.robot_left_scatter)
-        self.view.addItem(self.robot_right_scatter)
-        self.view.addItem(self.robot_left_axes)
-        self.view.addItem(self.robot_right_axes)
+        self._gl_container = QWidget()
+        self._gl_container.setVisible(False)
+        self._gl_container.setMinimumSize(80, 60)
+        self._gl_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._gl_container_layout = QVBoxLayout(self._gl_container)
+        self._gl_container_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self._gl_container, stretch=3)
 
         self.depth_preview = ClickableImageLabel("点击深度图选择提示点；再按「调用分割」确认")
         self.depth_preview.setMinimumHeight(48)
         self.depth_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.depth_preview.clicked_pixel.connect(self._on_depth_pixel_clicked)
-        layout.addWidget(self.depth_preview, stretch=1)
+        layout.addWidget(self.depth_preview, stretch=2)
 
         self.info_label = QLabel("等待深度图...")
         self.info_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
@@ -7620,13 +7661,194 @@ class DepthPanel3D(QWidget):
     def stop_robot_timer(self) -> None:
         self._robot_timer.stop()
 
+    def shutdown(self) -> None:
+        """销毁前释放 OpenGL，避免无 context 绘制导致崩溃。"""
+        try:
+            self.stop_robot_timer()
+        except Exception:
+            pass
+        self._teardown_gl()
+
+    def _on_enable_gl_clicked(self) -> None:
+        other = DepthPanel3D._active_gl_panel
+        if other is not None and other is not self:
+            try:
+                other._teardown_gl()
+            except Exception:
+                pass
+        if self._ensure_gl_view():
+            self._request_depth_viz()
+
+    def _ensure_gl_view(self) -> bool:
+        if self._gl_ready and self.view is not None:
+            return True
+        try:
+            view = gl.GLViewWidget()
+            view.setMinimumSize(80, 60)
+            view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            view.setBackgroundColor((30, 30, 30))
+            view.opts["distance"] = 2.0
+
+            grid = gl.GLGridItem()
+            grid.setSize(2, 2)
+            grid.setSpacing(0.2, 0.2)
+            view.addItem(grid)
+
+            scatter = gl.GLScatterPlotItem(
+                pos=np.zeros((1, 3), dtype=np.float32),
+                color=np.array([[0.5, 0.5, 0.5, 1.0]], dtype=np.float32),
+                size=3,
+                pxMode=True,
+            )
+            view.addItem(scatter)
+
+            segment_scatter = gl.GLScatterPlotItem(
+                pos=np.zeros((1, 3), dtype=np.float32),
+                color=np.array([[1.0, 0.85, 0.1, 1.0]], dtype=np.float32),
+                size=6,
+                pxMode=True,
+            )
+            view.addItem(segment_scatter)
+
+            pose_obb_lines = gl.GLLinePlotItem(
+                pos=np.zeros((2, 3), dtype=np.float32),
+                color=(0.2, 0.9, 1.0, 1.0),
+                width=2,
+                antialias=True,
+                mode="lines",
+            )
+            view.addItem(pose_obb_lines)
+
+            pose_axes_lines = gl.GLLinePlotItem(
+                pos=np.zeros((2, 3), dtype=np.float32),
+                color=(1.0, 1.0, 1.0, 1.0),
+                width=3,
+                antialias=True,
+                mode="lines",
+            )
+            view.addItem(pose_axes_lines)
+
+            robot_left_scatter = gl.GLScatterPlotItem(
+                pos=np.zeros((1, 3), dtype=np.float32),
+                color=np.array([[1.0, 0.2, 0.8, 1.0]], dtype=np.float32),
+                size=14,
+                pxMode=False,
+            )
+            robot_right_scatter = gl.GLScatterPlotItem(
+                pos=np.zeros((1, 3), dtype=np.float32),
+                color=np.array([[0.2, 0.85, 1.0, 1.0]], dtype=np.float32),
+                size=14,
+                pxMode=False,
+            )
+            robot_left_axes = gl.GLLinePlotItem(
+                pos=np.zeros((2, 3), dtype=np.float32),
+                color=(1.0, 0.3, 0.8, 1.0),
+                width=2,
+                antialias=True,
+                mode="lines",
+            )
+            robot_right_axes = gl.GLLinePlotItem(
+                pos=np.zeros((2, 3), dtype=np.float32),
+                color=(0.3, 0.85, 1.0, 1.0),
+                width=2,
+                antialias=True,
+                mode="lines",
+            )
+            view.addItem(robot_left_scatter)
+            view.addItem(robot_right_scatter)
+            view.addItem(robot_left_axes)
+            view.addItem(robot_right_axes)
+
+            while self._gl_container_layout.count():
+                item = self._gl_container_layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+
+            self.view = view
+            self.scatter = scatter
+            self.segment_scatter = segment_scatter
+            self.pose_obb_lines = pose_obb_lines
+            self.pose_axes_lines = pose_axes_lines
+            self.robot_left_scatter = robot_left_scatter
+            self.robot_right_scatter = robot_right_scatter
+            self.robot_left_axes = robot_left_axes
+            self.robot_right_axes = robot_right_axes
+            self._gl_container_layout.addWidget(view)
+            self._gl_container.setVisible(True)
+            self._gl_ready = True
+            DepthPanel3D._active_gl_panel = self
+            self._gl_enable_btn.setVisible(False)
+            self._gl_disable_btn.setVisible(True)
+            self.title_label.setText(f"{self._title_base}  [3D]")
+            return True
+        except Exception as exc:
+            self._gl_ready = False
+            if self._status_callback:
+                self._status_callback(f"[{self.topic}] 启用 3D 失败: {exc}")
+            return False
+
+    def _teardown_gl(self) -> None:
+        if DepthPanel3D._active_gl_panel is self:
+            DepthPanel3D._active_gl_panel = None
+        self._gl_ready = False
+        view = self.view
+        self.view = None
+        self.scatter = None
+        self.segment_scatter = None
+        self.pose_obb_lines = None
+        self.pose_axes_lines = None
+        self.robot_left_scatter = None
+        self.robot_right_scatter = None
+        self.robot_left_axes = None
+        self.robot_right_axes = None
+        try:
+            self._gl_container.setVisible(False)
+        except Exception:
+            pass
+        try:
+            self._gl_enable_btn.setVisible(True)
+            self._gl_disable_btn.setVisible(False)
+            self.title_label.setText(f"{self._title_base}  [depth]")
+        except Exception:
+            pass
+        if view is not None:
+            try:
+                view.hide()
+            except Exception:
+                pass
+            try:
+                view.setParent(None)
+            except Exception:
+                pass
+            try:
+                view.deleteLater()
+            except Exception:
+                pass
+
+    def _safe_gl_set(self, fn: Callable[[], None]) -> None:
+        if not self._gl_ready or self.view is None:
+            return
+        try:
+            if not self.view.isVisible():
+                return
+            fn()
+        except Exception:
+            pass
+
     def _clear_robot_gl_items(self) -> None:
-        hidden = np.zeros((1, 3), dtype=np.float32)
-        transparent = np.array([[1.0, 1.0, 1.0, 0.0]], dtype=np.float32)
-        self.robot_left_scatter.setData(pos=hidden, color=transparent, size=14, pxMode=False)
-        self.robot_right_scatter.setData(pos=hidden, color=transparent, size=14, pxMode=False)
-        self.robot_left_axes.setData(pos=hidden, color=(1.0, 0.3, 0.8, 0.0), width=2, mode="lines")
-        self.robot_right_axes.setData(pos=hidden, color=(0.3, 0.85, 1.0, 0.0), width=2, mode="lines")
+        if not self._gl_ready:
+            return
+
+        def _do() -> None:
+            hidden = np.zeros((1, 3), dtype=np.float32)
+            transparent = np.array([[1.0, 1.0, 1.0, 0.0]], dtype=np.float32)
+            self.robot_left_scatter.setData(pos=hidden, color=transparent, size=14, pxMode=False)
+            self.robot_right_scatter.setData(pos=hidden, color=transparent, size=14, pxMode=False)
+            self.robot_left_axes.setData(pos=hidden, color=(1.0, 0.3, 0.8, 0.0), width=2, mode="lines")
+            self.robot_right_axes.setData(pos=hidden, color=(0.3, 0.85, 1.0, 0.0), width=2, mode="lines")
+
+        self._safe_gl_set(_do)
 
     def _set_robot_tcp_gl(
         self,
@@ -7635,28 +7857,37 @@ class DepthPanel3D(QWidget):
         cam_pose: Optional[Tuple[np.ndarray, np.ndarray]],
         color_rgba: Tuple[float, float, float, float],
     ) -> None:
+        if not self._gl_ready or scatter_item is None or axes_item is None:
+            return
         if cam_pose is None:
-            hidden = np.zeros((1, 3), dtype=np.float32)
-            scatter_item.setData(
-                pos=hidden,
-                color=np.array([[color_rgba[0], color_rgba[1], color_rgba[2], 0.0]], dtype=np.float32),
-                size=14,
-                pxMode=False,
-            )
-            axes_item.setData(pos=hidden, color=(*color_rgba[:3], 0.0), width=2, mode="lines")
+            def _hide() -> None:
+                hidden = np.zeros((1, 3), dtype=np.float32)
+                scatter_item.setData(
+                    pos=hidden,
+                    color=np.array([[color_rgba[0], color_rgba[1], color_rgba[2], 0.0]], dtype=np.float32),
+                    size=14,
+                    pxMode=False,
+                )
+                axes_item.setData(pos=hidden, color=(*color_rgba[:3], 0.0), width=2, mode="lines")
+
+            self._safe_gl_set(_hide)
             return
         center, rotation = cam_pose
         if center[2] <= 0.02:
             self._set_robot_tcp_gl(scatter_item, axes_item, None, color_rgba)
             return
-        scatter_item.setData(
-            pos=center.reshape(1, 3),
-            color=np.array([color_rgba], dtype=np.float32),
-            size=14,
-            pxMode=False,
-        )
-        axis_lines = make_tcp_axis_lines(center, rotation, scale=0.07)
-        axes_item.setData(pos=axis_lines, color=color_rgba, width=2, mode="lines")
+
+        def _show() -> None:
+            scatter_item.setData(
+                pos=center.reshape(1, 3),
+                color=np.array([color_rgba], dtype=np.float32),
+                size=14,
+                pxMode=False,
+            )
+            axis_lines = make_tcp_axis_lines(center, rotation, scale=0.07)
+            axes_item.setData(pos=axis_lines, color=color_rgba, width=2, mode="lines")
+
+        self._safe_gl_set(_show)
 
     def _update_robot_overlay(self) -> None:
         if self._get_robot_state is None or self._pose_busy:
@@ -7680,6 +7911,8 @@ class DepthPanel3D(QWidget):
             format_robot_state_html(state, camera_frame, left_xyz, right_xyz)
         )
 
+        if not self._gl_ready:
+            return
         self._set_robot_tcp_gl(
             self.robot_left_scatter,
             self.robot_left_axes,
@@ -7857,52 +8090,64 @@ class DepthPanel3D(QWidget):
         QTimer.singleShot(0, lambda t=target: self._on_segment_pose(t))
 
     def _clear_pose_visualization(self) -> None:
-        self.segment_scatter.setData(
-            pos=np.zeros((1, 3), dtype=np.float32),
-            color=np.array([[1.0, 0.85, 0.1, 0.0]], dtype=np.float32),
-            size=6,
-            pxMode=True,
-        )
-        self.pose_obb_lines.setData(
-            pos=np.zeros((2, 3), dtype=np.float32),
-            color=(0.2, 0.9, 1.0, 0.0),
-            width=2,
-            mode="lines",
-        )
-        self.pose_axes_lines.setData(
-            pos=np.zeros((2, 3), dtype=np.float32),
-            color=(1.0, 1.0, 1.0, 0.0),
-            width=3,
-            mode="lines",
-        )
+        if not self._gl_ready:
+            return
+
+        def _do() -> None:
+            self.segment_scatter.setData(
+                pos=np.zeros((1, 3), dtype=np.float32),
+                color=np.array([[1.0, 0.85, 0.1, 0.0]], dtype=np.float32),
+                size=6,
+                pxMode=True,
+            )
+            self.pose_obb_lines.setData(
+                pos=np.zeros((2, 3), dtype=np.float32),
+                color=(0.2, 0.9, 1.0, 0.0),
+                width=2,
+                mode="lines",
+            )
+            self.pose_axes_lines.setData(
+                pos=np.zeros((2, 3), dtype=np.float32),
+                color=(1.0, 1.0, 1.0, 0.0),
+                width=3,
+                mode="lines",
+            )
+
+        self._safe_gl_set(_do)
 
     def _show_pose_6d(self, result: Object6DPoseResult) -> None:
-        points = subsample_points(result.points_3d, MAX_GL_SEGMENT_POINTS)
-        if len(points) > 0:
-            colors = np.tile(
-                np.array([1.0, 0.85, 0.1, 1.0], dtype=np.float32), (len(points), 1)
+        if not self._gl_ready:
+            return
+
+        def _do() -> None:
+            points = subsample_points(result.points_3d, MAX_GL_SEGMENT_POINTS)
+            if len(points) > 0:
+                colors = np.tile(
+                    np.array([1.0, 0.85, 0.1, 1.0], dtype=np.float32), (len(points), 1)
+                )
+                self.segment_scatter.setData(pos=points, color=colors, size=5, pxMode=True)
+
+            obb_lines = obb_wireframe_edges(result.obb_corners)
+            self.pose_obb_lines.setData(
+                pos=obb_lines,
+                color=(0.2, 0.9, 1.0, 1.0),
+                width=2,
+                mode="lines",
             )
-            self.segment_scatter.setData(pos=points, color=colors, size=5, pxMode=True)
 
-        obb_lines = obb_wireframe_edges(result.obb_corners)
-        self.pose_obb_lines.setData(
-            pos=obb_lines,
-            color=(0.2, 0.9, 1.0, 1.0),
-            width=2,
-            mode="lines",
-        )
+            axis_scale = max(float(max(result.obb_extents)) * 0.6, 0.04)
+            center = np.array(result.obb_center, dtype=np.float32)
+            axis_lines, _axis_colors = pose_axes_lines(
+                center, result.rotation_matrix, axis_scale
+            )
+            self.pose_axes_lines.setData(
+                pos=axis_lines,
+                color=(1.0, 0.75, 0.2, 1.0),
+                width=3,
+                mode="lines",
+            )
 
-        axis_scale = max(float(max(result.obb_extents)) * 0.6, 0.04)
-        center = np.array(result.obb_center, dtype=np.float32)
-        axis_lines, _axis_colors = pose_axes_lines(
-            center, result.rotation_matrix, axis_scale
-        )
-        self.pose_axes_lines.setData(
-            pos=axis_lines,
-            color=(1.0, 0.75, 0.2, 1.0),
-            width=3,
-            mode="lines",
-        )
+        self._safe_gl_set(_do)
 
     def _request_depth_viz(self) -> None:
         if self._latest_depth is None or self._pose_busy:
@@ -7937,13 +8182,21 @@ class DepthPanel3D(QWidget):
             self._depth_preview_raw = result.preview_vis
             self.depth_preview.set_source_image(result.preview_vis)
             self._point_count = result.point_count
-            if self._point_count > 0:
-                self.scatter.setData(pos=result.points, color=result.colors, size=3, pxMode=True)
-                center = result.points.mean(axis=0)
-                self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
+            if self._gl_ready and self._point_count > 0:
+
+                def _do() -> None:
+                    self.scatter.setData(
+                        pos=result.points, color=result.colors, size=3, pxMode=True
+                    )
+                    center = result.points.mean(axis=0)
+                    self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
+
+                self._safe_gl_set(_do)
             h, w = result.full_shape
+            mode = "3D" if self._gl_ready else "2D"
             self.info_label.setText(
-                f"{self.topic}  |  {w}x{h}  |  {self._point_count} pts  |  {self._fps:.1f} Hz"
+                f"{self.topic}  |  {w}x{h}  |  {self._point_count} pts  |  "
+                f"{self._fps:.1f} Hz  |  {mode}"
             )
         if pending and not self._pose_busy:
             self._request_depth_viz()
@@ -11352,7 +11605,11 @@ def list_robodojo_tasks() -> List[str]:
 
 
 class RoboDojoEvalLauncher(QObject):
-    """启动/停止 RoboDojo 单任务评测（GUI: run_gui_eval.sh / headless: robodojo.sh eval）。"""
+    """启动/停止 RoboDojo 单任务评测（GUI: run_gui_eval.sh / headless: robodojo.sh eval）。
+
+    默认 EVAL_NUM=keep：评测进程与子进程常驻，直到调用 stop()/shutdown()。
+    也可接管（adopt）系统里已在运行的 eval_client，避免重复拉起 Isaac。
+    """
 
     log_line = pyqtSignal(str)
     status_message = pyqtSignal(str)
@@ -11364,14 +11621,173 @@ class RoboDojoEvalLauncher(QObject):
         self._pgid: Optional[int] = None
         self._stopping = False
         self._use_gui = True
+        self._keep_alive = True
+        self._restart_pending = False
+        self._last_start_kwargs: Optional[dict] = None
+        self._external_pids: List[int] = []
+        self._adopted = False
+        self._adopt_watch_timer = QTimer(self)
+        self._adopt_watch_timer.setInterval(2000)
+        self._adopt_watch_timer.timeout.connect(self._on_adopt_watch_tick)
+
+    @staticmethod
+    def list_running_eval_clients() -> List[dict]:
+        """发现系统中已在跑的 src/eval_client/main.py（含任务名）。"""
+        found: List[dict] = []
+        try:
+            result = subprocess.run(
+                ["pgrep", "-af", "src/eval_client/main.py"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except Exception:
+            return found
+        if result.returncode not in (0, 1):
+            return found
+        for line in (result.stdout or "").splitlines():
+            line = line.strip()
+            if not line or "pgrep" in line:
+                continue
+            parts = line.split(None, 1)
+            if len(parts) < 2:
+                continue
+            try:
+                pid = int(parts[0])
+            except ValueError:
+                continue
+            cmd = parts[1]
+            if "src/eval_client/main.py" not in cmd:
+                continue
+            task = ""
+            tokens = cmd.split()
+            for i, tok in enumerate(tokens):
+                if tok == "--task_name" and i + 1 < len(tokens):
+                    task = tokens[i + 1].strip()
+                    break
+                if tok.startswith("--task_name="):
+                    task = tok.split("=", 1)[1].strip()
+                    break
+            found.append({"pid": pid, "task": task, "cmd": cmd})
+        found.sort(key=lambda x: x["pid"])
+        return found
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        if pid <= 1:
+            return False
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except OSError:
+            return False
 
     def is_running(self) -> bool:
-        if self._stopping:
+        if self._stopping or self._restart_pending:
             return True
-        if self._process is None:
-            return False
-        # start() 后短暂处于 Starting，也要算运行中，否则「停止」按钮会被立刻禁用
-        return self._process.state() in (QProcess.Starting, QProcess.Running)
+        if self._process is not None:
+            if self._process.state() in (QProcess.Starting, QProcess.Running):
+                return True
+        if self._external_pids:
+            alive = [p for p in self._external_pids if self._pid_alive(p)]
+            self._external_pids = alive
+            if alive:
+                return True
+            if self._adopted:
+                self._adopted = False
+                self._pgid = None
+        return False
+
+    def adopt_running_eval(
+        self,
+        task: str = "",
+        *,
+        bridge_dir: str = "",
+        prefer_task: str = "",
+        **kwargs,
+    ) -> Optional[dict]:
+        """接管已存在的评测进程。成功返回 {pid, task, ...}，否则 None。"""
+        if self.is_running() and not self._adopted:
+            return None
+        clients = self.list_running_eval_clients()
+        if not clients:
+            return None
+        prefer = (prefer_task or task or "").strip()
+        chosen = None
+        if prefer:
+            for c in reversed(clients):
+                if c.get("task") == prefer:
+                    chosen = c
+                    break
+        if chosen is None:
+            chosen = clients[-1]  # 最新 PID
+        pid = int(chosen["pid"])
+        cur_task = str(chosen.get("task") or "").strip()
+        self._process = None
+        self._adopted = True
+        self._keep_alive = False  # 接管的进程退出后不自动再拉起
+        self._stopping = False
+        self._restart_pending = False
+        self._external_pids = [pid]
+        try:
+            self._pgid = os.getpgid(pid)
+        except OSError:
+            self._pgid = pid
+        bridge_dir = os.path.abspath(
+            os.path.expanduser(
+                (bridge_dir or "").strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
+            )
+        )
+        self._last_start_kwargs = {
+            "task": cur_task or prefer or task,
+            "bridge_dir": bridge_dir,
+            "policy_dir": kwargs.get("policy_dir", ""),
+            "ckpt": kwargs.get("ckpt", "demo"),
+            "action_type": kwargs.get("action_type", "ee"),
+            "policy_env": kwargs.get("policy_env", ""),
+            "eval_env": kwargs.get("eval_env", ""),
+            "robodojo_root": kwargs.get("robodojo_root", ""),
+            "display": kwargs.get("display", ""),
+            "use_gui": bool(kwargs.get("use_gui", True)),
+        }
+        extras = [c for c in clients if int(c["pid"]) != pid]
+        self.log_line.emit(
+            f"复用已运行仿真: pid={pid} task={cur_task or '?'} "
+            f"(共发现 {len(clients)} 个 eval_client)"
+        )
+        if extras:
+            extra_s = ", ".join(
+                f"{c['pid']}:{c.get('task') or '?'}" for c in extras
+            )
+            self.log_line.emit(
+                f"[WARN] 另有评测进程未接管（请手动停掉以免抢 GPU/帧）: {extra_s}"
+            )
+        self.status_message.emit(
+            f"已复用运行中仿真 pid={pid}（{cur_task or 'unknown'}）"
+        )
+        if not self._adopt_watch_timer.isActive():
+            self._adopt_watch_timer.start()
+        self.running_changed.emit(True)
+        return chosen
+
+    def _on_adopt_watch_tick(self) -> None:
+        if not self._adopted:
+            self._adopt_watch_timer.stop()
+            return
+        if self.is_running():
+            return
+        self._adopt_watch_timer.stop()
+        self._adopted = False
+        self._external_pids = []
+        self._pgid = None
+        self.log_line.emit("--- 已接管的评测进程已退出 ---")
+        self.status_message.emit("复用的评测已结束")
+        self.running_changed.emit(False)
 
     def start(
         self,
@@ -11386,14 +11802,76 @@ class RoboDojoEvalLauncher(QObject):
         robodojo_root: str = "",
         display: str = "",
         use_gui: bool = True,
-    ) -> None:
-        if self.is_running():
-            self.status_message.emit("RoboDojo 评测已在运行")
-            return
+        reuse_existing: bool = True,
+    ) -> str:
+        """启动或复用评测。返回 started / reused / switched / busy / error。"""
         task = (task or "").strip()
         if not task:
             self.status_message.emit("请选择评测任务")
-            return
+            return "error"
+
+        if self.is_running():
+            cur = self.current_task()
+            if cur and cur == task:
+                self.status_message.emit(f"评测已在运行（任务 {task}）")
+                return "reused"
+            if self.request_switch_task(task, bridge_dir=bridge_dir):
+                return "switched"
+            return "busy"
+
+        if reuse_existing:
+            adopted = self.adopt_running_eval(
+                task,
+                bridge_dir=bridge_dir,
+                prefer_task=task,
+                policy_dir=policy_dir,
+                ckpt=ckpt,
+                action_type=action_type,
+                policy_env=policy_env,
+                eval_env=eval_env,
+                robodojo_root=robodojo_root,
+                display=display,
+                use_gui=use_gui,
+            )
+            if adopted is not None:
+                cur = str(adopted.get("task") or "").strip()
+                if cur and cur != task:
+                    if self.request_switch_task(task, bridge_dir=bridge_dir):
+                        return "switched"
+                    return "reused"
+                self.status_message.emit(f"已复用仿真（任务 {cur or task}）")
+                return "reused"
+
+        return self._start_new_process(
+            task,
+            bridge_dir=bridge_dir,
+            policy_dir=policy_dir,
+            ckpt=ckpt,
+            action_type=action_type,
+            policy_env=policy_env,
+            eval_env=eval_env,
+            robodojo_root=robodojo_root,
+            display=display,
+            use_gui=use_gui,
+        )
+
+    def _start_new_process(
+        self,
+        task: str,
+        *,
+        bridge_dir: str = "",
+        policy_dir: str = "XPolicyLab/policy/demo_policy",
+        ckpt: str = "demo",
+        action_type: str = "ee",
+        policy_env: str = "",
+        eval_env: str = "",
+        robodojo_root: str = "",
+        display: str = "",
+        use_gui: bool = True,
+    ) -> str:
+        if self.is_running():
+            self.status_message.emit("RoboDojo 评测已在运行")
+            return "busy"
         root = os.path.abspath(
             os.path.expanduser(robodojo_root or ROBODOJO_ROOT_DEFAULT)
         )
@@ -11406,10 +11884,27 @@ class RoboDojoEvalLauncher(QObject):
         bridge_dir = os.path.abspath(os.path.expanduser((bridge_dir or "").strip()))
         disp = (display or os.environ.get("DISPLAY") or ":1.0").strip()
         self._use_gui = bool(use_gui)
+        self._keep_alive = True
+        self._restart_pending = False
+        self._adopted = False
+        self._external_pids = []
+        self._last_start_kwargs = {
+            "task": task,
+            "bridge_dir": bridge_dir,
+            "policy_dir": policy_dir,
+            "ckpt": ckpt,
+            "action_type": action_type,
+            "policy_env": policy_env,
+            "eval_env": eval_env,
+            "robodojo_root": root,
+            "display": disp,
+            "use_gui": self._use_gui,
+        }
         # 「无」：只启评测客户端；仍用 demo_policy 目录提供 client adapter 脚本
         skip_policy = not (policy_dir or "").strip()
         if skip_policy:
             policy_dir = "XPolicyLab/policy/demo_policy"
+            self._last_start_kwargs["policy_dir"] = ""
         is_starvla = (not skip_policy) and (
             "starVLA" in policy_dir or "starvla" in policy_dir.lower()
         )
@@ -11422,6 +11917,7 @@ class RoboDojoEvalLauncher(QObject):
         # PermissionError; mirror run_gui_eval.sh and use /dev/shm TMPDIR.
         conda_base = "/home/psibot/miniconda3"
         tmpdir = "/dev/shm/robodojo_tmp"
+        eval_num = ROBODOJO_EVAL_NUM_KEEP
         exports = [
             "unset PYTHONPATH PYTHONHOME || true",
             "export PYTHONNOUSERSITE=1 OMNI_KIT_ACCEPT_EULA=YES PYTHONUNBUFFERED=1",
@@ -11435,6 +11931,7 @@ class RoboDojoEvalLauncher(QObject):
             f"export ROBODOJO_POLICY_DIR={shlex.quote(policy_dir)}",
             f"export ROBODOJO_CKPT={shlex.quote(ckpt)}",
             f"export ROBODOJO_ACTION_TYPE={shlex.quote(action_type)}",
+            f"export EVAL_NUM={shlex.quote(eval_num)}",
             "unset RANK WORLD_SIZE LOCAL_RANK LOCAL_WORLD_SIZE MASTER_ADDR MASTER_PORT "
             "GROUP_RANK ROLE_RANK TORCHELASTIC_RUN_ID PMI_RANK PMI_SIZE 2>/dev/null || true",
         ]
@@ -11464,7 +11961,7 @@ class RoboDojoEvalLauncher(QObject):
                 )
                 self.status_message.emit(msg)
                 self.log_line.emit(f"[ERROR] {msg}")
-                return
+                return "error"
             hf_root = (
                 os.environ.get("STARVLA_HF_ROOT", "").strip()
                 or ROBODOJO_STARVLA_HF_ROOT_DEFAULT
@@ -11491,7 +11988,7 @@ class RoboDojoEvalLauncher(QObject):
                 gui_script = os.path.join(root, "scripts", "run_gui_starvla_pi_v3.sh")
                 if not os.path.isfile(gui_script):
                     self.status_message.emit(f"未找到脚本: {gui_script}")
-                    return
+                    return "error"
                 exports.extend(
                     [
                         f"export ROBODOJO_DISPLAY={shlex.quote(disp)}",
@@ -11514,22 +12011,23 @@ class RoboDojoEvalLauncher(QObject):
                 )
                 if not os.path.isfile(hf_eval):
                     self.status_message.emit(f"未找到脚本: {hf_eval}")
-                    return
+                    return "error"
                 run_cmd = (
                     f"exec bash {shlex.quote(hf_eval)} {shlex.quote(variant)} "
                     f"{shlex.quote(task)} 0 0 0 "
-                    f"{shlex.quote(policy_env)} {shlex.quote(eval_env)} 1"
+                    f"{shlex.quote(policy_env)} {shlex.quote(eval_env)} "
+                    f"{shlex.quote(eval_num)}"
                 )
                 log_cmd = (
                     f"$ bash …/eval_hf_robodojo.sh {variant} {task} … "
-                    f"# headless starVLA"
+                    f"# headless starVLA EVAL_NUM={eval_num}"
                 )
                 status_msg = f"正在启动 starVLA headless 评测: {task}…"
         elif self._use_gui:
             gui_script = os.path.join(root, "scripts", "run_gui_eval.sh")
             if not os.path.isfile(gui_script):
                 self.status_message.emit(f"未找到脚本: {gui_script}")
-                return
+                return "error"
             exports.extend(
                 [
                     f"export ROBODOJO_DISPLAY={shlex.quote(disp)}",
@@ -11547,7 +12045,7 @@ class RoboDojoEvalLauncher(QObject):
             robodojo_sh = os.path.join(root, "scripts", "robodojo.sh")
             if not os.path.isfile(robodojo_sh):
                 self.status_message.emit(f"未找到脚本: {robodojo_sh}")
-                return
+                return "error"
             run_cmd = (
                 f"exec bash {shlex.quote(robodojo_sh)} eval "
                 f"--policy-dir {shlex.quote(policy_dir)} "
@@ -11555,13 +12053,14 @@ class RoboDojoEvalLauncher(QObject):
                 f"--ckpt {shlex.quote(ckpt)} "
                 f"--policy-env {shlex.quote(policy_env)} "
                 f"--eval-env {shlex.quote(eval_env)} "
-                f"--eval-num 1 "
+                f"--eval-num {shlex.quote(eval_num)} "
                 f"--action-type {shlex.quote(action_type)} "
                 f"--seed 0"
             )
             log_cmd = (
                 f"$ bash scripts/robodojo.sh eval --task {task} "
-                f"--policy-dir {policy_dir} --ckpt {ckpt}  # headless"
+                f"--policy-dir {policy_dir} --ckpt {ckpt} "
+                f"--eval-num {eval_num}  # headless keep"
             )
             if skip_policy:
                 status_msg = f"正在启动评测（无策略 / headless）: {task}…"
@@ -11594,6 +12093,7 @@ class RoboDojoEvalLauncher(QObject):
         else:
             qenv.remove("ROBODOJO_SKIP_POLICY_SERVER")
             qenv.remove("ROBODOJO_FORCE_PROTOCOL")
+        qenv.insert("EVAL_NUM", eval_num)
         conda_bin = os.path.join(conda_base, "bin")
         path_now = qenv.value("PATH", "")
         if conda_bin not in path_now.split(":"):
@@ -11619,29 +12119,188 @@ class RoboDojoEvalLauncher(QObject):
         self.log_line.emit(
             f"  mode={'GUI' if self._use_gui else 'headless'} "
             f"policy={policy_label} ckpt={ckpt} action={action_type} "
-            f"bridge={bridge_dir or '(unset)'}"
+            f"EVAL_NUM={eval_num} bridge={bridge_dir or '(unset)'}"
         )
         if skip_policy:
             self.log_line.emit(
                 "  策略=无：仅启评测；Isaac 使用进程内零动作，不会连接 WebSocket 策略服务"
             )
+        self.log_line.emit(
+            "  常驻模式：评测相关进程将保持运行，直到点击「停止评测」"
+        )
         self.status_message.emit(status_msg)
+        return "started"
+
+    @staticmethod
+    def switch_task_request_path(bridge_dir: str = "") -> str:
+        bridge = os.path.abspath(
+            os.path.expanduser(
+                (bridge_dir or "").strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
+            )
+        )
+        return os.path.join(bridge, "switch_task.request")
+
+    def current_task(self) -> str:
+        kw = self._last_start_kwargs or {}
+        return str(kw.get("task") or "").strip()
+
+    def request_switch_task(self, task: str, bridge_dir: str = "") -> bool:
+        """热切换任务：写请求文件；评测在 episode 步进中检测并尽快换场景（不重启 Kit）。"""
+        task = (task or "").strip()
+        if not task:
+            self.status_message.emit("请选择评测任务")
+            return False
+        if not self.is_running():
+            self.status_message.emit("评测未在运行，请先启动")
+            return False
+        cur = self.current_task()
+        if cur and cur == task:
+            self.status_message.emit(f"已在任务 {task} 上运行")
+            self.log_line.emit(f"切换任务：已是 {task}，忽略")
+            return False
+        path = self.switch_task_request_path(bridge_dir)
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(task + "\n")
+            os.replace(tmp, path)
+        except OSError as exc:
+            self.status_message.emit(f"写切换请求失败: {exc}")
+            self.log_line.emit(f"[ERROR] switch_task: {exc}")
+            return False
+        if self._last_start_kwargs is not None:
+            self._last_start_kwargs["task"] = task
+        self.log_line.emit(
+            f"已请求热切换任务: {cur or '?'} → {task}"
+            "（不重启 Isaac；数秒内应中止当前 episode 并换场景）"
+        )
+        self.status_message.emit(f"正在切换任务 → {task}…")
+        self._switch_watch_path = path
+        self._switch_watch_task = task
+        self._switch_watch_tries = 0
+        if not hasattr(self, "_switch_watch_timer") or self._switch_watch_timer is None:
+            self._switch_watch_timer = QTimer(self)
+            self._switch_watch_timer.setInterval(2000)
+            self._switch_watch_timer.timeout.connect(self._on_switch_watch_tick)
+        if not self._switch_watch_timer.isActive():
+            self._switch_watch_timer.start()
+        return True
+
+    def _on_switch_watch_tick(self) -> None:
+        path = getattr(self, "_switch_watch_path", "") or ""
+        task = getattr(self, "_switch_watch_task", "") or ""
+        self._switch_watch_tries = int(getattr(self, "_switch_watch_tries", 0)) + 1
+        still = bool(path and os.path.isfile(path))
+        if not still:
+            self.log_line.emit(f"切换请求已被评测进程接收 → {task}")
+            self.status_message.emit(f"已切换任务 → {task}")
+            if getattr(self, "_switch_watch_timer", None) is not None:
+                self._switch_watch_timer.stop()
+            return
+        if self._switch_watch_tries >= 15:
+            self.log_line.emit(
+                f"[WARN] 切换请求仍未被消费（{path}）。"
+                "当前评测进程可能是旧代码：请点「停止评测」后重新「启动评测」再切换。"
+            )
+            self.status_message.emit("切换未生效：请停止后重开评测")
+            if getattr(self, "_switch_watch_timer", None) is not None:
+                self._switch_watch_timer.stop()
+            return
+        if self._switch_watch_tries in (1, 3, 6):
+            self.log_line.emit(
+                f"仍在等待评测消费切换请求 → {task}（{self._switch_watch_tries * 2}s）…"
+            )
 
     def stop(self) -> None:
-        if not self.is_running() and self._process is None:
-            self.status_message.emit("当前没有运行中的 RoboDojo 评测")
-            return
+        """停止本窗口管理的评测，并清掉系统里所有仿真/eval 残留。"""
+        self._keep_alive = False
+        self._restart_pending = False
+        if getattr(self, "_adopt_watch_timer", None) is not None:
+            self._adopt_watch_timer.stop()
+        if getattr(self, "_switch_watch_timer", None) is not None:
+            self._switch_watch_timer.stop()
+
+        clients = self.list_running_eval_clients()
+        for c in clients:
+            pid = int(c["pid"])
+            if pid not in self._external_pids:
+                self._external_pids.append(pid)
+        if self._external_pids and self._pgid is None:
+            try:
+                self._pgid = os.getpgid(self._external_pids[0])
+            except OSError:
+                self._pgid = self._external_pids[0]
+
         if self._stopping:
-            self.status_message.emit("正在强制停止 RoboDojo 评测…")
-            self._force_kill_process()
+            self.status_message.emit("正在强制停止全部仿真…")
+            self.log_line.emit("--- 再次停止：对全部仿真发 SIGKILL ---")
+            self._force_kill_all_sims()
             return
+
         self._stopping = True
-        self.status_message.emit("正在停止 RoboDojo 评测（可再次点击强制结束）…")
-        self.log_line.emit("--- 请求停止 RoboDojo 评测 ---")
-        self.running_changed.emit(True)  # 保持 UI「可停」状态
+        n = len(clients)
+        self.status_message.emit(
+            f"正在停止全部仿真（发现 {n} 个 eval_client；可再点强制结束）…"
+        )
+        self.log_line.emit(
+            f"--- 请求停止全部仿真（eval_client={n}，含本窗口进程）---"
+        )
+        for c in clients:
+            self.log_line.emit(
+                f"  stop target pid={c['pid']} task={c.get('task') or '?'}"
+            )
+        self.running_changed.emit(True)
         self._signal_process_group(signal.SIGTERM)
-        # 2s 后仍未退出则 SIGKILL 整组
-        QTimer.singleShot(2000, self._force_kill_process)
+        killed = self._pkill_eval_leftovers(sig="-TERM")
+        if killed:
+            self.log_line.emit(f"  已对仿真相关进程组发 SIGTERM（patterns hit≈{killed}）")
+        QTimer.singleShot(2000, self._force_kill_all_sims)
+
+    def _force_kill_all_sims(self) -> None:
+        """SIGKILL 本窗口进程组 + 全部仿真残留，并复位 UI 状态。"""
+        self._keep_alive = False
+        self._restart_pending = False
+        self._stopping = True
+        self._signal_process_group(signal.SIGKILL)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            try:
+                self._process.kill()
+                self._process.waitForFinished(1500)
+            except Exception:
+                pass
+        killed = self._pkill_eval_leftovers(sig="-KILL")
+        for c in self.list_running_eval_clients():
+            pid = int(c["pid"])
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except Exception:
+                pass
+        self._process = None
+        self._pgid = None
+        self._external_pids = []
+        self._adopted = False
+        if getattr(self, "_adopt_watch_timer", None) is not None:
+            self._adopt_watch_timer.stop()
+        self._stopping = False
+        left = self.list_running_eval_clients()
+        if left:
+            self.log_line.emit(
+                "[WARN] 强制停止后仍有残留: "
+                + ", ".join(f"{c['pid']}:{c.get('task') or '?'}" for c in left)
+            )
+            self.status_message.emit(f"仍有 {len(left)} 个仿真残留，请再点一次停止")
+            self.running_changed.emit(False)
+            return
+        self.log_line.emit(f"--- 全部仿真已停止（pkill hits≈{killed}）---")
+        self.status_message.emit("全部仿真已停止")
+        self.running_changed.emit(False)
 
     def _signal_process_group(self, sig: int) -> None:
         pgid = self._pgid
@@ -11650,55 +12309,46 @@ class RoboDojoEvalLauncher(QObject):
                 pgid = int(self._process.processId())
             except Exception:
                 pgid = None
+        if pgid is None and self._external_pids:
+            try:
+                pgid = os.getpgid(self._external_pids[0])
+            except OSError:
+                pgid = self._external_pids[0]
+        signaled_pgids = set()
         if pgid and pgid > 1:
             try:
                 os.killpg(pgid, sig)
-                return
+                signaled_pgids.add(pgid)
             except ProcessLookupError:
                 pass
             except Exception as exc:
                 self.log_line.emit(f"killpg({pgid}, {sig}) 失败: {exc}")
+        for pid in list(self._external_pids):
+            try:
+                child_pgid = os.getpgid(pid)
+                if child_pgid > 1 and child_pgid not in signaled_pgids:
+                    os.killpg(child_pgid, sig)
+                    signaled_pgids.add(child_pgid)
+            except Exception:
+                pass
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+            except Exception as exc:
+                self.log_line.emit(f"kill({pid}, {sig}) 失败: {exc}")
         if self._process is not None and self._process.state() != QProcess.NotRunning:
             if sig == signal.SIGKILL:
                 self._process.kill()
             else:
                 self._process.terminate()
 
-    @staticmethod
-    def _pkill_eval_leftovers() -> None:
-        """清理可能脱离会话的 Isaac / eval 残留（尽力而为）。"""
-        patterns = (
-            "scripts/run_gui_eval.sh",
-            "run_gui_eval.sh",
-            "run_gui_starvla_pi_v3.sh",
-            "eval_hf_robodojo.sh",
-            "scripts/robodojo.sh eval",
-            "isaacsim",
-            "isaac-sim",
-            "kit/kit ",
-        )
-        for pat in patterns:
-            try:
-                subprocess.run(
-                    ["pkill", "-f", pat],
-                    capture_output=True,
-                    timeout=2,
-                )
-            except Exception:
-                pass
-
     def shutdown(self) -> None:
-        self._stopping = True
-        self._signal_process_group(signal.SIGTERM)
-        if self._process is not None and self._process.state() != QProcess.NotRunning:
-            self._process.waitForFinished(2000)
-        if self._process is not None and self._process.state() != QProcess.NotRunning:
-            self._signal_process_group(signal.SIGKILL)
-            self._process.waitForFinished(1000)
-        self._process = None
-        self._pgid = None
-        self._stopping = False
-        self.running_changed.emit(False)
+        self._keep_alive = False
+        self._restart_pending = False
+        if getattr(self, "_adopt_watch_timer", None) is not None:
+            self._adopt_watch_timer.stop()
+        self._force_kill_all_sims()
 
     def _on_process_output(self) -> None:
         if self._process is None:
@@ -11710,16 +12360,56 @@ class RoboDojoEvalLauncher(QObject):
             if line:
                 self.log_line.emit(line.rstrip())
 
+    def _schedule_keepalive_restart(self) -> None:
+        if not self._keep_alive or self._stopping or not self._last_start_kwargs:
+            self._restart_pending = False
+            self.running_changed.emit(False)
+            return
+        self._restart_pending = True
+        self.running_changed.emit(True)
+        self.log_line.emit("--- 评测进程退出，常驻模式 3s 后自动重启 ---")
+        self.status_message.emit("评测常驻：即将自动重启…")
+        QTimer.singleShot(3000, self._restart_keepalive)
+
+    def _restart_keepalive(self) -> None:
+        self._restart_pending = False
+        if not self._keep_alive or self._stopping:
+            self.running_changed.emit(False)
+            return
+        kwargs = dict(self._last_start_kwargs or {})
+        if not kwargs:
+            self.running_changed.emit(False)
+            return
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            return
+        self.log_line.emit("--- 常驻模式：重新启动评测 ---")
+        self.start(reuse_existing=False, **kwargs)
+        if not self.is_running():
+            self._keep_alive = False
+            self.log_line.emit("--- 常驻重启失败，已停止自动重启 ---")
+            self.status_message.emit("评测常驻重启失败")
+            self.running_changed.emit(False)
+
     def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
         was_stopping = self._stopping
         self._process = None
         self._pgid = None
         self._stopping = False
-        self.running_changed.emit(False)
         if was_stopping:
+            self._keep_alive = False
+            self._restart_pending = False
+            self.running_changed.emit(False)
             self.log_line.emit("--- RoboDojo 评测已停止 ---")
             self.status_message.emit("RoboDojo 评测已停止")
-        elif exit_code == 0:
+            return
+        if self._keep_alive:
+            self.log_line.emit(
+                f"--- RoboDojo 评测退出 (code={exit_code})，准备常驻重启 ---"
+            )
+            self._schedule_keepalive_restart()
+            return
+        self.running_changed.emit(False)
+        if exit_code == 0:
             self.log_line.emit("--- RoboDojo 评测正常结束 ---")
             self.status_message.emit("RoboDojo 评测已结束")
         else:
@@ -11731,27 +12421,41 @@ class RoboDojoEvalLauncher(QObject):
             self.status_message.emit(f"RoboDojo 评测进程错误: {error}")
 
     def _force_kill_process(self) -> None:
-        if not self._stopping and (
-            self._process is None or self._process.state() == QProcess.NotRunning
-        ):
-            return
-        if self._process is not None and self._process.state() != QProcess.NotRunning:
-            self._signal_process_group(signal.SIGKILL)
+        # 兼容旧调用路径（二次点击 / 定时器）
+        self._force_kill_all_sims()
+
+    @staticmethod
+    def _pkill_eval_leftovers(sig: str = "-TERM") -> int:
+        """对所有仿真相关进程发信号。返回成功匹配的 pkill 次数。"""
+        patterns = (
+            "src/eval_client/main.py",
+            "scripts/run_gui_eval.sh",
+            "run_gui_eval.sh",
+            "run_gui_starvla_pi_v3.sh",
+            "eval_hf_robodojo.sh",
+            "scripts/robodojo.sh eval",
+            "scripts/robodojo.sh",
+            "scripts/eval_policy.sh",
+            "isaacsim.replicator",
+            "isaacsim.sensors",
+            "/kit/kit",
+            "kit/kit ",
+            "omni.isaac",
+            "IsaacSim",
+        )
+        hits = 0
+        for pat in patterns:
             try:
-                self._process.waitForFinished(1500)
+                result = subprocess.run(
+                    ["pkill", sig, "-f", pat],
+                    capture_output=True,
+                    timeout=3,
+                )
+                if result.returncode == 0:
+                    hits += 1
             except Exception:
                 pass
-        self._pkill_eval_leftovers()
-        if self._process is not None and self._process.state() != QProcess.NotRunning:
-            self._process.kill()
-        still = self._process is not None and self._process.state() != QProcess.NotRunning
-        if not still:
-            self._process = None
-            self._pgid = None
-            self._stopping = False
-            self.running_changed.emit(False)
-            self.log_line.emit("--- RoboDojo 评测已被强制终止 ---")
-            self.status_message.emit("RoboDojo 评测已强制停止")
+        return hits
 
 
 class LingbotVisionLauncher(QObject):
@@ -12586,10 +13290,12 @@ class CameraTopicWindow(QMainWindow):
         bridge: RosBridge,
         prefix: str,
         llm_config: Optional[LlmChatConfig] = None,
+        only_tabs: Optional[Sequence[str]] = None,
     ) -> None:
         super().__init__()
         self.node = node
         self.bridge = bridge
+        self._only_tabs = list(only_tabs) if only_tabs else []
         self.panels: Dict[str, QWidget] = {}
         self.topic_checks: Dict[str, QCheckBox] = {}
         self._topic_types: Dict[str, List[str]] = {}
@@ -12625,6 +13331,7 @@ class CameraTopicWindow(QMainWindow):
         control_tabs = QTabWidget()
         control_tabs.setDocumentMode(True)
         control_tabs.setTabPosition(QTabWidget.North)
+        self.control_tabs = control_tabs
 
         camera_tab = QWidget()
         camera_layout = QHBoxLayout(camera_tab)
@@ -13047,8 +13754,9 @@ class CameraTopicWindow(QMainWindow):
         depth_outer.setContentsMargins(8, 6, 8, 6)
         depth_outer.setSpacing(6)
         depth_hint = QLabel(
-            "LingBot-Depth：用 RGB + 原始深度 + 内参做深度精修 / 补全，"
-            "展示输入深度与精修结果。首次会从 Hugging Face 下载模型。"
+            "LingBot-Depth：用 RGB + 原始深度 + 内参做深度精修 / 补全。"
+            "「当前相机 RGB-D」时可在下方选择图像预览中的彩色画面，"
+            "或直接点击预览图选中后再运行。首次会从 Hugging Face 下载模型。"
         )
         depth_hint.setWordWrap(True)
         depth_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
@@ -13077,7 +13785,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_depth_source_combo.addItem("官方示例", "example")
         self.lingbot_depth_source_combo.addItem("本地文件", "file")
         self.lingbot_depth_source_combo.setToolTip(
-            "相机：抓取当前彩色 + 配对深度 + CameraInfo 内参\n"
+            "相机：抓取所选预览彩色 + 配对深度 + CameraInfo 内参\n"
             "示例：lingbot-depth/examples/<id>\n"
             "文件：指定 rgb / depth / intrinsics"
         )
@@ -13098,6 +13806,31 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_depth_device_combo.addItem("cpu", "cpu")
         depth_row.addWidget(self.lingbot_depth_device_combo)
         depth_outer.addLayout(depth_row)
+
+        depth_topic_row = QHBoxLayout()
+        depth_topic_row.setSpacing(6)
+        depth_topic_row.addWidget(QLabel("预览图像"))
+        self.lingbot_depth_topic_combo = ImeSafeComboBox()
+        self.lingbot_depth_topic_combo.setMinimumWidth(220)
+        self.lingbot_depth_topic_combo.setToolTip(
+            "选择图像预览中的彩色 topic；点击预览图也会同步到此处。"
+        )
+        self.lingbot_depth_topic_combo.currentIndexChanged.connect(
+            self._on_lingbot_depth_topic_changed
+        )
+        depth_topic_row.addWidget(self.lingbot_depth_topic_combo, 1)
+        self.lingbot_depth_topic_refresh_btn = QPushButton("刷新")
+        self.lingbot_depth_topic_refresh_btn.setFixedWidth(48)
+        self.lingbot_depth_topic_refresh_btn.setToolTip("重新扫描当前图像预览中的彩色画面")
+        self.lingbot_depth_topic_refresh_btn.clicked.connect(
+            self._refresh_lingbot_depth_topic_combo
+        )
+        depth_topic_row.addWidget(self.lingbot_depth_topic_refresh_btn)
+        self.lingbot_depth_pair_label = QLabel("配对深度: —")
+        self.lingbot_depth_pair_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.lingbot_depth_pair_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        depth_topic_row.addWidget(self.lingbot_depth_pair_label, 1)
+        depth_outer.addLayout(depth_topic_row)
 
         depth_model_row = QHBoxLayout()
         depth_model_row.setSpacing(6)
@@ -13364,7 +14097,8 @@ class CameraTopicWindow(QMainWindow):
         video_outer.setSpacing(6)
         video_hint = QLabel(
             "LingBot-Video：T2I / T2V / TI2V 生成。推荐用官方 cases 的结构化 prompt.json；"
-            "首次会下载 Dense-1.3B 权重。默认「快速预览」分辨率更低、帧数更少。"
+            "TI2V 可在下方选择图像预览中的彩色画面（或点击预览图）作为首帧。"
+            "首次会下载 Dense-1.3B 权重。"
         )
         video_hint.setWordWrap(True)
         video_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
@@ -13421,11 +14155,33 @@ class CameraTopicWindow(QMainWindow):
             self._on_lingbot_video_image_browse_clicked
         )
         video_path_row.addWidget(self.lingbot_video_image_browse_btn)
-        self.lingbot_video_cam_btn = QPushButton("相机首帧")
-        self.lingbot_video_cam_btn.setToolTip("从当前彩色相机抓一帧作 TI2V 首帧")
+        self.lingbot_video_cam_btn = QPushButton("抓取预览")
+        self.lingbot_video_cam_btn.setToolTip(
+            "从下方「预览图像」所选彩色画面抓一帧作 TI2V 首帧；也可点击图像预览选中。"
+        )
         self.lingbot_video_cam_btn.clicked.connect(self._on_lingbot_video_cam_clicked)
         video_path_row.addWidget(self.lingbot_video_cam_btn)
         video_outer.addLayout(video_path_row)
+
+        video_topic_row = QHBoxLayout()
+        video_topic_row.setSpacing(6)
+        video_topic_row.addWidget(QLabel("预览图像"))
+        self.lingbot_video_topic_combo = ImeSafeComboBox()
+        self.lingbot_video_topic_combo.setMinimumWidth(220)
+        self.lingbot_video_topic_combo.setToolTip(
+            "选择图像预览中的彩色 topic；点击预览图也会同步到此处（TI2V 首帧）。"
+        )
+        self.lingbot_video_topic_combo.currentIndexChanged.connect(
+            self._on_lingbot_video_topic_changed
+        )
+        video_topic_row.addWidget(self.lingbot_video_topic_combo, 1)
+        self.lingbot_video_topic_refresh_btn = QPushButton("刷新")
+        self.lingbot_video_topic_refresh_btn.setFixedWidth(48)
+        self.lingbot_video_topic_refresh_btn.clicked.connect(
+            self._refresh_lingbot_video_topic_combo
+        )
+        video_topic_row.addWidget(self.lingbot_video_topic_refresh_btn)
+        video_outer.addLayout(video_topic_row)
 
         video_model_row = QHBoxLayout()
         video_model_row.setSpacing(6)
@@ -13543,7 +14299,8 @@ class CameraTopicWindow(QMainWindow):
         world_outer.setSpacing(6)
         world_hint = QLabel(
             "LingBot-World-V2：图像 + 相机轨迹 → 交互世界视频。默认使用本地 "
-            "1.3B-causal-fast（单卡）。需提供 image.jpg 与含 poses/intrinsics 的 action 目录。"
+            "1.3B-causal-fast（单卡）。可在下方选择图像预览中的彩色画面（或点击预览图）"
+            "作为输入；轨迹仍用所选示例 / 自定义 action 目录。"
         )
         world_hint.setWordWrap(True)
         world_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
@@ -13597,9 +14354,9 @@ class CameraTopicWindow(QMainWindow):
             self._on_lingbot_world_image_browse_clicked
         )
         world_path_row.addWidget(self.lingbot_world_image_browse_btn)
-        self.lingbot_world_cam_btn = QPushButton("相机抓帧")
+        self.lingbot_world_cam_btn = QPushButton("抓取预览")
         self.lingbot_world_cam_btn.setToolTip(
-            "从当前彩色相机抓帧；轨迹仍用所选示例的 action_path"
+            "从下方「预览图像」所选彩色画面抓帧；轨迹仍用所选示例的 action_path。"
         )
         self.lingbot_world_cam_btn.clicked.connect(self._on_lingbot_world_cam_clicked)
         world_path_row.addWidget(self.lingbot_world_cam_btn)
@@ -13614,6 +14371,26 @@ class CameraTopicWindow(QMainWindow):
         )
         world_path_row.addWidget(self.lingbot_world_action_browse_btn)
         world_outer.addLayout(world_path_row)
+
+        world_topic_row = QHBoxLayout()
+        world_topic_row.setSpacing(6)
+        world_topic_row.addWidget(QLabel("预览图像"))
+        self.lingbot_world_topic_combo = ImeSafeComboBox()
+        self.lingbot_world_topic_combo.setMinimumWidth(220)
+        self.lingbot_world_topic_combo.setToolTip(
+            "选择图像预览中的彩色 topic；点击预览图也会同步到此处。"
+        )
+        self.lingbot_world_topic_combo.currentIndexChanged.connect(
+            self._on_lingbot_world_topic_changed
+        )
+        world_topic_row.addWidget(self.lingbot_world_topic_combo, 1)
+        self.lingbot_world_topic_refresh_btn = QPushButton("刷新")
+        self.lingbot_world_topic_refresh_btn.setFixedWidth(48)
+        self.lingbot_world_topic_refresh_btn.clicked.connect(
+            self._refresh_lingbot_world_topic_combo
+        )
+        world_topic_row.addWidget(self.lingbot_world_topic_refresh_btn)
+        world_outer.addLayout(world_topic_row)
 
         world_ckpt_row = QHBoxLayout()
         world_ckpt_row.setSpacing(6)
@@ -13684,6 +14461,7 @@ class CameraTopicWindow(QMainWindow):
         self._lingbot_world_launcher.result_ready.connect(self._on_lingbot_world_result)
         self._lingbot_world_last_output = ""
         self._on_lingbot_world_example_changed()
+        self._refresh_lingbot_world_topic_combo()
 
         control_tabs.addTab(world_tab, "世界模型")
 
@@ -13966,8 +14744,9 @@ class CameraTopicWindow(QMainWindow):
         sim_outer.setSpacing(6)
 
         sim_hint = QLabel(
-            "启动 RoboDojo 评测后，会自动启相机桥，并在「图像预览」显示左腕 / 头部 / 右腕实时画面"
-            "（共享目录 .npy → ROS /camera/*_color；预览同时直读 .npy，不依赖 topic 勾选时机）。"
+            "启动 RoboDojo 评测后，相关进程（Isaac / 策略 / 相机桥）会常驻运行，"
+            "直到点击「停止评测」。同时自动开图像预览：左腕 / 头部 / 右腕"
+            "（共享目录 .npy → ROS /camera/*_color；预览可直读 .npy）。"
         )
         sim_hint.setWordWrap(True)
         sim_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
@@ -14113,11 +14892,13 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_start_btn = QPushButton("启动评测")
         self.sim_eval_start_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_eval_start_btn.setToolTip(
-            "按「仿真界面」选项启动评测：\n"
-            "• 勾选 → scripts/run_gui_eval.sh（GUI）\n"
+            "启动前会检查是否已有 eval_client / Isaac 在跑：有则复用并按需热切换任务。\n"
+            "无运行进程时：按「仿真界面」选项新启动（EVAL_NUM=keep 常驻）。\n"
+            "已由本窗口管理时：按钮为「切换任务」。\n"
+            "• 勾选仿真界面 → scripts/run_gui_eval.sh（GUI）\n"
             "• 不勾选 → scripts/robodojo.sh eval（headless）\n"
             "策略选「无」时只启评测客户端，不启策略服务。\n"
-            "GUI 模式会自动启相机桥并打开三路预览。"
+            "相关进程一直保留，直到点击「停止评测」。"
         )
         self.sim_eval_start_btn.clicked.connect(self._on_sim_eval_start_clicked)
         sim_run_row.addWidget(self.sim_eval_start_btn)
@@ -14126,8 +14907,8 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_stop_run_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
         self.sim_eval_stop_run_btn.setEnabled(False)
         self.sim_eval_stop_run_btn.setToolTip(
-            "随时停止当前评测（含 Isaac / policy 子进程）。\n"
-            "首次点击发 SIGTERM；若未退出可再点一次强制 SIGKILL。"
+            "停止全部仿真（本窗口进程 + 系统中所有 eval_client / Isaac / robodojo）。\n"
+            "首次点击发 SIGTERM；约 2s 后自动 SIGKILL；仍残留时可再点一次强制清理。"
         )
         self.sim_eval_stop_run_btn.clicked.connect(self._on_sim_eval_stop_run_clicked)
         sim_run_row.addWidget(self.sim_eval_stop_run_btn)
@@ -14246,6 +15027,9 @@ class CameraTopicWindow(QMainWindow):
         self._sim_preview_retry_timer.setInterval(1500)
         self._sim_preview_retry_timer.timeout.connect(self._retry_enable_sim_preview_topics)
         self._sim_preview_retry_left = 0
+        self._sim_eval_auto_bridge = False
+        # 用户手动取消勾选的 topic：轮询 / ROS 刷新不得再强制勾回
+        self._topic_user_unchecked: set[str] = set()
         self._refresh_sim_frame_status()
         self._refresh_sim_eval_tree()
         self._on_sim_eval_policy_changed()
@@ -15031,6 +15815,7 @@ class CameraTopicWindow(QMainWindow):
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("就绪")
+        self._apply_only_tabs(self._only_tabs)
         self.chat_panel.status_message.connect(self.status_bar.showMessage)
         self._init_qwen_deploy_controller()
         self._stack_launcher.status_message.connect(self.status_bar.showMessage)
@@ -15211,7 +15996,10 @@ class CameraTopicWindow(QMainWindow):
         now = time.time()
         for key in ISAAC_CAM_BRIDGE_KEYS:
             npy = os.path.join(bridge_dir, f"{key}.npy")
-            stamp = os.path.join(bridge_dir, f"{key}.stamp")
+            depth_npy = os.path.join(bridge_dir, f"{key}_depth.npy")
+            stamp = os.path.join(bridge_dir, f"{key}.npy.stamp")
+            if not os.path.isfile(stamp):
+                stamp = os.path.join(bridge_dir, f"{key}.stamp")
             if not os.path.isfile(npy):
                 parts.append(f"{key}=无")
                 continue
@@ -15224,10 +16012,11 @@ class CameraTopicWindow(QMainWindow):
                 age = f"{max(0.0, now - mtime):.1f}s"
             except OSError:
                 pass
-            parts.append(f"{key}={age}")
+            depth_note = "+D" if os.path.isfile(depth_npy) else ""
+            parts.append(f"{key}={age}{depth_note}")
         self.sim_frame_status_label.setText(
             f"{bridge_dir}  |  " + "  ".join(parts)
-            + "  → /camera/head_color, left_wrist_color, right_wrist_color"
+            + "  → /camera/*_color + *_depth"
         )
 
     def _on_sim_bridge_start_clicked(self) -> None:
@@ -15269,9 +16058,8 @@ class CameraTopicWindow(QMainWindow):
         running = self._sim_eval_launcher.is_running()
         stopping = bool(getattr(self._sim_eval_launcher, "_stopping", False))
         no_policy = not str(self.sim_eval_policy_combo.currentData() or "")
-        self.sim_eval_start_btn.setEnabled(not running)
         self.sim_eval_stop_run_btn.setEnabled(running)
-        self.sim_eval_task_combo.setEnabled(not running)
+        # 策略 / GUI 模式仍锁定；任务可在运行中切换
         self.sim_eval_policy_combo.setEnabled(not running)
         self.sim_eval_ckpt_edit.setEnabled(not running and not no_policy)
         self.sim_eval_action_combo.setEnabled(not running and not no_policy)
@@ -15280,17 +16068,45 @@ class CameraTopicWindow(QMainWindow):
         if stopping:
             self.sim_eval_run_status.setText("评测: 正在停止…")
             self.sim_eval_run_status.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+            self.sim_eval_start_btn.setText("启动评测")
+            self.sim_eval_start_btn.setEnabled(False)
+            self.sim_eval_task_combo.setEnabled(False)
         elif running:
-            self.sim_eval_run_status.setText("评测: 运行中（可随时停止）")
+            cur = self._sim_eval_launcher.current_task() or "?"
+            adopted = bool(getattr(self._sim_eval_launcher, "_adopted", False))
+            mode = "复用外部进程" if adopted else "常驻运行中"
+            self.sim_eval_run_status.setText(
+                f"评测: {mode}（当前任务 {cur}；可「切换任务」）"
+            )
             self.sim_eval_run_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            self.sim_eval_start_btn.setText("切换任务")
+            self.sim_eval_start_btn.setEnabled(True)
+            self.sim_eval_task_combo.setEnabled(True)
             if not self._sim_npy_preview_timer.isActive():
                 self._sim_npy_preview_timer.start()
         else:
             self.sim_eval_run_status.setText("评测: 空闲")
             self.sim_eval_run_status.setStyleSheet("")
-            self._sim_npy_preview_timer.stop()
-            self._sim_preview_retry_timer.stop()
-            self._sim_preview_retry_left = 0
+            self.sim_eval_start_btn.setText("启动评测")
+            self.sim_eval_start_btn.setEnabled(True)
+            self.sim_eval_task_combo.setEnabled(True)
+            # 评测未跑时，若相机桥仍在或共享帧仍在，继续预览；否则停
+            if self._sim_bridge_launcher.is_running():
+                if not self._sim_npy_preview_timer.isActive():
+                    self._sim_npy_preview_timer.start()
+            else:
+                age = self._sim_bridge_newest_age_s()
+                if age is not None and age <= 900.0:
+                    if not self._sim_npy_preview_timer.isActive():
+                        self._sim_npy_preview_timer.start()
+                    self.sim_eval_run_status.setText(
+                        f"评测: 空闲（共享帧约 {age:.0f}s 前，预览仍可读）"
+                    )
+                    self.sim_eval_run_status.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+                else:
+                    self._sim_npy_preview_timer.stop()
+                    self._sim_preview_retry_timer.stop()
+                    self._sim_preview_retry_left = 0
 
     def _ensure_workspace_expanded(self) -> None:
         if getattr(self, "_workspace_collapsed", False):
@@ -15306,16 +16122,17 @@ class CameraTopicWindow(QMainWindow):
         os.makedirs(bridge_dir, exist_ok=True)
         removed = 0
         for key in ISAAC_CAM_BRIDGE_KEYS:
-            for suffix in (".npy", ".npy.stamp", ".npy.writing"):
-                path = os.path.join(bridge_dir, f"{key}{suffix}")
-                try:
-                    if os.path.isfile(path):
-                        os.remove(path)
-                        removed += 1
-                except OSError:
-                    pass
+            for base in (key, f"{key}_depth"):
+                for suffix in (".npy", ".npy.stamp", ".npy.writing", ".stamp"):
+                    path = os.path.join(bridge_dir, f"{base}{suffix}")
+                    try:
+                        if os.path.isfile(path):
+                            os.remove(path)
+                            removed += 1
+                    except OSError:
+                        pass
         self._sim_npy_last_mtime.clear()
-        for topic in SIM_PREVIEW_TOPICS:
+        for topic in SIM_PREVIEW_ALL_TOPICS:
             self._frame_cache.pop(topic, None)
             panel = self.panels.get(topic)
             if isinstance(panel, CameraPanel):
@@ -15323,21 +16140,34 @@ class CameraTopicWindow(QMainWindow):
                     panel.update_frame(np.zeros((240, 320, 3), dtype=np.uint8))
                 except Exception:
                     pass
+            elif isinstance(panel, DepthPanel3D):
+                try:
+                    panel.update_depth(np.zeros((240, 320), dtype=np.uint16))
+                except Exception:
+                    pass
         self._append_sim_log(
             f"已清空共享帧目录 {bridge_dir}（删除 {removed} 个旧文件），等待本轮 Isaac 写出"
         )
 
-    def _activate_sim_camera_preview(self) -> None:
-        """展开图像预览并订阅左腕 / 头部 / 右腕三路（含 .npy 直读兜底）。"""
+    def _activate_sim_camera_preview(self, force: bool = True) -> None:
+        """展开图像预览并订阅左腕 / 头部 / 右腕彩色+深度（含 .npy 直读兜底）。"""
         self._ensure_workspace_expanded()
+        if force:
+            for topic in SIM_PREVIEW_ALL_TOPICS:
+                self._topic_user_unchecked.discard(topic)
+        # ROS 可能一直发现不到 /camera：先把仿真伪 topic 注入左侧列表
+        if any(t not in self.topic_checks for t in SIM_PREVIEW_ALL_TOPICS):
+            self._on_topics_updated(dict(getattr(self, "_topic_types", {}) or {}))
         enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
-        enabled.update(SIM_PREVIEW_TOPICS)
-        for topic in SIM_PREVIEW_TOPICS:
+        for topic in SIM_PREVIEW_ALL_TOPICS:
+            if topic in self._topic_user_unchecked:
+                continue
             checkbox = self.topic_checks.get(topic)
             if checkbox is not None:
                 checkbox.blockSignals(True)
                 checkbox.setChecked(True)
                 checkbox.blockSignals(False)
+            enabled.add(topic)
         self._apply_selection(enabled)
         if not self._sim_npy_preview_timer.isActive():
             self._sim_npy_preview_timer.start()
@@ -15346,39 +16176,87 @@ class CameraTopicWindow(QMainWindow):
             self._sim_preview_retry_timer.start()
         if getattr(self, "status_bar", None) is not None:
             self.status_bar.showMessage(
-                "已打开仿真预览：左腕 / 头部 / 右腕（直读共享 .npy，等待 RoboDojo 写出帧）",
+                "已打开仿真预览：左腕/头部/右腕 RGB-D（直读共享 .npy）",
                 5000,
             )
 
+    def _sim_bridge_newest_age_s(self) -> Optional[float]:
+        """共享目录里最新一帧的年龄（秒）；无文件则 None。"""
+        bridge_dir = os.path.abspath(
+            os.path.expanduser(
+                self.sim_bridge_dir_edit.text().strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
+            )
+        )
+        if not os.path.isdir(bridge_dir):
+            return None
+        now = time.time()
+        newest: Optional[float] = None
+        for key in ISAAC_CAM_BRIDGE_KEYS:
+            for base in (key, f"{key}_depth"):
+                npy_path = os.path.join(bridge_dir, f"{base}.npy")
+                stamp_path = npy_path + ".stamp"
+                try:
+                    mtime = os.path.getmtime(
+                        stamp_path if os.path.isfile(stamp_path) else npy_path
+                    )
+                except OSError:
+                    continue
+                age = max(0.0, now - mtime)
+                newest = age if newest is None else min(newest, age)
+        return newest
+
+    def _maybe_resume_sim_npy_preview(self) -> None:
+        """UI 重启后：若共享帧仍在，自动恢复预览（不依赖本窗口是否拥有评测进程）。"""
+        age = self._sim_bridge_newest_age_s()
+        if age is None:
+            return
+        if age > 600.0 and not (
+            self._sim_eval_launcher.is_running() or self._sim_bridge_launcher.is_running()
+        ):
+            return
+        self._activate_sim_camera_preview(force=False)
+        self._append_sim_log(
+            f"检测到共享帧目录（最新约 {age:.0f}s 前），已恢复图像预览轮询"
+            + ("；帧已较旧，若画面静止请在本窗口重新启动评测" if age > 5.0 else "")
+        )
+
     def _retry_enable_sim_preview_topics(self) -> None:
-        """topic 列表稍后才发现时，补勾三路相机。"""
-        if self._sim_preview_retry_left <= 0 or not self._sim_eval_launcher.is_running():
+        """topic 列表稍后才发现时，补勾尚未被用户取消的彩色+深度相机。"""
+        if self._sim_preview_retry_left <= 0 or not (
+            self._sim_eval_launcher.is_running()
+            or self._sim_bridge_newest_age_s() is not None
+        ):
             self._sim_preview_retry_timer.stop()
             self._sim_preview_retry_left = 0
             return
         self._sim_preview_retry_left -= 1
         found = 0
-        for topic in SIM_PREVIEW_TOPICS:
+        changed = False
+        for topic in SIM_PREVIEW_ALL_TOPICS:
             checkbox = self.topic_checks.get(topic)
             if checkbox is None:
                 continue
             found += 1
+            if topic in self._topic_user_unchecked:
+                continue
             if not checkbox.isChecked():
                 checkbox.blockSignals(True)
                 checkbox.setChecked(True)
                 checkbox.blockSignals(False)
-        if found:
+                changed = True
+        if changed or found:
             enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
-            enabled.update(SIM_PREVIEW_TOPICS)
             self._apply_selection(enabled)
-        if found >= len(SIM_PREVIEW_TOPICS):
+        if found >= len(SIM_PREVIEW_ALL_TOPICS):
             self._sim_preview_retry_timer.stop()
             self._sim_preview_retry_left = 0
 
     def _poll_sim_npy_preview(self) -> None:
-        """直读 ISAAC_CAM_BRIDGE_DIR 下三路 .npy，刷新图像预览（不依赖 ROS）。"""
-        if not self._sim_eval_launcher.is_running():
-            return
+        """直读 ISAAC_CAM_BRIDGE_DIR 下 RGB / depth .npy，刷新图像预览（不依赖 ROS）。"""
+        owned = (
+            self._sim_eval_launcher.is_running()
+            or self._sim_bridge_launcher.is_running()
+        )
         bridge_dir = os.path.abspath(
             os.path.expanduser(
                 self.sim_bridge_dir_edit.text().strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
@@ -15386,30 +16264,31 @@ class CameraTopicWindow(QMainWindow):
         )
         if not os.path.isdir(bridge_dir):
             return
-        # 保证三路面板存在（topic 尚未发现时也能看图）
-        missing = [t for t in SIM_PREVIEW_TOPICS if t not in self.panels]
+        # UI 崩溃重启后评测可能仍是外部孤儿进程：只要目录里有帧就继续读
+        if not owned and self._sim_bridge_newest_age_s() is None:
+            return
+        # 保证左侧 Topic 列表存在（不依赖 ROS discovery）；不强制改用户勾选
+        if any(t not in self.topic_checks for t in SIM_PREVIEW_ALL_TOPICS):
+            self._on_topics_updated(dict(getattr(self, "_topic_types", {}) or {}))
+        enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
+        missing = [t for t in enabled if t not in self.panels]
         if missing:
-            enabled = set(self.panels.keys()) | set(SIM_PREVIEW_TOPICS)
-            for topic in SIM_PREVIEW_TOPICS:
-                checkbox = self.topic_checks.get(topic)
-                if checkbox is not None and not checkbox.isChecked():
-                    checkbox.blockSignals(True)
-                    checkbox.setChecked(True)
-                    checkbox.blockSignals(False)
-                    enabled.add(topic)
             self._apply_selection(enabled)
 
         now = time.time()
+        # 本窗口拥有评测时丢掉过旧帧；外部残留帧放宽到 15min 以便重启后仍能看到最后一帧
+        max_age = 120.0 if owned else 900.0
         fresh = 0
         for cam_key, topic in SIM_PREVIEW_CAM_TOPICS:
             npy_path = os.path.join(bridge_dir, f"{cam_key}.npy")
             stamp_path = npy_path + ".stamp"
             try:
-                mtime = os.path.getmtime(stamp_path if os.path.isfile(stamp_path) else npy_path)
+                mtime = os.path.getmtime(
+                    stamp_path if os.path.isfile(stamp_path) else npy_path
+                )
             except OSError:
                 continue
-            # 拒绝过旧帧（例如上次评测残留），等本轮写出
-            if now - mtime > 120.0:
+            if now - mtime > max_age:
                 continue
             if self._sim_npy_last_mtime.get(topic) == mtime:
                 fresh += 1
@@ -15431,6 +16310,47 @@ class CameraTopicWindow(QMainWindow):
             if isinstance(panel, CameraPanel):
                 panel.update_frame(bgr)
             fresh += 1
+
+        for cam_key, topic in SIM_PREVIEW_DEPTH_CAM_TOPICS:
+            npy_path = os.path.join(bridge_dir, f"{cam_key}_depth.npy")
+            stamp_path = npy_path + ".stamp"
+            try:
+                mtime = os.path.getmtime(
+                    stamp_path if os.path.isfile(stamp_path) else npy_path
+                )
+            except OSError:
+                continue
+            if now - mtime > max_age:
+                continue
+            if self._sim_npy_last_mtime.get(topic) == mtime:
+                fresh += 1
+                continue
+            try:
+                with open(npy_path, "rb") as f:
+                    arr = np.load(f)
+                arr = np.asarray(arr)
+            except Exception:
+                continue
+            if arr.ndim == 3:
+                arr = arr[..., 0]
+            if arr.ndim != 2:
+                continue
+            if arr.dtype != np.uint16:
+                depth_f = arr.astype(np.float32)
+                finite = depth_f[np.isfinite(depth_f)]
+                if finite.size and float(np.nanmax(finite)) < 100.0:
+                    arr = np.clip(depth_f * 1000.0, 0, 65535).astype(np.uint16)
+                else:
+                    arr = np.clip(depth_f, 0, 65535).astype(np.uint16)
+            depth = np.ascontiguousarray(arr)
+            self._sim_npy_last_mtime[topic] = mtime
+            self._frame_cache[topic] = depth
+            self._received_topics[topic] = self._received_topics.get(topic, 0) + 1
+            panel = self.panels.get(topic)
+            if isinstance(panel, DepthPanel3D):
+                panel.update_depth(depth)
+            fresh += 1
+
         if fresh == 0 and getattr(self, "_sim_preview_wait_logged", False) is False:
             self._sim_preview_wait_logged = True
             self._append_sim_log(
@@ -15443,6 +16363,11 @@ class CameraTopicWindow(QMainWindow):
             or self.sim_eval_task_combo.currentText()
             or ""
         ).strip()
+        bridge_dir = os.path.abspath(
+            os.path.expanduser(
+                self.sim_bridge_dir_edit.text().strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
+            )
+        )
         # currentData() 为 "" 表示「无」：勿回落到 demo_policy
         policy_data = self.sim_eval_policy_combo.currentData()
         if policy_data is None:
@@ -15459,37 +16384,7 @@ class CameraTopicWindow(QMainWindow):
             getattr(self, "sim_eval_use_gui_check", None) is not None
             and self.sim_eval_use_gui_check.isChecked()
         )
-        bridge_dir = os.path.abspath(
-            os.path.expanduser(
-                self.sim_bridge_dir_edit.text().strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
-            )
-        )
-        # 始终写出共享帧供预览；GUI 时再启 ROS 桥（RoboStack 本地也可）
-        self._reset_sim_bridge_frames()
-        self._sim_preview_wait_logged = False
-        if use_gui:
-            if not self._sim_bridge_launcher.is_running():
-                self._sim_bridge_launcher.start(
-                    bridge_dir,
-                    hz=float(self.sim_bridge_hz_spin.value()),
-                )
-                self._update_sim_bridge_ui()
-        elif self._sim_bridge_launcher.is_running():
-            self._append_sim_log("headless：停止已在运行的相机桥（预览改直读 .npy）")
-            self._sim_bridge_launcher.stop()
-            self._update_sim_bridge_ui()
-        mode_note = "GUI（仿真界面）" if use_gui else "headless（无 Isaac 窗口）"
-        if skip_policy:
-            self._append_sim_log(
-                f"评测模式: {mode_note}；策略=无（只启评测，不启策略服务）；"
-                f"共享帧={bridge_dir}"
-            )
-        else:
-            self._append_sim_log(
-                f"评测模式: {mode_note}；共享帧={bridge_dir}"
-            )
-        self._sim_eval_launcher.start(
-            task,
+        start_kwargs = dict(
             bridge_dir=bridge_dir,
             policy_dir=policy_dir,
             ckpt=self.sim_eval_ckpt_edit.text().strip() or "demo",
@@ -15499,18 +16394,87 @@ class CameraTopicWindow(QMainWindow):
             robodojo_root=ROBODOJO_ROOT_DEFAULT,
             display=os.environ.get("DISPLAY", ":1.0"),
             use_gui=use_gui,
+            reuse_existing=True,
         )
+
+        # 已由本窗口管理：热切换
+        if self._sim_eval_launcher.is_running():
+            result = self._sim_eval_launcher.start(task, **start_kwargs)
+            if result in ("switched", "reused"):
+                self._append_sim_log(
+                    f"{'热切换' if result == 'switched' else '保持'}任务 → {task}"
+                    "（复用已运行仿真）"
+                )
+                self._activate_sim_camera_preview(force=False)
+                self._update_sim_eval_run_ui()
+            return
+
+        # 本窗口未管理，但系统里可能已有 Isaac / eval_client → 先复用
+        existing = RoboDojoEvalLauncher.list_running_eval_clients()
+        if existing:
+            self._append_sim_log(
+                "检测到已运行仿真: "
+                + ", ".join(
+                    f"pid={c['pid']} task={c.get('task') or '?'}" for c in existing
+                )
+            )
+            result = self._sim_eval_launcher.start(task, **start_kwargs)
+            if result in ("reused", "switched"):
+                self._sim_preview_wait_logged = False
+                self._activate_sim_camera_preview(force=False)
+                self._update_sim_eval_run_ui()
+                self._append_sim_log(
+                    f"已复用仿真进程（{result}），任务目标={task}；未重头启动 Isaac"
+                )
+                return
+            self._append_sim_log("复用失败，将尝试新启动评测…")
+
+        # 全新启动：清旧帧并按需起相机桥
+        self._reset_sim_bridge_frames()
+        self._sim_preview_wait_logged = False
+        self._sim_eval_auto_bridge = False
+        if use_gui:
+            if not self._sim_bridge_launcher.is_running():
+                self._sim_bridge_launcher.start(
+                    bridge_dir,
+                    hz=float(self.sim_bridge_hz_spin.value()),
+                )
+                self._sim_eval_auto_bridge = True
+                self._update_sim_bridge_ui()
+            else:
+                self._sim_eval_auto_bridge = False
+        elif self._sim_bridge_launcher.is_running():
+            self._append_sim_log("headless：停止已在运行的相机桥（预览改直读 .npy）")
+            self._sim_bridge_launcher.stop()
+            self._sim_eval_auto_bridge = False
+            self._update_sim_bridge_ui()
+        mode_note = "GUI（仿真界面）" if use_gui else "headless（无 Isaac 窗口）"
+        if skip_policy:
+            self._append_sim_log(
+                f"评测模式: {mode_note}；策略=无（只启评测，不启策略服务）；"
+                f"EVAL_NUM=keep 常驻；共享帧={bridge_dir}"
+            )
+        else:
+            self._append_sim_log(
+                f"评测模式: {mode_note}；EVAL_NUM=keep 常驻；共享帧={bridge_dir}"
+            )
+        result = self._sim_eval_launcher.start(task, **start_kwargs)
         self._update_sim_eval_run_ui()
-        # headless / GUI 都开图像预览（直读 .npy，不依赖 Docker 相机桥）
         self._activate_sim_camera_preview()
         self._append_sim_log(
-            "已激活图像预览 /camera/left_wrist_color, head_color, right_wrist_color"
+            f"启动结果={result}；图像预览 RGB-D："
+            "/camera/{left_wrist,head,right_wrist}_{color,depth}"
             "（优先共享 .npy，忽略同名真机 ROS 流）"
         )
 
     def _on_sim_eval_stop_run_clicked(self) -> None:
-        self._append_sim_log("--- 用户点击停止评测 ---")
+        self._append_sim_log("--- 用户点击停止评测（停止全部仿真）---")
         self._sim_eval_launcher.stop()
+        if self._sim_eval_auto_bridge and self._sim_bridge_launcher.is_running():
+            self._append_sim_log("--- 一并停止自动启动的相机桥 ---")
+            self._sim_bridge_launcher.stop()
+            self._sim_eval_auto_bridge = False
+            self._update_sim_bridge_ui()
         self._update_sim_eval_run_ui()
 
     def _sim_eval_root_path(self) -> str:
@@ -17419,6 +18383,29 @@ class CameraTopicWindow(QMainWindow):
         self.ctx_status_label.setText("状态: 已停止")
         self._update_ctx_ui()
 
+    def _apply_only_tabs(self, only_tabs: Sequence[str]) -> None:
+        """启动时只保留指定控制区 tab；单个时隐藏 tab 栏。"""
+        tabs = getattr(self, "control_tabs", None)
+        if tabs is None or not only_tabs:
+            return
+        wanted = {str(t) for t in only_tabs}
+        for i in range(tabs.count() - 1, -1, -1):
+            title = tabs.tabText(i)
+            if title not in wanted:
+                tabs.removeTab(i)
+        status_bar = getattr(self, "status_bar", None)
+        if tabs.count() == 0:
+            if status_bar is not None:
+                status_bar.showMessage("警告: --tab 过滤后无可用标签页")
+            return
+        tabs.setCurrentIndex(0)
+        if tabs.count() == 1:
+            tabs.tabBar().setVisible(False)
+            title = tabs.tabText(0)
+            self.setWindowTitle(f"Camera Topic Viewer — {title}")
+            if status_bar is not None:
+                status_bar.showMessage(f"仅显示 tab: {title}")
+
     def _update_ctx_ui(self, *_args) -> None:
         if not hasattr(self, "ctx_sync_start_btn"):
             return
@@ -17743,6 +18730,269 @@ class CameraTopicWindow(QMainWindow):
         if selected:
             self.lingbot_depth_intrinsics_edit.setText(selected)
 
+    def _list_preview_color_topics(self) -> list[str]:
+        """图像预览中可用的彩色 topic（有最新帧优先）。"""
+        topics: list[str] = []
+        seen: set[str] = set()
+        for topic, panel in sorted(self.panels.items()):
+            if is_depth_topic(topic) or not isinstance(panel, CameraPanel):
+                continue
+            if panel._latest_image is None:
+                continue
+            topics.append(topic)
+            seen.add(topic)
+        for topic in sorted(self._frame_cache.keys()):
+            if topic in seen or is_depth_topic(topic):
+                continue
+            image = self._frame_cache.get(topic)
+            if image is None or np.asarray(image).ndim < 2:
+                continue
+            topics.append(topic)
+            seen.add(topic)
+        for topic in sorted(self.panels.keys()):
+            if topic in seen or is_depth_topic(topic):
+                continue
+            if isinstance(self.panels.get(topic), CameraPanel):
+                topics.append(topic)
+                seen.add(topic)
+        return topics
+
+    def _list_lingbot_depth_preview_topics(self) -> list[str]:
+        return self._list_preview_color_topics()
+
+    def _get_preview_color_frame(
+        self, topic: str
+    ) -> Optional[Tuple[np.ndarray, Optional[CameraPanel]]]:
+        panel = self.panels.get(topic)
+        if isinstance(panel, CameraPanel) and panel._latest_image is not None:
+            return np.asarray(panel._latest_image).copy(), panel
+        image = self._frame_cache.get(topic)
+        if image is not None and np.asarray(image).ndim >= 2:
+            return np.asarray(image).copy(), (
+                panel if isinstance(panel, CameraPanel) else None
+            )
+        return None
+
+    def _get_lingbot_depth_color_frame(
+        self, topic: str
+    ) -> Optional[Tuple[np.ndarray, Optional[CameraPanel]]]:
+        return self._get_preview_color_frame(topic)
+
+    def _pick_preview_color_source(
+        self, combo: Optional[object] = None
+    ) -> Optional[Tuple[str, np.ndarray, Optional[CameraPanel]]]:
+        topic = ""
+        if combo is not None:
+            try:
+                topic = str(combo.currentData() or "").strip()
+            except Exception:
+                topic = ""
+        if not topic:
+            topic = (self._last_sam3_topic or "").strip()
+        if topic and not is_depth_topic(topic):
+            got = self._get_preview_color_frame(topic)
+            if got is not None:
+                color_bgr, panel = got
+                return topic, color_bgr, panel
+        return self._pick_sam3_color_source()
+
+    def _pick_lingbot_depth_color_source(
+        self,
+    ) -> Optional[Tuple[str, np.ndarray, Optional[CameraPanel]]]:
+        combo = getattr(self, "lingbot_depth_topic_combo", None)
+        return self._pick_preview_color_source(combo)
+
+    def _refresh_preview_topic_combo(
+        self, combo: object, prefer: Optional[str] = None
+    ) -> None:
+        if combo is None:
+            return
+        topics = self._list_preview_color_topics()
+        current = prefer or str(combo.currentData() or "")
+        if not current:
+            current = (self._last_sam3_topic or "").strip()
+        combo.blockSignals(True)
+        combo.clear()
+        if not topics:
+            combo.addItem("（无预览图像）", "")
+        else:
+            for topic in topics:
+                combo.addItem(topic, topic)
+            if current and current in topics:
+                idx = combo.findData(current)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+            elif current and current not in topics:
+                combo.addItem(current, current)
+                idx = combo.findData(current)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _select_preview_topic_combo(
+        self, combo: object, topic: str, *, status_cb=None
+    ) -> None:
+        if combo is None or not topic:
+            return
+        if is_depth_topic(topic):
+            color_topic = find_paired_color_topic(topic, self._cached_topic_names())
+            if not color_topic:
+                return
+            topic = color_topic
+        self._refresh_preview_topic_combo(combo, prefer=topic)
+        idx = combo.findData(topic)
+        if idx < 0:
+            combo.addItem(topic, topic)
+            idx = combo.findData(topic)
+        if idx >= 0 and combo.currentIndex() != idx:
+            combo.blockSignals(True)
+            combo.setCurrentIndex(idx)
+            combo.blockSignals(False)
+        self._last_sam3_topic = topic
+        if status_cb is not None:
+            short = topic.rsplit("/", 1)[-1]
+            status_cb(f"已选预览: {short}")
+
+    def _update_lingbot_depth_pair_label(self) -> None:
+        if not hasattr(self, "lingbot_depth_pair_label"):
+            return
+        source = str(self.lingbot_depth_source_combo.currentData() or "camera")
+        if source != "camera":
+            self.lingbot_depth_pair_label.setText("配对深度: —")
+            return
+        topic = str(self.lingbot_depth_topic_combo.currentData() or "").strip()
+        if not topic:
+            self.lingbot_depth_pair_label.setText("配对深度: （未选预览）")
+            return
+        depth_topic = self._get_paired_depth_topic_name(topic)
+        if not depth_topic:
+            self.lingbot_depth_pair_label.setText("配对深度: 无")
+            self.lingbot_depth_pair_label.setStyleSheet(f"color: {UI_ACCENT_RED};")
+            return
+        has_frame = self._get_paired_depth_frame(topic) is not None
+        if not has_frame:
+            depth_panel = self.panels.get(depth_topic)
+            if (
+                isinstance(depth_panel, DepthPanel3D)
+                and depth_panel._latest_depth is not None
+            ):
+                has_frame = True
+        enabled = self._is_topic_enabled(depth_topic)
+        if has_frame:
+            status = "有帧"
+            color = UI_ACCENT_GREEN
+        elif enabled:
+            status = "等待帧"
+            color = UI_TEXT_MUTED
+        else:
+            status = "未勾选"
+            color = UI_ACCENT_RED
+        short = depth_topic.rsplit("/", 1)[-1]
+        self.lingbot_depth_pair_label.setText(f"配对深度: {short} ({status})")
+        self.lingbot_depth_pair_label.setStyleSheet(f"color: {color};")
+
+    def _select_lingbot_depth_topic(
+        self, topic: str, *, from_click: bool = False
+    ) -> None:
+        if not hasattr(self, "lingbot_depth_topic_combo"):
+            return
+        self._select_preview_topic_combo(
+            self.lingbot_depth_topic_combo,
+            topic,
+            status_cb=self._on_lingbot_depth_status if from_click else None,
+        )
+        self._update_lingbot_depth_pair_label()
+
+    def _on_lingbot_depth_topic_changed(self, *_args) -> None:
+        topic = str(self.lingbot_depth_topic_combo.currentData() or "").strip()
+        if topic:
+            self._last_sam3_topic = topic
+        self._update_lingbot_depth_pair_label()
+
+    def _refresh_lingbot_depth_topic_combo(self, prefer: Optional[str] = None) -> None:
+        if not hasattr(self, "lingbot_depth_topic_combo"):
+            return
+        self._refresh_preview_topic_combo(self.lingbot_depth_topic_combo, prefer=prefer)
+        self._update_lingbot_depth_pair_label()
+
+    def _refresh_lingbot_video_topic_combo(self, prefer: Optional[str] = None) -> None:
+        if not hasattr(self, "lingbot_video_topic_combo"):
+            return
+        self._refresh_preview_topic_combo(self.lingbot_video_topic_combo, prefer=prefer)
+
+    def _on_lingbot_video_topic_changed(self, *_args) -> None:
+        if not hasattr(self, "lingbot_video_topic_combo"):
+            return
+        topic = str(self.lingbot_video_topic_combo.currentData() or "").strip()
+        if topic:
+            self._last_sam3_topic = topic
+
+    def _refresh_lingbot_world_topic_combo(self, prefer: Optional[str] = None) -> None:
+        if not hasattr(self, "lingbot_world_topic_combo"):
+            return
+        self._refresh_preview_topic_combo(self.lingbot_world_topic_combo, prefer=prefer)
+
+    def _on_lingbot_world_topic_changed(self, *_args) -> None:
+        if not hasattr(self, "lingbot_world_topic_combo"):
+            return
+        topic = str(self.lingbot_world_topic_combo.currentData() or "").strip()
+        if topic:
+            self._last_sam3_topic = topic
+
+    def _sim_bridge_dir(self) -> str:
+        return os.path.abspath(
+            os.path.expanduser(
+                (
+                    getattr(self, "sim_bridge_dir_edit", None).text().strip()
+                    if getattr(self, "sim_bridge_dir_edit", None) is not None
+                    else ""
+                )
+                or os.environ.get("ISAAC_CAM_BRIDGE_DIR", "")
+                or ISAAC_CAM_BRIDGE_DIR_DEFAULT
+            )
+        )
+
+    def _sim_bridge_cam_key_for_color(self, color_topic: str) -> Optional[str]:
+        for cam_key, topic in SIM_PREVIEW_CAM_TOPICS:
+            if topic == color_topic:
+                return cam_key
+        # 命名约定：/camera/head_color → cam_head
+        name = color_topic.rstrip("/").rsplit("/", 1)[-1]
+        if name.endswith("_color"):
+            stem = name[: -len("_color")]
+            if stem.startswith("cam_"):
+                return stem
+            return f"cam_{stem}"
+        return None
+
+    def _load_sim_bridge_depth_u16(self, color_topic: str) -> Optional[np.ndarray]:
+        """直读仿真共享目录 {cam_key}_depth.npy（不依赖 ROS topic 发现）。"""
+        cam_key = self._sim_bridge_cam_key_for_color(color_topic)
+        if not cam_key:
+            return None
+        path = os.path.join(self._sim_bridge_dir(), f"{cam_key}_depth.npy")
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "rb") as f:
+                arr = np.load(f)
+            arr = np.asarray(arr)
+        except Exception:
+            return None
+        if arr.ndim == 3:
+            arr = arr[..., 0]
+        if arr.ndim != 2:
+            return None
+        if arr.dtype == np.uint16:
+            return np.ascontiguousarray(arr)
+        depth_f = arr.astype(np.float32)
+        finite = depth_f[np.isfinite(depth_f)]
+        if finite.size and float(np.nanmax(finite)) < 100.0:
+            out = np.clip(depth_f * 1000.0, 0, 65535).astype(np.uint16)
+        else:
+            out = np.clip(depth_f, 0, 65535).astype(np.uint16)
+        return np.ascontiguousarray(out)
+
     def _resolve_lingbot_depth_inputs(
         self,
     ) -> Optional[Tuple[str, str, str, str]]:
@@ -17752,25 +19002,87 @@ class CameraTopicWindow(QMainWindow):
             return str(int(self.lingbot_depth_example_spin.value())), "", "", ""
 
         if source == "camera":
-            color_source = self._pick_sam3_color_source()
+            self._refresh_lingbot_depth_topic_combo()
+            color_source = self._pick_lingbot_depth_color_source()
             if color_source is None:
                 self._append_lingbot_depth_log(
-                    "[ERROR] 无可用彩色图像，请勾选 color topic 或改用示例/文件"
+                    "[ERROR] 无可用彩色图像：请在「预览图像」中选择，"
+                    "或点击图像预览，或勾选 color topic"
                 )
                 self._on_lingbot_depth_status("无可用相机图像")
                 return None
             color_topic, color_bgr, _panel = color_source
-            if not self._is_paired_depth_enabled(color_topic):
-                self._append_lingbot_depth_log(
-                    "[ERROR] 请勾选与彩色配对的 depth topic"
-                )
-                self._on_lingbot_depth_status("缺少配对深度")
-                return None
             depth_topic = self._get_paired_depth_topic_name(color_topic)
+            if not depth_topic:
+                self._append_lingbot_depth_log(
+                    f"[ERROR] {color_topic} 无配对 depth topic"
+                    "（约定应为 *_depth，如 /camera/head_depth）"
+                )
+                self._on_lingbot_depth_status("无配对深度 topic")
+                return None
+
+            if self._ensure_topic_enabled_for_capture(depth_topic):
+                self._append_lingbot_depth_log(
+                    f"已确保配对深度已勾选/订阅: {depth_topic}"
+                )
+            elif depth_topic not in self.topic_checks:
+                self._append_lingbot_depth_log(
+                    f"[WARN] topic 列表中尚无 {depth_topic}，"
+                    "将尝试直读仿真共享 depth .npy"
+                )
+
             depth = self._get_paired_depth_frame(color_topic)
-            if not depth_topic or depth is None:
-                self._append_lingbot_depth_log("[ERROR] 无法读取配对深度帧")
-                self._on_lingbot_depth_status("无深度帧")
+            if depth is None:
+                # 刚勾选时等一小会儿让 ROS 帧进来
+                app = QApplication.instance()
+                for _ in range(20):
+                    if app is not None:
+                        app.processEvents()
+                    depth = self._get_paired_depth_frame(color_topic)
+                    if depth is not None:
+                        break
+                    time.sleep(0.05)
+
+            if depth is None and depth_topic:
+                depth_panel = self.panels.get(depth_topic)
+                if (
+                    isinstance(depth_panel, DepthPanel3D)
+                    and depth_panel._latest_depth is not None
+                ):
+                    depth = np.asarray(depth_panel._latest_depth)
+
+            if depth is None:
+                depth = self._load_sim_bridge_depth_u16(color_topic)
+                if depth is not None:
+                    self._frame_cache[depth_topic] = depth
+                    self._append_lingbot_depth_log(
+                        f"已从仿真共享目录读取深度: "
+                        f"{self._sim_bridge_cam_key_for_color(color_topic)}_depth.npy"
+                    )
+
+            if depth is None:
+                bridge_dir = self._sim_bridge_dir()
+                cam_key = self._sim_bridge_cam_key_for_color(color_topic) or "?"
+                depth_npy = os.path.join(bridge_dir, f"{cam_key}_depth.npy")
+                if depth_topic not in self.topic_checks and not os.path.isfile(depth_npy):
+                    self._append_lingbot_depth_log(
+                        f"[ERROR] 未发现 {depth_topic}，且共享目录无 {cam_key}_depth.npy。\n"
+                        f"  请重启仿真评测（需 arx_x5 approximate_depth=true + "
+                        f"camera_config distance_to_image_plane），"
+                        f"或改用「官方示例」/「本地文件」。\n"
+                        f"  检查: {depth_npy}"
+                    )
+                    self._on_lingbot_depth_status("无仿真深度帧")
+                elif not self._is_topic_enabled(depth_topic) and depth_topic in self.topic_checks:
+                    self._append_lingbot_depth_log(
+                        f"[ERROR] 请勾选配对深度 topic: {depth_topic}"
+                    )
+                    self._on_lingbot_depth_status("请勾选配对深度")
+                else:
+                    self._append_lingbot_depth_log(
+                        f"[ERROR] 无法读取配对深度帧: {depth_topic}"
+                    )
+                    self._on_lingbot_depth_status("无深度帧")
                 return None
 
             out_dir = os.path.join(LINGBOT_DEPTH_CACHE_DIR, "camera_input")
@@ -18146,6 +19458,9 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_video_image_edit.setEnabled(not running and ti2v)
         self.lingbot_video_image_browse_btn.setEnabled(not running and ti2v)
         self.lingbot_video_cam_btn.setEnabled(not running and ti2v)
+        if hasattr(self, "lingbot_video_topic_combo"):
+            self.lingbot_video_topic_combo.setEnabled(not running and ti2v)
+            self.lingbot_video_topic_refresh_btn.setEnabled(not running and ti2v)
         if running:
             self.lingbot_video_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
         else:
@@ -18199,6 +19514,7 @@ class CameraTopicWindow(QMainWindow):
     def _on_lingbot_video_mode_changed(self, *_args) -> None:
         self._populate_lingbot_video_cases()
         self._on_lingbot_video_preset_changed()
+        self._refresh_lingbot_video_topic_combo()
         self._update_lingbot_video_ui()
 
     def _on_lingbot_video_case_changed(self, *_args) -> None:
@@ -18269,9 +19585,14 @@ class CameraTopicWindow(QMainWindow):
             self.lingbot_video_model_edit.setText(selected)
 
     def _on_lingbot_video_cam_clicked(self) -> None:
-        picked = self._pick_sam3_color_source()
+        self._refresh_lingbot_video_topic_combo()
+        picked = self._pick_preview_color_source(
+            getattr(self, "lingbot_video_topic_combo", None)
+        )
         if picked is None:
-            self._append_lingbot_video_log("[ERROR] 无可用彩色图像")
+            self._append_lingbot_video_log(
+                "[ERROR] 无可用彩色图像：请在「预览图像」中选择或点击图像预览"
+            )
             self._on_lingbot_video_status("无可用相机图像")
             return
         topic, image, _panel = picked
@@ -18297,7 +19618,13 @@ class CameraTopicWindow(QMainWindow):
             return
         image = self.lingbot_video_image_edit.text().strip()
         if mode == "ti2v" and (not image or not os.path.isfile(image)):
-            self._append_lingbot_video_log("[ERROR] TI2V 需要有效首帧图像")
+            # 自动从所选预览抓一帧
+            self._on_lingbot_video_cam_clicked()
+            image = self.lingbot_video_image_edit.text().strip()
+        if mode == "ti2v" and (not image or not os.path.isfile(image)):
+            self._append_lingbot_video_log(
+                "[ERROR] TI2V 需要有效首帧：请选择预览图像后点「抓取预览」"
+            )
             self._on_lingbot_video_status("缺少首帧")
             return
 
@@ -18435,6 +19762,9 @@ class CameraTopicWindow(QMainWindow):
             self.lingbot_world_cam_btn,
         ):
             w.setEnabled(not running)
+        if hasattr(self, "lingbot_world_topic_combo"):
+            self.lingbot_world_topic_combo.setEnabled(not running)
+            self.lingbot_world_topic_refresh_btn.setEnabled(not running)
         self.lingbot_world_image_edit.setEnabled(not running and custom)
         self.lingbot_world_image_browse_btn.setEnabled(not running and custom)
         self.lingbot_world_action_edit.setEnabled(not running and custom)
@@ -18483,9 +19813,14 @@ class CameraTopicWindow(QMainWindow):
             self.lingbot_world_ckpt_edit.setText(selected)
 
     def _on_lingbot_world_cam_clicked(self) -> None:
-        picked = self._pick_sam3_color_source()
+        self._refresh_lingbot_world_topic_combo()
+        picked = self._pick_preview_color_source(
+            getattr(self, "lingbot_world_topic_combo", None)
+        )
         if picked is None:
-            self._append_lingbot_world_log("[ERROR] 无可用彩色图像")
+            self._append_lingbot_world_log(
+                "[ERROR] 无可用彩色图像：请在「预览图像」中选择或点击图像预览"
+            )
             self._on_lingbot_world_status("无可用相机图像")
             return
         topic, image, _panel = picked
@@ -18641,6 +19976,22 @@ class CameraTopicWindow(QMainWindow):
             h, w = panel._latest_image.shape[:2]
             self.sam3_u_spin.setMaximum(max(u, w - 1))
             self.sam3_v_spin.setMaximum(max(v, h - 1))
+        if hasattr(self, "lingbot_depth_topic_combo"):
+            source = str(self.lingbot_depth_source_combo.currentData() or "camera")
+            if source == "camera":
+                self._select_lingbot_depth_topic(topic, from_click=True)
+        if hasattr(self, "lingbot_video_topic_combo"):
+            self._select_preview_topic_combo(
+                self.lingbot_video_topic_combo,
+                topic,
+                status_cb=self._on_lingbot_video_status,
+            )
+        if hasattr(self, "lingbot_world_topic_combo"):
+            self._select_preview_topic_combo(
+                self.lingbot_world_topic_combo,
+                topic,
+                status_cb=self._on_lingbot_world_status,
+            )
 
     def _on_stereo_invoke_clicked(self) -> None:
         """按钮确认：按提示点执行立体分割 + 6D 位姿。"""
@@ -19919,8 +21270,61 @@ class CameraTopicWindow(QMainWindow):
     def _is_image_topic(self, types: List[str]) -> bool:
         return any(t in IMAGE_TYPES for t in types)
 
+    def _sim_bridge_dir_path(self) -> str:
+        edit = getattr(self, "sim_bridge_dir_edit", None)
+        raw = edit.text().strip() if edit is not None else ""
+        return os.path.abspath(os.path.expanduser(raw or ISAAC_CAM_BRIDGE_DIR_DEFAULT))
+
+    def _sim_preview_active(self) -> bool:
+        eval_on = (
+            getattr(self, "_sim_eval_launcher", None) is not None
+            and self._sim_eval_launcher.is_running()
+        )
+        bridge_on = (
+            getattr(self, "_sim_bridge_launcher", None) is not None
+            and self._sim_bridge_launcher.is_running()
+        )
+        return bool(eval_on or bridge_on)
+
+    def _merge_sim_preview_topics(
+        self, topics: Dict[str, List[str]]
+    ) -> Dict[str, List[str]]:
+        """ROS 未发现 /camera 时，仍把仿真共享 .npy 对应的伪 topic 放进列表。"""
+        out = dict(topics)
+        img_types = ["sensor_msgs/msg/Image"]
+        expose_all = self._sim_preview_active()
+        bridge_dir = self._sim_bridge_dir_path()
+        for cam_key, topic in SIM_PREVIEW_CAM_TOPICS:
+            if topic in out:
+                continue
+            npy_path = os.path.join(bridge_dir, f"{cam_key}.npy")
+            if (
+                expose_all
+                or topic in self._frame_cache
+                or topic in self.panels
+                or os.path.isfile(npy_path)
+            ):
+                out[topic] = list(img_types)
+        for cam_key, topic in SIM_PREVIEW_DEPTH_CAM_TOPICS:
+            if topic in out:
+                continue
+            npy_path = os.path.join(bridge_dir, f"{cam_key}_depth.npy")
+            if (
+                expose_all
+                or topic in self._frame_cache
+                or topic in self.panels
+                or os.path.isfile(npy_path)
+            ):
+                out[topic] = list(img_types)
+        return out
+
     def _on_topics_updated(self, topics: Dict[str, List[str]]) -> None:
+        topics = self._merge_sim_preview_topics(topics)
         self._topic_types = topics
+        prev_checked = {
+            topic: checkbox.isChecked()
+            for topic, checkbox in self.topic_checks.items()
+        }
 
         while self.topic_list_layout.count():
             item = self.topic_list_layout.takeAt(0)
@@ -19932,6 +21336,16 @@ class CameraTopicWindow(QMainWindow):
             empty = QLabel("未发现匹配的 topic")
             empty.setStyleSheet(f"color: {UI_TEXT_MUTED}; padding: 8px;")
             self.topic_list_layout.addWidget(empty)
+            # 仿真预览面板勿因 ROS 空发现被整表清掉；尊重用户取消勾选
+            if self._sim_preview_active() or self.panels:
+                keep = {
+                    topic
+                    for topic in self.panels.keys()
+                    if topic not in self._topic_user_unchecked
+                }
+                self._rebuild_panels(keep)
+                self._refresh_skeleton_camera_list()
+                return
             self._rebuild_panels(set())
             self._refresh_skeleton_camera_list()
             return
@@ -19940,23 +21354,25 @@ class CameraTopicWindow(QMainWindow):
         for topic, types in topics.items():
             type_str = ", ".join(t.split("/")[-1] for t in types)
             is_default = is_color_image_topic(topic, types)
+            if topic in prev_checked:
+                checked = prev_checked[topic]
+            elif topic in self._topic_user_unchecked:
+                checked = False
+            elif (
+                topic in SIM_PREVIEW_ALL_TOPICS
+                and self._sim_preview_active()
+            ):
+                # 新出现的仿真 topic：默认勾选（用户取消过的除外）
+                checked = True
+            else:
+                checked = is_default
             label = f"{topic}  [{type_str}]"
             checkbox = QCheckBox(label)
-            checkbox.setChecked(is_default)
+            checkbox.setChecked(checked)
             checkbox.stateChanged.connect(self._on_selection_changed)
             self.topic_checks[topic] = checkbox
             self.topic_list_layout.addWidget(checkbox)
-            if is_default:
-                default_enabled.add(topic)
-
-        # RoboDojo 评测运行中：始终保留三路仿真预览
-        if getattr(self, "_sim_eval_launcher", None) is not None and self._sim_eval_launcher.is_running():
-            for topic in SIM_PREVIEW_TOPICS:
-                checkbox = self.topic_checks.get(topic)
-                if checkbox is not None:
-                    checkbox.blockSignals(True)
-                    checkbox.setChecked(True)
-                    checkbox.blockSignals(False)
+            if checked:
                 default_enabled.add(topic)
 
         self.topic_list_layout.addStretch()
@@ -19964,6 +21380,11 @@ class CameraTopicWindow(QMainWindow):
         self._refresh_skeleton_camera_list()
 
     def _on_selection_changed(self) -> None:
+        for topic, checkbox in self.topic_checks.items():
+            if checkbox.isChecked():
+                self._topic_user_unchecked.discard(topic)
+            else:
+                self._topic_user_unchecked.add(topic)
         enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
         self._apply_selection(enabled)
         self._refresh_skeleton_camera_list()
@@ -19975,10 +21396,16 @@ class CameraTopicWindow(QMainWindow):
     def _select_all_images(self) -> None:
         for topic, checkbox in self.topic_checks.items():
             types = self._topic_types.get(topic, [])
-            checkbox.setChecked(self._is_image_topic(types))
+            want = self._is_image_topic(types)
+            if want:
+                self._topic_user_unchecked.discard(topic)
+            else:
+                self._topic_user_unchecked.add(topic)
+            checkbox.setChecked(want)
 
     def _clear_selection(self) -> None:
-        for checkbox in self.topic_checks.values():
+        for topic, checkbox in self.topic_checks.items():
+            self._topic_user_unchecked.add(topic)
             checkbox.setChecked(False)
 
     def _grid_dimensions(self, topic_count: int, has_depth: bool) -> Tuple[int, int]:
@@ -20008,6 +21435,11 @@ class CameraTopicWindow(QMainWindow):
         for topic in list(self.panels.keys()):
             if topic not in enabled:
                 panel = self.panels.pop(topic)
+                if isinstance(panel, DepthPanel3D):
+                    try:
+                        panel.shutdown()
+                    except Exception:
+                        pass
                 panel.deleteLater()
 
         for topic in enabled:
@@ -20031,7 +21463,7 @@ class CameraTopicWindow(QMainWindow):
         while self.grid_layout.count():
             self.grid_layout.takeAt(0)
 
-        order_index = {t: i for i, t in enumerate(SIM_PREVIEW_TOPICS)}
+        order_index = {t: i for i, t in enumerate(SIM_PREVIEW_ALL_TOPICS)}
         topics = sorted(
             self.panels.keys(),
             key=lambda t: (order_index.get(t, 1000), t),
@@ -20046,9 +21478,46 @@ class CameraTopicWindow(QMainWindow):
         self._apply_grid_stretches(rows, cols)
 
         self.status_bar.showMessage(f"显示 {len(topics)} 路图像")
+        if hasattr(self, "lingbot_depth_topic_combo"):
+            self._refresh_lingbot_depth_topic_combo()
+        if hasattr(self, "lingbot_video_topic_combo"):
+            self._refresh_lingbot_video_topic_combo()
+        if hasattr(self, "lingbot_world_topic_combo"):
+            self._refresh_lingbot_world_topic_combo()
 
     def _cached_topic_names(self) -> List[str]:
-        return list(self._frame_cache.keys())
+        """已知 topic：缓存帧 + 列表勾选 + 发现类型 + 当前面板。"""
+        names: List[str] = []
+        seen: set[str] = set()
+        for src in (
+            self._frame_cache.keys(),
+            self.topic_checks.keys(),
+            getattr(self, "_topic_types", {}).keys(),
+            self.panels.keys(),
+        ):
+            for topic in src:
+                if topic in seen:
+                    continue
+                seen.add(topic)
+                names.append(topic)
+        return names
+
+    def _ensure_topic_enabled_for_capture(self, topic: str) -> bool:
+        """勾选并订阅 topic；若 topic 列表尚无该项则返回 False。"""
+        if not topic:
+            return False
+        checkbox = self.topic_checks.get(topic)
+        if checkbox is None:
+            return False
+        if checkbox.isChecked() and topic in self.panels:
+            return True
+        checkbox.blockSignals(True)
+        checkbox.setChecked(True)
+        checkbox.blockSignals(False)
+        enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
+        enabled.add(topic)
+        self._apply_selection(enabled)
+        return topic in self.panels or checkbox.isChecked()
 
     def _get_paired_depth_topic_name(self, color_topic: str) -> Optional[str]:
         return find_paired_depth_topic(color_topic, self._cached_topic_names())
@@ -20067,7 +21536,18 @@ class CameraTopicWindow(QMainWindow):
         depth_topic = self._get_paired_depth_topic_name(color_topic)
         if depth_topic is None:
             return None
-        return self._frame_cache.get(depth_topic)
+        depth = self._frame_cache.get(depth_topic)
+        if depth is not None:
+            return depth
+        panel = self.panels.get(depth_topic)
+        if isinstance(panel, DepthPanel3D) and panel._latest_depth is not None:
+            return np.asarray(panel._latest_depth)
+        # 仿真 headless：无 ROS depth topic 时直读共享 .npy
+        bridge_depth = self._load_sim_bridge_depth_u16(color_topic)
+        if bridge_depth is not None:
+            self._frame_cache[depth_topic] = bridge_depth
+            return bridge_depth
+        return None
 
     def _get_paired_color_frame(self, depth_topic: str) -> Optional[np.ndarray]:
         color_topic = find_paired_color_topic(depth_topic, self._cached_topic_names())
@@ -20081,7 +21561,7 @@ class CameraTopicWindow(QMainWindow):
     def _on_frame_updated(self, topic: str, cv_image: object) -> None:
         # 仿真评测预览期间：同名 /camera/* 可能来自真机，优先用共享 .npy
         if (
-            topic in SIM_PREVIEW_TOPICS
+            topic in SIM_PREVIEW_ALL_TOPICS
             and getattr(self, "_sim_npy_preview_timer", None) is not None
             and self._sim_npy_preview_timer.isActive()
             and self._sim_eval_launcher.is_running()
@@ -20130,7 +21610,80 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("LLM_MODEL", LLM_MODEL_DEFAULT),
         help="大模型名称",
     )
+    parser.add_argument(
+        "--tab",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help=(
+            "只展示指定控制区 tab（可重复；也可用逗号分隔）。"
+            "例: --tab 测试 或 --tab test；可用中文名或英文别名。"
+            "亦支持环境变量 EAI_ONLY_TAB。"
+        ),
+    )
+    parser.add_argument(
+        "--only-tab",
+        dest="tab",
+        action="append",
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
+
+
+def resolve_control_tab_title(name: str) -> Optional[str]:
+    raw = (name or "").strip()
+    if not raw:
+        return None
+    # 直接命中正式标题
+    if raw in CONTROL_TAB_TITLES:
+        return raw
+    key = raw.lower().replace(" ", "").replace("_", "-")
+    # 别名表（含中文）
+    if raw in CONTROL_TAB_ALIASES:
+        return CONTROL_TAB_ALIASES[raw]
+    if key in CONTROL_TAB_ALIASES:
+        return CONTROL_TAB_ALIASES[key]
+    # 宽松：去掉间隔符再比
+    compact = raw.replace("·", "/").replace("-", "").replace("_", "").replace(" ", "")
+    for title in CONTROL_TAB_TITLES:
+        if title.replace("/", "").replace("·", "") == compact:
+            return title
+        if title.lower().replace(" ", "") == key:
+            return title
+    return None
+
+
+def parse_only_tabs(tab_args: Optional[List[str]]) -> List[str]:
+    raw_parts: List[str] = []
+    if tab_args:
+        for item in tab_args:
+            raw_parts.extend(
+                p.strip() for p in str(item).replace(";", ",").split(",") if p.strip()
+            )
+    if not raw_parts:
+        env = os.environ.get("EAI_ONLY_TAB", "").strip()
+        if env:
+            raw_parts.extend(
+                p.strip() for p in env.replace(";", ",").split(",") if p.strip()
+            )
+    resolved: List[str] = []
+    unknown: List[str] = []
+    for part in raw_parts:
+        title = resolve_control_tab_title(part)
+        if title is None:
+            unknown.append(part)
+            continue
+        if title not in resolved:
+            resolved.append(title)
+    if unknown:
+        known = " / ".join(CONTROL_TAB_TITLES)
+        aliases = "test→测试, sim→仿真评测, world→世界模型, …"
+        raise SystemExit(
+            f"未知 tab: {', '.join(unknown)}\n"
+            f"可用标题: {known}\n"
+            f"常用别名: {aliases}"
+        )
+    return resolved
 
 
 def apply_viewer_theme(app: QApplication) -> None:
@@ -20265,6 +21818,7 @@ def configure_qt_ime_for_chinese() -> None:
 
 def main() -> int:
     args = parse_args()
+    only_tabs = parse_only_tabs(args.tab)
     configure_qt_ime_for_chinese()
     rclpy.init()
 
@@ -20287,9 +21841,17 @@ def main() -> int:
         api_key=os.environ.get(LLM_API_KEY_ENV, "").strip(),
     )
 
-    window = CameraTopicWindow(node, bridge, prefix=args.prefix, llm_config=llm_config)
+    window = CameraTopicWindow(
+        node,
+        bridge,
+        prefix=args.prefix,
+        llm_config=llm_config,
+        only_tabs=only_tabs or None,
+    )
     window.setAttribute(Qt.WA_QuitOnClose, True)
     window.show()
+    # UI 重启后若共享 .npy 仍在，自动恢复图像预览（不依赖本窗口是否拥有评测进程）
+    QTimer.singleShot(800, window._maybe_resume_sim_npy_preview)
 
     shutdown_flag = {"value": False}
     cleaned_up = {"value": False}

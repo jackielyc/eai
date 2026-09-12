@@ -2,12 +2,15 @@
 # -*- coding: utf-8 -*-
 """Isaac 共享帧目录 → ROS2 Image 发布桥（Python 3.10 + Humble）。
 
-读取 ISAAC_CAM_BRIDGE_DIR 下的 {cam_key}.npy，发布到 /camera/*_color。
+读取 ISAAC_CAM_BRIDGE_DIR 下的 {cam_key}.npy / {cam_key}_depth.npy，
+发布到 /camera/*_color 与 /camera/*_depth。
 
 默认映射:
-  cam_head / cam_high     → /camera/head_color      (frame_id=camera_frame)
-  cam_left_wrist          → /camera/left_wrist_color
-  cam_right_wrist         → /camera/right_wrist_color
+  cam_head / cam_high     → /camera/head_color + /camera/head_depth
+  cam_left_wrist          → /camera/left_wrist_color + /camera/left_wrist_depth
+  cam_right_wrist         → /camera/right_wrist_color + /camera/right_wrist_depth
+
+深度编码: 16UC1（毫米），与真机 D405 约定一致。
 
 启动示例::
 
@@ -15,7 +18,6 @@
     bash run_isaac_cam_bridge.sh
 
     # 另开终端启动 Isaac 评测时同样 export ISAAC_CAM_BRIDGE_DIR
-    # 然后用 eai viewer 勾选 /camera/head_color
 """
 
 from __future__ import annotations
@@ -32,13 +34,21 @@ DEFAULT_DIR = os.path.join(
 )
 DEFAULT_HZ = 30.0
 
-# cam_key → (topic, frame_id)
-CAMERA_MAP: Dict[str, Tuple[str, str]] = {
-    "cam_head": ("/camera/head_color", "camera_frame"),
-    "cam_high": ("/camera/head_color", "camera_frame"),
-    "head_camera": ("/camera/head_color", "camera_frame"),
-    "cam_left_wrist": ("/camera/left_wrist_color", "left_wrist_camera_frame"),
-    "cam_right_wrist": ("/camera/right_wrist_color", "right_wrist_camera_frame"),
+# cam_key → (color_topic, depth_topic, frame_id)
+CAMERA_MAP: Dict[str, Tuple[str, str, str]] = {
+    "cam_head": ("/camera/head_color", "/camera/head_depth", "camera_frame"),
+    "cam_high": ("/camera/head_color", "/camera/head_depth", "camera_frame"),
+    "head_camera": ("/camera/head_color", "/camera/head_depth", "camera_frame"),
+    "cam_left_wrist": (
+        "/camera/left_wrist_color",
+        "/camera/left_wrist_depth",
+        "left_wrist_camera_frame",
+    ),
+    "cam_right_wrist": (
+        "/camera/right_wrist_color",
+        "/camera/right_wrist_depth",
+        "right_wrist_camera_frame",
+    ),
 }
 
 
@@ -47,11 +57,45 @@ def _load_rgb(path: str) -> Optional[np.ndarray]:
         with open(path, "rb") as f:
             arr = np.load(f)
         arr = np.asarray(arr)
-        if arr.ndim != 3 or arr.shape[2] < 3:
-            return None
-        return np.ascontiguousarray(arr[..., :3], dtype=np.uint8)
     except Exception:
         return None
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        return None
+    return np.ascontiguousarray(arr[..., :3], dtype=np.uint8)
+
+
+def _load_depth_u16(path: str) -> Optional[np.ndarray]:
+    try:
+        with open(path, "rb") as f:
+            arr = np.load(f)
+        arr = np.asarray(arr)
+    except Exception:
+        return None
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    if arr.ndim != 2:
+        return None
+    if arr.dtype == np.uint16:
+        return np.ascontiguousarray(arr)
+    depth_f = arr.astype(np.float32)
+    finite = depth_f[np.isfinite(depth_f)]
+    if finite.size and float(np.nanmax(finite)) < 100.0:
+        out = np.clip(depth_f * 1000.0, 0, 65535).astype(np.uint16)
+    else:
+        out = np.clip(depth_f, 0, 65535).astype(np.uint16)
+    return np.ascontiguousarray(out)
+
+
+def _read_stamp(path: str) -> str:
+    stamp_path = path + ".stamp"
+    try:
+        with open(stamp_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        try:
+            return str(os.path.getmtime(path))
+        except Exception:
+            return ""
 
 
 def main(argv=None) -> int:
@@ -80,9 +124,10 @@ def main(argv=None) -> int:
             super().__init__("isaac_cam_ros_bridge")
             self._dir = os.path.abspath(args.dir)
             self._bridge = CvBridge()
-            self._last_stamp: Dict[str, str] = {}
+            self._last_color_stamp: Dict[str, str] = {}
+            self._last_depth_stamp: Dict[str, str] = {}
             self._pubs: Dict[str, object] = {}
-            qos = QoSProfile(
+            self._qos = QoSProfile(
                 reliability=(
                     ReliabilityPolicy.BEST_EFFORT
                     if args.qos_best_effort
@@ -91,22 +136,42 @@ def main(argv=None) -> int:
                 history=HistoryPolicy.KEEP_LAST,
                 depth=1,
             )
-            # 按 topic 去重创建 publisher（cam_head/cam_high 共用）
-            for cam_key, (topic, _fid) in CAMERA_MAP.items():
-                if topic not in self._pubs:
-                    self._pubs[topic] = self.create_publisher(Image, topic, qos)
+            for _cam_key, (color_topic, depth_topic, _fid) in CAMERA_MAP.items():
+                if color_topic not in self._pubs:
+                    self._pubs[color_topic] = self.create_publisher(
+                        Image, color_topic, self._qos
+                    )
+                if depth_topic not in self._pubs:
+                    self._pubs[depth_topic] = self.create_publisher(
+                        Image, depth_topic, self._qos
+                    )
             os.makedirs(self._dir, exist_ok=True)
             period = 1.0 / max(1.0, float(args.hz))
             self.create_timer(period, self._on_timer)
             self.get_logger().info(
-                f"watching {self._dir} → {sorted(self._pubs.keys())}"
+                f"watching {self._dir} → color+depth "
+                f"{sorted(self._pubs.keys())}"
             )
 
-        def _on_timer(self) -> None:
-            if not os.path.isdir(self._dir):
-                return
-            # 每个 topic 只发一次（优先 cam_head）
-            published_topics = set()
+        def _ensure_pub(self, topic: str) -> object:
+            pub = self._pubs.get(topic)
+            if pub is not None:
+                return pub
+            pub = self.create_publisher(Image, topic, self._qos)
+            self._pubs[topic] = pub
+            return pub
+
+        def _resolve_mapping(self, cam_key: str) -> Tuple[str, str, str]:
+            mapping = CAMERA_MAP.get(cam_key)
+            if mapping is not None:
+                return mapping
+            return (
+                f"/camera/{cam_key}_color",
+                f"/camera/{cam_key}_depth",
+                cam_key,
+            )
+
+        def _cam_keys(self) -> list:
             order = [
                 "cam_head",
                 "cam_high",
@@ -115,69 +180,78 @@ def main(argv=None) -> int:
                 "cam_right_wrist",
             ]
             seen = set(order)
+            if not os.path.isdir(self._dir):
+                return order
             for name in os.listdir(self._dir):
-                if name.endswith(".npy"):
+                if name.endswith("_depth.npy"):
+                    key = name[: -len("_depth.npy")]
+                elif name.endswith(".npy"):
                     key = name[: -len(".npy")]
-                    if key not in seen:
-                        order.append(key)
-                        seen.add(key)
-
-            for cam_key in order:
-                mapping = CAMERA_MAP.get(cam_key)
-                if mapping is None:
-                    # 未知相机：发到 /camera/<key>_color
-                    topic = f"/camera/{cam_key}_color"
-                    frame_id = cam_key
                 else:
-                    topic, frame_id = mapping
-                if topic in published_topics:
                     continue
+                if key.endswith("_depth"):
+                    continue
+                if key not in seen:
+                    order.append(key)
+                    seen.add(key)
+            return order
 
-                path = os.path.join(self._dir, f"{cam_key}.npy")
-                if not os.path.isfile(path):
-                    continue
-                stamp_path = path + ".stamp"
-                stamp_val = ""
-                try:
-                    with open(stamp_path, "r", encoding="utf-8") as f:
-                        stamp_val = f.read().strip()
-                except Exception:
-                    try:
-                        stamp_val = str(os.path.getmtime(path))
-                    except Exception:
-                        stamp_val = ""
-                if stamp_val and self._last_stamp.get(cam_key) == stamp_val:
-                    continue
+        def _publish_color(self, cam_key: str, color_topic: str, frame_id: str) -> None:
+            path = os.path.join(self._dir, f"{cam_key}.npy")
+            if not os.path.isfile(path):
+                return
+            stamp_val = _read_stamp(path)
+            if stamp_val and self._last_color_stamp.get(cam_key) == stamp_val:
+                return
+            rgb = _load_rgb(path)
+            if rgb is None:
+                return
+            try:
+                import cv2
 
-                rgb = _load_rgb(path)
-                if rgb is None:
-                    continue
-                try:
-                    # cv_bridge 要 BGR
-                    import cv2
+                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                msg = self._bridge.cv2_to_imgmsg(bgr, encoding="bgr8")
+            except Exception as exc:
+                self.get_logger().warning(f"encode color {cam_key} failed: {exc}")
+                return
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = frame_id
+            self._ensure_pub(color_topic).publish(msg)
+            self._last_color_stamp[cam_key] = stamp_val
 
-                    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                    msg = self._bridge.cv2_to_imgmsg(bgr, encoding="bgr8")
-                except Exception as exc:
-                    self.get_logger().warning(f"encode {cam_key} failed: {exc}")
-                    continue
-                msg.header.stamp = self.get_clock().now().to_msg()
-                msg.header.frame_id = frame_id
-                pub = self._pubs.get(topic)
-                if pub is None:
-                    pub = self.create_publisher(
-                        Image,
-                        topic,
-                        QoSProfile(
-                            reliability=ReliabilityPolicy.RELIABLE,
-                            history=HistoryPolicy.KEEP_LAST,
-                            depth=1,
-                        ),
-                    )
-                    self._pubs[topic] = pub
-                pub.publish(msg)
-                self._last_stamp[cam_key] = stamp_val
-                published_topics.add(topic)
+        def _publish_depth(self, cam_key: str, depth_topic: str, frame_id: str) -> None:
+            path = os.path.join(self._dir, f"{cam_key}_depth.npy")
+            if not os.path.isfile(path):
+                return
+            stamp_val = _read_stamp(path)
+            if stamp_val and self._last_depth_stamp.get(cam_key) == stamp_val:
+                return
+            depth_u16 = _load_depth_u16(path)
+            if depth_u16 is None:
+                return
+            try:
+                msg = self._bridge.cv2_to_imgmsg(depth_u16, encoding="16UC1")
+            except Exception as exc:
+                self.get_logger().warning(f"encode depth {cam_key} failed: {exc}")
+                return
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = frame_id
+            self._ensure_pub(depth_topic).publish(msg)
+            self._last_depth_stamp[cam_key] = stamp_val
+
+        def _on_timer(self) -> None:
+            if not os.path.isdir(self._dir):
+                return
+            published_color = set()
+            published_depth = set()
+            for cam_key in self._cam_keys():
+                color_topic, depth_topic, frame_id = self._resolve_mapping(cam_key)
+                if color_topic not in published_color:
+                    self._publish_color(cam_key, color_topic, frame_id)
+                    published_color.add(color_topic)
+                if depth_topic not in published_depth:
+                    self._publish_depth(cam_key, depth_topic, frame_id)
+                    published_depth.add(depth_topic)
 
     rclpy.init(args=None)
     node = IsaacCamBridge()

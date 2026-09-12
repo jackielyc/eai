@@ -180,11 +180,13 @@ bash run_in_docker.sh
 # 勾选 /camera/head_color
 ```
 
-| Isaac 相机 | ROS topic |
-|------------|-----------|
-| `cam_head` / `cam_high` | `/camera/head_color` |
-| `cam_left_wrist` | `/camera/left_wrist_color` |
-| `cam_right_wrist` | `/camera/right_wrist_color` |
+| Isaac 相机 | ROS color | ROS depth |
+|------------|-----------|-----------|
+| `cam_head` / `cam_high` | `/camera/head_color` | `/camera/head_depth` |
+| `cam_left_wrist` | `/camera/left_wrist_color` | `/camera/left_wrist_depth` |
+| `cam_right_wrist` | `/camera/right_wrist_color` | `/camera/right_wrist_depth` |
+
+深度文件为 `{cam_key}_depth.npy`（HxW uint16 毫米），与真机 `16UC1` 约定一致。需在 RoboDojo `env_cfg/camera/camera_config.yml` 启用 `distance_to_image_plane`（已默认打开）。
 
 检查帧是否写出：
 
