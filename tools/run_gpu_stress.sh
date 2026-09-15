@@ -20,9 +20,10 @@ Options (passed to gpu_stress.py):
   --hosts-file FILE      Hosts file, one per line
   -u, --max-util PCT     Cap GPU utilization at PCT% (default: 100)
   -d, --duration SEC     Run for SEC seconds (default: until Ctrl+C)
-  -s, --matrix-size N    GEMM size (0 = auto from GPU memory)
+  -s, --matrix-size N    GEMM size (0 = auto, modest VRAM)
   --dtype fp16|bf16|fp32 Compute dtype (default: fp16)
   --streams N            CUDA streams per GPU (default: 4)
+  --mem-fraction F       Auto-size using this fraction of free VRAM (default: 0.08)
   -h, --help             Show this help
 
 Environment:

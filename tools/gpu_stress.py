@@ -479,11 +479,12 @@ def _pick_matrix_size(
     torch.cuda.set_device(gpu_id)
     free_bytes, _total_bytes = torch.cuda.mem_get_info(gpu_id)
     bytes_per = 2 if dtype_name in ("fp16", "bf16") else 4
-    # a, b, and one output buffer per stream, plus ~15% headroom for cuBLAS workspace.
+    # a, b, and one output buffer per stream. Cap N so SMs stay busy without
+    # filling VRAM — 8192 fp16 GEMM saturates modern GPUs at ~1 GB with 4 streams.
     num_buffers = 2 + num_streams
     budget = int(free_bytes * mem_fraction)
     n = int((budget / (num_buffers * bytes_per)) ** 0.5)
-    n = max(2048, min(32768, (n // 256) * 256))
+    n = max(2048, min(8192, (n // 256) * 256))
     return n
 
 
@@ -663,7 +664,7 @@ def _worker(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Stress GPUs with continuous GEMM; optionally cap SM utilization.",
+        description="Stress GPU SM utilization with GEMM while keeping VRAM modest.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -730,7 +731,7 @@ def main() -> None:
         "--matrix-size",
         type=int,
         default=0,
-        help="GEMM matrix dimension N (0 = auto from GPU memory)",
+        help="GEMM matrix dimension N (0 = auto; capped so VRAM stays low)",
     )
     parser.add_argument(
         "--dtype",
@@ -747,8 +748,8 @@ def main() -> None:
     parser.add_argument(
         "--mem-fraction",
         type=float,
-        default=0.85,
-        help="Fraction of GPU memory used when auto-sizing matrices",
+        default=0.08,
+        help="Fraction of free GPU memory used when auto-sizing matrices",
     )
     parser.add_argument(
         "--report-interval",

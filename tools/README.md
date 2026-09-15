@@ -1,6 +1,6 @@
 # GPU Stress Test
 
-在多张 GPU 上持续执行 GEMM（矩阵乘法），把 SM 利用率拉高，用于压测、预热或验证 CUDA/PyTorch 环境。默认拉满；可用 `-u` / `--max-util` 设定最高利用率。
+在多张 GPU 上持续执行 GEMM（矩阵乘法），把 **SM 利用率**拉高，同时默认只占少量显存。用于压测、预热或验证 CUDA/PyTorch 环境。可用 `-u` / `--max-util` 设定最高利用率；要用更大矩阵占满显存时再加大 `-s` 或 `--mem-fraction`。
 
 ## 依赖
 
@@ -38,6 +38,7 @@ watch -n1 nvidia-smi
 | 从文件读 hosts | `bash tools/run_gpu_stress.sh --hosts-file tools/hosts.txt` |
 | 跑 5 分钟后自动停止 | `bash tools/run_gpu_stress.sh -d 300` |
 | 把利用率压到约 70% | `bash tools/run_gpu_stress.sh -u 70` |
+| 故意占更多显存 | `bash tools/run_gpu_stress.sh -s 16384 --mem-fraction 0.85` |
 | 利用率 ≤20% 的卡视为空闲 | `bash tools/run_gpu_stress.sh -t 20` |
 | 限制可见设备后再压测 | `CUDA_VISIBLE_DEVICES=2,3 bash tools/run_gpu_stress.sh` |
 | 查看帮助 | `bash tools/run_gpu_stress.sh -h` |
@@ -69,8 +70,8 @@ $PYTHON tools/gpu_stress.py -u 70
 # 闲置门槛 20%（利用率不超过 20% 的卡才压）
 $PYTHON tools/gpu_stress.py -t 20
 
-# 手动指定矩阵规模（不自动估算显存）
-$PYTHON tools/gpu_stress.py --gpu-ids 0,1 -s 8192 --streams 8
+# 手动指定更大矩阵（会明显占显存）
+$PYTHON tools/gpu_stress.py --gpu-ids 0,1 -s 16384 --streams 8
 ```
 
 ## 参数说明
@@ -90,10 +91,10 @@ $PYTHON tools/gpu_stress.py --gpu-ids 0,1 -s 8192 --streams 8
 | `--ssh-user` | — | 未写 `user@host` 时使用的 SSH 用户 |
 | `--ssh-opts` | — | 额外 ssh 参数，例如 `'-p 2222 -i /path/key'` |
 | `-d`, `--duration` | `0` | 运行秒数；`0` 表示直到 Ctrl+C |
-| `-s`, `--matrix-size` | `0` | GEMM 维度 N×N；`0` 按空闲显存自动估算 |
+| `-s`, `--matrix-size` | `0` | GEMM 维度 N×N；`0` 按空闲显存自动估算，且自动上限为 8192（约 1 GB 级显存） |
 | `--dtype` | `fp16` | 计算精度：`fp16` / `bf16` / `fp32`（fp16/bf16 在支持的卡上会走 Tensor Core） |
 | `--streams` | `4` | 每张 GPU 的 CUDA stream 数，用于重叠计算 |
-| `--mem-fraction` | `0.85` | 自动估算矩阵大小时，使用的空闲显存比例 |
+| `--mem-fraction` | `0.08` | 自动估算矩阵大小时，使用的空闲显存比例（默认偏低，避免占满显存） |
 | `--report-interval` | `10` | 每张 GPU 打印吞吐日志的间隔（秒）；`0` 关闭 |
 
 ## 运行时会看到什么
@@ -105,7 +106,7 @@ $PYTHON tools/gpu_stress.py --gpu-ids 0,1 -s 8192 --streams 8
 [info] GPU 1 (torch 1): idle | util=0%, mem=0.4/80.0 GB (0.5%)
 [info] visible=(all) mode=idle auto-detect using GPUs: [1, 3]
 [info] running until Ctrl+C
-[gpu 1] NVIDIA A100-SXM4-80GB | size=12288 dtype=fp16 streams=4
+[gpu 1] NVIDIA A100-SXM4-80GB | size=8192 dtype=fp16 streams=4
 ```
 
 - 每张 GPU 独立进程（`spawn`），互不阻塞
@@ -146,7 +147,7 @@ bash tools/run_gpu_stress.sh --hosts-file /tmp/gpu_hosts.txt --all-gpus -d 300
 
 1. **默认只压空闲 GPU**（通过 `nvidia-smi` 看利用率、显存占用、compute 进程）；训练中的卡会被跳过。若要强制占满所有卡，加 `--all-gpus`。
 2. **`--max-util` 按忙碌时间补偿休眠**。大矩阵单次 GEMM 可能超过 1 秒，旧的固定窗口会来不及休眠、看起来像没生效；现在会缩小计算 tile，并把 `nvidia-smi` 利用率打在日志里。
-3. 自动矩阵大小基于**当前空闲显存**；若 GPU 已被其他进程部分占用，矩阵会变小。
+3. 自动矩阵大小基于**当前空闲显存的一小部分**（默认 8%，N 上限 8192），优先打满利用率而不是占满显存。需要更大占用来验证 OOM/显存带宽时，用 `-s 16384` 或 `--mem-fraction 0.85`。
 4. 若提示找不到 Python，设置 `PYTHON` 指向已安装 PyTorch CUDA 版的环境。
 5. 本工具只做计算压测，**不读写磁盘、不涉及模型权重**。
 

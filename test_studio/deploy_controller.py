@@ -585,10 +585,13 @@ class QwenDeployController(QObject):
                 chat.apply_remote_qwen_service_preset(
                     api_base=api, model_id=mid, silent=False
                 )
-                self.append_log(f"远程 Qwen 已就绪: {api} ({mid})")
+                mode_s = sct.qwen_deploy_mode_suffix(info).lstrip(" ·")
+                extra = f" {mode_s}" if mode_s else ""
+                self.append_log(f"远程 Qwen 已就绪: {api} ({mid}){extra}")
         live_model = str((info or {}).get("model") or "")
         if healthy:
             suffix = f" · {live_model}" if live_model else ""
+            suffix += sct.qwen_deploy_mode_suffix(info)
             view.status_label.setText(f"服务: 远程在线 {api}{suffix}")
             view.status_label.setStyleSheet(f"color: {sct.UI_ACCENT_GREEN};")
         elif starting:
@@ -657,6 +660,7 @@ class QwenDeployController(QObject):
         live_model = str((info or {}).get("model") or "")
         if healthy:
             suffix = f" · {live_model}" if live_model else ""
+            suffix += sct.qwen_deploy_mode_suffix(info)
             view.status_label.setText(f"服务: 在线 {api}{suffix}")
             view.status_label.setStyleSheet(f"color: {sct.UI_ACCENT_GREEN};")
         elif starting:
