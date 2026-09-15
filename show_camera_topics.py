@@ -11,7 +11,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   python3.10 show_camera_topics.py --prefix /camera
   bash run_local.sh --tab 测试   # 只展示「测试」tab（也可用 --tab test）
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 测试 / 仿真评测 / 真机评测 / 上下文学习。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / Bagel / CAD / 训练 / 手臂·手 / 手骨架遥控 / 测试 / 仿真评测 / 真机评测 / 上下文学习。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -29,6 +29,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # 系统 apt Humble 绑定 Python 3.10；RoboStack conda Humble 可用环境内 Python（如 3.11）。
 # 以能否 import rclpy 为准，不再硬性要求 3.10。
@@ -69,6 +70,18 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+
+# opencv-contrib 会在 import 时把 QT_QPA_PLATFORM_PLUGIN_PATH 指到 cv2/qt/plugins，
+# 与 conda PyQt5 的 xcb 冲突；手骨架只需 headless cv2，此处清掉污染路径。
+def _clear_opencv_qt_plugin_hijack() -> None:
+    for key in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH"):
+        val = os.environ.get(key, "")
+        if "/cv2/" in val.replace("\\", "/"):
+            os.environ.pop(key, None)
+
+
+_clear_opencv_qt_plugin_hijack()
+
 import pyqtgraph as pg
 import pyqtgraph.opengl as gl
 import rclpy
@@ -83,6 +96,9 @@ from PyQt5.QtCore import (
     QPoint,
     QEvent,
     QUrl,
+    QByteArray,
+    QBuffer,
+    QIODevice,
 )
 from PyQt5.QtGui import (
     QCloseEvent,
@@ -120,6 +136,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QStatusBar,
     QSizePolicy,
+    QTabBar,
     QTabWidget,
     QTextEdit,
     QToolButton,
@@ -132,11 +149,17 @@ from PyQt5.QtWidgets import (
 
 try:
     # 须在创建 QApplication 前 import，否则部分环境 WebEngine 初始化失败
-    from PyQt5.QtWebEngineWidgets import QWebEngineView  # type: ignore
+    from PyQt5.QtWebEngineWidgets import (  # type: ignore
+        QWebEngineView,
+        QWebEnginePage,
+        QWebEngineSettings,
+    )
 
     _HAS_QT_WEBENGINE = True
 except Exception:
     QWebEngineView = None  # type: ignore
+    QWebEnginePage = None  # type: ignore
+    QWebEngineSettings = None  # type: ignore
     _HAS_QT_WEBENGINE = False
 
 from rclpy.node import Node
@@ -635,6 +658,14 @@ EAI_DIR = os.path.dirname(os.path.abspath(__file__))
 LINGBOT_VISION_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/lingbot-vision"
 )
+BAGEL_ROOT_DEFAULT = "/share_data/projects/mahjong/share/personal/liyichao/Bagel"
+BAGEL_MODEL_DEFAULT = "models/BAGEL-7B-MoT"
+BAGEL_SERVER_HOST_DEFAULT = "127.0.0.1"
+BAGEL_SERVER_PORT_DEFAULT = 7860
+BAGEL_API_PORT_DEFAULT = 7861
+BAGEL_VENV_PYTHON_DEFAULT = os.path.join(EAI_DIR, ".cache", "bagel_venv", "bin", "python")
+BAGEL_MODEL_CACHE_DEFAULT = os.path.join(EAI_DIR, ".cache", "bagel_models", "BAGEL-7B-MoT")
+BAGEL_API_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "bagel_tmp")
 LINGBOT_VISION_PYTHON_DEFAULT = "/home/psibot/miniconda3/envs/eai/bin/python"
 LINGBOT_VISION_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_vision.sh")
 LINGBOT_VISION_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_vision")
@@ -693,6 +724,7 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "3D重建模型",
     "视频生成模型",
     "世界模型",
+    "Bagel",
     "CAD",
     "训练",
     "手臂/手",
@@ -726,6 +758,9 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "视频生成模型": "视频生成模型",
     "world": "世界模型",
     "世界模型": "世界模型",
+    "bagel": "Bagel",
+    "Bagel": "Bagel",
+    "BAGEL": "Bagel",
     "cad": "CAD",
     "CAD": "CAD",
     "train": "训练",
@@ -2112,6 +2147,22 @@ LEFT_HAND_CMD_VELOCITY = HAND_CMD_VELOCITY
 LEFT_HAND_CMD_EFFORT = HAND_CMD_EFFORT
 LEFT_HAND_ANGLE_A_DEFAULT = 0
 LEFT_HAND_ANGLE_B_DEFAULT = 45
+SKELETON_LOCAL_CAM_PREFIX = "local_webcam:"
+SKELETON_NETWORK_CAM_SOURCE = "network_stream"
+SKELETON_NETWORK_URL_DEFAULT = "http://127.0.0.1:8090/cam.mjpg"
+SKELETON_NETWORK_HELP = (
+    "VNC 不能转发摄像头。请把本机画面推成网络流，再在远端识别：\n\n"
+    "【本机（有摄像头）】\n"
+    "1) 启动 MJPEG 服务:\n"
+    "   python3 examples/local_webcam_mjpeg_server.py --device 0 --port 8090\n"
+    "2) SSH 反向隧道（把本机 8090 映射到远端 localhost:8090）:\n"
+    "   ssh -N -R 8090:127.0.0.1:8090 <user@远端>\n\n"
+    "【远端 UI】\n"
+    "相机选「网络流」，URL 填:\n"
+    "   http://127.0.0.1:8090/cam.mjpg\n"
+    "然后点「开始识别」。\n\n"
+    "也支持 rtsp://...（需 OpenCV/FFmpeg 可读）。"
+)
 RIGHT_HAND_ANGLE_A_DEFAULT = 0
 RIGHT_HAND_ANGLE_B_DEFAULT = 45
 
@@ -5138,6 +5189,82 @@ def _http_get_json(
         return False, None, str(exc)
 
 
+def _http_post_json(
+    url: str,
+    payload: Dict[str, object],
+    headers: Optional[Dict[str, str]] = None,
+    timeout_s: float = 300.0,
+) -> Tuple[bool, object, str]:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    hdrs = {"Content-Type": "application/json; charset=utf-8"}
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            try:
+                return True, json.loads(raw), ""
+            except Exception:
+                return True, raw, ""
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        return False, None, f"HTTP {exc.code}: {detail[:400]}"
+    except Exception as exc:
+        return False, None, str(exc)
+
+
+def call_bagel_inference(
+    api_base: str,
+    prompt: str,
+    *,
+    image_bgr: Optional[np.ndarray] = None,
+    task: str = "",
+    timeout_s: float = 300.0,
+) -> str:
+    """调用 Bagel serve_api.py：有图则理解，无图则文生图。成功时可能带 BAGEL_IMAGE:: 路径。"""
+    base = (api_base or "").strip().rstrip("/")
+    if base.endswith("/v1"):
+        root = base
+    else:
+        root = base + "/v1"
+    prompt = (prompt or "").strip()
+    if not prompt:
+        raise RuntimeError("prompt 为空")
+    kind = (task or "").strip() or ("understand" if image_bgr is not None else "text2image")
+    payload: Dict[str, object] = {"prompt": prompt}
+    if kind in ("understand", "edit"):
+        if image_bgr is None:
+            raise RuntimeError("图像理解/编辑需要输入图")
+        payload["image_base64"] = encode_bgr_image_jpeg_b64(image_bgr)
+        url = f"{root}/{kind}"
+    else:
+        url = f"{root}/text2image"
+        payload["image_ratio"] = "1:1"
+    ok, body, err = _http_post_json(url, payload, timeout_s=timeout_s)
+    if not ok:
+        raise RuntimeError(err or "Bagel 调用失败")
+    if not isinstance(body, dict):
+        raise RuntimeError(f"Bagel 返回异常: {body}")
+    if body.get("ok") is False:
+        raise RuntimeError(str(body.get("detail") or body.get("error") or body))
+    text = str(body.get("text") or "").strip()
+    b64 = str(body.get("image_base64") or "").strip()
+    if b64:
+        os.makedirs(BAGEL_API_OUTPUT_DIR, exist_ok=True)
+        out_path = os.path.join(
+            BAGEL_API_OUTPUT_DIR, f"bagel_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+        )
+        raw = b64
+        if "," in raw and raw.lower().startswith("data:"):
+            raw = raw.split(",", 1)[1]
+        with open(out_path, "wb") as f:
+            f.write(base64.b64decode(raw))
+        prefix = f"BAGEL_IMAGE::{out_path}"
+        return prefix + (f"\n{text}" if text else "")
+    return text or "(Bagel 无文本输出)"
+
+
 def classify_llm_service_kind(
     api_base: str,
     model_ids: Sequence[str],
@@ -5286,6 +5413,130 @@ def probe_llm_endpoint(
         "details": details,
         "error": "" if reachable else "无法连接当前 API",
     }
+
+
+def discover_running_inference_services(
+    timeout_s: float = 1.0,
+    extra_candidates: Optional[Sequence[Tuple[str, str, str, str]]] = None,
+) -> List[Dict[str, str]]:
+    """并行探测本机/隧道上已运行的推理服务，供 AI 对话选择。
+
+    仅返回健康检查或 /models / Ollama tags 可达的本地类服务（不含云端百炼/OpenAI）。
+    """
+    candidates: List[Tuple[str, str, str, str]] = [
+        (
+            "本地 Qwen",
+            resolve_local_qwen_viewer_api_base(),
+            "EMPTY",
+            "",
+        ),
+        (
+            "远程 Qwen",
+            REMOTE_QWEN_API_BASE_DEFAULT,
+            "EMPTY",
+            "",
+        ),
+        (
+            "Ollama",
+            OLLAMA_API_BASE_DEFAULT,
+            "ollama",
+            "",
+        ),
+        (
+            "Hy-Embodied-VLM",
+            HY_EMBODIED_VLM_API_BASE,
+            "EMPTY",
+            HY_EMBODIED_VLM_MODEL,
+        ),
+        (
+            "Hy-Embodied-RxBrain",
+            HY_RXBRAIN_API_BASE,
+            "EMPTY",
+            HY_RXBRAIN_MODEL,
+        ),
+        (
+            "Bagel",
+            f"http://127.0.0.1:{BAGEL_API_PORT_DEFAULT}/v1",
+            "EMPTY",
+            "BAGEL-7B-MoT",
+        ),
+    ]
+    if extra_candidates:
+        candidates.extend(extra_candidates)
+
+    def _probe_one(
+        family: str, api_base: str, api_key: str, hint: str
+    ) -> List[Dict[str, str]]:
+        result = probe_llm_endpoint(
+            api_base,
+            api_key=api_key,
+            configured_model=hint,
+            timeout_s=timeout_s,
+        )
+        if not result.get("ok"):
+            return []
+        health = result.get("health") or {}
+        if isinstance(health, dict) and health.get("ok") is False:
+            return []
+        models = [
+            str(m).strip()
+            for m in (result.get("models") or [])
+            if str(m).strip()
+        ]
+        if not models:
+            live = ""
+            if isinstance(health, dict):
+                live = str(health.get("model") or "").strip()
+            models = [m for m in (live, hint) if m]
+        if not models:
+            return []
+        base = str(result.get("api_base") or api_base).rstrip("/")
+        out: List[Dict[str, str]] = []
+        for mid in models:
+            out.append(
+                {
+                    "label": f"{family} · {mid}",
+                    "family": family,
+                    "api_base": base,
+                    "model": mid,
+                    "api_key": api_key,
+                }
+            )
+        return out
+
+    found: List[Dict[str, str]] = []
+    seen: set = set()
+    with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+        futs = [
+            pool.submit(_probe_one, fam, base, key, hint)
+            for fam, base, key, hint in candidates
+        ]
+        for fut in as_completed(futs):
+            try:
+                items = fut.result()
+            except Exception:
+                continue
+            for item in items:
+                dedupe = f"{item['api_base']}|{item['model']}"
+                if dedupe in seen:
+                    continue
+                seen.add(dedupe)
+                found.append(item)
+
+    def _sort_key(item: Dict[str, str]) -> Tuple[int, str, str]:
+        family = item.get("family") or ""
+        order = {
+            "本地 Qwen": 0,
+            "远程 Qwen": 1,
+            "Ollama": 2,
+            "Hy-Embodied-VLM": 3,
+            "Hy-Embodied-RxBrain": 4,
+            "Bagel": 5,
+        }.get(family, 9)
+        return (order, family, item.get("model") or "")
+
+    found.sort(key=_sort_key)
+    return found
 
 
 def format_chat_prompt_dump(
@@ -5968,24 +6219,49 @@ class ChatPanelWidget(QWidget):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(4)
 
-        # 紧凑顶栏：预设 / 模型 / 设置 / 清空 —— 把纵向空间留给对话区
+        # 多会话：每个 tab 独立对话，点「+」新开
+        self._sessions: List[Dict[str, object]] = []
+        self._session_index = 0
+        self._session_switch_guard = False
+        session_row = QHBoxLayout()
+        session_row.setSpacing(2)
+        self.session_tabs = QTabBar()
+        self.session_tabs.setExpanding(False)
+        self.session_tabs.setTabsClosable(True)
+        self.session_tabs.setMovable(True)
+        self.session_tabs.setDrawBase(False)
+        self.session_tabs.setUsesScrollButtons(True)
+        self.session_tabs.setElideMode(Qt.ElideRight)
+        self.session_tabs.setToolTip("切换对话；点 × 关闭当前会话（至少一个）")
+        self.session_tabs.currentChanged.connect(self._on_session_tab_changed)
+        self.session_tabs.tabCloseRequested.connect(self._on_session_tab_close)
+        self.session_tabs.tabMoved.connect(self._on_session_tab_moved)
+        session_row.addWidget(self.session_tabs, 1)
+        self.new_session_btn = QToolButton()
+        self.new_session_btn.setText("+")
+        self.new_session_btn.setFocusPolicy(Qt.NoFocus)
+        self.new_session_btn.setToolTip("新起一个对话（可另选模型）")
+        self.new_session_btn.clicked.connect(self._on_new_session_clicked)
+        session_row.addWidget(self.new_session_btn)
+        layout.addLayout(session_row)
+
+        # 紧凑顶栏：仅可选「已在运行」的推理服务
         header = QHBoxLayout()
         header.setSpacing(4)
         self.provider_combo = ImeSafeComboBox()
-        self.provider_combo.addItems(list(LLM_PROVIDER_PRESETS.keys()))
         self.provider_combo.setToolTip(
-            "含腾讯混元 Hy-Embodied-VLM / RxBrain（需先 bash run_hy_embodied_vlm.sh "
-            "或 run_hy_rxbrain.sh 启动服务）、本地 Ollama、百炼 API"
+            "仅列出已部署且正在运行的推理服务（本地/远程 Qwen、Ollama、Hy-Embodied）。\n"
+            "点「探测」可刷新列表；请先在「测试」等页启动对应服务。"
         )
-        self.provider_combo.currentTextChanged.connect(self._on_provider_preset_changed)
+        self.provider_combo.currentIndexChanged.connect(self._on_running_service_changed)
         header.addWidget(self.provider_combo, 1)
         self.model_edit = QLineEdit(self._config.model)
         self.model_edit.setPlaceholderText("模型名")
-        self.model_edit.setToolTip(
-            "模型名：hy_a3b (VLM) / hy-rxbrain / qwen3-vl:4b / gpt-4o-mini"
-        )
+        self.model_edit.setToolTip("由上方运行中服务自动填充（只读）")
         self.model_edit.setMinimumWidth(90)
         self.model_edit.setMaximumWidth(160)
+        self.model_edit.setReadOnly(True)
+        self.model_edit.textChanged.connect(lambda _t: self._sync_session_tab_title())
         header.addWidget(self.model_edit)
         self.settings_toggle_btn = QToolButton()
         self.settings_toggle_btn.setText("设置")
@@ -5998,8 +6274,7 @@ class ChatPanelWidget(QWidget):
         self.probe_btn = QPushButton("探测")
         self.probe_btn.setFixedWidth(44)
         self.probe_btn.setToolTip(
-            "探测当前 API 地址上的服务类型与可用模型\n"
-            "（/health、/models、Ollama /api/tags）"
+            "刷新运行中的推理服务列表，并探测当前选中服务"
         )
         self.probe_btn.clicked.connect(self._on_probe_clicked)
         header.addWidget(self.probe_btn)
@@ -6043,8 +6318,9 @@ class ChatPanelWidget(QWidget):
         self.api_base_edit = ImeSafeLineEdit(self._config.api_base)
         self.api_base_edit.setPlaceholderText("https://api.openai.com/v1")
         self.api_base_edit.setToolTip(
-            "OpenAI 兼容 API：Ollama :11434/v1；Hy-VLM :8080/v1；RxBrain :8090/v1"
+            "由上方运行中服务自动填充（只读）。OpenAI 兼容：Qwen / Ollama / Hy-Embodied"
         )
+        self.api_base_edit.setReadOnly(True)
         settings_row.addWidget(self.api_base_edit, stretch=1)
         settings_layout.addLayout(settings_row)
         key_row = QHBoxLayout()
@@ -6177,25 +6453,416 @@ class ChatPanelWidget(QWidget):
             f"模型: {self._config.model}  |  API: {self._config.api_base}"
         )
         self._append_system_line(
-            "具身模型: Hy-Embodied-VLM-1.0 / RxBrain-1.0 — "
-            "见 HY_EMBODIED.md；先启动对应服务再选预设"
+            "对话仅可选已部署且正在运行的推理服务；无服务时请先在「测试」页启动。"
         )
         if not self._config.api_key:
             self._append_system_line(
                 f"提示: 请填写 API Key 或 export {LLM_API_KEY_ENV}=your-key"
             )
-        if self._config.api_key and self._config.api_base != LLM_PROVIDER_PRESETS[
-            "本地 Ollama · Qwen3.5-4B"
-        ][0]:
-            idx = self.provider_combo.findText("自定义")
+        self._running_services: List[Dict[str, str]] = []
+        self._extra_inference_candidates: List[Tuple[str, str, str, str]] = []
+        self._provider_switch_guard = False
+        self.refresh_running_providers(notify=True)
+
+        # 初始会话 tab（在系统提示写入 history 之后再快照）
+        self._session_switch_guard = True
+        try:
+            self.session_tabs.addTab("新对话")
+            self.session_tabs.setCurrentIndex(0)
+        finally:
+            self._session_switch_guard = False
+        self._session_index = 0
+        self._sessions = [self._snapshot_current_session()]
+        self._sync_session_tab_title()
+
+    def set_camera_frame_provider(
+        self,
+        provider: Optional[Callable[[], Optional[Tuple[str, np.ndarray]]]],
+    ) -> None:
+        self._camera_frame_provider = provider
+
+    def _blank_session_state(self) -> Dict[str, object]:
+        # 新会话继承当前模型/API，可在新 tab 里再改成别的
+        state: Dict[str, object] = {
+            "messages": [],
+            "history_id": "",
+            "history_title": "",
+            "lake_language_memory": LAKE_DEFAULT_LANGUAGE_MEMORY,
+            "traditional_chat_mode": bool(self._traditional_chat_mode),
+            "history_html": "",
+            "input_draft": "",
+            "chat_attach_image_bgr": None,
+            "chat_attach_image_path": "",
+        }
+        state.update(self._snapshot_llm_settings())
+        return state
+
+    def _snapshot_llm_settings(self) -> Dict[str, object]:
+        return {
+            "provider": self.provider_combo.currentText(),
+            "model": self.model_edit.text(),
+            "api_base": self.api_base_edit.text(),
+            "api_key": self.api_key_edit.text(),
+            "enable_thinking": bool(self.thinking_check.isChecked()),
+            "thinking_enabled": bool(self.thinking_check.isEnabled()),
+            "attach_camera": bool(self.attach_camera_check.isChecked()),
+            "system_prompt": self.system_prompt_edit.toPlainText(),
+        }
+
+    def _current_running_service(self) -> Optional[Dict[str, str]]:
+        data = self.provider_combo.currentData()
+        if isinstance(data, dict) and data.get("api_base") and data.get("model"):
+            return {
+                "label": str(data.get("label") or self.provider_combo.currentText()),
+                "family": str(data.get("family") or ""),
+                "api_base": str(data.get("api_base") or "").rstrip("/"),
+                "model": str(data.get("model") or "").strip(),
+                "api_key": str(data.get("api_key") or "EMPTY"),
+            }
+        return None
+
+    def _apply_running_service(
+        self, svc: Dict[str, str], *, silent: bool = False
+    ) -> None:
+        api_base = str(svc.get("api_base") or "").rstrip("/")
+        model = str(svc.get("model") or "").strip()
+        api_key = str(svc.get("api_key") or "EMPTY")
+        family = str(svc.get("family") or "")
+        label = str(svc.get("label") or f"{family} · {model}")
+        if api_base:
+            self.api_base_edit.setText(api_base)
+        if model:
+            self.model_edit.setText(model)
+        self.api_key_edit.setText(api_key or "EMPTY")
+
+        vision = family in (
+            "本地 Qwen",
+            "远程 Qwen",
+            "Ollama",
+            "Hy-Embodied-VLM",
+            "Hy-Embodied-RxBrain",
+            "Bagel",
+        ) or "vl" in model.lower()
+        thinking = family == "Hy-Embodied-VLM"
+        self.attach_camera_check.setEnabled(True)
+        if vision:
+            self.attach_camera_check.setChecked(True)
+        self.thinking_check.setEnabled(thinking)
+        if not thinking:
+            self.thinking_check.setChecked(False)
+        self._sync_config_from_ui()
+        if not silent:
+            self._append_system_line(
+                f"已选择运行中服务: {label}  |  API: {api_base}"
+            )
+
+    def refresh_running_providers(
+        self,
+        *,
+        prefer_api: Optional[str] = None,
+        prefer_model: Optional[str] = None,
+        notify: bool = False,
+        silent_apply: bool = True,
+    ) -> int:
+        """刷新下拉框：只保留探测到的运行中推理服务。返回可用数量。"""
+        prefer_api = (prefer_api or self.api_base_edit.text() or "").strip().rstrip("/")
+        prefer_model = (prefer_model or self.model_edit.text() or "").strip()
+        try:
+            services = discover_running_inference_services(
+                timeout_s=1.0,
+                extra_candidates=getattr(self, "_extra_inference_candidates", None),
+            )
+        except Exception as exc:
+            services = []
+            if notify:
+                self._append_error_line(f"刷新运行中服务失败: {exc}")
+
+        self._running_services = services
+        self._provider_switch_guard = True
+        try:
+            self.provider_combo.clear()
+            if not services:
+                self.provider_combo.addItem("（无运行中的推理服务）", None)
+                self.model_edit.setText("")
+                self.send_btn.setEnabled(False)
+                if notify:
+                    self._append_system_line(
+                        "未发现运行中的推理服务。请先在「测试」页启动本地/远程 Qwen，"
+                        "或启动 Ollama / Hy-Embodied。"
+                    )
+                    self.status_message.emit("无运行中的推理服务")
+            else:
+                select_idx = 0
+                for i, svc in enumerate(services):
+                    self.provider_combo.addItem(svc["label"], svc)
+                    if prefer_api and svc["api_base"].rstrip("/") == prefer_api.rstrip("/"):
+                        if not prefer_model or svc["model"] == prefer_model:
+                            select_idx = i
+                        elif prefer_model.lower() in svc["model"].lower():
+                            select_idx = i
+                self.provider_combo.setCurrentIndex(select_idx)
+                data = self.provider_combo.itemData(select_idx)
+                if isinstance(data, dict):
+                    self._apply_running_service(data, silent=silent_apply)
+                if not self._busy:
+                    self.send_btn.setEnabled(True)
+                if notify:
+                    shown = "、".join(s["label"] for s in services[:8])
+                    suffix = "…" if len(services) > 8 else ""
+                    self._append_system_line(
+                        f"运行中推理服务 ({len(services)}): {shown}{suffix}"
+                    )
+                    self.status_message.emit(f"可用推理服务 {len(services)} 个")
+        finally:
+            self._provider_switch_guard = False
+        self._sync_session_tab_title()
+        return len(services)
+
+    def _on_running_service_changed(self, _index: int) -> None:
+        if getattr(self, "_provider_switch_guard", False):
+            return
+        svc = self._current_running_service()
+        if svc is None:
+            self.send_btn.setEnabled(False)
+            return
+        self._apply_running_service(svc, silent=False)
+        self._sync_session_tab_title()
+
+    def _restore_llm_settings(self, state: Dict[str, object]) -> None:
+        prefer_api = str(state.get("api_base") or "").strip()
+        prefer_model = str(state.get("model") or "").strip()
+        self.refresh_running_providers(
+            prefer_api=prefer_api or None,
+            prefer_model=prefer_model or None,
+            notify=False,
+            silent_apply=True,
+        )
+        # 若会话记录的服务仍在列表中，refresh 已选中；否则沿用当前可用服务
+        if "attach_camera" in state:
+            self.attach_camera_check.setChecked(bool(state.get("attach_camera")))
+
+        provider = str(state.get("provider") or "").strip()
+        thinking_enabled = state.get("thinking_enabled")
+        if thinking_enabled is None:
+            thinking_enabled = "Hy-Embodied-VLM" in provider
+        family = ""
+        svc = self._current_running_service()
+        if svc:
+            family = svc.get("family") or ""
+        if family == "Hy-Embodied-VLM":
+            thinking_enabled = True
         else:
-            idx = self.provider_combo.findText("本地 Ollama · Qwen3.5-4B")
-        if idx >= 0:
-            self.provider_combo.blockSignals(True)
-            self.provider_combo.setCurrentIndex(idx)
-            self.provider_combo.blockSignals(False)
-            if idx != self.provider_combo.findText("自定义"):
-                self._apply_provider_preset(self.provider_combo.currentText(), silent=True)
+            thinking_enabled = False
+        self.thinking_check.setEnabled(bool(thinking_enabled))
+        self.thinking_check.setChecked(
+            bool(state.get("enable_thinking")) and bool(thinking_enabled)
+        )
+
+        sys_text = state.get("system_prompt")
+        if isinstance(sys_text, str):
+            self.system_prompt_edit.setPlainText(sys_text)
+
+        # 保留会话里保存的 key（若有）
+        saved_key = state.get("api_key")
+        if isinstance(saved_key, str) and saved_key.strip():
+            self.api_key_edit.setText(saved_key)
+
+        self._sync_config_from_ui()
+
+    def _snapshot_current_session(self) -> Dict[str, object]:
+        state: Dict[str, object] = {
+            "messages": list(self._messages),
+            "history_id": self._history_id,
+            "history_title": self._history_title,
+            "lake_language_memory": self._lake_language_memory,
+            "traditional_chat_mode": bool(self._traditional_chat_mode),
+            "history_html": self.history_view.toHtml(),
+            "input_draft": self.input_edit.toPlainText(),
+            "chat_attach_image_bgr": self._chat_attach_image_bgr,
+            "chat_attach_image_path": self._chat_attach_image_path,
+        }
+        state.update(self._snapshot_llm_settings())
+        return state
+
+    def _restore_attached_image_ui(
+        self, image_bgr: Optional[np.ndarray], path: str
+    ) -> None:
+        self._chat_attach_image_bgr = image_bgr
+        self._chat_attach_image_path = path if image_bgr is not None else ""
+        if image_bgr is None:
+            self.clear_image_btn.setEnabled(False)
+            self.chat_image_label.setText(
+                "未选场景图（测试页点选，或勾选附带相机图）"
+            )
+            self.chat_image_label.setToolTip("")
+            self.chat_image_preview.clear()
+            self.chat_image_preview.setText("预览")
+            self.attached_image_changed.emit("")
+            return
+        self.clear_image_btn.setEnabled(not self._busy)
+        name = os.path.basename(path) if path else "场景图"
+        h, w = image_bgr.shape[:2]
+        self.chat_image_label.setText(f"已选场景: {name}  ({w}×{h})")
+        self.chat_image_label.setToolTip(path)
+        pix = cv2_to_qpixmap(image_bgr)
+        if pix is not None and not pix.isNull():
+            scaled = pix.scaled(
+                self.chat_image_preview.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            self.chat_image_preview.setPixmap(scaled)
+            self.chat_image_preview.setText("")
+        self.attached_image_changed.emit(path)
+
+    def _restore_session(self, state: Dict[str, object]) -> None:
+        raw_msgs = state.get("messages") or []
+        self._messages = list(raw_msgs) if isinstance(raw_msgs, list) else []
+        self._history_id = str(state.get("history_id") or "")
+        self._history_title = str(state.get("history_title") or "")
+        self._lake_language_memory = str(
+            state.get("lake_language_memory") or LAKE_DEFAULT_LANGUAGE_MEMORY
+        )
+        # 先恢复该会话的模型/API，再套传统对话模式（避免预设信号冲掉模型名）
+        self._restore_llm_settings(state)
+        trad = bool(state.get("traditional_chat_mode"))
+        self._apply_traditional_chat_mode(trad, notify=False)
+        if not trad:
+            sys_text = state.get("system_prompt")
+            if isinstance(sys_text, str):
+                self.system_prompt_edit.setPlainText(sys_text)
+                self._config.system_prompt = sys_text
+                self._client = LlmChatClient(self._config)
+        html = str(state.get("history_html") or "")
+        if html.strip():
+            self.history_view.setHtml(html)
+        else:
+            self.history_view.clear()
+            self._render_messages_to_view()
+        self.input_edit.setPlainText(str(state.get("input_draft") or ""))
+        img = state.get("chat_attach_image_bgr")
+        path = str(state.get("chat_attach_image_path") or "")
+        image_bgr = img if isinstance(img, np.ndarray) else None
+        self._restore_attached_image_ui(image_bgr, path)
+        self._refresh_history_title_label()
+
+    def _current_session_display_title(self) -> str:
+        title = (self._history_title or "").strip()
+        if title:
+            return title
+        if self._conversation_message_count() == 0:
+            return "新对话"
+        return default_chat_history_title(self._messages)
+
+    def _sync_session_tab_title(self) -> None:
+        idx = self.session_tabs.currentIndex()
+        if idx < 0:
+            return
+        full = self._current_session_display_title()
+        model = (self.model_edit.text().strip() or self._config.model or "").strip()
+        short = full if len(full) <= 14 else full[:13] + "…"
+        self.session_tabs.setTabText(idx, short)
+        tip = f"{full}\n模型: {model}" if model else full
+        self.session_tabs.setTabToolTip(idx, tip)
+
+    def _on_new_session_clicked(self) -> None:
+        if self._busy:
+            self.status_message.emit("请等待当前回复完成后再新开对话")
+            return
+        cur = self.session_tabs.currentIndex()
+        if 0 <= cur < len(self._sessions):
+            self._sessions[cur] = self._snapshot_current_session()
+        blank = self._blank_session_state()
+        self._sessions.append(blank)
+        self._session_switch_guard = True
+        try:
+            new_idx = self.session_tabs.addTab("新对话")
+            self.session_tabs.setCurrentIndex(new_idx)
+            self._session_index = new_idx
+        finally:
+            self._session_switch_guard = False
+        self._restore_session(blank)
+        n = self.refresh_running_providers(notify=False, silent_apply=True)
+        model = (self.model_edit.text().strip() or self._config.model or "").strip()
+        api = (self.api_base_edit.text().strip() or self._config.api_base or "").strip()
+        if n <= 0:
+            self._append_system_line(
+                "已新开对话，但当前没有运行中的推理服务；请先部署并启动后再选择。"
+            )
+        else:
+            self._append_system_line(
+                f"已新开对话 | 可选运行中服务 {n} 个 | 当前: {model}  |  API: {api}"
+            )
+        self._sessions[new_idx] = self._snapshot_current_session()
+        self._sync_session_tab_title()
+        self._focus_chat_input()
+        self.status_message.emit(
+            "已新开对话（仅可选择运行中的推理服务）"
+            if n > 0
+            else "已新开对话：无运行中推理服务"
+        )
+
+    def _on_session_tab_changed(self, index: int) -> None:
+        if self._session_switch_guard:
+            return
+        if index < 0:
+            return
+        if self._busy:
+            self._session_switch_guard = True
+            try:
+                self.session_tabs.setCurrentIndex(self._session_index)
+            finally:
+                self._session_switch_guard = False
+            self.status_message.emit("请等待当前回复完成后再切换对话")
+            return
+        prev = self._session_index
+        if 0 <= prev < len(self._sessions) and prev != index:
+            self._sessions[prev] = self._snapshot_current_session()
+        if 0 <= index < len(self._sessions):
+            self._restore_session(self._sessions[index])
+            self._session_index = index
+            self._focus_chat_input()
+
+    def _on_session_tab_close(self, index: int) -> None:
+        if self._busy:
+            self.status_message.emit("请等待当前回复完成后再关闭对话")
+            return
+        if index < 0 or index >= self.session_tabs.count():
+            return
+        if self.session_tabs.count() <= 1:
+            self._clear_chat()
+            if self._sessions:
+                self._sessions[0] = self._snapshot_current_session()
+            self._sync_session_tab_title()
+            return
+        self._session_switch_guard = True
+        try:
+            cur = self.session_tabs.currentIndex()
+            if 0 <= cur < len(self._sessions):
+                self._sessions[cur] = self._snapshot_current_session()
+            if 0 <= index < len(self._sessions):
+                del self._sessions[index]
+            self.session_tabs.removeTab(index)
+            new_cur = self.session_tabs.currentIndex()
+            if new_cur < 0 and self.session_tabs.count() > 0:
+                new_cur = 0
+                self.session_tabs.setCurrentIndex(0)
+            self._session_index = new_cur
+            if 0 <= new_cur < len(self._sessions):
+                self._restore_session(self._sessions[new_cur])
+        finally:
+            self._session_switch_guard = False
+        self._focus_chat_input()
+
+    def _on_session_tab_moved(self, from_index: int, to_index: int) -> None:
+        if from_index == to_index:
+            return
+        if not (0 <= from_index < len(self._sessions) and 0 <= to_index < len(self._sessions)):
+            self._session_index = self.session_tabs.currentIndex()
+            return
+        item = self._sessions.pop(from_index)
+        self._sessions.insert(to_index, item)
+        self._session_index = self.session_tabs.currentIndex()
 
     def set_camera_frame_provider(
         self,
@@ -6241,11 +6908,15 @@ class ChatPanelWidget(QWidget):
     def _on_probe_clicked(self) -> None:
         if self._busy:
             return
+        self._append_system_line("正在刷新运行中的推理服务列表…")
+        n = self.refresh_running_providers(notify=True, silent_apply=True)
+        if n <= 0:
+            return
         self._sync_config_from_ui()
         self._set_busy(True)
         self.probe_btn.setText("…")
         self._append_system_line(
-            f"正在探测模型服务: {self._config.api_base}  model={self._config.model}"
+            f"正在探测当前服务: {self._config.api_base}  model={self._config.model}"
         )
         self.status_message.emit("正在探测连接的模型…")
 
@@ -6309,13 +6980,18 @@ class ChatPanelWidget(QWidget):
                     f"检测到服务类型: {kind}\n"
                     f"可用模型: {models[0]}\n"
                     f"当前配置: {configured}\n\n"
-                    "是否把模型名切换为检测到的模型？",
+                    "是否切换到检测到的模型？",
                     QMessageBox.Yes | QMessageBox.No,
                     QMessageBox.Yes,
                 )
                 if reply == QMessageBox.Yes:
-                    self.model_edit.setText(models[0])
-                    self._append_system_line(f"已切换模型名为: {models[0]}")
+                    self.refresh_running_providers(
+                        prefer_api=str(data.get("api_base") or self._config.api_base),
+                        prefer_model=models[0],
+                        notify=False,
+                        silent_apply=True,
+                    )
+                    self._append_system_line(f"已切换到运行中模型: {models[0]}")
             else:
                 QMessageBox.information(self, "探测模型", summary)
         else:
@@ -6324,14 +7000,17 @@ class ChatPanelWidget(QWidget):
             QMessageBox.warning(self, "探测模型", summary)
 
     def apply_local_ollama_preset(self, silent: bool = False) -> None:
-        """切换到本地 Ollama 预设（供「本地部署 AI」按钮调用）。"""
-        name = "本地 Ollama · Qwen3.5-4B"
-        idx = self.provider_combo.findText(name)
-        if idx >= 0:
-            self.provider_combo.setCurrentIndex(idx)
-        self._apply_provider_preset(name, silent=silent)
-        if not silent:
-            self._append_system_line(f"已切换对话 API 为 {OLLAMA_API_BASE_DEFAULT}")
+        """切换到本地 Ollama（若正在运行则选入下拉框）。"""
+        n = self.refresh_running_providers(
+            prefer_api=OLLAMA_API_BASE_DEFAULT,
+            prefer_model="qwen3.5:4b",
+            notify=not silent,
+            silent_apply=silent,
+        )
+        if n <= 0 and not silent:
+            self._append_system_line(
+                f"Ollama 未在运行（期望 {OLLAMA_API_BASE_DEFAULT}）"
+            )
 
     def apply_local_qwen_service_preset(
         self,
@@ -6339,29 +7018,24 @@ class ChatPanelWidget(QWidget):
         model_id: Optional[str] = None,
         silent: bool = False,
     ) -> None:
-        """切换到本地 Qwen 推理服务预设（model id 随已部署模型变化）。"""
-        name = LOCAL_QWEN_CHAT_PRESET_NAME
-        self.provider_combo.blockSignals(True)
-        try:
-            idx = self.provider_combo.findText(name)
-            if idx >= 0:
-                self.provider_combo.setCurrentIndex(idx)
-        finally:
-            self.provider_combo.blockSignals(False)
+        """切换到本地 Qwen 推理服务（须已在运行）。"""
         base = (api_base or resolve_local_qwen_viewer_api_base()).rstrip("/")
-        self.api_base_edit.setText(base)
         mid = (model_id or "").strip()
         if not mid:
             info = fetch_local_qwen_server_info(base) or {}
-            mid = str(info.get("model") or "").strip()
-        if not mid:
-            mid = LOCAL_QWEN_MODEL_ID
-        self.model_edit.setText(mid)
-        if not self.api_key_edit.text().strip():
-            self.api_key_edit.setText("EMPTY")
-        self.attach_camera_check.setChecked(True)
-        self.thinking_check.setChecked(False)
-        self.thinking_check.setEnabled(False)
+            mid = str(info.get("model") or "").strip() or LOCAL_QWEN_MODEL_ID
+        n = self.refresh_running_providers(
+            prefer_api=base,
+            prefer_model=mid,
+            notify=False,
+            silent_apply=True,
+        )
+        if n <= 0:
+            if not silent:
+                self._append_system_line(
+                    f"本地 Qwen 未在运行，无法切换（{base}）"
+                )
+            return
         if not silent:
             self._append_system_line(
                 f"已切换对话 API 为本地 Qwen 服务 {base}  model={mid}"
@@ -6373,29 +7047,24 @@ class ChatPanelWidget(QWidget):
         model_id: Optional[str] = None,
         silent: bool = False,
     ) -> None:
-        """切换到远程 Qwen（SSH 隧道）推理服务预设。"""
-        name = REMOTE_QWEN_CHAT_PRESET_NAME
-        self.provider_combo.blockSignals(True)
-        try:
-            idx = self.provider_combo.findText(name)
-            if idx >= 0:
-                self.provider_combo.setCurrentIndex(idx)
-        finally:
-            self.provider_combo.blockSignals(False)
+        """切换到远程 Qwen（SSH 隧道）推理服务（须已在运行）。"""
         base = (api_base or REMOTE_QWEN_API_BASE_DEFAULT).rstrip("/")
-        self.api_base_edit.setText(base)
         mid = (model_id or "").strip()
         if not mid:
             info = fetch_local_qwen_server_info(base) or {}
-            mid = str(info.get("model") or "").strip()
-        if not mid:
-            mid = "qwen3.5-35b-a3b"
-        self.model_edit.setText(mid)
-        if not self.api_key_edit.text().strip():
-            self.api_key_edit.setText("EMPTY")
-        self.attach_camera_check.setChecked(True)
-        self.thinking_check.setChecked(False)
-        self.thinking_check.setEnabled(False)
+            mid = str(info.get("model") or "").strip() or "qwen3.5-35b-a3b"
+        n = self.refresh_running_providers(
+            prefer_api=base,
+            prefer_model=mid,
+            notify=False,
+            silent_apply=True,
+        )
+        if n <= 0:
+            if not silent:
+                self._append_system_line(
+                    f"远程 Qwen 未在运行，无法切换（{base}）"
+                )
+            return
         if not silent:
             self._append_system_line(
                 f"已切换对话 API 为远程 Qwen 服务 {base}  model={mid}"
@@ -6442,7 +7111,12 @@ class ChatPanelWidget(QWidget):
             self._append_system_line(f"已切换预设: {name}{hint}")
 
     def _on_provider_preset_changed(self, name: str) -> None:
-        self._apply_provider_preset(name)
+        # 兼容旧调用：改为按运行中服务刷新并匹配名称
+        self.refresh_running_providers(notify=False, silent_apply=True)
+        idx = self.provider_combo.findText(name)
+        if idx >= 0:
+            self.provider_combo.setCurrentIndex(idx)
+        self._sync_session_tab_title()
 
     def set_attached_image_from_path(
         self, path: str, display_name: str = ""
@@ -6643,11 +7317,20 @@ class ChatPanelWidget(QWidget):
         ts: Optional[str] = None,
         latency_s: Optional[float] = None,
     ) -> None:
-        safe = _html_escape(text).replace("\n", "<br>")
+        image_html = ""
+        body = text
+        if text.startswith("BAGEL_IMAGE::"):
+            first, _, rest = text.partition("\n")
+            path = first.split("::", 1)[-1].strip()
+            body = rest
+            if path and os.path.isfile(path):
+                url = QUrl.fromLocalFile(os.path.abspath(path)).toString()
+                image_html = f'<br><img src="{url}" width="380" />'
+        safe = _html_escape(body).replace("\n", "<br>") if body else ""
         self.history_view.append(
             f'<p style="margin:6px 0;">'
             f'<b style="color:#50fa7b;">AI:</b>{self._meta_span(ts, latency_s)}'
-            f"<br>{safe}</p>"
+            f"<br>{safe}{image_html}</p>"
         )
 
     def _append_error_line(
@@ -6676,12 +7359,16 @@ class ChatPanelWidget(QWidget):
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
-        self.send_btn.setEnabled(not busy)
+        has_svc = self._current_running_service() is not None
+        self.send_btn.setEnabled((not busy) and has_svc)
         self.input_edit.setReadOnly(busy)
         self.save_btn.setEnabled(not busy)
         self.history_btn.setEnabled(not busy)
         self.clear_btn.setEnabled(not busy)
         self.probe_btn.setEnabled(not busy)
+        self.new_session_btn.setEnabled(not busy)
+        self.session_tabs.setEnabled(not busy)
+        self.provider_combo.setEnabled(not busy)
         self.clear_image_btn.setEnabled(
             (not busy) and self._chat_attach_image_bgr is not None
         )
@@ -6698,6 +7385,7 @@ class ChatPanelWidget(QWidget):
             self.history_title_label.setText(f"当前: {self._history_title}")
         else:
             self.history_title_label.setText("当前: 新对话（未保存）")
+        self._sync_session_tab_title()
 
     def _conversation_message_count(self) -> int:
         return sum(
@@ -6951,8 +7639,21 @@ class ChatPanelWidget(QWidget):
     def _on_send_clicked(self) -> None:
         if self._busy:
             return
+        if self._current_running_service() is None:
+            self._append_error_line(
+                "没有可用的运行中推理服务。请先部署启动，再点「探测」刷新列表。"
+            )
+            self.status_message.emit("无运行中的推理服务")
+            return
+        # 强制使用当前下拉选中的运行中服务，避免设置面板残留地址
+        svc = self._current_running_service()
+        if svc is not None:
+            self._apply_running_service(svc, silent=True)
         text = self.input_edit.toPlainText().strip()
         if not text:
+            return
+        if svc and str(svc.get("family") or "") == "Bagel":
+            self._send_bagel_chat(text, svc)
             return
         self._sync_config_from_ui()
         self.input_edit.clear()
@@ -6961,6 +7662,9 @@ class ChatPanelWidget(QWidget):
         self._append_user_line(text, ts=send_ts)
         self._messages.append({"role": "user", "content": text, "ts": send_ts})
         self._trim_history()
+        if not (self._history_title or "").strip():
+            self._history_title = default_chat_history_title(self._messages)
+            self._refresh_history_title_label()
         api_messages = self._build_api_messages(text)
         self._append_prompt_dump(api_messages)
         self._set_busy(True)
@@ -6969,6 +7673,48 @@ class ChatPanelWidget(QWidget):
         def _work() -> None:
             try:
                 reply = self._client.chat(api_messages)
+                self._bridge.finished.emit(reply, True)
+            except Exception as exc:
+                self._bridge.finished.emit(str(exc), False)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def set_extra_inference_candidates(
+        self, items: Optional[Sequence[Tuple[str, str, str, str]]]
+    ) -> None:
+        self._extra_inference_candidates = list(items or [])
+
+    def _send_bagel_chat(self, text: str, svc: Dict[str, str]) -> None:
+        self.input_edit.clear()
+        send_ts = _utc_now_iso()
+        self._request_t0 = time.perf_counter()
+        self._append_user_line(text, ts=send_ts)
+        self._messages.append({"role": "user", "content": text, "ts": send_ts})
+        self._trim_history()
+        if not (self._history_title or "").strip():
+            self._history_title = default_chat_history_title(self._messages)
+            self._refresh_history_title_label()
+        image_bgr = None
+        if self._chat_attach_image_bgr is not None:
+            image_bgr = self._chat_attach_image_bgr
+        elif (
+            self.attach_camera_check.isChecked()
+            and self._camera_frame_provider is not None
+        ):
+            frame = self._camera_frame_provider()
+            if frame is not None:
+                image_bgr = frame[1]
+        api_base = str(svc.get("api_base") or "").rstrip("/")
+        self._append_system_line(
+            f"Bagel 调用: {'图像理解' if image_bgr is not None else '文生图'}  {api_base}"
+        )
+        self._set_busy(True)
+        self.status_message.emit("正在调用 Bagel…")
+        img_copy = None if image_bgr is None else np.asarray(image_bgr).copy()
+
+        def _work() -> None:
+            try:
+                reply = call_bagel_inference(api_base, text, image_bgr=img_copy)
                 self._bridge.finished.emit(reply, True)
             except Exception as exc:
                 self._bridge.finished.emit(str(exc), False)
@@ -11327,6 +12073,533 @@ class PsiPolicyTrainLauncher(QObject):
             self.status_message.emit("训练已强制停止")
 
 
+def resolve_bagel_root(path: str = "") -> str:
+    raw = (path or "").strip() or os.environ.get("BAGEL_DIR", "") or BAGEL_ROOT_DEFAULT
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def _bagel_python_looks_wrong(path: str) -> bool:
+    """ros-humble / Qwen2.5-VL 没有兼容的 gradio 栈，不能跑 Bagel。"""
+    p = os.path.normpath(path or "")
+    return ("ros-humble" in p) or ("Qwen2.5-VL" in p)
+
+
+def resolve_bagel_python(repo: str) -> str:
+    """优先专用 venv / BAGEL_PYTHON，再常见 conda，最后当前解释器。"""
+    env = (os.environ.get("BAGEL_PYTHON") or "").strip()
+    if env and os.path.isfile(env) and not _bagel_python_looks_wrong(env):
+        return env
+    candidates = [
+        BAGEL_VENV_PYTHON_DEFAULT,
+        os.path.join(repo, ".venv", "bin", "python"),
+        "/home/psibot/miniconda3/envs/bagel/bin/python",
+        "/home/psibot/miniconda3/envs/Bagel/bin/python",
+        "/share_data/projects/mahjong/share/personal/liyichao/envs/bagel/bin/python",
+        sys.executable,
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path) and not _bagel_python_looks_wrong(path):
+            return path
+    return sys.executable or "python3"
+
+
+def resolve_bagel_model_path(repo: str, model_path: str = "") -> str:
+    """解析模型目录：相对仓库路径 / 绝对路径 / eai 缓存默认。"""
+    raw = (model_path or "").strip() or BAGEL_MODEL_DEFAULT
+    if os.path.isabs(raw):
+        cand = raw
+    else:
+        cand = os.path.join(repo, raw)
+    if os.path.isdir(cand):
+        return cand
+    if os.path.isdir(BAGEL_MODEL_CACHE_DEFAULT):
+        return BAGEL_MODEL_CACHE_DEFAULT
+    return cand
+
+
+def bagel_isolated_process_env(python_bin: str = "") -> QProcessEnvironment:
+    """去掉 RoboStack PYTHONPATH，避免 bagel_venv (3.10) 误用 ros-humble (3.11) 的 numpy。"""
+    qenv = QProcessEnvironment.systemEnvironment()
+    qenv.remove("PYTHONPATH")
+    qenv.remove("PYTHONHOME")
+    # Proxy often breaks Gradio's localhost reachability check.
+    for key in (
+        "http_proxy",
+        "https_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "all_proxy",
+        "ALL_PROXY",
+    ):
+        qenv.remove(key)
+    no_proxy = qenv.value("NO_PROXY", "") or qenv.value("no_proxy", "")
+    local_no = "127.0.0.1,localhost,::1"
+    merged = ",".join(
+        p for p in (local_no + ("," + no_proxy if no_proxy else "")).split(",") if p
+    )
+    qenv.insert("NO_PROXY", merged)
+    qenv.insert("no_proxy", merged)
+    bagel_tmp = os.path.join(EAI_DIR, ".cache", "bagel_tmp")
+    try:
+        os.makedirs(bagel_tmp, exist_ok=True)
+    except OSError:
+        bagel_tmp = "/tmp"
+    qenv.insert("TMPDIR", bagel_tmp)
+    qenv.insert("TEMP", bagel_tmp)
+    qenv.insert("TMP", bagel_tmp)
+    qenv.insert("GRADIO_TEMP_DIR", bagel_tmp)
+    qenv.insert("PYTHONNOUSERSITE", "1")
+    qenv.insert("PYTHONUNBUFFERED", "1")
+    qenv.insert("GRADIO_ANALYTICS_ENABLED", "False")
+    py = (python_bin or "").strip()
+    if py and os.path.isfile(py):
+        venv_bin = os.path.dirname(os.path.abspath(py))
+        venv_root = os.path.dirname(venv_bin)
+        qenv.insert("VIRTUAL_ENV", venv_root)
+        path_now = qenv.value("PATH", "")
+        parts = [p for p in path_now.split(":") if p] if path_now else []
+        if venv_bin not in parts:
+            qenv.insert("PATH", f"{venv_bin}:{path_now}" if path_now else venv_bin)
+    return qenv
+
+
+def bagel_app_url(host: str, port: int) -> str:
+    h = (host or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
+    if h in ("0.0.0.0", "::"):
+        h = "127.0.0.1"
+    return f"http://{h}:{int(port)}/"
+
+
+# Gradio Image 在 QWebEngine 里原生上传常得到 0 字节文件；用内存 File 注入更可靠。
+_BAGEL_INJECT_IMAGE_JS = r"""
+(function(b64, mime, name) {
+  function b64ToUint8(b64Data) {
+    var bin = atob(b64Data);
+    var len = bin.length;
+    var bytes = new Uint8Array(len);
+    for (var i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+  var blob = new Blob([b64ToUint8(b64)], {type: mime || "image/png"});
+  var file = new File([blob], name || "upload.png", {type: mime || "image/png"});
+  var dt = new DataTransfer();
+  dt.items.add(file);
+  var inputs = Array.prototype.slice.call(document.querySelectorAll('input[type="file"]'));
+  var candidates = inputs.filter(function(el) {
+    if (el.disabled) return false;
+    var acc = (el.accept || "").toLowerCase();
+    return !acc || acc.indexOf("image") >= 0 || acc.indexOf("*") >= 0 || acc === "";
+  });
+  if (!candidates.length) return "no-file-input";
+  var target = null;
+  for (var i = 0; i < candidates.length; i++) {
+    var el = candidates[i];
+    var block = el.closest(".block, .form, [data-testid]") || el.parentElement;
+    if (block && block.offsetParent !== null) target = el;
+  }
+  if (!target) target = candidates[candidates.length - 1];
+  try {
+    target.files = dt.files;
+  } catch (e) {
+    return "set-files-failed:" + String(e);
+  }
+  target.dispatchEvent(new Event("input", {bubbles: true}));
+  target.dispatchEvent(new Event("change", {bubbles: true}));
+  return "ok:" + (target.accept || "") + ":" + file.name + ":" + file.size;
+})
+"""
+
+
+if QWebEnginePage is not None:
+
+    class BagelWebEnginePage(QWebEnginePage):
+        """用系统文件对话框选图，避免 WebEngine 默认上传得到空文件。"""
+
+        def chooseFiles(self, mode, old_files, accepted_mime_types):  # type: ignore[override]
+            mime = " ".join(accepted_mime_types or [])
+            if "image" in mime.lower() or not mime.strip():
+                filt = "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All (*)"
+            else:
+                filt = "All (*)"
+            parent = self.view().window() if self.view() is not None else None
+            multi = False
+            try:
+                multi = mode == QWebEnginePage.FileSelectOpenMultiple
+            except Exception:
+                multi = int(mode) == 1
+            if multi:
+                paths, _ = QFileDialog.getOpenFileNames(
+                    parent, "选择图片", "", filt
+                )
+                return paths
+            path, _ = QFileDialog.getOpenFileName(parent, "选择图片", "", filt)
+            return [path] if path else []
+
+else:
+    BagelWebEnginePage = None  # type: ignore
+
+
+class BagelAppLauncher(QObject):
+    """启动/停止 Bagel Gradio app.py，日志转发到 UI。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    ready_url = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._ready_emitted = False
+        self._url = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() == QProcess.Running
+
+    def current_url(self) -> str:
+        return self._url
+
+    def start(
+        self,
+        *,
+        repo_dir: str = "",
+        model_path: str = "",
+        python_bin: str = "",
+        server_name: str = BAGEL_SERVER_HOST_DEFAULT,
+        server_port: int = BAGEL_SERVER_PORT_DEFAULT,
+        mode: int = 1,
+        zh: bool = False,
+        share: bool = False,
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("Bagel 已在运行")
+            return
+        repo = resolve_bagel_root(repo_dir)
+        app_py = os.path.join(repo, "app.py")
+        if not os.path.isfile(app_py):
+            self.status_message.emit(f"未找到 app.py: {app_py}")
+            return
+        py = (python_bin or "").strip() or resolve_bagel_python(repo)
+        if _bagel_python_looks_wrong(py) and os.path.isfile(BAGEL_VENV_PYTHON_DEFAULT):
+            self.log_line.emit(
+                f"[warn] 跳过 {py}（无兼容 gradio），改用 {BAGEL_VENV_PYTHON_DEFAULT}"
+            )
+            py = BAGEL_VENV_PYTHON_DEFAULT
+        if not os.path.isfile(py):
+            self.status_message.emit(f"Python 不存在: {py}")
+            return
+        model = (model_path or "").strip() or BAGEL_MODEL_DEFAULT
+        model_abs = resolve_bagel_model_path(repo, model)
+        if not os.path.isdir(model_abs):
+            self.log_line.emit(
+                f"[warn] 模型目录不存在: {model_abs}\n"
+                "请点「下载模型」，或按 README 下载 ByteDance-Seed/BAGEL-7B-MoT。\n"
+                f"也可用缓存路径: {BAGEL_MODEL_CACHE_DEFAULT}"
+            )
+        # Preflight: avoid cryptic ModuleNotFoundError in subprocess
+        pre = (
+            f"{shlex.quote(py)} -c "
+            f"{shlex.quote('import gradio,torch,transformers,flash_attn')}"
+        )
+        # Use absolute model path so cwd 无关
+        model_arg = model_abs if os.path.isdir(model_abs) else model
+        host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
+        port = int(server_port)
+        self._url = bagel_app_url(host, port)
+        self._ready_emitted = False
+
+        args = [
+            "app.py",
+            "--server_name",
+            host,
+            "--server_port",
+            str(port),
+            "--model_path",
+            model_arg,
+            "--mode",
+            str(int(mode)),
+        ]
+        if zh:
+            args.append("--zh")
+        if share:
+            args.append("--share")
+
+        quoted = " ".join(shlex.quote(a) for a in args)
+        venv_activate = ""
+        for activate in (
+            os.path.join(os.path.dirname(os.path.dirname(py)), "bin", "activate"),
+            os.path.join(repo, ".venv", "bin", "activate"),
+        ):
+            if os.path.isfile(activate):
+                venv_activate = activate
+                break
+        prefix = f"source {shlex.quote(venv_activate)} && " if venv_activate else ""
+        cmd = (
+            "unset PYTHONPATH PYTHONHOME || true && "
+            "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY || true && "
+            "export NO_PROXY=127.0.0.1,localhost,::1${NO_PROXY:+,$NO_PROXY} "
+            "no_proxy=127.0.0.1,localhost,::1${no_proxy:+,$no_proxy} "
+            "PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 GRADIO_ANALYTICS_ENABLED=False && "
+            f"{prefix}cd {shlex.quote(repo)} && "
+            f"({pre}) || {{ echo '[error] Python 环境缺依赖 (gradio/torch/transformers/flash_attn)。"
+            f"请将 Python 设为 eai/.cache/bagel_venv 或先 pip install -r requirements.txt'; exit 2; }} && "
+            f"exec {shlex.quote(py)} {quoted}"
+        )
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(repo)
+        proc.setProcessEnvironment(bagel_isolated_process_env(py))
+        proc.start("setsid", ["bash", "-lc", cmd])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ cd {repo}")
+        self.log_line.emit(f"$ {py} {' '.join(args)}")
+        self.status_message.emit(f"正在启动 Bagel Gradio ({self._url})…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 Bagel")
+            return
+        self.status_message.emit("正在停止 Bagel…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(4000, self._force_kill_process)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.terminate()
+            self._process.waitForFinished(3000)
+            if self._process is not None and self._process.state() == QProcess.Running:
+                self._process.kill()
+                self._process.waitForFinished(1000)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _maybe_emit_ready(self, line: str) -> None:
+        if self._ready_emitted:
+            return
+        low = line.lower()
+        if "running on" in low or "http://" in low or "local url" in low:
+            self._ready_emitted = True
+            self.ready_url.emit(self._url)
+            self.status_message.emit(f"Bagel 已就绪: {self._url}")
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            if line:
+                text = line.rstrip()
+                self.log_line.emit(text)
+                self._maybe_emit_ready(text)
+
+    def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        self._process = None
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- Bagel 进程正常退出 ---")
+            self.status_message.emit("Bagel 已退出")
+        else:
+            self.log_line.emit(f"--- Bagel 进程退出 (code={exit_code}) ---")
+            self.status_message.emit(f"Bagel 异常退出 (code={exit_code})")
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error != QProcess.Crashed:
+            self.status_message.emit(f"Bagel 进程错误: {error}")
+
+    def _force_kill_process(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.kill()
+            self._process = None
+            self.running_changed.emit(False)
+            self.log_line.emit("--- Bagel 进程已被强制终止 ---")
+            self.status_message.emit("Bagel 已强制停止")
+
+
+class BagelApiLauncher(QObject):
+    """启动/停止 Bagel serve_api.py（无 Gradio，仅模型 HTTP）。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    ready_url = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._ready_emitted = False
+        self._url = ""
+        self._api_base = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() == QProcess.Running
+
+    def current_url(self) -> str:
+        return self._url
+
+    def api_base(self) -> str:
+        return self._api_base
+
+    def start(
+        self,
+        *,
+        repo_dir: str = "",
+        model_path: str = "",
+        python_bin: str = "",
+        server_name: str = BAGEL_SERVER_HOST_DEFAULT,
+        server_port: int = BAGEL_API_PORT_DEFAULT,
+        mode: int = 1,
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("Bagel 推理 API 已在运行")
+            return
+        repo = resolve_bagel_root(repo_dir)
+        serve_py = os.path.join(repo, "serve_api.py")
+        if not os.path.isfile(serve_py):
+            self.status_message.emit(f"未找到 serve_api.py: {serve_py}")
+            return
+        py = (python_bin or "").strip() or resolve_bagel_python(repo)
+        if _bagel_python_looks_wrong(py) and os.path.isfile(BAGEL_VENV_PYTHON_DEFAULT):
+            self.log_line.emit(
+                f"[warn] 跳过 {py}（无兼容环境），改用 {BAGEL_VENV_PYTHON_DEFAULT}"
+            )
+            py = BAGEL_VENV_PYTHON_DEFAULT
+        if not os.path.isfile(py):
+            self.status_message.emit(f"Python 不存在: {py}")
+            return
+        model = (model_path or "").strip() or BAGEL_MODEL_DEFAULT
+        model_abs = resolve_bagel_model_path(repo, model)
+        if not os.path.isdir(model_abs):
+            self.status_message.emit(f"模型目录不存在: {model_abs}")
+            self.log_line.emit(
+                f"[error] 模型目录不存在: {model_abs}\n"
+                "请先点「下载模型」。"
+            )
+            return
+        host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
+        port = int(server_port)
+        self._url = bagel_app_url(host, port)
+        self._api_base = self._url.rstrip("/") + "/v1"
+        self._ready_emitted = False
+
+        args = [
+            "serve_api.py",
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--model_path",
+            model_abs,
+            "--mode",
+            str(int(mode)),
+        ]
+        quoted = " ".join(shlex.quote(a) for a in args)
+        venv_activate = ""
+        for activate in (
+            os.path.join(os.path.dirname(os.path.dirname(py)), "bin", "activate"),
+            os.path.join(repo, ".venv", "bin", "activate"),
+        ):
+            if os.path.isfile(activate):
+                venv_activate = activate
+                break
+        prefix = f"source {shlex.quote(venv_activate)} && " if venv_activate else ""
+        pre = (
+            f"{shlex.quote(py)} -c "
+            f"{shlex.quote('import fastapi,uvicorn,torch,transformers,flash_attn')}"
+        )
+        cmd = (
+            "unset PYTHONPATH PYTHONHOME || true && "
+            "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY || true && "
+            "export NO_PROXY=127.0.0.1,localhost,::1${NO_PROXY:+,$NO_PROXY} "
+            "no_proxy=127.0.0.1,localhost,::1${no_proxy:+,$no_proxy} "
+            "PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 && "
+            f"{prefix}cd {shlex.quote(repo)} && "
+            f"({pre}) || {{ echo '[error] Python 环境缺依赖 (fastapi/uvicorn/torch)。"
+            f"请使用 eai/.cache/bagel_venv'; exit 2; }} && "
+            f"exec {shlex.quote(py)} {quoted}"
+        )
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(repo)
+        proc.setProcessEnvironment(bagel_isolated_process_env(py))
+        proc.start("setsid", ["bash", "-lc", cmd])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ cd {repo}")
+        self.log_line.emit(f"$ {py} {' '.join(args)}")
+        self.status_message.emit(f"正在部署 Bagel 推理 API ({self._url})…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 Bagel 推理 API")
+            return
+        self.status_message.emit("正在停止 Bagel 推理 API…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(4000, self._force_kill_process)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.terminate()
+            self._process.waitForFinished(3000)
+            if self._process is not None and self._process.state() == QProcess.Running:
+                self._process.kill()
+                self._process.waitForFinished(1000)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _maybe_emit_ready(self, line: str) -> None:
+        if self._ready_emitted:
+            return
+        low = line.lower()
+        if "[bagel-api] ready" in low or "uvicorn running on" in low:
+            self._ready_emitted = True
+            self.ready_url.emit(self._url)
+            self.status_message.emit(f"Bagel 推理 API 已就绪: {self._url}")
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            if line:
+                text = line.rstrip()
+                self.log_line.emit(text)
+                self._maybe_emit_ready(text)
+
+    def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        self._process = None
+        self._ready_emitted = False
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- Bagel 推理 API 正常退出 ---")
+            self.status_message.emit("Bagel 推理 API 已退出")
+        else:
+            self.log_line.emit(f"--- Bagel 推理 API 退出 (code={exit_code}) ---")
+            self.status_message.emit(f"Bagel 推理 API 异常退出 (code={exit_code})")
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error != QProcess.Crashed:
+            self.status_message.emit(f"Bagel 推理 API 进程错误: {error}")
+
+    def _force_kill_process(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.kill()
+            self._process = None
+            self.running_changed.emit(False)
+            self.log_line.emit("--- Bagel 推理 API 已被强制终止 ---")
+            self.status_message.emit("Bagel 推理 API 已强制停止")
+
+
 class VideoPlayerWidget(QWidget):
     """内嵌 OpenCV 视频播放（暂停 / 重头 / 循环 / 可拖动进度条）。"""
 
@@ -14540,6 +15813,273 @@ class CameraTopicWindow(QMainWindow):
 
         control_tabs.addTab(world_tab, "世界模型")
 
+        bagel_tab = QWidget()
+        bagel_outer = QVBoxLayout(bagel_tab)
+        bagel_outer.setContentsMargins(8, 6, 8, 6)
+        bagel_outer.setSpacing(6)
+        bagel_hint = QLabel(
+            "BAGEL：Gradio 界面（「启动」）或单独部署无 UI 推理 API（「部署推理 API」）。\n"
+            "推理 API 启动后可在本页点「调用」，也会出现在右侧 AI 对话的运行中服务列表。"
+        )
+        bagel_hint.setWordWrap(True)
+        bagel_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        bagel_outer.addWidget(bagel_hint)
+
+        bagel_path_row = QHBoxLayout()
+        bagel_path_row.setSpacing(6)
+        bagel_path_row.addWidget(QLabel("仓库"))
+        self.bagel_root_edit = QLineEdit(
+            os.environ.get("BAGEL_DIR", BAGEL_ROOT_DEFAULT)
+        )
+        self.bagel_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.bagel_root_edit.setToolTip("Bagel 仓库根目录（含 app.py）")
+        bagel_path_row.addWidget(self.bagel_root_edit, 1)
+        self.bagel_root_browse_btn = QPushButton("…")
+        self.bagel_root_browse_btn.setFixedWidth(28)
+        self.bagel_root_browse_btn.clicked.connect(self._on_bagel_root_browse_clicked)
+        bagel_path_row.addWidget(self.bagel_root_browse_btn)
+        bagel_path_row.addWidget(QLabel("Python"))
+        self.bagel_python_edit = QLineEdit(
+            resolve_bagel_python(resolve_bagel_root(self.bagel_root_edit.text()))
+        )
+        self.bagel_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.bagel_python_edit.setToolTip(
+            "运行 app.py 的解释器。推荐 eai/.cache/bagel_venv；也可设 BAGEL_PYTHON"
+        )
+        bagel_path_row.addWidget(self.bagel_python_edit, 1)
+        self.bagel_python_browse_btn = QPushButton("…")
+        self.bagel_python_browse_btn.setFixedWidth(28)
+        self.bagel_python_browse_btn.clicked.connect(self._on_bagel_python_browse_clicked)
+        bagel_path_row.addWidget(self.bagel_python_browse_btn)
+        bagel_outer.addLayout(bagel_path_row)
+
+        bagel_model_row = QHBoxLayout()
+        bagel_model_row.setSpacing(6)
+        bagel_model_row.addWidget(QLabel("模型"))
+        _default_model = (
+            BAGEL_MODEL_CACHE_DEFAULT
+            if os.path.isdir(BAGEL_MODEL_CACHE_DEFAULT)
+            else BAGEL_MODEL_DEFAULT
+        )
+        self.bagel_model_edit = QLineEdit(_default_model)
+        self.bagel_model_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.bagel_model_edit.setToolTip(
+            "相对仓库路径或绝对路径。默认可用 eai/.cache/bagel_models/BAGEL-7B-MoT"
+        )
+        bagel_model_row.addWidget(self.bagel_model_edit, 1)
+        self.bagel_model_browse_btn = QPushButton("…")
+        self.bagel_model_browse_btn.setFixedWidth(28)
+        self.bagel_model_browse_btn.clicked.connect(self._on_bagel_model_browse_clicked)
+        bagel_model_row.addWidget(self.bagel_model_browse_btn)
+        self.bagel_download_btn = QPushButton("下载模型")
+        self.bagel_download_btn.setToolTip(
+            "从 HuggingFace / hf-mirror 下载 ByteDance-Seed/BAGEL-7B-MoT 到缓存目录"
+        )
+        self.bagel_download_btn.clicked.connect(self._on_bagel_download_clicked)
+        bagel_model_row.addWidget(self.bagel_download_btn)
+        bagel_outer.addLayout(bagel_model_row)
+
+        bagel_run_row = QHBoxLayout()
+        bagel_run_row.setSpacing(6)
+        bagel_run_row.addWidget(QLabel("host"))
+        self.bagel_host_edit = QLineEdit(BAGEL_SERVER_HOST_DEFAULT)
+        self.bagel_host_edit.setFixedWidth(110)
+        bagel_run_row.addWidget(self.bagel_host_edit)
+        bagel_run_row.addWidget(QLabel("port"))
+        self.bagel_port_spin = QSpinBox()
+        self.bagel_port_spin.setRange(1024, 65535)
+        self.bagel_port_spin.setValue(BAGEL_SERVER_PORT_DEFAULT)
+        self.bagel_port_spin.setFixedWidth(72)
+        bagel_run_row.addWidget(self.bagel_port_spin)
+        bagel_run_row.addWidget(QLabel("mode"))
+        self.bagel_mode_combo = ImeSafeComboBox()
+        self.bagel_mode_combo.addItem("1 · 全精度 (32GB+)", 1)
+        self.bagel_mode_combo.addItem("2 · NF4 量化 (12~32GB)", 2)
+        self.bagel_mode_combo.addItem("3 · INT8 量化", 3)
+        self.bagel_mode_combo.setCurrentIndex(0)
+        self.bagel_mode_combo.setToolTip(
+            "对应 app.py --mode；低显存建议选 2 并勾选中文界面"
+        )
+        bagel_run_row.addWidget(self.bagel_mode_combo)
+        self.bagel_zh_check = QCheckBox("中文界面")
+        self.bagel_zh_check.setChecked(True)
+        bagel_run_row.addWidget(self.bagel_zh_check)
+        self.bagel_share_check = QCheckBox("share")
+        self.bagel_share_check.setToolTip("Gradio --share 公网链接（可选）")
+        bagel_run_row.addWidget(self.bagel_share_check)
+        bagel_run_row.addStretch()
+        self.bagel_status_label = QLabel("Bagel: 空闲")
+        self.bagel_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        bagel_run_row.addWidget(self.bagel_status_label)
+        self.bagel_start_btn = QPushButton("启动")
+        self.bagel_start_btn.setToolTip("python app.py（加载模型可能较久）")
+        self.bagel_start_btn.clicked.connect(self._on_bagel_start_clicked)
+        bagel_run_row.addWidget(self.bagel_start_btn)
+        self.bagel_stop_btn = QPushButton("停止")
+        self.bagel_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.bagel_stop_btn.setEnabled(False)
+        self.bagel_stop_btn.clicked.connect(self._on_bagel_stop_clicked)
+        bagel_run_row.addWidget(self.bagel_stop_btn)
+        self.bagel_open_btn = QPushButton("浏览器打开")
+        self.bagel_open_btn.setEnabled(False)
+        self.bagel_open_btn.clicked.connect(self._on_bagel_open_clicked)
+        bagel_run_row.addWidget(self.bagel_open_btn)
+        self.bagel_pick_image_btn = QPushButton("选择图片")
+        self.bagel_pick_image_btn.setEnabled(False)
+        self.bagel_pick_image_btn.setToolTip(
+            "用系统对话框选图并注入到嵌入的 Gradio（避开 WebEngine 空文件问题）"
+        )
+        self.bagel_pick_image_btn.clicked.connect(self._on_bagel_pick_image_clicked)
+        bagel_run_row.addWidget(self.bagel_pick_image_btn)
+        self.bagel_clear_log_btn = QPushButton("清空日志")
+        self.bagel_clear_log_btn.clicked.connect(self._on_bagel_clear_log_clicked)
+        bagel_run_row.addWidget(self.bagel_clear_log_btn)
+        bagel_outer.addLayout(bagel_run_row)
+
+        bagel_api_row = QHBoxLayout()
+        bagel_api_row.setSpacing(6)
+        bagel_api_row.addWidget(QLabel("推理 API 端口"))
+        self.bagel_api_port_spin = QSpinBox()
+        self.bagel_api_port_spin.setRange(1024, 65535)
+        self.bagel_api_port_spin.setValue(BAGEL_API_PORT_DEFAULT)
+        self.bagel_api_port_spin.setFixedWidth(72)
+        self.bagel_api_port_spin.setToolTip("serve_api.py 监听端口，默认 7861（避开 Gradio 7860）")
+        bagel_api_row.addWidget(self.bagel_api_port_spin)
+        self.bagel_api_status_label = QLabel("推理 API: 未部署")
+        self.bagel_api_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        bagel_api_row.addWidget(self.bagel_api_status_label, 1)
+        self.bagel_api_start_btn = QPushButton("部署推理 API")
+        self.bagel_api_start_btn.setToolTip(
+            "只加载模型并启动 HTTP（无 Gradio）。随后可用下方「调用」或 AI 对话。"
+        )
+        self.bagel_api_start_btn.clicked.connect(self._on_bagel_api_start_clicked)
+        bagel_api_row.addWidget(self.bagel_api_start_btn)
+        self.bagel_api_stop_btn = QPushButton("停止 API")
+        self.bagel_api_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.bagel_api_stop_btn.setEnabled(False)
+        self.bagel_api_stop_btn.clicked.connect(self._on_bagel_api_stop_clicked)
+        bagel_api_row.addWidget(self.bagel_api_stop_btn)
+        bagel_outer.addLayout(bagel_api_row)
+
+        bagel_call_row = QHBoxLayout()
+        bagel_call_row.setSpacing(6)
+        bagel_call_row.addWidget(QLabel("调用"))
+        self.bagel_call_task_combo = ImeSafeComboBox()
+        self.bagel_call_task_combo.addItem("文生图", "text2image")
+        self.bagel_call_task_combo.addItem("图像理解", "understand")
+        self.bagel_call_task_combo.addItem("图像编辑", "edit")
+        self.bagel_call_task_combo.setToolTip("理解/编辑需要点「选图」")
+        bagel_call_row.addWidget(self.bagel_call_task_combo)
+        self.bagel_call_prompt_edit = ImeSafeLineEdit("")
+        self.bagel_call_prompt_edit.setPlaceholderText("输入提示词后点「调用」")
+        bagel_call_row.addWidget(self.bagel_call_prompt_edit, 1)
+        self.bagel_call_pick_btn = QPushButton("选图")
+        self.bagel_call_pick_btn.setToolTip("理解 / 编辑用输入图")
+        self.bagel_call_pick_btn.clicked.connect(self._on_bagel_call_pick_clicked)
+        bagel_call_row.addWidget(self.bagel_call_pick_btn)
+        self.bagel_call_btn = QPushButton("调用")
+        self.bagel_call_btn.setEnabled(False)
+        self.bagel_call_btn.setToolTip("向已部署的 Bagel 推理 API 发请求")
+        self.bagel_call_btn.clicked.connect(self._on_bagel_call_clicked)
+        bagel_call_row.addWidget(self.bagel_call_btn)
+        bagel_outer.addLayout(bagel_call_row)
+
+        bagel_preview_row = QHBoxLayout()
+        bagel_preview_row.setSpacing(6)
+        self.bagel_call_input_preview = QLabel("输入图")
+        self.bagel_call_input_preview.setFixedSize(120, 90)
+        self.bagel_call_input_preview.setAlignment(Qt.AlignCenter)
+        self.bagel_call_input_preview.setStyleSheet(
+            "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #888; }"
+        )
+        bagel_preview_row.addWidget(self.bagel_call_input_preview)
+        self.bagel_call_output_preview = QLabel("输出图")
+        self.bagel_call_output_preview.setMinimumHeight(160)
+        self.bagel_call_output_preview.setAlignment(Qt.AlignCenter)
+        self.bagel_call_output_preview.setStyleSheet(
+            "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #888; }"
+        )
+        self.bagel_call_output_preview.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        bagel_preview_row.addWidget(self.bagel_call_output_preview, 1)
+        bagel_outer.addLayout(bagel_preview_row)
+        self._bagel_call_image_path = ""
+        self._bagel_call_busy = False
+
+        self.bagel_log_edit = QTextEdit()
+        self.bagel_log_edit.setReadOnly(True)
+        self.bagel_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.bagel_log_edit.setMinimumHeight(100)
+        self.bagel_log_edit.setMaximumHeight(160)
+        self.bagel_log_edit.setPlaceholderText("Bagel 启动 / 推理日志…")
+        self.bagel_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            "border: 1px solid #555; }}"
+        )
+        bagel_outer.addWidget(self.bagel_log_edit)
+
+        if QWebEngineView is not None:
+            self.bagel_web_view = QWebEngineView()
+            self.bagel_web_view.setMinimumHeight(360)
+            if BagelWebEnginePage is not None:
+                self.bagel_web_page = BagelWebEnginePage(self.bagel_web_view)
+                self.bagel_web_view.setPage(self.bagel_web_page)
+                try:
+                    settings = self.bagel_web_view.settings()
+                    if QWebEngineSettings is not None:
+                        settings.setAttribute(
+                            QWebEngineSettings.LocalContentCanAccessRemoteUrls, True
+                        )
+                        settings.setAttribute(
+                            QWebEngineSettings.LocalContentCanAccessFileUrls, True
+                        )
+                        settings.setAttribute(
+                            QWebEngineSettings.JavascriptEnabled, True
+                        )
+                        settings.setAttribute(
+                            QWebEngineSettings.LocalStorageEnabled, True
+                        )
+                except Exception:
+                    pass
+            else:
+                self.bagel_web_page = None
+            self.bagel_web_view.setUrl(QUrl("about:blank"))
+            bagel_outer.addWidget(self.bagel_web_view, 1)
+        else:
+            self.bagel_web_view = None
+            self.bagel_web_page = None
+            bagel_web_fallback = QLabel(
+                "未安装 PyQtWebEngine：无法页内嵌入。启动后请点「浏览器打开」。"
+            )
+            bagel_web_fallback.setAlignment(Qt.AlignCenter)
+            bagel_web_fallback.setMinimumHeight(120)
+            bagel_web_fallback.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+            bagel_outer.addWidget(bagel_web_fallback, 1)
+
+        self._bagel_launcher = BagelAppLauncher(self)
+        self._bagel_launcher.log_line.connect(self._append_bagel_log)
+        self._bagel_launcher.status_message.connect(self._on_bagel_status)
+        self._bagel_launcher.running_changed.connect(self._update_bagel_run_ui)
+        self._bagel_launcher.ready_url.connect(self._on_bagel_ready_url)
+        self._bagel_ready_poll_timer = QTimer(self)
+        self._bagel_ready_poll_timer.setInterval(1500)
+        self._bagel_ready_poll_timer.timeout.connect(self._poll_bagel_http_ready)
+
+        self._bagel_api_launcher = BagelApiLauncher(self)
+        self._bagel_api_launcher.log_line.connect(self._append_bagel_log)
+        self._bagel_api_launcher.status_message.connect(self._on_bagel_api_status)
+        self._bagel_api_launcher.running_changed.connect(self._update_bagel_api_ui)
+        self._bagel_api_launcher.ready_url.connect(self._on_bagel_api_ready)
+        self._bagel_api_ready_poll_timer = QTimer(self)
+        self._bagel_api_ready_poll_timer.setInterval(1500)
+        self._bagel_api_ready_poll_timer.timeout.connect(self._poll_bagel_api_ready)
+        self._bagel_call_bridge = LlmProbeBridge()
+        self._bagel_call_bridge.finished.connect(self._on_bagel_call_finished)
+        self._update_bagel_api_ui()
+
+        control_tabs.addTab(bagel_tab, "Bagel")
+
         cad_tab = QWidget()
         cad_outer = QVBoxLayout(cad_tab)
         cad_outer.setContentsMargins(8, 6, 8, 6)
@@ -15431,12 +16971,35 @@ class CameraTopicWindow(QMainWindow):
         sk_row1.addWidget(QLabel("相机:"))
         self.skeleton_cam_combo = ImeSafeComboBox()
         self.skeleton_cam_combo.setMinimumWidth(220)
-        self.skeleton_cam_combo.setToolTip("选择用于手骨架识别的彩色图像 topic（需先在左侧勾选订阅）")
+        self.skeleton_cam_combo.setToolTip(
+            "图像来源：本机摄像头 / 网络流（VNC 场景）/ ROS 彩色 topic。\n"
+            "VNC 登录时请用「网络流」+ 本机推流（点「用法」）。"
+        )
+        self.skeleton_cam_combo.currentIndexChanged.connect(
+            self._on_skeleton_cam_source_changed
+        )
         sk_row1.addWidget(self.skeleton_cam_combo, 1)
         self.skeleton_refresh_cam_btn = QPushButton("刷新列表")
+        self.skeleton_refresh_cam_btn.setToolTip("重新探测本机摄像头，并刷新 ROS 彩色 topic 列表")
         self.skeleton_refresh_cam_btn.clicked.connect(self._refresh_skeleton_camera_list)
         sk_row1.addWidget(self.skeleton_refresh_cam_btn)
+        self.skeleton_net_help_btn = QPushButton("用法")
+        self.skeleton_net_help_btn.setToolTip("本机摄像头经 SSH 隧道转发到远端的步骤")
+        self.skeleton_net_help_btn.clicked.connect(self._on_skeleton_network_help)
+        sk_row1.addWidget(self.skeleton_net_help_btn)
         skeleton_layout.addLayout(sk_row1)
+
+        sk_url_row = QHBoxLayout()
+        sk_url_row.setSpacing(6)
+        sk_url_row.addWidget(QLabel("网络流:"))
+        self.skeleton_stream_url_edit = QLineEdit(SKELETON_NETWORK_URL_DEFAULT)
+        self.skeleton_stream_url_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.skeleton_stream_url_edit.setPlaceholderText(
+            "http://127.0.0.1:8090/cam.mjpg  或  rtsp://..."
+        )
+        self.skeleton_stream_url_edit.setToolTip(SKELETON_NETWORK_HELP)
+        sk_url_row.addWidget(self.skeleton_stream_url_edit, 1)
+        skeleton_layout.addLayout(sk_url_row)
 
         sk_row2 = QHBoxLayout()
         sk_row2.setSpacing(8)
@@ -15484,7 +17047,9 @@ class CameraTopicWindow(QMainWindow):
         sk_row3.addWidget(self.skeleton_status_label, 1)
         skeleton_layout.addLayout(sk_row3)
 
-        self.skeleton_preview_label = QLabel("勾选彩色相机 topic → 刷新列表 → 开始识别")
+        self.skeleton_preview_label = QLabel(
+            "选本地摄像头 / 网络流 / ROS topic → 开始识别（VNC 请看「用法」）"
+        )
         self.skeleton_preview_label.setAlignment(Qt.AlignCenter)
         self.skeleton_preview_label.setMinimumHeight(220)
         self.skeleton_preview_label.setStyleSheet(
@@ -15773,11 +17338,13 @@ class CameraTopicWindow(QMainWindow):
         self._update_ctx_ui()
 
         self._hand_skeleton_detector = None
+        self._skeleton_local_cap = None
         self._skeleton_tracking = False
         self._skeleton_busy = False
         self._skeleton_timer = QTimer(self)
         self._skeleton_timer.setInterval(66)  # ~15 Hz
         self._skeleton_timer.timeout.connect(self._on_skeleton_tick)
+        self._refresh_skeleton_camera_list()
 
         self._left_arm_move_btn_idle_style = ""
         self._left_arm_move_btn_cancel_style = f"color: {UI_ACCENT_RED};"
@@ -16029,6 +17596,475 @@ class CameraTopicWindow(QMainWindow):
             num_processes=self.train_gpu_spin.value(),
         )
         self._update_train_ui()
+
+    def _append_bagel_log(self, line: str) -> None:
+        self.bagel_log_edit.append(line)
+        scrollbar = self.bagel_log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _on_bagel_status(self, text: str) -> None:
+        self.bagel_status_label.setText(text if text.startswith("Bagel") else f"Bagel: {text}")
+        self.status_bar.showMessage(text)
+
+    def _update_bagel_run_ui(self, *_args) -> None:
+        running = self._bagel_launcher.is_running()
+        ready = running or bool(self._bagel_launcher.current_url())
+        self.bagel_start_btn.setEnabled(not running)
+        self.bagel_stop_btn.setEnabled(running)
+        self.bagel_open_btn.setEnabled(ready)
+        if hasattr(self, "bagel_pick_image_btn"):
+            self.bagel_pick_image_btn.setEnabled(
+                ready and self.bagel_web_view is not None
+            )
+        for w in (
+            self.bagel_root_edit,
+            self.bagel_root_browse_btn,
+            self.bagel_python_edit,
+            self.bagel_python_browse_btn,
+            self.bagel_model_edit,
+            self.bagel_model_browse_btn,
+            self.bagel_host_edit,
+            self.bagel_port_spin,
+            self.bagel_mode_combo,
+            self.bagel_zh_check,
+            self.bagel_share_check,
+        ):
+            w.setEnabled(not running)
+        if running:
+            self.bagel_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            if not self._bagel_ready_poll_timer.isActive():
+                self._bagel_ready_poll_timer.start()
+        else:
+            self.bagel_status_label.setStyleSheet("")
+            self._bagel_ready_poll_timer.stop()
+            if self.bagel_web_view is not None and not running:
+                # 保留最后一页；用户可手动刷新
+                pass
+
+    def _on_bagel_root_browse_clicked(self) -> None:
+        current = self.bagel_root_edit.text().strip() or BAGEL_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 Bagel 仓库目录", current
+        )
+        if selected:
+            self.bagel_root_edit.setText(selected)
+            py = resolve_bagel_python(resolve_bagel_root(selected))
+            self.bagel_python_edit.setText(py)
+
+    def _on_bagel_python_browse_clicked(self) -> None:
+        current = self.bagel_python_edit.text().strip() or sys.executable
+        initial = os.path.dirname(current) if current else ""
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "选择 Python 解释器", initial, "Python (python*);;All (*)"
+        )
+        if selected:
+            self.bagel_python_edit.setText(selected)
+
+    def _on_bagel_model_browse_clicked(self) -> None:
+        repo = resolve_bagel_root(self.bagel_root_edit.text())
+        current = self.bagel_model_edit.text().strip() or BAGEL_MODEL_DEFAULT
+        initial = current if os.path.isabs(current) else os.path.join(repo, current)
+        if not os.path.isdir(initial):
+            initial = repo
+        selected = QFileDialog.getExistingDirectory(self, "选择 BAGEL 模型目录", initial)
+        if selected:
+            # 尽量写成相对仓库路径
+            try:
+                rel = os.path.relpath(selected, repo)
+                if not rel.startswith(".."):
+                    self.bagel_model_edit.setText(rel)
+                else:
+                    self.bagel_model_edit.setText(selected)
+            except ValueError:
+                self.bagel_model_edit.setText(selected)
+
+    def _on_bagel_download_clicked(self) -> None:
+        save_dir = BAGEL_MODEL_CACHE_DEFAULT
+        py = self.bagel_python_edit.text().strip() or resolve_bagel_python(
+            resolve_bagel_root(self.bagel_root_edit.text())
+        )
+        if not os.path.isfile(py):
+            QMessageBox.warning(self, "Bagel", f"Python 不存在: {py}")
+            return
+        os.makedirs(os.path.dirname(save_dir), exist_ok=True)
+        script = (
+            "import os\n"
+            "from huggingface_hub import snapshot_download\n"
+            f"save_dir = {save_dir!r}\n"
+            "os.makedirs(save_dir, exist_ok=True)\n"
+            "print('HF_ENDPOINT=', os.environ.get('HF_ENDPOINT', ''))\n"
+            "print('downloading to', save_dir, flush=True)\n"
+            "path = snapshot_download(\n"
+            "  repo_id='ByteDance-Seed/BAGEL-7B-MoT',\n"
+            "  local_dir=save_dir,\n"
+            "  resume_download=True,\n"
+            "  allow_patterns=['*.json','*.safetensors','*.bin','*.py','*.md','*.txt'],\n"
+            ")\n"
+            "print('done', path, flush=True)\n"
+        )
+        cmd = (
+            "unset PYTHONPATH PYTHONHOME || true && "
+            "export PYTHONNOUSERSITE=1 "
+            "HF_ENDPOINT=${HF_ENDPOINT:-https://hf-mirror.com} "
+            "PYTHONUNBUFFERED=1 && "
+            f"exec {shlex.quote(py)} -c {shlex.quote(script)}"
+        )
+        if getattr(self, "_bagel_download_proc", None) is not None:
+            proc = self._bagel_download_proc
+            if proc.state() == QProcess.Running:
+                self.status_bar.showMessage("模型下载已在进行…")
+                return
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(
+            lambda: self._append_bagel_log(
+                bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace").rstrip()
+            )
+        )
+
+        def _on_finished(code: int, _status: QProcess.ExitStatus) -> None:
+            if code == 0 and os.path.isdir(save_dir):
+                self.bagel_model_edit.setText(save_dir)
+                self._append_bagel_log(f"模型已就绪: {save_dir}")
+                self.status_bar.showMessage(f"Bagel 模型已下载: {save_dir}")
+            else:
+                self.status_bar.showMessage(f"Bagel 模型下载失败 (code={code})")
+            self.bagel_download_btn.setEnabled(True)
+
+        proc.finished.connect(_on_finished)
+        self._bagel_download_proc = proc
+        self.bagel_download_btn.setEnabled(False)
+        self._append_bagel_log(f"$ 下载模型 → {save_dir}")
+        proc.setProcessEnvironment(bagel_isolated_process_env(py))
+        proc.start("bash", ["-lc", cmd])
+
+    def _on_bagel_start_clicked(self) -> None:
+        if getattr(self, "_bagel_api_launcher", None) is not None and self._bagel_api_launcher.is_running():
+            QMessageBox.warning(
+                self,
+                "Bagel",
+                "推理 API 仍在运行，会与 Gradio 争用 GPU。请先「停止 API」。",
+            )
+            return
+        self._bagel_launcher.start(
+            repo_dir=self.bagel_root_edit.text(),
+            model_path=self.bagel_model_edit.text(),
+            python_bin=self.bagel_python_edit.text(),
+            server_name=self.bagel_host_edit.text().strip() or BAGEL_SERVER_HOST_DEFAULT,
+            server_port=int(self.bagel_port_spin.value()),
+            mode=int(self.bagel_mode_combo.currentData() or 1),
+            zh=self.bagel_zh_check.isChecked(),
+            share=self.bagel_share_check.isChecked(),
+        )
+        self._update_bagel_run_ui()
+
+    def _on_bagel_stop_clicked(self) -> None:
+        self._bagel_launcher.stop()
+        self._update_bagel_run_ui()
+
+    def _on_bagel_clear_log_clicked(self) -> None:
+        self.bagel_log_edit.clear()
+
+    def _on_bagel_open_clicked(self) -> None:
+        url = self._bagel_launcher.current_url() or bagel_app_url(
+            self.bagel_host_edit.text(), int(self.bagel_port_spin.value())
+        )
+        QDesktopServices.openUrl(QUrl(url))
+        self.status_bar.showMessage(f"已打开 {url}")
+
+    def _on_bagel_ready_url(self, url: str) -> None:
+        self._load_bagel_web(url)
+        self.bagel_open_btn.setEnabled(True)
+        if hasattr(self, "bagel_pick_image_btn"):
+            self.bagel_pick_image_btn.setEnabled(self.bagel_web_view is not None)
+
+    def _poll_bagel_http_ready(self) -> None:
+        if not self._bagel_launcher.is_running():
+            self._bagel_ready_poll_timer.stop()
+            return
+        url = self._bagel_launcher.current_url()
+        if not url:
+            return
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                if 200 <= int(getattr(resp, "status", 200)) < 500:
+                    self._bagel_ready_poll_timer.stop()
+                    self._load_bagel_web(url)
+                    self.bagel_status_label.setText(f"Bagel: 已就绪 {url}")
+                    self.bagel_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+                    self.bagel_open_btn.setEnabled(True)
+                    if hasattr(self, "bagel_pick_image_btn"):
+                        self.bagel_pick_image_btn.setEnabled(
+                            self.bagel_web_view is not None
+                        )
+                    self._append_bagel_log(
+                        f"[ready] {url} — 用「选择图片」上传到嵌入页"
+                    )
+        except Exception:
+            pass
+
+    def _on_bagel_api_status(self, text: str) -> None:
+        label = text if text.startswith("Bagel") else f"推理 API: {text}"
+        self.bagel_api_status_label.setText(label)
+        self.status_bar.showMessage(text)
+
+    def _update_bagel_api_ui(self, *_args) -> None:
+        running = self._bagel_api_launcher.is_running()
+        ready = bool(self._bagel_api_launcher._ready_emitted) and running
+        self.bagel_api_start_btn.setEnabled(not running)
+        self.bagel_api_stop_btn.setEnabled(running)
+        self.bagel_api_port_spin.setEnabled(not running)
+        self.bagel_call_btn.setEnabled(running and ready and not self._bagel_call_busy)
+        if running:
+            self.bagel_api_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            if not self._bagel_api_ready_poll_timer.isActive():
+                self._bagel_api_ready_poll_timer.start()
+        else:
+            self.bagel_api_status_label.setStyleSheet("")
+            self._bagel_api_ready_poll_timer.stop()
+            if not ready:
+                self.bagel_api_status_label.setText("推理 API: 未部署")
+            try:
+                self.chat_panel.set_extra_inference_candidates([])
+                self.chat_panel.refresh_running_providers(notify=False, silent_apply=True)
+            except Exception:
+                pass
+
+    def _on_bagel_api_start_clicked(self) -> None:
+        if self._bagel_launcher.is_running():
+            QMessageBox.warning(
+                self,
+                "Bagel",
+                "Gradio 仍在运行，会与推理 API 争用同一份 GPU 权重。\n"
+                "请先停止 Gradio，再部署推理 API。",
+            )
+            return
+        self._bagel_api_launcher.start(
+            repo_dir=self.bagel_root_edit.text(),
+            model_path=self.bagel_model_edit.text(),
+            python_bin=self.bagel_python_edit.text(),
+            server_name=self.bagel_host_edit.text().strip() or BAGEL_SERVER_HOST_DEFAULT,
+            server_port=int(self.bagel_api_port_spin.value()),
+            mode=int(self.bagel_mode_combo.currentData() or 1),
+        )
+        self._update_bagel_api_ui()
+
+    def _on_bagel_api_stop_clicked(self) -> None:
+        self._bagel_api_launcher.stop()
+        self._update_bagel_api_ui()
+
+    def _on_bagel_api_ready(self, url: str) -> None:
+        self.bagel_api_status_label.setText(f"推理 API: 已就绪 {url}")
+        self.bagel_api_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        self.bagel_call_btn.setEnabled(not self._bagel_call_busy)
+        api_base = url.rstrip("/") + "/v1"
+        self.chat_panel.set_extra_inference_candidates(
+            [("Bagel", api_base, "EMPTY", "BAGEL-7B-MoT")]
+        )
+        n = self.chat_panel.refresh_running_providers(
+            prefer_api=api_base,
+            prefer_model="BAGEL-7B-MoT",
+            notify=True,
+            silent_apply=False,
+        )
+        self._append_bagel_log(f"[ready] 推理 API {url}  已加入对话服务列表 ({n})")
+
+    def _poll_bagel_api_ready(self) -> None:
+        if not self._bagel_api_launcher.is_running():
+            self._bagel_api_ready_poll_timer.stop()
+            return
+        url = self._bagel_api_launcher.current_url().rstrip("/")
+        if not url:
+            return
+        ok, body, _err = _http_get_json(f"{url}/health", timeout_s=1.5)
+        if ok and isinstance(body, dict) and body.get("ok"):
+            self._bagel_api_ready_poll_timer.stop()
+            if not self._bagel_api_launcher._ready_emitted:
+                self._bagel_api_launcher._ready_emitted = True
+                self._bagel_api_launcher.ready_url.emit(url + "/")
+
+    def _on_bagel_call_pick_clicked(self) -> None:
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 Bagel 输入图",
+            os.path.expanduser("~"),
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp);;All (*)",
+        )
+        if not selected:
+            return
+        image = cv2.imread(selected, cv2.IMREAD_COLOR)
+        if image is None:
+            QMessageBox.warning(self, "Bagel", f"无法读取图片: {selected}")
+            return
+        self._bagel_call_image_path = selected
+        pix = cv2_to_qpixmap(image)
+        if pix is not None and not pix.isNull():
+            self.bagel_call_input_preview.setPixmap(
+                pix.scaled(
+                    self.bagel_call_input_preview.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
+            self.bagel_call_input_preview.setText("")
+        self.bagel_call_input_preview.setToolTip(selected)
+
+    def _on_bagel_call_clicked(self) -> None:
+        if self._bagel_call_busy:
+            return
+        if not self._bagel_api_launcher.is_running():
+            QMessageBox.information(self, "Bagel", "请先点「部署推理 API」并等待就绪。")
+            return
+        prompt = self.bagel_call_prompt_edit.text().strip()
+        if not prompt:
+            QMessageBox.information(self, "Bagel", "请填写提示词。")
+            return
+        task = str(self.bagel_call_task_combo.currentData() or "text2image")
+        image_bgr = None
+        if task in ("understand", "edit"):
+            path = self._bagel_call_image_path
+            if not path or not os.path.isfile(path):
+                QMessageBox.information(self, "Bagel", "理解/编辑请先点「选图」。")
+                return
+            image_bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+            if image_bgr is None:
+                QMessageBox.warning(self, "Bagel", f"无法读取图片: {path}")
+                return
+        api_base = self._bagel_api_launcher.api_base()
+        self._bagel_call_busy = True
+        self.bagel_call_btn.setEnabled(False)
+        self.bagel_call_btn.setText("调用中…")
+        self._append_bagel_log(f"[call] {task}: {prompt[:80]}")
+        img_copy = None if image_bgr is None else np.asarray(image_bgr).copy()
+
+        def _work() -> None:
+            try:
+                reply = call_bagel_inference(
+                    api_base, prompt, image_bgr=img_copy, task=task
+                )
+                self._bagel_call_bridge.finished.emit({"ok": True, "reply": reply})
+            except Exception as exc:
+                self._bagel_call_bridge.finished.emit({"ok": False, "error": str(exc)})
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _on_bagel_call_finished(self, result: object) -> None:
+        self._bagel_call_busy = False
+        self.bagel_call_btn.setText("调用")
+        self.bagel_call_btn.setEnabled(self._bagel_api_launcher.is_running())
+        data = result if isinstance(result, dict) else {}
+        if not data.get("ok"):
+            err = str(data.get("error") or result)
+            self._append_bagel_log(f"[call error] {err}")
+            self.bagel_call_output_preview.setPixmap(QPixmap())
+            self.bagel_call_output_preview.setText("调用失败")
+            self.status_bar.showMessage(f"Bagel 调用失败: {err[:80]}")
+            return
+        reply = str(data.get("reply") or "")
+        path = ""
+        text = reply
+        if reply.startswith("BAGEL_IMAGE::"):
+            first, _, rest = reply.partition("\n")
+            path = first.split("::", 1)[-1].strip()
+            text = rest
+        if path and os.path.isfile(path):
+            pix = QPixmap(path)
+            if not pix.isNull():
+                self.bagel_call_output_preview.setPixmap(
+                    pix.scaled(
+                        self.bagel_call_output_preview.size(),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                )
+                self.bagel_call_output_preview.setText("")
+                self.bagel_call_output_preview.setToolTip(path)
+            self._append_bagel_log(f"[call ok] 图像: {path}")
+        else:
+            self.bagel_call_output_preview.setPixmap(QPixmap())
+            preview = text.strip() or "(无图像输出)"
+            self.bagel_call_output_preview.setText(preview[:400])
+            self._append_bagel_log(f"[call ok] {preview[:200]}")
+        self.status_bar.showMessage("Bagel 调用完成")
+
+    def _load_bagel_web(self, url: str) -> None:
+        if self.bagel_web_view is None:
+            return
+        try:
+            self.bagel_web_view.setUrl(QUrl(url))
+        except Exception as exc:
+            self._append_bagel_log(f"[warn] 嵌入页加载失败: {exc}")
+
+    def _on_bagel_pick_image_clicked(self) -> None:
+        if self.bagel_web_view is None:
+            QMessageBox.information(
+                self,
+                "Bagel",
+                "当前无嵌入页，请用「浏览器打开」后在浏览器里上传。",
+            )
+            return
+        if not self._bagel_launcher.is_running():
+            QMessageBox.warning(self, "Bagel", "请先启动 Bagel")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择要写入 Gradio 的图片",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All (*)",
+        )
+        if not path:
+            return
+        try:
+            self._inject_bagel_image(path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Bagel", f"注入图片失败: {exc}")
+            self._append_bagel_log(f"[error] 注入图片失败: {exc}")
+
+    def _inject_bagel_image(self, path: str) -> None:
+        """把本地图片以内存 File 注入嵌入 Gradio，避免 WebEngine 空上传。"""
+        img = QImage(path)
+        if img.isNull():
+            raise ValueError(f"无法读取图像: {path}")
+        max_edge = 2048
+        if img.width() > max_edge or img.height() > max_edge:
+            img = img.scaled(
+                max_edge,
+                max_edge,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        buf = QByteArray()
+        qbuf = QBuffer(buf)
+        qbuf.open(QIODevice.WriteOnly)
+        if not img.save(qbuf, "PNG"):
+            raise RuntimeError("PNG 编码失败")
+        qbuf.close()
+        b64 = bytes(buf.toBase64()).decode("ascii")
+        name = os.path.splitext(os.path.basename(path))[0] + ".png"
+        # JSON-encode args for safe JS string literals
+        payload = json.dumps([b64, "image/png", name], ensure_ascii=True)
+        js = f"({_BAGEL_INJECT_IMAGE_JS})(...{payload})"
+
+        def _on_js_result(result) -> None:
+            text = str(result) if result is not None else ""
+            if text.startswith("ok:"):
+                self._append_bagel_log(f"[ok] 已注入图片 → Gradio ({name})")
+                self.status_bar.showMessage(f"已写入 Gradio: {name}")
+            else:
+                self._append_bagel_log(f"[warn] 图片注入结果: {text or 'empty'}")
+                self.status_bar.showMessage(
+                    "注入可能未成功：请先切到 Image Edit / Understanding 标签再试"
+                )
+
+        page = self.bagel_web_view.page()
+        try:
+            page.runJavaScript(js, _on_js_result)
+        except TypeError:
+            # 部分 PyQt 绑定不接受 callback
+            page.runJavaScript(js)
+            self._append_bagel_log(f"[ok] 已请求注入图片 → Gradio ({name})")
+            self.status_bar.showMessage(f"已写入 Gradio: {name}")
 
     def _on_sim_bridge_browse_clicked(self) -> None:
         current = self.sim_bridge_dir_edit.text().strip()
@@ -18153,6 +20189,14 @@ class CameraTopicWindow(QMainWindow):
             self.lingbot_video_player.close_video()
         if getattr(self, "_lingbot_world_launcher", None) is not None:
             self._lingbot_world_launcher.shutdown()
+        if getattr(self, "_bagel_launcher", None) is not None:
+            if getattr(self, "_bagel_ready_poll_timer", None) is not None:
+                self._bagel_ready_poll_timer.stop()
+            self._bagel_launcher.shutdown()
+        if getattr(self, "_bagel_api_launcher", None) is not None:
+            if getattr(self, "_bagel_api_ready_poll_timer", None) is not None:
+                self._bagel_api_ready_poll_timer.stop()
+            self._bagel_api_launcher.shutdown()
         if getattr(self, "lingbot_world_player", None) is not None:
             self.lingbot_world_player.close_video()
         if getattr(self, "_real_eval_timer", None) is not None:
@@ -21505,7 +23549,20 @@ class CameraTopicWindow(QMainWindow):
         current = self.skeleton_cam_combo.currentData()
         self.skeleton_cam_combo.blockSignals(True)
         self.skeleton_cam_combo.clear()
-        topics = []
+
+        # 本机摄像头
+        local_indices = self._discover_local_webcam_indices()
+        for idx in local_indices:
+            dev = f"/dev/video{idx}"
+            label = f"本地摄像头 {idx}"
+            if os.path.exists(dev):
+                label = f"{label} ({dev})"
+            self.skeleton_cam_combo.addItem(label, f"{SKELETON_LOCAL_CAM_PREFIX}{idx}")
+
+        # VNC / 跨机：网络流（URL 见下方输入框）
+        self.skeleton_cam_combo.addItem("网络流 (下方 URL)", SKELETON_NETWORK_CAM_SOURCE)
+
+        topics: List[str] = []
         for topic, types in sorted(self._topic_types.items()):
             if not self._is_image_topic(types):
                 continue
@@ -21518,18 +23575,208 @@ class CameraTopicWindow(QMainWindow):
                     topics.append(topic)
         for topic in topics:
             self.skeleton_cam_combo.addItem(topic, topic)
+
+        prefer_network = False
+        # 远端常见：没有真实 /dev/video，默认选网络流
+        if not any(os.path.exists(f"/dev/video{i}") for i in local_indices):
+            prefer_network = True
+
         if current:
             idx = self.skeleton_cam_combo.findData(current)
             if idx >= 0:
                 self.skeleton_cam_combo.setCurrentIndex(idx)
+            elif prefer_network:
+                idx = self.skeleton_cam_combo.findData(SKELETON_NETWORK_CAM_SOURCE)
+                self.skeleton_cam_combo.setCurrentIndex(max(0, idx))
+        elif prefer_network:
+            idx = self.skeleton_cam_combo.findData(SKELETON_NETWORK_CAM_SOURCE)
+            self.skeleton_cam_combo.setCurrentIndex(max(0, idx))
+        elif self.skeleton_cam_combo.count() > 0:
+            self.skeleton_cam_combo.setCurrentIndex(0)
         self.skeleton_cam_combo.blockSignals(False)
+        self._on_skeleton_cam_source_changed()
         if self.skeleton_cam_combo.count() == 0:
-            self.skeleton_status_label.setText("手骨架: 无可用彩色相机（请先勾选并订阅）")
+            self.skeleton_status_label.setText("手骨架: 无可用相机")
+
+    def _on_skeleton_cam_source_changed(self, *_args) -> None:
+        is_net = self._skeleton_source_is_network(self.skeleton_cam_combo.currentData())
+        if hasattr(self, "skeleton_stream_url_edit"):
+            self.skeleton_stream_url_edit.setEnabled(True)  # 始终可编辑，便于预先填好
+            self.skeleton_stream_url_edit.setStyleSheet(
+                f"color: {UI_TEXT_PRIMARY};" if is_net else f"color: {UI_TEXT_MUTED};"
+            )
+
+    def _on_skeleton_network_help(self) -> None:
+        QMessageBox.information(self, "本机摄像头 → 远端（VNC）", SKELETON_NETWORK_HELP)
+
+    @staticmethod
+    def _skeleton_source_is_local(source: object) -> bool:
+        return isinstance(source, str) and source.startswith(SKELETON_LOCAL_CAM_PREFIX)
+
+    @staticmethod
+    def _skeleton_source_is_network(source: object) -> bool:
+        return source == SKELETON_NETWORK_CAM_SOURCE
+
+    @staticmethod
+    def _skeleton_source_uses_capture(source: object) -> bool:
+        return MainWindow._skeleton_source_is_local(source) or MainWindow._skeleton_source_is_network(
+            source
+        )
+
+    @staticmethod
+    def _skeleton_local_cam_index(source: object) -> int:
+        if not isinstance(source, str) or not source.startswith(SKELETON_LOCAL_CAM_PREFIX):
+            return 0
+        try:
+            return max(0, int(source.split(":", 1)[1]))
+        except ValueError:
+            return 0
+
+    def _discover_local_webcam_indices(self, max_index: int = 5) -> List[int]:
+        """探测本机可用摄像头；探测失败时仍提供 index=0。"""
+        if self._skeleton_tracking and self._skeleton_local_cap is not None:
+            cur = self.skeleton_cam_combo.currentData()
+            if self._skeleton_source_is_local(cur):
+                return [self._skeleton_local_cam_index(cur)]
+            return [0]
+        found: List[int] = []
+        for i in range(max_index + 1):
+            cap = None
+            try:
+                cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
+                if not cap.isOpened():
+                    cap.release()
+                    cap = cv2.VideoCapture(i)
+                if not cap.isOpened():
+                    continue
+                ok, frame = cap.read()
+                if ok and frame is not None and getattr(frame, "size", 0) > 0:
+                    found.append(i)
+            except Exception:
+                continue
+            finally:
+                if cap is not None:
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+        return found if found else [0]
+
+    def _close_skeleton_local_cam(self) -> None:
+        cap = self._skeleton_local_cap
+        self._skeleton_local_cap = None
+        if cap is None:
+            return
+        try:
+            cap.release()
+        except Exception:
+            pass
+
+    def _open_skeleton_local_cam(self, index: int) -> Tuple[bool, str]:
+        self._close_skeleton_local_cam()
+        cap = None
+        try:
+            cap = cv2.VideoCapture(int(index), cv2.CAP_V4L2)
+            if not cap.isOpened():
+                cap.release()
+                cap = cv2.VideoCapture(int(index))
+            if not cap.isOpened():
+                return False, f"无法打开本地摄像头 {index}（/dev/video{index}）"
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            ok, frame = cap.read()
+            if not ok or frame is None or getattr(frame, "size", 0) == 0:
+                cap.release()
+                return False, f"本地摄像头 {index} 已打开但读不到画面"
+            self._skeleton_local_cap = cap
+            return True, f"本地摄像头 {index}"
+        except Exception as exc:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            return False, f"打开本地摄像头失败: {exc}"
+
+    def _open_skeleton_network_stream(self, url: str) -> Tuple[bool, str]:
+        url = (url or "").strip()
+        if not url:
+            return False, "请填写网络流 URL（例如 http://127.0.0.1:8090/cam.mjpg）"
+        self._close_skeleton_local_cam()
+        cap = None
+        try:
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                if cap is not None:
+                    cap.release()
+                cap = cv2.VideoCapture(url)
+            if not cap.isOpened():
+                return (
+                    False,
+                    f"无法打开网络流:\n{url}\n\n请确认本机 MJPEG 服务与 SSH -R 隧道已建立（点「用法」）。",
+                )
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            # 网络流首帧可能稍慢
+            deadline = time.time() + 8.0
+            frame = None
+            ok = False
+            while time.time() < deadline:
+                ok, frame = cap.read()
+                if ok and frame is not None and getattr(frame, "size", 0) > 0:
+                    break
+                time.sleep(0.05)
+            if not ok or frame is None or getattr(frame, "size", 0) == 0:
+                cap.release()
+                return False, f"网络流已连接但读不到画面:\n{url}"
+            self._skeleton_local_cap = cap
+            return True, url
+        except Exception as exc:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            return False, f"打开网络流失败: {exc}"
+
+    def _read_skeleton_frame(self, source: object) -> Tuple[Optional[np.ndarray], str]:
+        """返回 (BGR 帧, 来源标签)。"""
+        if self._skeleton_source_is_local(source):
+            idx = self._skeleton_local_cam_index(source)
+            cap = self._skeleton_local_cap
+            if cap is None:
+                return None, f"本地摄像头 {idx}（未打开）"
+            ok, frame = cap.read()
+            if not ok or frame is None or getattr(frame, "size", 0) == 0:
+                return None, f"本地摄像头 {idx}"
+            return frame, f"本地摄像头 {idx}"
+        if self._skeleton_source_is_network(source):
+            url = self.skeleton_stream_url_edit.text().strip() or SKELETON_NETWORK_URL_DEFAULT
+            cap = self._skeleton_local_cap
+            if cap is None:
+                return None, f"网络流（未打开） {url}"
+            ok, frame = cap.read()
+            if not ok or frame is None or getattr(frame, "size", 0) == 0:
+                return None, url
+            short = url if len(url) <= 48 else url[:45] + "..."
+            return frame, short
+        topic = str(source or "")
+        if not topic:
+            return None, "(未选相机)"
+        frame = self._frame_cache.get(topic)
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return None, topic
+        return frame, topic
 
     def _stop_skeleton_tracking(self) -> None:
         self._skeleton_tracking = False
         self._skeleton_timer.stop()
         self.skeleton_teleop_check.setChecked(False)
+        self._close_skeleton_local_cam()
         if self._hand_skeleton_detector is not None:
             try:
                 self._hand_skeleton_detector.close()
@@ -21556,24 +23803,53 @@ class CameraTopicWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "手骨架遥控",
-                "未安装 mediapipe。请执行:\n"
-                "  python3.10 -m pip install 'mediapipe==0.10.14'\n"
-                "并保持 numpy<2（与 ROS2 cv_bridge 兼容）。",
+                "未安装 mediapipe。请在当前 ROS conda 环境执行:\n"
+                "  python -m pip install 'mediapipe==0.10.14'\n"
+                "（本机 run_local.sh 使用 Python 3.11；勿强行降 numpy，"
+                "conda 已带的 numpy 可与 cv_bridge 共存。）",
             )
             return
+        # 保留当前选择（含网络流），刷新时不要冲掉
+        prev = self.skeleton_cam_combo.currentData()
         self._refresh_skeleton_camera_list()
+        if prev is not None:
+            idx = self.skeleton_cam_combo.findData(prev)
+            if idx >= 0:
+                self.skeleton_cam_combo.setCurrentIndex(idx)
         if self.skeleton_cam_combo.count() == 0:
-            self.status_bar.showMessage("请先在左侧勾选彩色相机 topic")
+            self.status_bar.showMessage("无可用相机：请用网络流、本机摄像头或 ROS topic")
             return
+        source = self.skeleton_cam_combo.currentData()
+        if self._skeleton_source_is_local(source):
+            ok, msg = self._open_skeleton_local_cam(self._skeleton_local_cam_index(source))
+            if not ok:
+                QMessageBox.warning(self, "手骨架遥控", msg)
+                return
+        elif self._skeleton_source_is_network(source):
+            url = self.skeleton_stream_url_edit.text().strip() or SKELETON_NETWORK_URL_DEFAULT
+            self.skeleton_stream_url_edit.setText(url)
+            self.status_bar.showMessage(f"正在连接网络流: {url}")
+            QApplication.processEvents()
+            ok, msg = self._open_skeleton_network_stream(url)
+            if not ok:
+                QMessageBox.warning(self, "手骨架遥控", msg)
+                return
         try:
             self._hand_skeleton_detector = HandSkeletonDetector(max_num_hands=2)
         except Exception as exc:
+            self._close_skeleton_local_cam()
             QMessageBox.warning(self, "手骨架遥控", f"初始化 MediaPipe Hands 失败:\n{exc}")
             self._hand_skeleton_detector = None
             return
         self._skeleton_tracking = True
         self.skeleton_track_btn.setText("停止识别")
-        self.skeleton_status_label.setText("手骨架: 识别中…")
+        if self._skeleton_source_is_local(source):
+            src_label = f"本地摄像头 {self._skeleton_local_cam_index(source)}"
+        elif self._skeleton_source_is_network(source):
+            src_label = self.skeleton_stream_url_edit.text().strip()
+        else:
+            src_label = str(source)
+        self.skeleton_status_label.setText(f"手骨架: 识别中… @ {src_label}")
         self._skeleton_timer.start()
 
     def _on_skeleton_teleop_toggled(self, checked: bool) -> None:
@@ -21598,12 +23874,12 @@ class CameraTopicWindow(QMainWindow):
             return
         if self._hand_skeleton_detector is None:
             return
-        topic = self.skeleton_cam_combo.currentData()
-        if not topic:
+        source = self.skeleton_cam_combo.currentData()
+        if not source:
             return
-        frame = self._frame_cache.get(topic)
-        if frame is None or getattr(frame, "size", 0) == 0:
-            self.skeleton_status_label.setText(f"手骨架: 等待图像 {topic}")
+        frame, src_label = self._read_skeleton_frame(source)
+        if frame is None:
+            self.skeleton_status_label.setText(f"手骨架: 等待图像 {src_label}")
             return
         self._skeleton_busy = True
         try:
@@ -21652,11 +23928,11 @@ class CameraTopicWindow(QMainWindow):
                 self.skeleton_joints_label.setText(" | ".join(lines))
                 mode = "遥控" if teleop else "预览"
                 self.skeleton_status_label.setText(
-                    f"手骨架: {mode} 检测到 {len(hands)} 只手 @ {topic}"
+                    f"手骨架: {mode} 检测到 {len(hands)} 只手 @ {src_label}"
                 )
             else:
                 self.skeleton_joints_label.setText("关节: (未检测到手)")
-                self.skeleton_status_label.setText(f"手骨架: 未检测到手 @ {topic}")
+                self.skeleton_status_label.setText(f"手骨架: 未检测到手 @ {src_label}")
         except Exception as exc:
             self.skeleton_status_label.setText(f"手骨架错误: {exc}")
         finally:

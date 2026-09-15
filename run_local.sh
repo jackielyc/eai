@@ -61,6 +61,10 @@ _apply_qt_paths() {
     local qt_lib="$1"
     local qt_platforms="$2"
     unset QT_PLUGIN_PATH
+    # 避免 opencv-contrib 等把路径指到 cv2/qt/plugins，导致 xcb 加载失败
+    if [[ -n "${QT_QPA_PLATFORM_PLUGIN_PATH:-}" && "${QT_QPA_PLATFORM_PLUGIN_PATH}" == *"/cv2/"* ]]; then
+        unset QT_QPA_PLATFORM_PLUGIN_PATH
+    fi
     if [[ -n "${qt_lib}" ]]; then
         export LD_LIBRARY_PATH="${qt_lib}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
     fi
@@ -221,4 +225,9 @@ PY
 fi
 
 _log_elapsed
+# 启动前再钉一次 PyQt 插件路径（防止先前环境 / OpenCV 污染）
+if [[ "${ROS_MODE}" == "conda_humble" ]]; then
+    _conda_pyqt_root="${CONDA_PREFIX}/lib/python3.11/site-packages/PyQt5/Qt5"
+    _apply_qt_paths "${_conda_pyqt_root}/lib" "${_conda_pyqt_root}/plugins/platforms"
+fi
 exec "${PYTHON}" "${EAI_DIR}/show_camera_topics.py" "$@"
