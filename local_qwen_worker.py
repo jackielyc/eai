@@ -40,6 +40,7 @@ _STATE: Dict[str, Any] = {
     "processor": None,
     "model_dir": "",
     "device": "",
+    "kind": "",
 }
 
 
@@ -233,6 +234,7 @@ def load_full_model(model_dir: str) -> None:
         _STATE["model"] = model
         _STATE["model_dir"] = model_dir
         _STATE["device"] = device
+        _STATE["kind"] = "full"
         _STATE["ready"] = True
         _STATE["error"] = ""
     _ensure_cudnn_ready()
@@ -338,6 +340,7 @@ def load_lora_model(adapter_dir: str) -> None:
         _STATE["model"] = model
         _STATE["model_dir"] = adapter_dir
         _STATE["device"] = device
+        _STATE["kind"] = "lora"
         _STATE["ready"] = True
         _STATE["error"] = ""
     _ensure_cudnn_ready()
@@ -478,7 +481,15 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "LocalQwenWorker/1.0"
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        _log("%s - %s" % (self.address_string(), fmt % args))
+        # UI 会高频轮询 /health，默认不打 access log，避免刷屏
+        try:
+            msg = fmt % args
+        except Exception:
+            msg = str(fmt)
+        low = msg.lower()
+        if "/health" in low and ('" 200' in msg or " 200 " in msg):
+            return
+        _log("%s - %s" % (self.address_string(), msg))
 
     def _send_json(self, code: int, body: Dict[str, Any]) -> None:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -501,6 +512,7 @@ class Handler(BaseHTTPRequestHandler):
                     "model": MODEL_ID,
                     "model_dir": _STATE.get("model_dir") or "",
                     "device": _STATE.get("device") or "",
+                    "kind": _STATE.get("kind") or "",
                     "error": err,
                 },
             )

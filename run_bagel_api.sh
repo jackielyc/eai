@@ -70,6 +70,8 @@ export NO_PROXY="127.0.0.1,localhost,${NO_PROXY:-}"
 export TMPDIR="${TMPDIR:-${SCRIPT_DIR}/.cache/bagel_tmp}"
 mkdir -p "${TMPDIR}"
 export PYTHONDONTWRITEBYTECODE=1
+export BITSANDBYTES_NOWELCOME=1
+export PYTHONWARNINGS="${PYTHONWARNINGS:+$PYTHONWARNINGS,}ignore:MatMul8bitLt:UserWarning"
 
 echo "[run_bagel_api] python=${BAGEL_PYTHON}"
 echo "[run_bagel_api] model=${BAGEL_MODEL_PATH}"

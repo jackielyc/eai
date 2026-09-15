@@ -9,9 +9,11 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_in_docker.sh          # ROS 在 Docker 内运行时用此方式（推荐）
   bash run.sh                    # ROS 在宿主机直接运行时用此方式
   python3.10 show_camera_topics.py --prefix /camera
-  bash run_local.sh --tab 测试   # 只展示「测试」tab（也可用 --tab test）
+  bash run_local.sh --tab "sub task"              # 只展示「sub task」
+  bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
+  bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / Bagel / CAD / 训练 / 手臂·手 / 手骨架遥控 / 测试 / 仿真评测 / 真机评测 / 上下文学习。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测 / 真机评测 / ICL / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -724,15 +726,15 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "3D重建模型",
     "视频生成模型",
     "世界模型",
-    "Bagel",
     "CAD",
     "训练",
     "手臂/手",
     "手骨架遥控",
-    "测试",
     "仿真评测",
     "真机评测",
-    "上下文学习",
+    "ICL",
+    "sub task",
+    "sub image",
 )
 # 启动 --tab 可用的别名 → 正式标题
 CONTROL_TAB_ALIASES: Dict[str, str] = {
@@ -758,9 +760,12 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "视频生成模型": "视频生成模型",
     "world": "世界模型",
     "世界模型": "世界模型",
-    "bagel": "Bagel",
-    "Bagel": "Bagel",
-    "BAGEL": "Bagel",
+    "bagel": "sub image",
+    "Bagel": "sub image",
+    "BAGEL": "sub image",
+    "sub image": "sub image",
+    "subimage": "sub image",
+    "sub-image": "sub image",
     "cad": "CAD",
     "CAD": "CAD",
     "train": "训练",
@@ -771,17 +776,22 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "手臂·手": "手臂/手",
     "skeleton": "手骨架遥控",
     "手骨架遥控": "手骨架遥控",
-    "test": "测试",
-    "测试": "测试",
+    "test": "sub task",
+    "测试": "sub task",
+    "sub task": "sub task",
+    "subtask": "sub task",
+    "sub-task": "sub task",
     "sim": "仿真评测",
     "sim_eval": "仿真评测",
     "仿真评测": "仿真评测",
     "real": "真机评测",
     "real_eval": "真机评测",
     "真机评测": "真机评测",
-    "ctx": "上下文学习",
-    "context": "上下文学习",
-    "上下文学习": "上下文学习",
+    "ctx": "ICL",
+    "context": "ICL",
+    "icl": "ICL",
+    "ICL": "ICL",
+    "上下文学习": "ICL",
 }
 CAD_MESHES_DIR = os.path.join(EAI_DIR, "meshes")
 TEST_IMAGES_DIR = os.path.join(EAI_DIR, "images")
@@ -1192,6 +1202,26 @@ def remote_deploy_scan_roots(host_id: str) -> List[Tuple[str, str]]:
 
 def deploy_model_kind_label(kind: str) -> str:
     return "LoRA" if kind == "lora" else "全量"
+
+
+def qwen_deploy_mode_suffix(
+    info: Optional[Dict[str, object]] = None,
+    *,
+    model_dir: str = "",
+    kind: str = "",
+) -> str:
+    """部署成功后状态栏用的 mode 片段，如 ' · mode=LoRA'。"""
+    k = (kind or "").strip().lower()
+    if not k and isinstance(info, dict):
+        k = str(info.get("kind") or "").strip().lower()
+    path = (model_dir or "").strip()
+    if not path and isinstance(info, dict):
+        path = str(info.get("model_dir") or "").strip()
+    if not k and path:
+        k = "lora" if qwen_model_is_lora(path) else "full"
+    if not k:
+        return ""
+    return f" · mode={deploy_model_kind_label(k)}"
 
 
 def fetch_deploy_model_dirs(
@@ -7146,6 +7176,26 @@ class ChatPanelWidget(QWidget):
         self.attached_image_changed.emit(path)
         return True
 
+    def get_attached_image_path(self) -> str:
+        return str(self._chat_attach_image_path or "").strip()
+
+    def get_last_role_text(self, role: str = "assistant") -> str:
+        """取当前会话中最近一条指定角色的纯文本（跳过 BAGEL_IMAGE 元数据行）。"""
+        want = str(role or "").strip()
+        for msg in reversed(self._messages):
+            if str(msg.get("role") or "") != want:
+                continue
+            content = msg.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            text = content.strip()
+            if text.startswith("BAGEL_IMAGE::"):
+                _first, _, rest = text.partition("\n")
+                text = rest.strip()
+            if text:
+                return text
+        return ""
+
     def _on_clear_chat_image_clicked(self, *, notify: bool = True) -> None:
         had_image = self._chat_attach_image_bgr is not None
         self._chat_attach_image_bgr = None
@@ -12103,6 +12153,20 @@ def resolve_bagel_python(repo: str) -> str:
     return sys.executable or "python3"
 
 
+def bagel_mode_label(mode: int) -> str:
+    """Bagel --mode 的可读标签。"""
+    labels = {
+        1: "1 · 全精度 (bf16)",
+        2: "2 · NF4 量化",
+        3: "3 · INT8 量化",
+    }
+    try:
+        m = int(mode)
+    except (TypeError, ValueError):
+        m = 1
+    return labels.get(m, f"{m}")
+
+
 def resolve_bagel_model_path(repo: str, model_path: str = "") -> str:
     """解析模型目录：相对仓库路径 / 绝对路径 / eai 缓存默认。"""
     raw = (model_path or "").strip() or BAGEL_MODEL_DEFAULT
@@ -12151,6 +12215,15 @@ def bagel_isolated_process_env(python_bin: str = "") -> QProcessEnvironment:
     qenv.insert("PYTHONNOUSERSITE", "1")
     qenv.insert("PYTHONUNBUFFERED", "1")
     qenv.insert("GRADIO_ANALYTICS_ENABLED", "False")
+    # bitsandbytes INT8/NF4 会刷屏 MatMul8bitLt cast 警告；抑制后日志可读。
+    qenv.insert("BITSANDBYTES_NOWELCOME", "1")
+    existing_pw = (qenv.value("PYTHONWARNINGS", "") or "").strip()
+    matmul_filter = "ignore:MatMul8bitLt:UserWarning"
+    if matmul_filter not in existing_pw:
+        qenv.insert(
+            "PYTHONWARNINGS",
+            f"{existing_pw},{matmul_filter}" if existing_pw else matmul_filter,
+        )
     py = (python_bin or "").strip()
     if py and os.path.isfile(py):
         venv_bin = os.path.dirname(os.path.abspath(py))
@@ -12161,6 +12234,18 @@ def bagel_isolated_process_env(python_bin: str = "") -> QProcessEnvironment:
         if venv_bin not in parts:
             qenv.insert("PATH", f"{venv_bin}:{path_now}" if path_now else venv_bin)
     return qenv
+
+
+def _is_noisy_bagel_log_line(line: str) -> bool:
+    """bitsandbytes 量化推理时的无用刷屏行。"""
+    text = (line or "").strip()
+    if not text:
+        return True
+    if "MatMul8bitLt" in text:
+        return True
+    if "inputs will be cast from" in text and "during quantization" in text:
+        return True
+    return False
 
 
 def bagel_app_url(host: str, port: int) -> str:
@@ -12252,12 +12337,16 @@ class BagelAppLauncher(QObject):
         self._process: Optional[QProcess] = None
         self._ready_emitted = False
         self._url = ""
+        self._mode = 1
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.state() == QProcess.Running
 
     def current_url(self) -> str:
         return self._url
+
+    def current_mode(self) -> int:
+        return int(self._mode or 1)
 
     def start(
         self,
@@ -12272,7 +12361,9 @@ class BagelAppLauncher(QObject):
         share: bool = False,
     ) -> None:
         if self.is_running():
-            self.status_message.emit("Bagel 已在运行")
+            self.status_message.emit(
+                f"Bagel 已在运行 (mode={bagel_mode_label(self.current_mode())})"
+            )
             return
         repo = resolve_bagel_root(repo_dir)
         app_py = os.path.join(repo, "app.py")
@@ -12305,6 +12396,7 @@ class BagelAppLauncher(QObject):
         model_arg = model_abs if os.path.isdir(model_abs) else model
         host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
         port = int(server_port)
+        self._mode = int(mode or 1)
         self._url = bagel_app_url(host, port)
         self._ready_emitted = False
 
@@ -12317,7 +12409,7 @@ class BagelAppLauncher(QObject):
             "--model_path",
             model_arg,
             "--mode",
-            str(int(mode)),
+            str(self._mode),
         ]
         if zh:
             args.append("--zh")
@@ -12358,7 +12450,9 @@ class BagelAppLauncher(QObject):
         self.running_changed.emit(True)
         self.log_line.emit(f"$ cd {repo}")
         self.log_line.emit(f"$ {py} {' '.join(args)}")
-        self.status_message.emit(f"正在启动 Bagel Gradio ({self._url})…")
+        self.status_message.emit(
+            f"正在启动 Bagel Gradio ({self._url}) · mode={bagel_mode_label(self._mode)}…"
+        )
 
     def stop(self) -> None:
         if not self.is_running():
@@ -12386,7 +12480,9 @@ class BagelAppLauncher(QObject):
         if "running on" in low or "http://" in low or "local url" in low:
             self._ready_emitted = True
             self.ready_url.emit(self._url)
-            self.status_message.emit(f"Bagel 已就绪: {self._url}")
+            self.status_message.emit(
+                f"Bagel 已就绪: {self._url}  ·  mode={bagel_mode_label(self.current_mode())}"
+            )
 
     def _on_process_output(self) -> None:
         if self._process is None:
@@ -12395,6 +12491,8 @@ class BagelAppLauncher(QObject):
         for line in data.splitlines():
             if line:
                 text = line.rstrip()
+                if _is_noisy_bagel_log_line(text):
+                    continue
                 self.log_line.emit(text)
                 self._maybe_emit_ready(text)
 
@@ -12435,6 +12533,7 @@ class BagelApiLauncher(QObject):
         self._ready_emitted = False
         self._url = ""
         self._api_base = ""
+        self._mode = 1
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.state() == QProcess.Running
@@ -12444,6 +12543,9 @@ class BagelApiLauncher(QObject):
 
     def api_base(self) -> str:
         return self._api_base
+
+    def current_mode(self) -> int:
+        return int(self._mode or 1)
 
     def start(
         self,
@@ -12456,7 +12558,9 @@ class BagelApiLauncher(QObject):
         mode: int = 1,
     ) -> None:
         if self.is_running():
-            self.status_message.emit("Bagel 推理 API 已在运行")
+            self.status_message.emit(
+                f"Bagel 推理 API 已在运行 (mode={bagel_mode_label(self.current_mode())})"
+            )
             return
         repo = resolve_bagel_root(repo_dir)
         serve_py = os.path.join(repo, "serve_api.py")
@@ -12483,6 +12587,7 @@ class BagelApiLauncher(QObject):
             return
         host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
         port = int(server_port)
+        self._mode = int(mode or 1)
         self._url = bagel_app_url(host, port)
         self._api_base = self._url.rstrip("/") + "/v1"
         self._ready_emitted = False
@@ -12496,7 +12601,7 @@ class BagelApiLauncher(QObject):
             "--model_path",
             model_abs,
             "--mode",
-            str(int(mode)),
+            str(self._mode),
         ]
         quoted = " ".join(shlex.quote(a) for a in args)
         venv_activate = ""
@@ -12536,7 +12641,9 @@ class BagelApiLauncher(QObject):
         self.running_changed.emit(True)
         self.log_line.emit(f"$ cd {repo}")
         self.log_line.emit(f"$ {py} {' '.join(args)}")
-        self.status_message.emit(f"正在部署 Bagel 推理 API ({self._url})…")
+        self.status_message.emit(
+            f"正在部署 Bagel 推理 API ({self._url}) · mode={bagel_mode_label(self._mode)}…"
+        )
 
     def stop(self) -> None:
         if not self.is_running():
@@ -12564,7 +12671,9 @@ class BagelApiLauncher(QObject):
         if "[bagel-api] ready" in low or "uvicorn running on" in low:
             self._ready_emitted = True
             self.ready_url.emit(self._url)
-            self.status_message.emit(f"Bagel 推理 API 已就绪: {self._url}")
+            self.status_message.emit(
+                f"Bagel 推理 API 已就绪: {self._url}  ·  mode={bagel_mode_label(self.current_mode())}"
+            )
 
     def _on_process_output(self) -> None:
         if self._process is None:
@@ -12573,6 +12682,8 @@ class BagelApiLauncher(QObject):
         for line in data.splitlines():
             if line:
                 text = line.rstrip()
+                if _is_noisy_bagel_log_line(text):
+                    continue
                 self.log_line.emit(text)
                 self._maybe_emit_ready(text)
 
@@ -15814,12 +15925,18 @@ class CameraTopicWindow(QMainWindow):
         control_tabs.addTab(world_tab, "世界模型")
 
         bagel_tab = QWidget()
+        self.bagel_tab = bagel_tab
+        bagel_tab.setObjectName("bagelTab")
+        bagel_tab.setStyleSheet(
+            "#bagelTab { background-color: #1a1a1a; }"
+            "#bagelTab QLabel { background: transparent; }"
+        )
         bagel_outer = QVBoxLayout(bagel_tab)
         bagel_outer.setContentsMargins(8, 6, 8, 6)
         bagel_outer.setSpacing(6)
         bagel_hint = QLabel(
-            "BAGEL：Gradio 界面（「启动」）或单独部署无 UI 推理 API（「部署推理 API」）。\n"
-            "推理 API 启动后可在本页点「调用」，也会出现在右侧 AI 对话的运行中服务列表。"
+            "BAGEL：Gradio（「启动」）或推理 API（「部署推理 API」）。\n"
+            "可将 sub task 选中图 + AI 对话输出点「从 sub task 导入」作为调用输入。"
         )
         bagel_hint.setWordWrap(True)
         bagel_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
@@ -15977,6 +16094,15 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_call_pick_btn.setToolTip("理解 / 编辑用输入图")
         self.bagel_call_pick_btn.clicked.connect(self._on_bagel_call_pick_clicked)
         bagel_call_row.addWidget(self.bagel_call_pick_btn)
+        self.bagel_import_subtask_btn = QPushButton("从 sub task 导入")
+        self.bagel_import_subtask_btn.setToolTip(
+            "导入 sub task 页选中的场景图，以及 AI 对话中最近一次模型输出，"
+            "作为本页调用的输入图 / 提示词（默认切到「图像编辑」）"
+        )
+        self.bagel_import_subtask_btn.clicked.connect(
+            self._on_bagel_import_from_sub_task_clicked
+        )
+        bagel_call_row.addWidget(self.bagel_import_subtask_btn)
         self.bagel_call_btn = QPushButton("调用")
         self.bagel_call_btn.setEnabled(False)
         self.bagel_call_btn.setToolTip("向已部署的 Bagel 推理 API 发请求")
@@ -16003,7 +16129,8 @@ class CameraTopicWindow(QMainWindow):
             QSizePolicy.Expanding, QSizePolicy.Expanding
         )
         bagel_preview_row.addWidget(self.bagel_call_output_preview, 1)
-        bagel_outer.addLayout(bagel_preview_row)
+        self._bagel_preview_layout = bagel_preview_row
+        bagel_outer.addLayout(bagel_preview_row, 1)
         self._bagel_call_image_path = ""
         self._bagel_call_busy = False
 
@@ -16021,10 +16148,21 @@ class CameraTopicWindow(QMainWindow):
 
         if QWebEngineView is not None:
             self.bagel_web_view = QWebEngineView()
-            self.bagel_web_view.setMinimumHeight(360)
+            self.bagel_web_view.setMinimumHeight(0)
+            self.bagel_web_view.setStyleSheet(
+                "QWebEngineView { background-color: #1a1a1a; }"
+            )
+            try:
+                self.bagel_web_view.page().setBackgroundColor(QColor("#1a1a1a"))
+            except Exception:
+                pass
             if BagelWebEnginePage is not None:
                 self.bagel_web_page = BagelWebEnginePage(self.bagel_web_view)
                 self.bagel_web_view.setPage(self.bagel_web_page)
+                try:
+                    self.bagel_web_page.setBackgroundColor(QColor("#1a1a1a"))
+                except Exception:
+                    pass
                 try:
                     settings = self.bagel_web_view.settings()
                     if QWebEngineSettings is not None:
@@ -16044,8 +16182,16 @@ class CameraTopicWindow(QMainWindow):
                     pass
             else:
                 self.bagel_web_page = None
-            self.bagel_web_view.setUrl(QUrl("about:blank"))
-            bagel_outer.addWidget(self.bagel_web_view, 1)
+            # about:blank 默认白底，先放一块深色占位页
+            self.bagel_web_view.setHtml(
+                "<html><body style='margin:0;background:#1a1a1a;color:#888;"
+                "font-family:sans-serif;display:flex;align-items:center;"
+                "justify-content:center;height:100vh;'>"
+                "Bagel Gradio 未启动</body></html>"
+            )
+            bagel_outer.addWidget(self.bagel_web_view, 0)
+            self.bagel_web_view.hide()
+            self._bagel_web_fallback = None
         else:
             self.bagel_web_view = None
             self.bagel_web_page = None
@@ -16053,9 +16199,11 @@ class CameraTopicWindow(QMainWindow):
                 "未安装 PyQtWebEngine：无法页内嵌入。启动后请点「浏览器打开」。"
             )
             bagel_web_fallback.setAlignment(Qt.AlignCenter)
-            bagel_web_fallback.setMinimumHeight(120)
+            bagel_web_fallback.setMinimumHeight(0)
             bagel_web_fallback.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-            bagel_outer.addWidget(bagel_web_fallback, 1)
+            bagel_outer.addWidget(bagel_web_fallback, 0)
+            bagel_web_fallback.hide()
+            self._bagel_web_fallback = bagel_web_fallback
 
         self._bagel_launcher = BagelAppLauncher(self)
         self._bagel_launcher.log_line.connect(self._append_bagel_log)
@@ -16077,8 +16225,9 @@ class CameraTopicWindow(QMainWindow):
         self._bagel_call_bridge = LlmProbeBridge()
         self._bagel_call_bridge.finished.connect(self._on_bagel_call_finished)
         self._update_bagel_api_ui()
+        self._sync_bagel_gradio_embed()
 
-        control_tabs.addTab(bagel_tab, "Bagel")
+        # sub image / sub task 挂在「手臂/手」「手骨架遥控」之后，见下方 addTab
 
         cad_tab = QWidget()
         cad_outer = QVBoxLayout(cad_tab)
@@ -17330,10 +17479,11 @@ class CameraTopicWindow(QMainWindow):
 
         self._load_ctx_default_video()
 
-        control_tabs.addTab(test_tab, "测试")
         control_tabs.addTab(sim_tab, "仿真评测")
         control_tabs.addTab(real_tab, "真机评测")
-        control_tabs.addTab(ctx_tab, "上下文学习")
+        control_tabs.addTab(ctx_tab, "ICL")
+        control_tabs.addTab(test_tab, "sub task")
+        control_tabs.addTab(bagel_tab, "sub image")
         self._refresh_real_eval_status()
         self._update_ctx_ui()
 
@@ -17598,6 +17748,8 @@ class CameraTopicWindow(QMainWindow):
         self._update_train_ui()
 
     def _append_bagel_log(self, line: str) -> None:
+        if _is_noisy_bagel_log_line(line):
+            return
         self.bagel_log_edit.append(line)
         scrollbar = self.bagel_log_edit.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
@@ -17605,6 +17757,64 @@ class CameraTopicWindow(QMainWindow):
     def _on_bagel_status(self, text: str) -> None:
         self.bagel_status_label.setText(text if text.startswith("Bagel") else f"Bagel: {text}")
         self.status_bar.showMessage(text)
+
+    def _sync_bagel_gradio_embed(self) -> None:
+        """Gradio 未启动时收起嵌入页，把高度让给上方输入/输出图。"""
+        running = False
+        launcher = getattr(self, "_bagel_launcher", None)
+        if launcher is not None:
+            running = bool(launcher.is_running())
+        view = getattr(self, "bagel_web_view", None)
+        fallback = getattr(self, "_bagel_web_fallback", None)
+        preview = getattr(self, "bagel_call_output_preview", None)
+        tab = getattr(self, "bagel_tab", None)
+        outer = tab.layout() if tab is not None else None
+        qmax = 16777215
+
+        def _set_item_stretch(target, stretch: int) -> None:
+            if outer is None or target is None:
+                return
+            for i in range(outer.count()):
+                item = outer.itemAt(i)
+                if item is None:
+                    continue
+                if item.widget() is target or item.layout() is target:
+                    outer.setStretch(i, stretch)
+                    return
+
+        if running:
+            if view is not None:
+                view.setMinimumHeight(280)
+                view.setMaximumHeight(qmax)
+                view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                view.show()
+                _set_item_stretch(view, 1)
+            if fallback is not None:
+                fallback.setMinimumHeight(80)
+                fallback.show()
+                _set_item_stretch(fallback, 1)
+            if preview is not None:
+                preview.setMinimumHeight(90)
+                preview.setMaximumHeight(160)
+                preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            _set_item_stretch(getattr(self, "_bagel_preview_layout", None), 0)
+        else:
+            if view is not None:
+                view.hide()
+                view.setMinimumHeight(0)
+                view.setMaximumHeight(0)
+                _set_item_stretch(view, 0)
+            if fallback is not None:
+                fallback.hide()
+                fallback.setMinimumHeight(0)
+                _set_item_stretch(fallback, 0)
+            if preview is not None:
+                preview.setMinimumHeight(160)
+                preview.setMaximumHeight(qmax)
+                preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            _set_item_stretch(getattr(self, "_bagel_preview_layout", None), 1)
+        if tab is not None:
+            tab.updateGeometry()
 
     def _update_bagel_run_ui(self, *_args) -> None:
         running = self._bagel_launcher.is_running()
@@ -17638,8 +17848,13 @@ class CameraTopicWindow(QMainWindow):
             self.bagel_status_label.setStyleSheet("")
             self._bagel_ready_poll_timer.stop()
             if self.bagel_web_view is not None and not running:
-                # 保留最后一页；用户可手动刷新
-                pass
+                self.bagel_web_view.setHtml(
+                    "<html><body style='margin:0;background:#1a1a1a;color:#888;"
+                    "font-family:sans-serif;display:flex;align-items:center;"
+                    "justify-content:center;height:100vh;'>"
+                    "Bagel Gradio 未启动</body></html>"
+                )
+        self._sync_bagel_gradio_embed()
 
     def _on_bagel_root_browse_clicked(self) -> None:
         current = self.bagel_root_edit.text().strip() or BAGEL_ROOT_DEFAULT
@@ -17791,7 +18006,9 @@ class CameraTopicWindow(QMainWindow):
                 if 200 <= int(getattr(resp, "status", 200)) < 500:
                     self._bagel_ready_poll_timer.stop()
                     self._load_bagel_web(url)
-                    self.bagel_status_label.setText(f"Bagel: 已就绪 {url}")
+                    self.bagel_status_label.setText(
+                        f"Bagel: 已就绪 {url}  ·  mode={bagel_mode_label(self._bagel_launcher.current_mode())}"
+                    )
                     self.bagel_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
                     self.bagel_open_btn.setEnabled(True)
                     if hasattr(self, "bagel_pick_image_btn"):
@@ -17799,7 +18016,7 @@ class CameraTopicWindow(QMainWindow):
                             self.bagel_web_view is not None
                         )
                     self._append_bagel_log(
-                        f"[ready] {url} — 用「选择图片」上传到嵌入页"
+                        f"[ready] {url}  mode={bagel_mode_label(self._bagel_launcher.current_mode())} — 用「选择图片」上传到嵌入页"
                     )
         except Exception:
             pass
@@ -17855,7 +18072,18 @@ class CameraTopicWindow(QMainWindow):
         self._update_bagel_api_ui()
 
     def _on_bagel_api_ready(self, url: str) -> None:
-        self.bagel_api_status_label.setText(f"推理 API: 已就绪 {url}")
+        mode_txt = bagel_mode_label(self._bagel_api_launcher.current_mode())
+        # 若服务 /health 已回传 mode，以其为准
+        try:
+            ok, body, _err = _http_get_json(url.rstrip("/") + "/health", timeout_s=1.5)
+            if ok and isinstance(body, dict) and body.get("mode") is not None:
+                mode_txt = bagel_mode_label(int(body.get("mode") or 1))
+                self._bagel_api_launcher._mode = int(body.get("mode") or 1)
+        except Exception:
+            pass
+        self.bagel_api_status_label.setText(
+            f"推理 API: 已就绪 {url}  ·  mode={mode_txt}"
+        )
         self.bagel_api_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
         self.bagel_call_btn.setEnabled(not self._bagel_call_busy)
         api_base = url.rstrip("/") + "/v1"
@@ -17868,7 +18096,9 @@ class CameraTopicWindow(QMainWindow):
             notify=True,
             silent_apply=False,
         )
-        self._append_bagel_log(f"[ready] 推理 API {url}  已加入对话服务列表 ({n})")
+        self._append_bagel_log(
+            f"[ready] 推理 API {url}  mode={mode_txt}  已加入对话服务列表 ({n})"
+        )
 
     def _poll_bagel_api_ready(self) -> None:
         if not self._bagel_api_launcher.is_running():
@@ -17893,11 +18123,16 @@ class CameraTopicWindow(QMainWindow):
         )
         if not selected:
             return
-        image = cv2.imread(selected, cv2.IMREAD_COLOR)
+        self._set_bagel_call_input_image(selected)
+
+    def _set_bagel_call_input_image(self, path: str, display_name: str = "") -> bool:
+        path = str(path or "").strip()
+        if not path or not os.path.isfile(path):
+            return False
+        image = cv2.imread(path, cv2.IMREAD_COLOR)
         if image is None:
-            QMessageBox.warning(self, "Bagel", f"无法读取图片: {selected}")
-            return
-        self._bagel_call_image_path = selected
+            return False
+        self._bagel_call_image_path = path
         pix = cv2_to_qpixmap(image)
         if pix is not None and not pix.isNull():
             self.bagel_call_input_preview.setPixmap(
@@ -17908,7 +18143,63 @@ class CameraTopicWindow(QMainWindow):
                 )
             )
             self.bagel_call_input_preview.setText("")
-        self.bagel_call_input_preview.setToolTip(selected)
+        tip = display_name or os.path.basename(path)
+        self.bagel_call_input_preview.setToolTip(f"{tip}\n{path}")
+        return True
+
+    def _on_bagel_import_from_sub_task_clicked(self) -> None:
+        """把 sub task 选中图 + AI 对话最近输出导入为 Bagel 调用输入。"""
+        image_path = ""
+        image_title = ""
+        scenario = str(getattr(self, "_test_selected_scenario", "") or "").strip()
+        if scenario:
+            image_path = str(self._test_image_paths.get(scenario) or "").strip()
+            image_title = scenario
+        if not image_path:
+            image_path = self.chat_panel.get_attached_image_path()
+            if image_path:
+                image_title = os.path.basename(image_path)
+
+        out_text = self.chat_panel.get_last_role_text("assistant")
+        if not out_text:
+            out_text = self.chat_panel.get_last_role_text("user")
+
+        if not image_path and not out_text:
+            QMessageBox.information(
+                self,
+                "sub image",
+                "sub task 中尚无可导入内容。\n"
+                "请先在 sub task 点选场景图，并在 AI 对话中得到模型输出。",
+            )
+            return
+
+        imported: List[str] = []
+        if image_path:
+            if self._set_bagel_call_input_image(image_path, display_name=image_title):
+                imported.append(f"图像: {image_title or os.path.basename(image_path)}")
+            else:
+                QMessageBox.warning(self, "sub image", f"无法读取图像: {image_path}")
+                return
+        if out_text:
+            self.bagel_call_prompt_edit.setText(out_text)
+            preview = out_text.replace("\n", " ")
+            if len(preview) > 60:
+                preview = preview[:57] + "…"
+            imported.append(f"提示词: {preview}")
+
+        # 有图时默认走编辑；仅文本则文生图
+        if image_path:
+            idx = self.bagel_call_task_combo.findData("edit")
+            if idx >= 0:
+                self.bagel_call_task_combo.setCurrentIndex(idx)
+        else:
+            idx = self.bagel_call_task_combo.findData("text2image")
+            if idx >= 0:
+                self.bagel_call_task_combo.setCurrentIndex(idx)
+
+        msg = "已从 sub task 导入: " + "；".join(imported)
+        self._append_bagel_log(f"[import] {msg}")
+        self.status_bar.showMessage(msg)
 
     def _on_bagel_call_clicked(self) -> None:
         if self._bagel_call_busy:
@@ -17992,9 +18283,47 @@ class CameraTopicWindow(QMainWindow):
         if self.bagel_web_view is None:
             return
         try:
+            page = self.bagel_web_view.page()
+            try:
+                page.setBackgroundColor(QColor("#1a1a1a"))
+            except Exception:
+                pass
             self.bagel_web_view.setUrl(QUrl(url))
+            # 页面加载后再强制深色，覆盖 Gradio 未覆盖到的白底块
+            QTimer.singleShot(800, self._force_bagel_web_dark)
+            QTimer.singleShot(2500, self._force_bagel_web_dark)
         except Exception as exc:
             self._append_bagel_log(f"[warn] 嵌入页加载失败: {exc}")
+
+    def _force_bagel_web_dark(self) -> None:
+        if self.bagel_web_view is None:
+            return
+        js = (
+            "(function(){"
+            "try{"
+            "document.documentElement.classList.add('dark');"
+            "document.body.classList.add('dark');"
+            "document.documentElement.style.background='#1a1a1a';"
+            "document.body.style.background='#1a1a1a';"
+            "var s=document.getElementById('eai-dark-override');"
+            "if(!s){s=document.createElement('style');s.id='eai-dark-override';"
+            "document.head.appendChild(s);}"
+            "s.textContent='"
+            "html,body,.gradio-container,.main,.app,.fillable,.contain,.wrap,"
+            ".panel,.tabs,.tabitem,.form,.block,.image-container,.upload-container,"
+            ".empty{background:#1a1a1a!important;background-color:#1a1a1a!important;"
+            "color:#ececec!important;}"
+            "textarea,input,select{background:#1e1e1e!important;color:#ececec!important;"
+            "border-color:#555!important;}"
+            ".tab-nav button{background:#252525!important;color:#ececec!important;}"
+            "';"
+            "}catch(e){}"
+            "})();"
+        )
+        try:
+            self.bagel_web_view.page().runJavaScript(js)
+        except Exception:
+            pass
 
     def _on_bagel_pick_image_clicked(self) -> None:
         if self.bagel_web_view is None:
@@ -19364,10 +19693,14 @@ class CameraTopicWindow(QMainWindow):
                 self.chat_panel.apply_remote_qwen_service_preset(
                     api_base=api, model_id=mid, silent=False
                 )
-                self._append_test_infer_log(f"远程 Qwen 已就绪: {api} ({mid})")
+                self._append_test_infer_log(
+                    f"远程 Qwen 已就绪: {api} ({mid})"
+                    f"{qwen_deploy_mode_suffix(info)}"
+                )
         live_model = str((info or {}).get("model") or "")
         if healthy:
             suffix = f" · {live_model}" if live_model else ""
+            suffix += qwen_deploy_mode_suffix(info)
             self.test_qwen_status_label.setText(f"服务: 远程在线 {api}{suffix}")
             self.test_qwen_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
         elif starting:
@@ -19441,6 +19774,7 @@ class CameraTopicWindow(QMainWindow):
         live_model = str((info or {}).get("model") or "")
         if healthy:
             suffix = f" · {live_model}" if live_model else ""
+            suffix += qwen_deploy_mode_suffix(info)
             self.test_qwen_status_label.setText(f"服务: 在线 {api}{suffix}")
             self.test_qwen_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
         elif starting:
@@ -20519,22 +20853,42 @@ class CameraTopicWindow(QMainWindow):
         if tabs is None or not only_tabs:
             return
         wanted = {str(t) for t in only_tabs}
+        # 按 CONTROL_TAB_TITLES 顺序保留（only_tabs 可能是任意顺序）
+        order = [t for t in CONTROL_TAB_TITLES if t in wanted]
         for i in range(tabs.count() - 1, -1, -1):
             title = tabs.tabText(i)
             if title not in wanted:
                 tabs.removeTab(i)
+        # 按正式顺序重排
+        if order and tabs.count() > 1:
+            widgets: List[Tuple[str, QWidget]] = []
+            for i in range(tabs.count()):
+                widgets.append((tabs.tabText(i), tabs.widget(i)))
+            by_title = {t: w for t, w in widgets}
+            while tabs.count():
+                tabs.removeTab(0)
+            for title in order:
+                w = by_title.get(title)
+                if w is not None:
+                    tabs.addTab(w, title)
         status_bar = getattr(self, "status_bar", None)
         if tabs.count() == 0:
             if status_bar is not None:
                 status_bar.showMessage("警告: --tab 过滤后无可用标签页")
             return
         tabs.setCurrentIndex(0)
+        titles = [tabs.tabText(i) for i in range(tabs.count())]
         if tabs.count() == 1:
             tabs.tabBar().setVisible(False)
-            title = tabs.tabText(0)
-            self.setWindowTitle(f"Camera Topic Viewer — {title}")
+            self.setWindowTitle(f"Camera Topic Viewer — {titles[0]}")
             if status_bar is not None:
-                status_bar.showMessage(f"仅显示 tab: {title}")
+                status_bar.showMessage(f"仅显示 tab: {titles[0]}")
+        else:
+            tabs.tabBar().setVisible(True)
+            joined = " / ".join(titles)
+            self.setWindowTitle(f"Camera Topic Viewer — {joined}")
+            if status_bar is not None:
+                status_bar.showMessage(f"仅显示 tab: {joined}")
 
     def _update_ctx_ui(self, *_args) -> None:
         if not hasattr(self, "ctx_sync_start_btn"):
@@ -24290,18 +24644,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tab",
         action="append",
+        nargs="+",
         default=None,
         metavar="NAME",
         help=(
-            "只展示指定控制区 tab（可重复；也可用逗号分隔）。"
-            "例: --tab 测试 或 --tab test；可用中文名或英文别名。"
-            "亦支持环境变量 EAI_ONLY_TAB。"
+            "只展示指定控制区 tab，可同时指定多个。"
+            "例: --tab \"sub image\" \"sub task\"  或  --tab bagel,test  或  --tab bagel --tab test。"
+            "可用中文名或英文别名；亦支持环境变量 EAI_ONLY_TAB=a,b。"
         ),
     )
     parser.add_argument(
         "--only-tab",
         dest="tab",
         action="append",
+        nargs="+",
         help=argparse.SUPPRESS,
     )
     return parser.parse_args()
@@ -24330,13 +24686,29 @@ def resolve_control_tab_title(name: str) -> Optional[str]:
     return None
 
 
-def parse_only_tabs(tab_args: Optional[List[str]]) -> List[str]:
+def _flatten_tab_arg_items(tab_args: Optional[List[object]]) -> List[str]:
+    """展开 --tab 的 append+nargs 结果，并拆开逗号/分号。"""
     raw_parts: List[str] = []
-    if tab_args:
-        for item in tab_args:
-            raw_parts.extend(
-                p.strip() for p in str(item).replace(";", ",").split(",") if p.strip()
-            )
+
+    def _push(text: str) -> None:
+        for p in str(text).replace(";", ",").split(","):
+            part = p.strip()
+            if part:
+                raw_parts.append(part)
+
+    if not tab_args:
+        return raw_parts
+    for item in tab_args:
+        if isinstance(item, (list, tuple)):
+            for sub in item:
+                _push(str(sub))
+        else:
+            _push(str(item))
+    return raw_parts
+
+
+def parse_only_tabs(tab_args: Optional[List[object]]) -> List[str]:
+    raw_parts = _flatten_tab_arg_items(tab_args)
     if not raw_parts:
         env = os.environ.get("EAI_ONLY_TAB", "").strip()
         if env:
@@ -24354,7 +24726,9 @@ def parse_only_tabs(tab_args: Optional[List[str]]) -> List[str]:
             resolved.append(title)
     if unknown:
         known = " / ".join(CONTROL_TAB_TITLES)
-        aliases = "test→测试, sim→仿真评测, world→世界模型, …"
+        aliases = (
+            "test→sub task, bagel→sub image, sim→仿真评测, world→世界模型, …"
+        )
         raise SystemExit(
             f"未知 tab: {', '.join(unknown)}\n"
             f"可用标题: {known}\n"
