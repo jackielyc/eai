@@ -27,8 +27,10 @@ train/lake_qwen35/data/.hermes_approved_episode_ids.json
 train/lake_qwen35/data/hermas_sys2_*_supplement.jsonl
 # Hermes approved dumps exceed GitHub's 100MB limit; keep local-only
 train/lake_qwen35/data/hermas_sys2_*_approved.jsonl
+train/lake_qwen35/data/hermas_sys2_*_approved-en.jsonl
 train/lake_qwen35/data/.hermes_jsonl_approved_filtered
 train/lake_qwen35/data/*.offsets.npy
+train/lake_qwen35/data/*.offsets.*.npy
 train/lake_qwen35/output/*
 train/lake_qwen35/data/layer2_en2zh.shard*.json
 train/lake_qwen35/data/._clip_ids_for_zh.txt
@@ -39,6 +41,7 @@ train/lake_qwen35/data/vn_sys2_train.jsonl
 train/lake_qwen35/data/vn_sys2_train.noimage.jsonl
 train/lake_qwen35/data/vn_sys2_val.jsonl
 train/lake_qwen35/data/vn_sys2_val.noimage.jsonl
+train/lake_qwen35/data/vn_sys2_*-en.jsonl
 train/lake_qwen35/data/vn_sys2_*.jsonl.tmp
 log/dbus_proxy.log
 log/dbus_proxy.pid

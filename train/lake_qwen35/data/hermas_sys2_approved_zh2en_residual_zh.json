@@ -1,0 +1,56 @@
+{
+  "hard_miss_rows": 0,
+  "note": "No hard misses. Residual Chinese is inside official lake/CDB English fields (mixed source text).",
+  "soft_counters": {
+    "hermas_sys2_val_approved-en.jsonl": {
+      "subtasks_still_zh": 293,
+      "task_en_still_zh": 822
+    },
+    "hermas_sys2_train_approved-en.jsonl": {
+      "subtasks_still_zh": 3101,
+      "task_en_still_zh": 7939
+    }
+  },
+  "residual_span_examples": [
+    "账本",
+    "永",
+    "有",
+    "春",
+    "杂物",
+    "者",
+    "盘",
+    "彩",
+    "道",
+    "松",
+    "魔方",
+    "然",
+    "家庭还",
+    "行",
+    "与",
+    "禁达",
+    "点滴",
+    "作用",
+    "晚",
+    "真人",
+    "湾",
+    "金",
+    "中",
+    "口",
+    "保碧",
+    "蒲",
+    "从蓝色工具箱中取出套装六角扳手",
+    "团",
+    "并将其放置在桌面便于使用的位置",
+    "通过",
+    "墨",
+    "从中电话",
+    "拉",
+    "干扰无锡",
+    "路",
+    "体育",
+    "试用提前",
+    "半年更新",
+    "可",
+    "直"
+  ]
+}
