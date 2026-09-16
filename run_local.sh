@@ -230,4 +230,9 @@ if [[ "${ROS_MODE}" == "conda_humble" ]]; then
     _conda_pyqt_root="${CONDA_PREFIX}/lib/python3.11/site-packages/PyQt5/Qt5"
     _apply_qt_paths "${_conda_pyqt_root}/lib" "${_conda_pyqt_root}/plugins/platforms"
 fi
+# 远程 X 常无 GLX：提前关掉 WebEngine GPU，避免 ANGLE/GLX 刷屏
+if [[ -z "${QTWEBENGINE_CHROMIUM_FLAGS:-}" ]]; then
+    export QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu --disable-gpu-compositing --disable-webgl --disable-dev-shm-usage --in-process-gpu"
+fi
+export QT_XCB_GL_INTEGRATION="${QT_XCB_GL_INTEGRATION:-none}"
 exec "${PYTHON}" "${EAI_DIR}/show_camera_topics.py" "$@"

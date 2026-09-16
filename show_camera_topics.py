@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测 / 真机评测 / ICL / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测 / 真机评测 / ICL / Astra / HumanEgo / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -665,9 +665,56 @@ BAGEL_MODEL_DEFAULT = "models/BAGEL-7B-MoT"
 BAGEL_SERVER_HOST_DEFAULT = "127.0.0.1"
 BAGEL_SERVER_PORT_DEFAULT = 7860
 BAGEL_API_PORT_DEFAULT = 7861
+BAGEL_NUM_TIMESTEPS_DEFAULT = 25
 BAGEL_VENV_PYTHON_DEFAULT = os.path.join(EAI_DIR, ".cache", "bagel_venv", "bin", "python")
 BAGEL_MODEL_CACHE_DEFAULT = os.path.join(EAI_DIR, ".cache", "bagel_models", "BAGEL-7B-MoT")
 BAGEL_API_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "bagel_tmp")
+ASTRA_ROBODOJO_URL = "https://cookiegg.github.io/llm-as-policies/"
+ASTRA_ROBODOJO_ZH_URL = "https://cookiegg.github.io/llm-as-policies/zh/"
+ASTRA_GALLERY_FOLD_CLOTHES_URL = (
+    "https://anonymous-report-421.github.io/public-website/"
+    "gallery.html?id=mix__fold_clothes__random__g0__l2"
+)
+ASTRA_PAGE_PRESETS: Tuple[Tuple[str, str], ...] = (
+    ("English", ASTRA_ROBODOJO_URL),
+    ("中文解读", ASTRA_ROBODOJO_ZH_URL),
+    ("Gallery · fold_clothes", ASTRA_GALLERY_FOLD_CLOTHES_URL),
+)
+HUMANOGO_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/HumanEgo"
+)
+HUMANOGO_WEBSITE_URL = "https://humanego-ai.github.io/"
+HUMANOGO_GALLERY_URL = "https://leo-tx-humanego-gallery.static.hf.space/"
+HUMANOGO_PYTHON_CANDIDATES: Tuple[str, ...] = (
+    "/home/psibot/miniconda3/envs/humanego/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/humanego/bin/python",
+    "/home/psibot/miniconda3/envs/eai/bin/python",
+)
+
+
+def astra_url_prefers_external_browser(url: str) -> bool:
+    """含视频的 Gallery 页：Qt5 WebEngine 常播不了 H.264，优先系统浏览器。"""
+    u = (url or "").lower()
+    return ("gallery.html" in u) or ("anonymous-report-421.github.io" in u)
+
+
+def resolve_humanego_root(path: str = "") -> str:
+    raw = (path or "").strip() or HUMANOGO_ROOT_DEFAULT
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def resolve_humanego_python(repo: str = "") -> str:
+    for cand in HUMANOGO_PYTHON_CANDIDATES:
+        if cand and os.path.isfile(cand):
+            return cand
+    repo = resolve_humanego_root(repo)
+    local = os.path.join(repo, ".venv", "bin", "python")
+    if os.path.isfile(local):
+        return local
+    which = shutil.which("python3") or shutil.which("python") or sys.executable
+    return which or sys.executable
+
+
 LINGBOT_VISION_PYTHON_DEFAULT = "/home/psibot/miniconda3/envs/eai/bin/python"
 LINGBOT_VISION_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_vision.sh")
 LINGBOT_VISION_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_vision")
@@ -733,6 +780,8 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "仿真评测",
     "真机评测",
     "ICL",
+    "Astra",
+    "HumanEgo",
     "sub task",
     "sub image",
 )
@@ -792,6 +841,17 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "icl": "ICL",
     "ICL": "ICL",
     "上下文学习": "ICL",
+    "astra": "Astra",
+    "Astra": "Astra",
+    "gpt-6": "Astra",
+    "gpt6": "Astra",
+    "robodojo": "Astra",
+    "llm-as-policies": "Astra",
+    "llm_as_policies": "Astra",
+    "humanego": "HumanEgo",
+    "HumanEgo": "HumanEgo",
+    "human-ego": "HumanEgo",
+    "human_ego": "HumanEgo",
 }
 CAD_MESHES_DIR = os.path.join(EAI_DIR, "meshes")
 TEST_IMAGES_DIR = os.path.join(EAI_DIR, "images")
@@ -5250,6 +5310,7 @@ def call_bagel_inference(
     *,
     image_bgr: Optional[np.ndarray] = None,
     task: str = "",
+    num_timesteps: int = BAGEL_NUM_TIMESTEPS_DEFAULT,
     timeout_s: float = 300.0,
 ) -> str:
     """调用 Bagel serve_api.py：有图则理解，无图则文生图。成功时可能带 BAGEL_IMAGE:: 路径。"""
@@ -5263,14 +5324,18 @@ def call_bagel_inference(
         raise RuntimeError("prompt 为空")
     kind = (task or "").strip() or ("understand" if image_bgr is not None else "text2image")
     payload: Dict[str, object] = {"prompt": prompt}
+    steps = max(1, int(num_timesteps or BAGEL_NUM_TIMESTEPS_DEFAULT))
     if kind in ("understand", "edit"):
         if image_bgr is None:
             raise RuntimeError("图像理解/编辑需要输入图")
         payload["image_base64"] = encode_bgr_image_jpeg_b64(image_bgr)
         url = f"{root}/{kind}"
+        if kind == "edit":
+            payload["num_timesteps"] = steps
     else:
         url = f"{root}/text2image"
         payload["image_ratio"] = "1:1"
+        payload["num_timesteps"] = steps
     ok, body, err = _http_post_json(url, payload, timeout_s=timeout_s)
     if not ok:
         raise RuntimeError(err or "Bagel 调用失败")
@@ -12324,6 +12389,157 @@ else:
     BagelWebEnginePage = None  # type: ignore
 
 
+class HumanEgoLauncher(QObject):
+    """在 HumanEgo 仓库目录中跑 setup / download / preprocess / train / 自定义命令。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._label = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start_command(
+        self,
+        *,
+        repo_dir: str,
+        python_bin: str,
+        command: str,
+        label: str = "",
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("HumanEgo 任务仍在运行，请先停止")
+            return
+        repo = resolve_humanego_root(repo_dir)
+        if not os.path.isdir(repo):
+            self.status_message.emit(f"仓库不存在: {repo}")
+            return
+        cmd = (command or "").strip()
+        if not cmd:
+            self.status_message.emit("命令为空")
+            return
+        py = (python_bin or "").strip() or resolve_humanego_python(repo)
+        label = (label or "").strip() or cmd[:80]
+        self._label = label
+
+        # 用 bash -lc，保证 conda activate / PATH 与终端一致；PYTHON 注入供命令里用 $PYTHON
+        env_exports = [
+            f"export HUMANOGO_ROOT={shlex.quote(repo)}",
+            f"export PYTHON={shlex.quote(py)}",
+            "export PYTHONUNBUFFERED=1",
+        ]
+        # 若 python 在 conda env 下，尝试 source conda.sh + activate
+        conda_prefix = ""
+        py_dir = os.path.dirname(os.path.abspath(py))
+        if py_dir.endswith("/bin"):
+            maybe_prefix = os.path.dirname(py_dir)
+            if os.path.isfile(os.path.join(maybe_prefix, "conda-meta", "history")) or os.path.isdir(
+                os.path.join(maybe_prefix, "conda-meta")
+            ):
+                conda_prefix = maybe_prefix
+        activate_bits: List[str] = []
+        if conda_prefix:
+            conda_sh_candidates = [
+                os.path.join(os.path.dirname(os.path.dirname(conda_prefix)), "etc", "profile.d", "conda.sh"),
+                "/home/psibot/miniconda3/etc/profile.d/conda.sh",
+                "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/etc/profile.d/conda.sh",
+            ]
+            for sh_path in conda_sh_candidates:
+                if os.path.isfile(sh_path):
+                    env_name = os.path.basename(conda_prefix)
+                    activate_bits = [
+                        f"source {shlex.quote(sh_path)}",
+                        f"conda activate {shlex.quote(env_name)} || true",
+                    ]
+                    break
+            env_exports.append(f"export PATH={shlex.quote(py_dir)}:$PATH")
+        shell = " && ".join(
+            [
+                f"cd {shlex.quote(repo)}",
+                *activate_bits,
+                *env_exports,
+                cmd,
+            ]
+        )
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.insert("PYTHONUNBUFFERED", "1")
+        qenv.insert("HUMANOGO_ROOT", repo)
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(repo)
+        proc.setProcessEnvironment(qenv)
+        proc.start("bash", ["-lc", shell])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ {cmd}")
+        self.status_message.emit(f"HumanEgo 运行中: {label}")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 HumanEgo 任务")
+            return
+        self.status_message.emit("正在停止 HumanEgo…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(3000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.terminate()
+            self._process.waitForFinished(1500)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if text:
+                self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        label = self._label or "任务"
+        if exit_code == 0:
+            self.status_message.emit(f"HumanEgo 完成: {label}")
+            self.log_line.emit(f"[done] exit=0  {label}")
+        else:
+            self.status_message.emit(f"HumanEgo 失败 (exit={exit_code}): {label}")
+            self.log_line.emit(f"[ERROR] exit={exit_code}  {label}")
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.status_message.emit("HumanEgo 启动失败（找不到 bash？）")
+            self.log_line.emit("[ERROR] FailedToStart")
+            self.running_changed.emit(False)
+            self._process = None
+
+
 class BagelAppLauncher(QObject):
     """启动/停止 Bagel Gradio app.py，日志转发到 UI。"""
 
@@ -15014,7 +15230,7 @@ class CameraTopicWindow(QMainWindow):
         self.sam3_result_edit.setPlaceholderText("SAM3 调用结果将显示在这里…")
         self.sam3_result_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         sam3_result_row = QHBoxLayout()
         sam3_result_row.setSpacing(8)
@@ -15087,7 +15303,7 @@ class CameraTopicWindow(QMainWindow):
         self.fp_result_edit.setPlaceholderText("FoundationPose 调用结果将显示在这里…")
         self.fp_result_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         segment_outer.addWidget(self.fp_result_edit)
 
@@ -15195,7 +15411,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_log_edit.setPlaceholderText("LingBot-Vision 日志…")
         self.lingbot_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         vis_outer.addWidget(self.lingbot_log_edit)
 
@@ -15380,7 +15596,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_depth_log_edit.setPlaceholderText("LingBot-Depth 日志…")
         self.lingbot_depth_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         depth_outer.addWidget(self.lingbot_depth_log_edit)
 
@@ -15536,7 +15752,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_map_log_edit.setPlaceholderText("LingBot-Map 日志…")
         self.lingbot_map_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         map_outer.addWidget(self.lingbot_map_log_edit)
 
@@ -15736,7 +15952,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_video_log_edit.setPlaceholderText("LingBot-Video 日志…")
         self.lingbot_video_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         video_outer.addWidget(self.lingbot_video_log_edit)
 
@@ -15909,7 +16125,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_world_log_edit.setPlaceholderText("LingBot-World 日志…")
         self.lingbot_world_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         world_outer.addWidget(self.lingbot_world_log_edit)
 
@@ -16087,6 +16303,16 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_call_task_combo.addItem("图像编辑", "edit")
         self.bagel_call_task_combo.setToolTip("理解/编辑需要点「选图」")
         bagel_call_row.addWidget(self.bagel_call_task_combo)
+        bagel_call_row.addWidget(QLabel("steps"))
+        self.bagel_num_timesteps_spin = QSpinBox()
+        self.bagel_num_timesteps_spin.setRange(10, 100)
+        self.bagel_num_timesteps_spin.setSingleStep(5)
+        self.bagel_num_timesteps_spin.setValue(BAGEL_NUM_TIMESTEPS_DEFAULT)
+        self.bagel_num_timesteps_spin.setFixedWidth(64)
+        self.bagel_num_timesteps_spin.setToolTip(
+            "文生图 / 图像编辑的去噪步数 num_timesteps（默认 25，越大越慢越细）"
+        )
+        bagel_call_row.addWidget(self.bagel_num_timesteps_spin)
         self.bagel_call_prompt_edit = ImeSafeLineEdit("")
         self.bagel_call_prompt_edit.setPlaceholderText("输入提示词后点「调用」")
         bagel_call_row.addWidget(self.bagel_call_prompt_edit, 1)
@@ -16142,7 +16368,7 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_log_edit.setPlaceholderText("Bagel 启动 / 推理日志…")
         self.bagel_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         bagel_outer.addWidget(self.bagel_log_edit)
 
@@ -16227,7 +16453,7 @@ class CameraTopicWindow(QMainWindow):
         self._update_bagel_api_ui()
         self._sync_bagel_gradio_embed()
 
-        # sub image / sub task 挂在「手臂/手」「手骨架遥控」之后，见下方 addTab
+        # sub image / sub task 挂在全部 tab 最后，见下方 addTab
 
         cad_tab = QWidget()
         cad_outer = QVBoxLayout(cad_tab)
@@ -16365,7 +16591,7 @@ class CameraTopicWindow(QMainWindow):
         )
         self.cad_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         cad_outer.addWidget(self.cad_log_edit)
 
@@ -16489,7 +16715,7 @@ class CameraTopicWindow(QMainWindow):
         self.train_log_edit.setPlaceholderText("训练日志将在此实时显示…")
         self.train_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         train_outer.addWidget(self.train_log_edit)
 
@@ -16582,7 +16808,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_log_edit.setPlaceholderText("相机桥日志…")
         self.sim_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         sim_outer.addWidget(self.sim_log_edit)
 
@@ -16755,7 +16981,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_detail_edit.setPlaceholderText("选中含 _result.json 的运行后显示摘要…")
         self.sim_eval_detail_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         self.sim_eval_detail_edit.setMinimumHeight(80)
         sim_eval_right_layout.addWidget(self.sim_eval_detail_edit, 1)
@@ -16866,7 +17092,7 @@ class CameraTopicWindow(QMainWindow):
         self.real_eval_log_edit.setPlaceholderText("真机评测日志…")
         self.real_eval_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         real_outer.addWidget(self.real_eval_log_edit)
 
@@ -17357,7 +17583,7 @@ class CameraTopicWindow(QMainWindow):
         self.test_infer_log_edit.setPlaceholderText("推理服务日志…")
         self.test_infer_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         test_outer.addWidget(self.test_infer_log_edit)
         # 推理部署后端在 chat_panel 创建后由 QwenDeployController 统一接管
@@ -17482,8 +17708,264 @@ class CameraTopicWindow(QMainWindow):
         control_tabs.addTab(sim_tab, "仿真评测")
         control_tabs.addTab(real_tab, "真机评测")
         control_tabs.addTab(ctx_tab, "ICL")
+        # sub task / sub image 挂在全部 tab 最后，见下方 addTab
+
+        astra_tab = QWidget()
+        astra_tab.setObjectName("astraTab")
+        astra_tab.setStyleSheet(
+            "#astraTab { background-color: #111111; }"
+            "#astraTab QLabel { background: transparent; }"
+        )
+        astra_outer = QVBoxLayout(astra_tab)
+        astra_outer.setContentsMargins(8, 6, 8, 6)
+        astra_outer.setSpacing(6)
+        astra_hint = QLabel(
+            "嵌入页可切换 English / 中文解读 / Gallery，或手动输入链接后点「前往」。"
+            "若页内视频无法播放，再点「浏览器打开」。"
+        )
+        astra_hint.setWordWrap(True)
+        astra_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        astra_outer.addWidget(astra_hint)
+        astra_tool_row = QHBoxLayout()
+        astra_tool_row.setSpacing(6)
+        astra_tool_row.addWidget(QLabel("页面"))
+        self.astra_page_combo = ImeSafeComboBox()
+        for title, url in ASTRA_PAGE_PRESETS:
+            self.astra_page_combo.addItem(title, url)
+        self.astra_page_combo.setToolTip("切换嵌入页面")
+        self.astra_page_combo.currentIndexChanged.connect(
+            self._on_astra_page_changed
+        )
+        astra_tool_row.addWidget(self.astra_page_combo)
+        self.astra_url_edit = QLineEdit(ASTRA_ROBODOJO_URL)
+        self.astra_url_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.astra_url_edit.setPlaceholderText("https://…")
+        self.astra_url_edit.returnPressed.connect(self._on_astra_go_clicked)
+        astra_tool_row.addWidget(self.astra_url_edit, 1)
+        self.astra_go_btn = QPushButton("前往")
+        self.astra_go_btn.setToolTip("加载地址栏中的链接")
+        self.astra_go_btn.clicked.connect(self._on_astra_go_clicked)
+        astra_tool_row.addWidget(self.astra_go_btn)
+        self.astra_reload_btn = QPushButton("刷新")
+        self.astra_reload_btn.setToolTip("重新加载当前页面")
+        self.astra_reload_btn.clicked.connect(self._on_astra_reload_clicked)
+        astra_tool_row.addWidget(self.astra_reload_btn)
+        self.astra_open_btn = QPushButton("浏览器打开")
+        self.astra_open_btn.clicked.connect(self._on_astra_open_clicked)
+        astra_tool_row.addWidget(self.astra_open_btn)
+        astra_outer.addLayout(astra_tool_row)
+        if QWebEngineView is not None:
+            self.astra_web_view = QWebEngineView()
+            self.astra_web_view.setMinimumHeight(360)
+            self.astra_web_view.setStyleSheet(
+                "QWebEngineView { background-color: #111111; }"
+            )
+            try:
+                self.astra_web_view.page().setBackgroundColor(QColor("#111111"))
+            except Exception:
+                pass
+            try:
+                settings = self.astra_web_view.settings()
+                if QWebEngineSettings is not None:
+                    settings.setAttribute(
+                        QWebEngineSettings.JavascriptEnabled, True
+                    )
+                    settings.setAttribute(
+                        QWebEngineSettings.LocalStorageEnabled, True
+                    )
+                    settings.setAttribute(
+                        QWebEngineSettings.PluginsEnabled, True
+                    )
+            except Exception:
+                pass
+            self.astra_web_view.setUrl(QUrl(ASTRA_ROBODOJO_URL))
+            astra_outer.addWidget(self.astra_web_view, 1)
+        else:
+            self.astra_web_view = None
+            astra_fallback = QLabel(
+                "未安装 PyQtWebEngine，无法页内嵌入。\n"
+                f"请点「浏览器打开」查看：{ASTRA_ROBODOJO_URL}"
+            )
+            astra_fallback.setAlignment(Qt.AlignCenter)
+            astra_fallback.setWordWrap(True)
+            astra_fallback.setMinimumHeight(200)
+            astra_fallback.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+            astra_outer.addWidget(astra_fallback, 1)
+            self.astra_reload_btn.setEnabled(False)
+            self.astra_go_btn.setEnabled(False)
+            self.astra_page_combo.setEnabled(False)
+        control_tabs.addTab(astra_tab, "Astra")
+
+        humanego_tab = QWidget()
+        humanego_tab.setObjectName("humanegoTab")
+        humanego_outer = QVBoxLayout(humanego_tab)
+        humanego_outer.setContentsMargins(8, 6, 8, 6)
+        humanego_outer.setSpacing(6)
+        humanego_hint = QLabel(
+            "HumanEgo（"
+            f"{HUMANOGO_ROOT_DEFAULT}"
+            "）：在仓库目录中运行 setup / 下载 / 预处理 / 训练。需先 "
+            "`conda create -n humanego python=3.11 && bash setup.sh`。"
+        )
+        humanego_hint.setWordWrap(True)
+        humanego_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        humanego_outer.addWidget(humanego_hint)
+
+        he_path_row = QHBoxLayout()
+        he_path_row.setSpacing(6)
+        he_path_row.addWidget(QLabel("仓库"))
+        self.humanego_root_edit = QLineEdit(
+            os.environ.get("HUMANOGO_DIR", HUMANOGO_ROOT_DEFAULT)
+        )
+        self.humanego_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        he_path_row.addWidget(self.humanego_root_edit, 1)
+        self.humanego_root_browse_btn = QPushButton("…")
+        self.humanego_root_browse_btn.setFixedWidth(28)
+        self.humanego_root_browse_btn.clicked.connect(self._on_humanego_root_browse)
+        he_path_row.addWidget(self.humanego_root_browse_btn)
+        he_path_row.addWidget(QLabel("Python"))
+        self.humanego_python_edit = QLineEdit(
+            resolve_humanego_python(self.humanego_root_edit.text())
+        )
+        self.humanego_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        he_path_row.addWidget(self.humanego_python_edit, 1)
+        self.humanego_python_browse_btn = QPushButton("…")
+        self.humanego_python_browse_btn.setFixedWidth(28)
+        self.humanego_python_browse_btn.clicked.connect(self._on_humanego_python_browse)
+        he_path_row.addWidget(self.humanego_python_browse_btn)
+        humanego_outer.addLayout(he_path_row)
+
+        he_run_row = QHBoxLayout()
+        he_run_row.setSpacing(6)
+        he_run_row.addWidget(QLabel("动作"))
+        self.humanego_action_combo = ImeSafeComboBox()
+        self.humanego_action_combo.addItem("下载数据 (download)", "download")
+        self.humanego_action_combo.addItem("预处理 (preprocess)", "preprocess")
+        self.humanego_action_combo.addItem("训练 (train)", "train")
+        self.humanego_action_combo.addItem("环境安装 (setup.sh)", "setup")
+        self.humanego_action_combo.addItem("自定义命令", "custom")
+        self.humanego_action_combo.currentIndexChanged.connect(
+            self._on_humanego_action_changed
+        )
+        he_run_row.addWidget(self.humanego_action_combo)
+        he_run_row.addWidget(QLabel("task"))
+        self.humanego_task_combo = ImeSafeComboBox()
+        self.humanego_task_combo.addItem("serve_bread", "serve_bread")
+        self.humanego_task_combo.addItem("water_flowers", "water_flowers")
+        self.humanego_task_combo.addItem("all", "all")
+        self.humanego_task_combo.currentIndexChanged.connect(
+            self._on_humanego_action_changed
+        )
+        he_run_row.addWidget(self.humanego_task_combo)
+        he_run_row.addWidget(QLabel("num"))
+        self.humanego_num_edit = QLineEdit("2")
+        self.humanego_num_edit.setFixedWidth(48)
+        self.humanego_num_edit.setToolTip("download 的 --num（数字或 all）")
+        self.humanego_num_edit.editingFinished.connect(self._on_humanego_action_changed)
+        he_run_row.addWidget(self.humanego_num_edit)
+        self.humanego_input_only_check = QCheckBox("input-only")
+        self.humanego_input_only_check.setChecked(True)
+        self.humanego_input_only_check.setToolTip("download 时只下输入，自行跑预处理")
+        self.humanego_input_only_check.toggled.connect(self._on_humanego_action_changed)
+        he_run_row.addWidget(self.humanego_input_only_check)
+        self.humanego_use_cfg_check = QCheckBox("use_cfg")
+        self.humanego_use_cfg_check.setChecked(True)
+        self.humanego_use_cfg_check.setToolTip("训练时加 --use_cfg")
+        self.humanego_use_cfg_check.toggled.connect(self._on_humanego_action_changed)
+        he_run_row.addWidget(self.humanego_use_cfg_check)
+        he_run_row.addStretch(1)
+        humanego_outer.addLayout(he_run_row)
+
+        he_mps_row = QHBoxLayout()
+        he_mps_row.setSpacing(6)
+        he_mps_row.addWidget(QLabel("mps_path"))
+        self.humanego_mps_edit = QLineEdit()
+        self.humanego_mps_edit.setPlaceholderText(
+            "预处理用：./data/serve_bread/aria/mps_serve_bread_000_vrs"
+        )
+        self.humanego_mps_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.humanego_mps_edit.textChanged.connect(self._on_humanego_action_changed)
+        he_mps_row.addWidget(self.humanego_mps_edit, 1)
+        self.humanego_mps_browse_btn = QPushButton("…")
+        self.humanego_mps_browse_btn.setFixedWidth(28)
+        self.humanego_mps_browse_btn.clicked.connect(self._on_humanego_mps_browse)
+        he_mps_row.addWidget(self.humanego_mps_browse_btn)
+        self.humanego_refresh_mps_btn = QPushButton("扫描 data/")
+        self.humanego_refresh_mps_btn.setToolTip("扫描仓库 data/*/aria/mps_* 填入下拉")
+        self.humanego_refresh_mps_btn.clicked.connect(self._on_humanego_refresh_mps)
+        he_mps_row.addWidget(self.humanego_refresh_mps_btn)
+        self.humanego_mps_combo = ImeSafeComboBox()
+        self.humanego_mps_combo.setMinimumWidth(180)
+        self.humanego_mps_combo.setToolTip("选择已下载的 recording")
+        self.humanego_mps_combo.currentIndexChanged.connect(
+            self._on_humanego_mps_combo_changed
+        )
+        he_mps_row.addWidget(self.humanego_mps_combo)
+        humanego_outer.addLayout(he_mps_row)
+
+        he_cmd_row = QHBoxLayout()
+        he_cmd_row.setSpacing(6)
+        he_cmd_row.addWidget(QLabel("命令"))
+        self.humanego_cmd_edit = ImeSafeLineEdit("")
+        self.humanego_cmd_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.humanego_cmd_edit.setPlaceholderText("将按动作自动生成，也可改成自定义命令")
+        he_cmd_row.addWidget(self.humanego_cmd_edit, 1)
+        humanego_outer.addLayout(he_cmd_row)
+
+        he_btn_row = QHBoxLayout()
+        he_btn_row.setSpacing(6)
+        self.humanego_status_label = QLabel("HumanEgo: 空闲")
+        self.humanego_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        he_btn_row.addWidget(self.humanego_status_label, 1)
+        self.humanego_run_btn = QPushButton("运行")
+        self.humanego_run_btn.clicked.connect(self._on_humanego_run_clicked)
+        he_btn_row.addWidget(self.humanego_run_btn)
+        self.humanego_stop_btn = QPushButton("停止")
+        self.humanego_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.humanego_stop_btn.setEnabled(False)
+        self.humanego_stop_btn.clicked.connect(self._on_humanego_stop_clicked)
+        he_btn_row.addWidget(self.humanego_stop_btn)
+        self.humanego_clear_log_btn = QPushButton("清空日志")
+        self.humanego_clear_log_btn.clicked.connect(
+            lambda: self.humanego_log_edit.clear()
+        )
+        he_btn_row.addWidget(self.humanego_clear_log_btn)
+        self.humanego_web_btn = QPushButton("项目主页")
+        self.humanego_web_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(HUMANOGO_WEBSITE_URL))
+        )
+        he_btn_row.addWidget(self.humanego_web_btn)
+        self.humanego_gallery_btn = QPushButton("Data Gallery")
+        self.humanego_gallery_btn.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(HUMANOGO_GALLERY_URL))
+        )
+        he_btn_row.addWidget(self.humanego_gallery_btn)
+        self.humanego_open_dir_btn = QPushButton("打开目录")
+        self.humanego_open_dir_btn.clicked.connect(self._on_humanego_open_dir)
+        he_btn_row.addWidget(self.humanego_open_dir_btn)
+        humanego_outer.addLayout(he_btn_row)
+
+        self.humanego_log_edit = QTextEdit()
+        self.humanego_log_edit.setReadOnly(True)
+        self.humanego_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.humanego_log_edit.setMinimumHeight(220)
+        self.humanego_log_edit.setPlaceholderText("HumanEgo 运行日志…")
+        self.humanego_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        humanego_outer.addWidget(self.humanego_log_edit, 1)
+
+        self._humanego_launcher = HumanEgoLauncher(self)
+        self._humanego_launcher.log_line.connect(self._append_humanego_log)
+        self._humanego_launcher.status_message.connect(self._on_humanego_status)
+        self._humanego_launcher.running_changed.connect(self._update_humanego_ui)
+        self._on_humanego_action_changed()
+        self._on_humanego_refresh_mps()
+        control_tabs.addTab(humanego_tab, "HumanEgo")
         control_tabs.addTab(test_tab, "sub task")
         control_tabs.addTab(bagel_tab, "sub image")
+
         self._refresh_real_eval_status()
         self._update_ctx_ui()
 
@@ -17980,6 +18462,257 @@ class CameraTopicWindow(QMainWindow):
     def _on_bagel_clear_log_clicked(self) -> None:
         self.bagel_log_edit.clear()
 
+    def _astra_current_url(self) -> str:
+        if hasattr(self, "astra_url_edit"):
+            text = self.astra_url_edit.text().strip()
+            if text:
+                return text
+        return ASTRA_ROBODOJO_URL
+
+    def _load_astra_url(self, url: str, *, sync_combo: bool = True) -> None:
+        url = (url or "").strip() or ASTRA_ROBODOJO_URL
+        if hasattr(self, "astra_url_edit"):
+            self.astra_url_edit.setText(url)
+        if sync_combo and hasattr(self, "astra_page_combo"):
+            matched = -1
+            for i in range(self.astra_page_combo.count()):
+                preset = str(self.astra_page_combo.itemData(i) or "")
+                if preset.rstrip("/") == url.rstrip("/") or preset == url:
+                    matched = i
+                    break
+            self.astra_page_combo.blockSignals(True)
+            if matched >= 0:
+                self.astra_page_combo.setCurrentIndex(matched)
+            self.astra_page_combo.blockSignals(False)
+        view = getattr(self, "astra_web_view", None)
+        if view is not None:
+            view.setUrl(QUrl(url))
+        tip = f"Astra: {url}"
+        if astra_url_prefers_external_browser(url):
+            tip += "（视频播不出时点「浏览器打开」）"
+        self.status_bar.showMessage(tip)
+
+    def _on_astra_page_changed(self, _index: int = 0) -> None:
+        if not hasattr(self, "astra_page_combo"):
+            return
+        url = str(self.astra_page_combo.currentData() or "").strip()
+        if url:
+            self._load_astra_url(url, sync_combo=False)
+
+    def _on_astra_go_clicked(self) -> None:
+        self._load_astra_url(self._astra_current_url())
+
+    def _on_astra_reload_clicked(self) -> None:
+        view = getattr(self, "astra_web_view", None)
+        if view is None:
+            return
+        url = self._astra_current_url()
+        view.setUrl(QUrl(url))
+        self.status_bar.showMessage(f"已刷新 {url}")
+
+    def _on_astra_open_clicked(self) -> None:
+        url = self._astra_current_url()
+        ok, detail = open_url_in_chromium_app(url)
+        if ok:
+            self.status_bar.showMessage(f"已用 {detail} 打开 {url}")
+            return
+        QDesktopServices.openUrl(QUrl(url))
+        self.status_bar.showMessage(f"已打开 {url}（{detail}）")
+
+    def _append_humanego_log(self, line: str) -> None:
+        self.humanego_log_edit.append(line)
+        bar = self.humanego_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_humanego_status(self, text: str) -> None:
+        msg = text if text.startswith("HumanEgo") else f"HumanEgo: {text}"
+        self.humanego_status_label.setText(msg)
+        self.status_bar.showMessage(msg)
+
+    def _update_humanego_ui(self, *_args) -> None:
+        running = self._humanego_launcher.is_running()
+        self.humanego_run_btn.setEnabled(not running)
+        self.humanego_stop_btn.setEnabled(running)
+        for w in (
+            self.humanego_root_edit,
+            self.humanego_root_browse_btn,
+            self.humanego_python_edit,
+            self.humanego_python_browse_btn,
+            self.humanego_action_combo,
+            self.humanego_task_combo,
+            self.humanego_num_edit,
+            self.humanego_input_only_check,
+            self.humanego_use_cfg_check,
+            self.humanego_mps_edit,
+            self.humanego_mps_browse_btn,
+            self.humanego_mps_combo,
+            self.humanego_cmd_edit,
+        ):
+            w.setEnabled(not running)
+        if running:
+            self.humanego_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        else:
+            self.humanego_status_label.setStyleSheet("")
+
+    def _on_humanego_root_browse(self) -> None:
+        cur = self.humanego_root_edit.text().strip() or HUMANOGO_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 HumanEgo 仓库", cur)
+        if selected:
+            self.humanego_root_edit.setText(selected)
+            self.humanego_python_edit.setText(resolve_humanego_python(selected))
+            self._on_humanego_refresh_mps()
+            self._on_humanego_action_changed()
+
+    def _on_humanego_python_browse(self) -> None:
+        cur = self.humanego_python_edit.text().strip() or sys.executable
+        initial = os.path.dirname(cur) if cur else ""
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "选择 Python", initial, "Python (python*);;All (*)"
+        )
+        if selected:
+            self.humanego_python_edit.setText(selected)
+
+    def _on_humanego_mps_browse(self) -> None:
+        repo = resolve_humanego_root(self.humanego_root_edit.text())
+        cur = self.humanego_mps_edit.text().strip() or os.path.join(repo, "data")
+        if not os.path.isdir(cur):
+            cur = repo
+        selected = QFileDialog.getExistingDirectory(self, "选择 mps_* recording 目录", cur)
+        if selected:
+            self.humanego_mps_edit.setText(selected)
+
+    def _on_humanego_refresh_mps(self) -> None:
+        repo = resolve_humanego_root(self.humanego_root_edit.text())
+        found: List[str] = []
+        data_root = os.path.join(repo, "data")
+        if os.path.isdir(data_root):
+            for task in sorted(os.listdir(data_root)):
+                aria = os.path.join(data_root, task, "aria")
+                if not os.path.isdir(aria):
+                    continue
+                for name in sorted(os.listdir(aria)):
+                    path = os.path.join(aria, name)
+                    if os.path.isdir(path) and name.startswith("mps_"):
+                        found.append(path)
+        self.humanego_mps_combo.blockSignals(True)
+        self.humanego_mps_combo.clear()
+        self.humanego_mps_combo.addItem("(未选择)", "")
+        for path in found:
+            rel = path
+            try:
+                rel = os.path.relpath(path, repo)
+            except ValueError:
+                pass
+            self.humanego_mps_combo.addItem(rel, path)
+        self.humanego_mps_combo.blockSignals(False)
+        if found and not self.humanego_mps_edit.text().strip():
+            self.humanego_mps_edit.setText(found[0])
+            self.humanego_mps_combo.setCurrentIndex(1)
+
+    def _on_humanego_mps_combo_changed(self, _index: int = 0) -> None:
+        path = str(self.humanego_mps_combo.currentData() or "").strip()
+        if path:
+            self.humanego_mps_edit.setText(path)
+
+    def _humanego_build_command(self) -> Tuple[str, str]:
+        action = str(self.humanego_action_combo.currentData() or "download")
+        task = str(self.humanego_task_combo.currentData() or "serve_bread")
+        py = "$PYTHON"
+        if action == "custom":
+            cmd = self.humanego_cmd_edit.text().strip()
+            return cmd, "custom"
+        if action == "setup":
+            return "bash setup.sh", "setup.sh"
+        if action == "download":
+            num = self.humanego_num_edit.text().strip() or "2"
+            parts = [
+                f"{py} scripts/download_data.py",
+                f"--task {shlex.quote(task)}",
+                f"--num {shlex.quote(num)}",
+            ]
+            if self.humanego_input_only_check.isChecked():
+                parts.append("--input-only")
+            return " ".join(parts), f"download {task}"
+        if action == "preprocess":
+            mps = self.humanego_mps_edit.text().strip()
+            if not mps:
+                return "", "preprocess"
+            # task all 不适合 preprocess；用 serve_bread 默认
+            pp_task = task if task != "all" else "serve_bread"
+            return (
+                f"{py} -m preprocess.Preprocess "
+                f"--mps_path {shlex.quote(mps)} --task {shlex.quote(pp_task)}",
+                f"preprocess {os.path.basename(mps)}",
+            )
+        if action == "train":
+            tr_task = task if task != "all" else "serve_bread"
+            parts = [
+                f"{py} -m training.FlowMatchingTrainer",
+                f"--task {shlex.quote(tr_task)}",
+                "--job HumanEgo",
+            ]
+            if self.humanego_use_cfg_check.isChecked():
+                parts.append("--use_cfg")
+            return " ".join(parts), f"train {tr_task}"
+        return self.humanego_cmd_edit.text().strip(), action
+
+    def _on_humanego_action_changed(self, *_args) -> None:
+        action = str(self.humanego_action_combo.currentData() or "download")
+        need_mps = action == "preprocess"
+        self.humanego_mps_edit.setEnabled(True)
+        self.humanego_mps_browse_btn.setEnabled(True)
+        self.humanego_num_edit.setEnabled(action == "download")
+        self.humanego_input_only_check.setEnabled(action == "download")
+        self.humanego_use_cfg_check.setEnabled(action == "train")
+        self.humanego_task_combo.setEnabled(action in ("download", "preprocess", "train"))
+        if action == "custom":
+            return
+        cmd, _label = self._humanego_build_command()
+        if action == "preprocess" and not self.humanego_mps_edit.text().strip():
+            cmd = (
+                "$PYTHON -m preprocess.Preprocess "
+                "--mps_path <mps_path> --task serve_bread"
+            )
+        if need_mps and not self.humanego_mps_edit.text().strip():
+            pass
+        self.humanego_cmd_edit.setText(cmd)
+
+    def _on_humanego_run_clicked(self) -> None:
+        if self.humanego_action_combo.currentData() != "custom":
+            self._on_humanego_action_changed()
+        cmd, label = self._humanego_build_command()
+        if not cmd.strip():
+            QMessageBox.information(
+                self,
+                "HumanEgo",
+                "命令为空。预处理请先填写 mps_path（可点「扫描 data/」）。",
+            )
+            return
+        action = str(self.humanego_action_combo.currentData() or "")
+        if action == "preprocess":
+            mps = self.humanego_mps_edit.text().strip()
+            if not mps or not os.path.isdir(mps):
+                QMessageBox.warning(self, "HumanEgo", f"mps_path 不存在: {mps}")
+                return
+        self._humanego_launcher.start_command(
+            repo_dir=self.humanego_root_edit.text(),
+            python_bin=self.humanego_python_edit.text(),
+            command=cmd,
+            label=label,
+        )
+        self._update_humanego_ui()
+
+    def _on_humanego_stop_clicked(self) -> None:
+        self._humanego_launcher.stop()
+        self._update_humanego_ui()
+
+    def _on_humanego_open_dir(self) -> None:
+        repo = resolve_humanego_root(self.humanego_root_edit.text())
+        if not os.path.isdir(repo):
+            QMessageBox.warning(self, "HumanEgo", f"目录不存在: {repo}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(repo))
+
     def _on_bagel_open_clicked(self) -> None:
         url = self._bagel_launcher.current_url() or bagel_app_url(
             self.bagel_host_edit.text(), int(self.bagel_port_spin.value())
@@ -18223,16 +18956,23 @@ class CameraTopicWindow(QMainWindow):
                 QMessageBox.warning(self, "Bagel", f"无法读取图片: {path}")
                 return
         api_base = self._bagel_api_launcher.api_base()
+        steps = int(self.bagel_num_timesteps_spin.value())
         self._bagel_call_busy = True
         self.bagel_call_btn.setEnabled(False)
         self.bagel_call_btn.setText("调用中…")
-        self._append_bagel_log(f"[call] {task}: {prompt[:80]}")
+        self._append_bagel_log(
+            f"[call] {task}: num_timesteps={steps}  {prompt[:80]}"
+        )
         img_copy = None if image_bgr is None else np.asarray(image_bgr).copy()
 
         def _work() -> None:
             try:
                 reply = call_bagel_inference(
-                    api_base, prompt, image_bgr=img_copy, task=task
+                    api_base,
+                    prompt,
+                    image_bgr=img_copy,
+                    task=task,
+                    num_timesteps=steps,
                 )
                 self._bagel_call_bridge.finished.emit({"ok": True, "reply": reply})
             except Exception as exc:
@@ -20531,6 +21271,8 @@ class CameraTopicWindow(QMainWindow):
             if getattr(self, "_bagel_api_ready_poll_timer", None) is not None:
                 self._bagel_api_ready_poll_timer.stop()
             self._bagel_api_launcher.shutdown()
+        if getattr(self, "_humanego_launcher", None) is not None:
+            self._humanego_launcher.shutdown()
         if getattr(self, "lingbot_world_player", None) is not None:
             self.lingbot_world_player.close_video()
         if getattr(self, "_real_eval_timer", None) is not None:
@@ -24829,6 +25571,28 @@ def apply_viewer_theme(app: QApplication) -> None:
     )
 
 
+def configure_qt_webengine_for_remote_display() -> None:
+    """远程 X / 无 GLX 时避免 WebEngine GPU 进程崩溃刷屏。
+
+    须在创建 QApplication 之前调用。已有 QTWEBENGINE_CHROMIUM_FLAGS 时不覆盖。
+    """
+    os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+    if os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip():
+        return
+    # 无 GLX 时 Chromium GPU 进程会退出；改走软件合成，减少 ANGLE/GLX 报错。
+    # Gallery 等含 H.264 的页面仍建议用「浏览器打开」（Qt5 WebEngine 常无专有编解码）。
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(
+        [
+            "--disable-gpu",
+            "--disable-gpu-compositing",
+            "--disable-webgl",
+            "--disable-dev-shm-usage",
+            "--in-process-gpu",
+            "--num-raster-threads=2",
+        ]
+    )
+
+
 def configure_qt_ime_for_chinese() -> None:
     """为 Docker/本机启用 fcitx 中文输入（须在创建 QApplication 之前调用）。"""
     os.environ.setdefault("QT_X11_NO_MITSHM", "1")
@@ -24871,6 +25635,7 @@ def main() -> int:
     args = parse_args()
     only_tabs = parse_only_tabs(args.tab)
     configure_qt_ime_for_chinese()
+    configure_qt_webengine_for_remote_display()
     rclpy.init()
 
     # QWebEngineView 需要在创建 QApplication 前设置

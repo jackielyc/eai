@@ -187,7 +187,7 @@ class TestStudioPage(QWidget):
         self.log_edit.setPlaceholderText("推理服务日志…")
         self.log_edit.setStyleSheet(
             f"QTextEdit {{ color: {sct.UI_TEXT_PRIMARY}; background-color: #252525; "
-            "border: 1px solid #555; }}"
+            f"border: 1px solid #555; }}"
         )
         root.addWidget(self.log_edit)
 
