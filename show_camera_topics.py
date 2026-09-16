@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测 / 真机评测 / ICL / Astra / HumanEgo / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测 / 真机评测 / Reward评测 / ICL / Astra / HumanEgo / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -136,6 +136,7 @@ from PyQt5.QtWidgets import (
     QSlider,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QSizePolicy,
     QTabBar,
@@ -666,6 +667,8 @@ BAGEL_SERVER_HOST_DEFAULT = "127.0.0.1"
 BAGEL_SERVER_PORT_DEFAULT = 7860
 BAGEL_API_PORT_DEFAULT = 7861
 BAGEL_NUM_TIMESTEPS_DEFAULT = 25
+BAGEL_IMAGE_SIZE_DEFAULT = "input"  # 有输入图时跟输入；纯文生图回退 512
+BAGEL_IMAGE_SIZE_FALLBACK = "512"
 BAGEL_VENV_PYTHON_DEFAULT = os.path.join(EAI_DIR, ".cache", "bagel_venv", "bin", "python")
 BAGEL_MODEL_CACHE_DEFAULT = os.path.join(EAI_DIR, ".cache", "bagel_models", "BAGEL-7B-MoT")
 BAGEL_API_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "bagel_tmp")
@@ -690,6 +693,25 @@ HUMANOGO_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/humanego/bin/python",
     "/home/psibot/miniconda3/envs/eai/bin/python",
 )
+
+
+def resolve_rlinf_root(path: str = "") -> str:
+    raw = (path or "").strip() or os.environ.get("RLINF_ROOT", "") or RLINF_ROOT_DEFAULT
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def resolve_rlinf_python(repo: str = "") -> str:
+    env = (os.environ.get("RLINF_PYTHON") or "").strip()
+    if env and os.path.isfile(env):
+        return os.path.abspath(env)
+    root = resolve_rlinf_root(repo)
+    candidates = list(RLINF_PYTHON_CANDIDATES) + [
+        os.path.join(root, ".venv", "bin", "python"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return os.path.abspath(path)
+    return "python3"
 
 
 def astra_url_prefers_external_browser(url: str) -> bool:
@@ -755,6 +777,17 @@ LINGBOT_WORLD_VENV_PYTHON = os.path.join(
 LINGBOT_WORLD_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_world.sh")
 LINGBOT_WORLD_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_world")
 LINGBOT_WORLD_OUTPUT_DIR = os.path.join(LINGBOT_WORLD_CACHE_DIR, "outputs")
+RLINF_ROOT_DEFAULT = "/share_data/projects/mahjong/share/personal/liyichao/RLinf"
+RLINF_PYTHON_CANDIDATES: Tuple[str, ...] = (
+    "/home/psibot/miniconda3/envs/RLinf/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python",
+    "/home/psibot/miniconda3/envs/eai/bin/python",
+)
+RLINF_RUN_SCRIPT = os.path.join(EAI_DIR, "run_reward_model.sh")
+RLINF_REWARD_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "reward_model")
+RLINF_TELEOP_SCRIPT = os.path.join(
+    RLINF_ROOT_DEFAULT, "examples", "reward", "run_realworld_teleop.sh"
+)
 LINGBOT_WORLD_CKPT_DEFAULT = os.path.join(
     LINGBOT_WORLD_ROOT_DEFAULT, "lingbot-world-v2-1.3b-causal-fast"
 )
@@ -779,6 +812,7 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "手骨架遥控",
     "仿真评测",
     "真机评测",
+    "Reward评测",
     "ICL",
     "Astra",
     "HumanEgo",
@@ -836,6 +870,11 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "real": "真机评测",
     "real_eval": "真机评测",
     "真机评测": "真机评测",
+    "reward": "Reward评测",
+    "rm": "Reward评测",
+    "reward_eval": "Reward评测",
+    "reward_model": "Reward评测",
+    "Reward评测": "Reward评测",
     "ctx": "ICL",
     "context": "ICL",
     "icl": "ICL",
@@ -2156,6 +2195,7 @@ def should_use_lake_orchestrator_prompt(api_base: str, model: str) -> bool:
 
 
 CHAT_HISTORY_DIR = os.path.join(EAI_DIR, "chat_history")
+BAGEL_HISTORY_DIR = os.path.join(EAI_DIR, "bagel_history")
 CHAT_USER_SETTINGS_PATH = os.path.join(EAI_DIR, "chat_user_settings.json")
 TEST_QWEN_LAST_CONFIG_PATH = os.path.join(EAI_DIR, "test_qwen_last_config.json")
 HY_EMBODIED_VLM_API_BASE = os.environ.get(
@@ -5298,10 +5338,30 @@ def _http_post_json(
             except Exception:
                 return True, raw, ""
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        return False, None, f"HTTP {exc.code}: {detail[:400]}"
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        # FastAPI JSON {"detail": "..."} or plain text
+        parsed = ""
+        if detail.startswith("{"):
+            try:
+                obj = json.loads(detail)
+                if isinstance(obj, dict):
+                    parsed = str(obj.get("detail") or obj.get("error") or detail)
+            except Exception:
+                parsed = detail
+        else:
+            parsed = detail
+        msg = parsed or exc.reason or "Internal Server Error"
+        return False, None, f"HTTP {exc.code}: {msg[:800]}"
     except Exception as exc:
         return False, None, str(exc)
+
+
+def bagel_size_from_bgr(image_bgr: np.ndarray) -> Tuple[int, int]:
+    """从输入图取输出 (W, H)，对齐 16 且不超过 1024。"""
+    h, w = image_bgr.shape[:2]
+    w = max(16, (int(w) // 16) * 16)
+    h = max(16, (int(h) // 16) * 16)
+    return (min(w, 1024), min(h, 1024))
 
 
 def call_bagel_inference(
@@ -5311,9 +5371,16 @@ def call_bagel_inference(
     image_bgr: Optional[np.ndarray] = None,
     task: str = "",
     num_timesteps: int = BAGEL_NUM_TIMESTEPS_DEFAULT,
+    image_ratio: str = BAGEL_IMAGE_SIZE_DEFAULT,
+    image_width: int = 0,
+    image_height: int = 0,
     timeout_s: float = 300.0,
-) -> str:
-    """调用 Bagel serve_api.py：有图则理解，无图则文生图。成功时可能带 BAGEL_IMAGE:: 路径。"""
+) -> Tuple[str, float, Dict[str, object]]:
+    """调用 Bagel serve_api.py：有图则理解，无图则文生图。
+
+    返回 (文本或 BAGEL_IMAGE::路径, 耗时秒, 元信息)。
+    元信息可能含 model_input_width/height、image_width/height 等。
+    """
     base = (api_base or "").strip().rstrip("/")
     if base.endswith("/v1"):
         root = base
@@ -5325,6 +5392,16 @@ def call_bagel_inference(
     kind = (task or "").strip() or ("understand" if image_bgr is not None else "text2image")
     payload: Dict[str, object] = {"prompt": prompt}
     steps = max(1, int(num_timesteps or BAGEL_NUM_TIMESTEPS_DEFAULT))
+    ratio = (image_ratio or BAGEL_IMAGE_SIZE_DEFAULT).strip() or BAGEL_IMAGE_SIZE_DEFAULT
+    width = int(image_width or 0)
+    height = int(image_height or 0)
+    # 默认「跟随输入」：有输入图则用其尺寸
+    if ratio in ("input", "auto", "follow") and width <= 0 and height <= 0:
+        if image_bgr is not None:
+            width, height = bagel_size_from_bgr(image_bgr)
+            ratio = "custom"
+        else:
+            ratio = BAGEL_IMAGE_SIZE_FALLBACK
     if kind in ("understand", "edit"):
         if image_bgr is None:
             raise RuntimeError("图像理解/编辑需要输入图")
@@ -5332,17 +5409,47 @@ def call_bagel_inference(
         url = f"{root}/{kind}"
         if kind == "edit":
             payload["num_timesteps"] = steps
+            if width > 0 and height > 0:
+                payload["image_width"] = width
+                payload["image_height"] = height
+            elif ratio not in ("input", "auto", "follow", "custom", ""):
+                payload["image_ratio"] = ratio
     else:
         url = f"{root}/text2image"
-        payload["image_ratio"] = "1:1"
+        payload["image_ratio"] = ratio if ratio != "custom" else BAGEL_IMAGE_SIZE_FALLBACK
         payload["num_timesteps"] = steps
+        if width > 0 and height > 0:
+            payload["image_width"] = width
+            payload["image_height"] = height
+    t0 = time.perf_counter()
     ok, body, err = _http_post_json(url, payload, timeout_s=timeout_s)
+    wall_s = time.perf_counter() - t0
     if not ok:
         raise RuntimeError(err or "Bagel 调用失败")
     if not isinstance(body, dict):
         raise RuntimeError(f"Bagel 返回异常: {body}")
     if body.get("ok") is False:
         raise RuntimeError(str(body.get("detail") or body.get("error") or body))
+    try:
+        latency_s = float(body.get("latency_s"))
+    except (TypeError, ValueError):
+        latency_s = wall_s
+    if latency_s <= 0:
+        latency_s = wall_s
+    meta: Dict[str, object] = {"latency_s": latency_s}
+    for key in (
+        "model_input_width",
+        "model_input_height",
+        "gen_width",
+        "gen_height",
+        "image_width",
+        "image_height",
+    ):
+        if key in body and body.get(key) is not None:
+            try:
+                meta[key] = int(body.get(key))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                pass
     text = str(body.get("text") or "").strip()
     b64 = str(body.get("image_base64") or "").strip()
     if b64:
@@ -5356,8 +5463,8 @@ def call_bagel_inference(
         with open(out_path, "wb") as f:
             f.write(base64.b64decode(raw))
         prefix = f"BAGEL_IMAGE::{out_path}"
-        return prefix + (f"\n{text}" if text else "")
-    return text or "(Bagel 无文本输出)"
+        return prefix + (f"\n{text}" if text else ""), latency_s, meta
+    return (text or "(Bagel 无文本输出)"), latency_s, meta
 
 
 def classify_llm_service_kind(
@@ -6007,6 +6114,337 @@ def rename_chat_history(history_id: str, title: str) -> None:
     data = load_chat_history(history_id)
     data["title"] = title.strip() or str(data.get("title") or history_id)
     save_chat_history_record(data)
+
+
+BAGEL_TASK_LABELS = {
+    "text2image": "文生图",
+    "understand": "图像理解",
+    "edit": "图像编辑",
+}
+
+
+def ensure_bagel_history_dir() -> str:
+    os.makedirs(BAGEL_HISTORY_DIR, exist_ok=True)
+    return BAGEL_HISTORY_DIR
+
+
+def bagel_history_path(history_id: str) -> str:
+    safe = "".join(ch for ch in history_id if ch.isalnum() or ch in "-_")
+    if not safe:
+        raise ValueError("invalid bagel history id")
+    return os.path.join(ensure_bagel_history_dir(), f"{safe}.json")
+
+
+def bagel_history_asset_dir(history_id: str) -> str:
+    safe = "".join(ch for ch in history_id if ch.isalnum() or ch in "-_") or "unknown"
+    path = os.path.join(ensure_bagel_history_dir(), "assets", safe)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def default_bagel_history_title(turns: Sequence[Dict[str, object]]) -> str:
+    for turn in reversed(list(turns)):
+        prompt = str(turn.get("prompt") or "").strip()
+        if prompt:
+            text = " ".join(prompt.split())
+            return text[:40] + ("…" if len(text) > 40 else "")
+    return f"Bagel {datetime.now().strftime('%m-%d %H:%M')}"
+
+
+def list_bagel_histories() -> List[Dict[str, object]]:
+    root = ensure_bagel_history_dir()
+    items: List[Dict[str, object]] = []
+    for name in os.listdir(root):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(root, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                continue
+            hid = str(data.get("id") or os.path.splitext(name)[0])
+            turns = data.get("turns") or []
+            items.append(
+                {
+                    "id": hid,
+                    "title": str(data.get("title") or hid),
+                    "updated_at": str(data.get("updated_at") or ""),
+                    "created_at": str(data.get("created_at") or ""),
+                    "path": path,
+                    "turn_count": len(turns) if isinstance(turns, list) else 0,
+                }
+            )
+        except Exception:
+            continue
+    items.sort(key=lambda x: str(x.get("updated_at") or ""), reverse=True)
+    return items
+
+
+def load_bagel_history(history_id: str) -> Dict[str, object]:
+    path = bagel_history_path(history_id)
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("invalid bagel history file")
+    data["id"] = str(data.get("id") or history_id)
+    turns = data.get("turns")
+    if not isinstance(turns, list):
+        data["turns"] = []
+    return data
+
+
+def save_bagel_history_record(record: Dict[str, object]) -> str:
+    history_id = str(record.get("id") or "").strip() or uuid.uuid4().hex[:12]
+    record["id"] = history_id
+    record["updated_at"] = _utc_now_iso()
+    if not record.get("created_at"):
+        record["created_at"] = record["updated_at"]
+    if not str(record.get("title") or "").strip():
+        turns = record.get("turns") if isinstance(record.get("turns"), list) else []
+        record["title"] = default_bagel_history_title(turns)  # type: ignore[arg-type]
+    path = bagel_history_path(history_id)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(record, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    return path
+
+
+def delete_bagel_history(history_id: str) -> None:
+    path = bagel_history_path(history_id)
+    if os.path.isfile(path):
+        os.remove(path)
+    asset = os.path.join(ensure_bagel_history_dir(), "assets", history_id)
+    if os.path.isdir(asset):
+        shutil.rmtree(asset, ignore_errors=True)
+
+
+def rename_bagel_history(history_id: str, title: str) -> None:
+    data = load_bagel_history(history_id)
+    data["title"] = title.strip() or str(data.get("title") or history_id)
+    save_bagel_history_record(data)
+
+
+def bagel_persist_media(history_id: str, src: str, prefix: str) -> str:
+    """把输入/输出图复制到 bagel_history/assets，返回持久路径。"""
+    src = str(src or "").strip()
+    if not src or not os.path.isfile(src):
+        return ""
+    asset_root = os.path.abspath(os.path.join(ensure_bagel_history_dir(), "assets"))
+    src_abs = os.path.abspath(src)
+    if src_abs.startswith(asset_root + os.sep):
+        return src_abs
+    ext = os.path.splitext(src)[1].lower() or ".png"
+    if ext not in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+        ext = ".png"
+    dst = os.path.join(
+        bagel_history_asset_dir(history_id),
+        f"{prefix}_{uuid.uuid4().hex[:10]}{ext}",
+    )
+    shutil.copy2(src, dst)
+    return dst
+
+
+class BagelHistoryDialog(QWidget):
+    """Bagel 历史对话浮层：加载 / 改标题 / 删除。"""
+
+    finished = pyqtSignal(int)
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        win = parent.window() if parent is not None else parent
+        super().__init__(win)
+        self.selected_id: str = ""
+        self.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setObjectName("bagelHistoryMask")
+        self.setStyleSheet("#bagelHistoryMask { background-color: rgba(0,0,0,160); }")
+        root = QVBoxLayout(self)
+        root.setContentsMargins(24, 24, 24, 24)
+        panel = QFrame()
+        panel.setObjectName("bagelHistoryPanel")
+        panel.setStyleSheet(
+            "#bagelHistoryPanel {"
+            "  background-color: #2b2b2b;"
+            "  border: 1px solid #666;"
+            "  border-radius: 6px;"
+            "}"
+        )
+        panel.setMinimumSize(480, 420)
+        panel.setMaximumSize(720, 560)
+        root.addStretch(1)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(panel)
+        row.addStretch(1)
+        root.addLayout(row)
+        root.addStretch(1)
+
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 12, 12, 12)
+        title = QLabel("Bagel 历史对话")
+        title.setStyleSheet(
+            f"color: {UI_TEXT_PRIMARY}; font-weight: bold; font-size: 14pt;"
+        )
+        layout.addWidget(title)
+        tip = QLabel(
+            "选择一条历史：双击或「加载」恢复该会话的调用轮次；"
+            "可改标题或删除。点空白处或「关闭」退出。"
+        )
+        tip.setWordWrap(True)
+        tip.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        layout.addWidget(tip)
+        self.list_widget = QListWidget()
+        self.list_widget.setAttribute(Qt.WA_InputMethodEnabled, False)
+        self.list_widget.setFocusPolicy(Qt.ClickFocus)
+        self.list_widget.setStyleSheet(
+            "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+        )
+        self.list_widget.itemDoubleClicked.connect(self._on_load_clicked)
+        self.list_widget.currentItemChanged.connect(self._on_current_changed)
+        layout.addWidget(self.list_widget, 1)
+        title_row = QHBoxLayout()
+        title_row.addWidget(QLabel("标题"))
+        self.title_edit = ImeSafeLineEdit()
+        self.title_edit.setPlaceholderText("选中条目后可改标题")
+        title_row.addWidget(self.title_edit, stretch=1)
+        self.save_title_btn = QPushButton("保存标题")
+        self.save_title_btn.setFocusPolicy(Qt.NoFocus)
+        self.save_title_btn.clicked.connect(self._on_save_title_clicked)
+        title_row.addWidget(self.save_title_btn)
+        layout.addLayout(title_row)
+        btn_row = QHBoxLayout()
+        self.load_btn = QPushButton("加载")
+        self.load_btn.setFocusPolicy(Qt.NoFocus)
+        self.load_btn.clicked.connect(self._on_load_clicked)
+        btn_row.addWidget(self.load_btn)
+        self.delete_btn = QPushButton("删除")
+        self.delete_btn.setFocusPolicy(Qt.NoFocus)
+        self.delete_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.delete_btn.clicked.connect(self._on_delete_clicked)
+        btn_row.addWidget(self.delete_btn)
+        self._delete_armed = False
+        btn_row.addStretch(1)
+        close_btn = QPushButton("关闭")
+        close_btn.setFocusPolicy(Qt.NoFocus)
+        close_btn.clicked.connect(self.reject)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        layout.addWidget(self._status)
+        self._panel = panel
+        self._reload()
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self.parentWidget() is not None:
+            self.setGeometry(self.parentWidget().rect())
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if self.parentWidget() is not None:
+            self.setGeometry(self.parentWidget().rect())
+        self.raise_()
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if not self._panel.geometry().contains(event.pos()):
+            self.reject()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def accept(self) -> None:
+        self.hide()
+        self.finished.emit(int(QDialog.Accepted))
+
+    def reject(self) -> None:
+        self.hide()
+        self.finished.emit(int(QDialog.Rejected))
+
+    def _reload(self) -> None:
+        self._delete_armed = False
+        self.delete_btn.setText("删除")
+        self.list_widget.clear()
+        self.title_edit.clear()
+        for item in list_bagel_histories():
+            title = str(item.get("title") or "")
+            updated = str(item.get("updated_at") or "")
+            count = int(item.get("turn_count") or 0)
+            label = title
+            if updated:
+                label += f"  ·  {updated}"
+            label += f"  ·  {count} 轮"
+            row = QListWidgetItem(label)
+            row.setData(Qt.UserRole, str(item.get("id") or ""))
+            row.setData(Qt.UserRole + 1, title)
+            row.setToolTip(str(item.get("path") or ""))
+            self.list_widget.addItem(row)
+        if self.list_widget.count() == 0:
+            empty = QListWidgetItem("（暂无 Bagel 历史）")
+            empty.setFlags(Qt.NoItemFlags)
+            self.list_widget.addItem(empty)
+        self._status.setText("")
+
+    def _current_id(self) -> str:
+        item = self.list_widget.currentItem()
+        if item is None:
+            return ""
+        return str(item.data(Qt.UserRole) or "")
+
+    def _on_current_changed(self, current, _previous) -> None:
+        self._delete_armed = False
+        self.delete_btn.setText("删除")
+        if current is None or not (current.flags() & Qt.ItemIsEnabled):
+            self.title_edit.clear()
+            return
+        self.title_edit.setText(str(current.data(Qt.UserRole + 1) or ""))
+        self.title_edit.setFocus(Qt.OtherFocusReason)
+
+    def _on_load_clicked(self, *_args) -> None:
+        hid = self._current_id()
+        if not hid:
+            self._status.setText("请先选择一条对话")
+            return
+        self.selected_id = hid
+        self.accept()
+
+    def _on_save_title_clicked(self) -> None:
+        hid = self._current_id()
+        if not hid:
+            self._status.setText("请先选择一条对话")
+            return
+        new_title = self.title_edit.text().strip()
+        if not new_title:
+            self._status.setText("标题不能为空")
+            return
+        try:
+            rename_bagel_history(hid, new_title)
+        except Exception as exc:
+            self._status.setText(f"保存标题失败: {exc}")
+            return
+        self._reload()
+        self._status.setText("标题已保存")
+
+    def _on_delete_clicked(self) -> None:
+        hid = self._current_id()
+        if not hid:
+            self._status.setText("请先选择一条对话")
+            return
+        if not self._delete_armed:
+            self._delete_armed = True
+            self.delete_btn.setText("再点确认删除")
+            self._status.setText("再点一次「再点确认删除」才会删除")
+            return
+        try:
+            delete_bagel_history(hid)
+        except Exception as exc:
+            self._status.setText(f"删除失败: {exc}")
+            self._delete_armed = False
+            self.delete_btn.setText("删除")
+            return
+        self._reload()
+        self._status.setText("已删除")
 
 
 class ChatHistoryDialog(QWidget):
@@ -7829,7 +8267,7 @@ class ChatPanelWidget(QWidget):
 
         def _work() -> None:
             try:
-                reply = call_bagel_inference(api_base, text, image_bgr=img_copy)
+                reply = call_bagel_inference(api_base, text, image_bgr=img_copy)[0]
                 self._bridge.finished.emit(reply, True)
             except Exception as exc:
                 self._bridge.finished.emit(str(exc), False)
@@ -12320,6 +12758,49 @@ def bagel_app_url(host: str, port: int) -> str:
     return f"http://{h}:{int(port)}/"
 
 
+# 停止时清理：推理 API + Gradio（以及 setsid 下的残留）
+BAGEL_PROCESS_PATTERNS: Tuple[str, ...] = (
+    "serve_api.py",
+    "app.py --server_name",
+    "app.py --server_port",
+)
+
+
+def bagel_probe_api_health(
+    host: str = BAGEL_SERVER_HOST_DEFAULT,
+    port: int = BAGEL_API_PORT_DEFAULT,
+    *,
+    timeout_s: float = 2.0,
+) -> Optional[dict]:
+    """探测已部署的 serve_api /health；就绪时返回 body，否则 None。"""
+    url = bagel_app_url(host, port).rstrip("/") + "/health"
+    ok, body, _err = _http_get_json(url, timeout_s=timeout_s)
+    if not ok or not isinstance(body, dict):
+        return None
+    if not body.get("ok"):
+        return None
+    return body
+
+
+def bagel_kill_related_processes(sig: str = "-TERM") -> int:
+    """对所有 Bagel 相关进程发信号。返回成功匹配的 pkill 次数。"""
+    hits = 0
+    for pat in BAGEL_PROCESS_PATTERNS:
+        try:
+            result = subprocess.run(
+                ["pkill", sig, "-f", pat],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            # pkill: 0=匹配到, 1=无匹配
+            if result.returncode == 0:
+                hits += 1
+        except Exception:
+            continue
+    return hits
+
+
 # Gradio Image 在 QWebEngine 里原生上传常得到 0 字节文件；用内存 File 注入更可靠。
 _BAGEL_INJECT_IMAGE_JS = r"""
 (function(b64, mime, name) {
@@ -12671,13 +13152,18 @@ class BagelAppLauncher(QObject):
         )
 
     def stop(self) -> None:
-        if not self.is_running():
-            self.status_message.emit("当前没有运行中的 Bagel")
-            return
-        self.status_message.emit("正在停止 Bagel…")
-        if self._process is not None:
+        self.status_message.emit("正在停止 Bagel Gradio，并清理相关进程…")
+        if self._process is not None and self._process.state() == QProcess.Running:
             self._process.terminate()
             QTimer.singleShot(4000, self._force_kill_process)
+        hits = bagel_kill_related_processes(sig="-TERM")
+        self.log_line.emit(f"[stop] pkill TERM 匹配组≈{hits}")
+        QTimer.singleShot(2000, lambda: bagel_kill_related_processes(sig="-KILL"))
+        if self._process is None or self._process.state() != QProcess.Running:
+            self._process = None
+            self._ready_emitted = False
+            self.running_changed.emit(False)
+            self.status_message.emit("已请求停止 Bagel 相关进程")
 
     def shutdown(self) -> None:
         if self._process is not None and self._process.state() == QProcess.Running:
@@ -12686,6 +13172,9 @@ class BagelAppLauncher(QObject):
             if self._process is not None and self._process.state() == QProcess.Running:
                 self._process.kill()
                 self._process.waitForFinished(1000)
+        bagel_kill_related_processes(sig="-TERM")
+        time.sleep(0.3)
+        bagel_kill_related_processes(sig="-KILL")
         self._process = None
         self.running_changed.emit(False)
 
@@ -12736,7 +13225,11 @@ class BagelAppLauncher(QObject):
 
 
 class BagelApiLauncher(QObject):
-    """启动/停止 Bagel serve_api.py（无 Gradio，仅模型 HTTP）。"""
+    """启动/停止 Bagel serve_api.py（无 Gradio，仅模型 HTTP）。
+
+    若目标端口上已有就绪的 serve_api，部署时直接复用（adopt），不重复加载权重。
+    停止时会清理本进程并 pkill 所有相关 Bagel 进程（API + Gradio）。
+    """
 
     log_line = pyqtSignal(str)
     status_message = pyqtSignal(str)
@@ -12750,9 +13243,20 @@ class BagelApiLauncher(QObject):
         self._url = ""
         self._api_base = ""
         self._mode = 1
+        self._adopted = False
+        self._adopt_host = BAGEL_SERVER_HOST_DEFAULT
+        self._adopt_port = BAGEL_API_PORT_DEFAULT
+        self._adopt_watch_timer = QTimer(self)
+        self._adopt_watch_timer.setInterval(2500)
+        self._adopt_watch_timer.timeout.connect(self._on_adopt_watch_tick)
 
     def is_running(self) -> bool:
+        if self._adopted:
+            return True
         return self._process is not None and self._process.state() == QProcess.Running
+
+    def is_adopted(self) -> bool:
+        return bool(self._adopted)
 
     def current_url(self) -> str:
         return self._url
@@ -12763,6 +13267,61 @@ class BagelApiLauncher(QObject):
     def current_mode(self) -> int:
         return int(self._mode or 1)
 
+    def try_adopt(
+        self,
+        *,
+        server_name: str = BAGEL_SERVER_HOST_DEFAULT,
+        server_port: int = BAGEL_API_PORT_DEFAULT,
+    ) -> bool:
+        """复用已在运行且 /health 就绪的推理 API。"""
+        host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
+        port = int(server_port)
+        body = bagel_probe_api_health(host, port, timeout_s=2.0)
+        if body is None:
+            return False
+        self._adopted = True
+        self._adopt_host = host
+        self._adopt_port = port
+        self._mode = int(body.get("mode") or 1)
+        self._url = bagel_app_url(host, port)
+        self._api_base = self._url.rstrip("/") + "/v1"
+        self._ready_emitted = True
+        model = str(body.get("model") or body.get("model_path") or "")
+        self.log_line.emit(
+            f"[adopt] 复用已部署推理 API {self._url.rstrip('/')}  "
+            f"mode={bagel_mode_label(self._mode)}"
+            + (f"  model={model}" if model else "")
+        )
+        self.status_message.emit(
+            f"已复用推理 API: {self._url}  ·  mode={bagel_mode_label(self._mode)}"
+        )
+        self.running_changed.emit(True)
+        self.ready_url.emit(self._url)
+        if not self._adopt_watch_timer.isActive():
+            self._adopt_watch_timer.start()
+        return True
+
+    def _clear_adopted(self, *, emit_stopped: bool = True) -> None:
+        was = self._adopted
+        self._adopted = False
+        self._ready_emitted = False
+        if self._adopt_watch_timer.isActive():
+            self._adopt_watch_timer.stop()
+        if was and emit_stopped:
+            self.running_changed.emit(False)
+
+    def _on_adopt_watch_tick(self) -> None:
+        if not self._adopted:
+            self._adopt_watch_timer.stop()
+            return
+        body = bagel_probe_api_health(
+            self._adopt_host, self._adopt_port, timeout_s=1.5
+        )
+        if body is None:
+            self.log_line.emit("--- 复用的推理 API 已不可用 ---")
+            self.status_message.emit("复用的推理 API 已退出")
+            self._clear_adopted(emit_stopped=True)
+
     def start(
         self,
         *,
@@ -12772,12 +13331,25 @@ class BagelApiLauncher(QObject):
         server_name: str = BAGEL_SERVER_HOST_DEFAULT,
         server_port: int = BAGEL_API_PORT_DEFAULT,
         mode: int = 1,
+        force_new: bool = False,
     ) -> None:
-        if self.is_running():
+        if self.is_running() and not self._adopted:
             self.status_message.emit(
                 f"Bagel 推理 API 已在运行 (mode={bagel_mode_label(self.current_mode())})"
             )
             return
+        if self._adopted and not force_new:
+            self.status_message.emit(
+                f"已复用推理 API (mode={bagel_mode_label(self.current_mode())})"
+            )
+            return
+
+        host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
+        port = int(server_port)
+
+        if not force_new and self.try_adopt(server_name=host, server_port=port):
+            return
+
         repo = resolve_bagel_root(repo_dir)
         serve_py = os.path.join(repo, "serve_api.py")
         if not os.path.isfile(serve_py):
@@ -12801,8 +13373,7 @@ class BagelApiLauncher(QObject):
                 "请先点「下载模型」。"
             )
             return
-        host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
-        port = int(server_port)
+        self._clear_adopted(emit_stopped=False)
         self._mode = int(mode or 1)
         self._url = bagel_app_url(host, port)
         self._api_base = self._url.rstrip("/") + "/v1"
@@ -12862,23 +13433,50 @@ class BagelApiLauncher(QObject):
         )
 
     def stop(self) -> None:
-        if not self.is_running():
-            self.status_message.emit("当前没有运行中的 Bagel 推理 API")
-            return
-        self.status_message.emit("正在停止 Bagel 推理 API…")
-        if self._process is not None:
+        """停止本窗口管理的进程，并清理所有相关 Bagel 模型进程。"""
+        self.status_message.emit("正在停止全部 Bagel 相关进程…")
+        if self._adopt_watch_timer.isActive():
+            self._adopt_watch_timer.stop()
+        if self._process is not None and self._process.state() == QProcess.Running:
             self._process.terminate()
-            QTimer.singleShot(4000, self._force_kill_process)
+            QTimer.singleShot(3500, self._force_kill_process)
+        hits = bagel_kill_related_processes(sig="-TERM")
+        self.log_line.emit(f"[stop] pkill TERM 匹配组≈{hits}")
+        QTimer.singleShot(2000, self._force_kill_all_related)
+        self._clear_adopted(emit_stopped=False)
+        if self._process is None or self._process.state() != QProcess.Running:
+            self._process = None
+            self._ready_emitted = False
+            self.running_changed.emit(False)
+            self.status_message.emit("已请求停止全部 Bagel 相关进程")
 
     def shutdown(self) -> None:
+        if self._adopt_watch_timer.isActive():
+            self._adopt_watch_timer.stop()
         if self._process is not None and self._process.state() == QProcess.Running:
             self._process.terminate()
             self._process.waitForFinished(3000)
             if self._process is not None and self._process.state() == QProcess.Running:
                 self._process.kill()
                 self._process.waitForFinished(1000)
+        bagel_kill_related_processes(sig="-TERM")
+        time.sleep(0.4)
+        bagel_kill_related_processes(sig="-KILL")
         self._process = None
+        self._adopted = False
+        self._ready_emitted = False
         self.running_changed.emit(False)
+
+    def _force_kill_all_related(self) -> None:
+        hits = bagel_kill_related_processes(sig="-KILL")
+        if hits:
+            self.log_line.emit(f"[stop] pkill KILL 匹配组≈{hits}")
+        self._process = None
+        self._adopted = False
+        self._ready_emitted = False
+        self.running_changed.emit(False)
+        self.log_line.emit("--- 全部 Bagel 相关进程已清理 ---")
+        self.status_message.emit("Bagel 相关进程已全部停止")
 
     def _maybe_emit_ready(self, line: str) -> None:
         if self._ready_emitted:
@@ -12906,6 +13504,9 @@ class BagelApiLauncher(QObject):
     def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
         self._process = None
         self._ready_emitted = False
+        if self._adopted:
+            # 本窗口进程退出但可能仍在复用外部；由 adopt watch 决定
+            return
         self.running_changed.emit(False)
         if exit_code == 0:
             self.log_line.emit("--- Bagel 推理 API 正常退出 ---")
@@ -12922,9 +13523,10 @@ class BagelApiLauncher(QObject):
         if self._process is not None and self._process.state() == QProcess.Running:
             self._process.kill()
             self._process = None
-            self.running_changed.emit(False)
-            self.log_line.emit("--- Bagel 推理 API 已被强制终止 ---")
-            self.status_message.emit("Bagel 推理 API 已强制停止")
+            if not self._adopted:
+                self.running_changed.emit(False)
+                self.log_line.emit("--- Bagel 推理 API 已被强制终止 ---")
+                self.status_message.emit("Bagel 推理 API 已强制停止")
 
 
 class VideoPlayerWidget(QWidget):
@@ -14443,6 +15045,269 @@ class LingbotDepthLauncher(QObject):
         if error == QProcess.FailedToStart:
             self.log_line.emit("[ERROR] 无法启动 run_lingbot_depth.sh")
             self.status_message.emit("无法启动 LingBot-Depth")
+            self.running_changed.emit(False)
+
+
+class RewardModelLauncher(QObject):
+    """跑 RLinf reward 打分（single/pair/batch）或真机 teleop。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    result_ready = pyqtSignal(dict)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._result: Optional[dict] = None
+        self._job: str = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start_score(
+        self,
+        *,
+        mode: str,
+        rlinf_root: str,
+        python_bin: str = "",
+        ckpt: str,
+        model_type: str = "resnet",
+        arch: str = "resnet18",
+        image_size: str = "3,224,224",
+        device: str = "auto",
+        threshold: float = 0.5,
+        task: str = "",
+        image: str = "",
+        image_a: str = "",
+        image_b: str = "",
+        dataset: str = "",
+        max_samples: int = 0,
+        batch_size: int = 16,
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("Reward 评测正在运行")
+            return
+        script = RLINF_RUN_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        root = resolve_rlinf_root(rlinf_root)
+        py = (python_bin or "").strip() or resolve_rlinf_python(root)
+        os.makedirs(RLINF_REWARD_CACHE_DIR, exist_ok=True)
+
+        args = [
+            "--mode",
+            mode,
+            "--ckpt",
+            os.path.abspath(os.path.expanduser(ckpt)),
+            "--model-type",
+            model_type,
+            "--arch",
+            arch,
+            "--image-size",
+            image_size,
+            "--device",
+            device or "auto",
+            "--threshold",
+            str(threshold),
+            "--batch-size",
+            str(int(batch_size)),
+        ]
+        if task.strip():
+            args.extend(["--task", task.strip()])
+        if mode == "single":
+            args.extend(["--image", os.path.abspath(os.path.expanduser(image))])
+        elif mode == "pair":
+            args.extend(
+                [
+                    "--image-a",
+                    os.path.abspath(os.path.expanduser(image_a)),
+                    "--image-b",
+                    os.path.abspath(os.path.expanduser(image_b)),
+                ]
+            )
+        elif mode == "batch":
+            args.extend(
+                [
+                    "--dataset",
+                    os.path.abspath(os.path.expanduser(dataset)),
+                    "--max-samples",
+                    str(int(max_samples)),
+                ]
+            )
+        else:
+            self.status_message.emit(f"未知 mode: {mode}")
+            return
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("RLINF_ROOT", root)
+        qenv.insert("RLINF_PYTHON", py)
+
+        self._result = None
+        self._job = mode
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(root)
+        proc.setProcessEnvironment(qenv)
+        proc.start("bash", [script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ bash run_reward_model.sh --mode {mode} --ckpt {ckpt}")
+        self.status_message.emit(f"正在运行 Reward 评测（{mode}）…")
+
+    def start_teleop(
+        self,
+        *,
+        rlinf_root: str,
+        python_bin: str = "",
+        config_name: str = "realworld_teleop",
+        ckpt: str = "",
+        threshold: float = 0.2,
+        model_type: str = "resnet",
+        arch: str = "resnet18",
+        image_size: str = "3,128,128",
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("Reward teleop 正在运行")
+            return
+        root = resolve_rlinf_root(rlinf_root)
+        py = (python_bin or "").strip() or resolve_rlinf_python(root)
+        src = os.path.join(root, "examples", "reward", "eval_realworld_teleop.py")
+        cfg_dir = os.path.join(root, "examples", "reward", "config")
+        if not os.path.isfile(src):
+            self.status_message.emit(f"未找到: {src}")
+            return
+        log_dir = os.path.join(
+            root, "logs", time.strftime("%Y%m%d-%H:%M:%S") + f"-{config_name}"
+        )
+        os.makedirs(log_dir, exist_ok=True)
+        overrides = [
+            f"runner.logger.log_path={log_dir}",
+            f"reward.model.model_type={model_type}",
+            f"reward.model.arch={arch}",
+            f"reward.model.image_size=[{image_size.replace('x', ',').replace(' ', '')}]",
+            f"reward.reward_threshold={threshold}",
+            "reward.use_reward_model=True",
+            "reward.standalone_realworld=True",
+        ]
+        if ckpt.strip():
+            ckpt_abs = os.path.abspath(os.path.expanduser(ckpt.strip()))
+            overrides.append(f"reward.model.model_path={ckpt_abs}")
+            overrides.append("reward.model.pretrained=False")
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("RLINF_ROOT", root)
+        qenv.insert("REWARD_PATH", os.path.join(root, "examples", "reward"))
+        qenv.insert("REPO_PATH", root)
+        qenv.insert("PYTHONPATH", root)
+
+        self._result = None
+        self._job = "teleop"
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(root)
+        proc.setProcessEnvironment(qenv)
+        args = [
+            src,
+            f"--config-path={cfg_dir}",
+            f"--config-name={config_name}",
+            *overrides,
+        ]
+        proc.start(py, args)
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(
+            f"$ {py} examples/reward/eval_realworld_teleop.py "
+            f"--config-name {config_name} …"
+        )
+        self.status_message.emit("正在启动 Reward 真机 teleop…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 Reward 任务")
+            return
+        self.status_message.emit("正在停止 Reward 任务…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(2500, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.terminate()
+            self._process.waitForFinished(1500)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[RESULT] "):
+                raw = text[len("[RESULT] ") :].strip()
+                try:
+                    self._result = json.loads(raw)
+                except json.JSONDecodeError:
+                    self.log_line.emit(text)
+                    continue
+                continue
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        result = self._result or {}
+        job = self._job or "reward"
+        if job == "teleop":
+            if exit_code == 0:
+                self.status_message.emit("Reward teleop 已退出")
+                self.result_ready.emit({"ok": True, "mode": "teleop"})
+            else:
+                err = f"退出码 {exit_code}"
+                self.status_message.emit(f"Reward teleop 失败: {err}")
+                self.log_line.emit(f"[ERROR] {err}")
+                self.result_ready.emit({"ok": False, "error": err, "mode": "teleop"})
+        elif result.get("ok"):
+            self.result_ready.emit(result)
+            self.status_message.emit(f"Reward 评测完成（{result.get('mode', job)}）")
+        else:
+            err = str(result.get("error") or f"退出码 {exit_code}")
+            self.status_message.emit(f"Reward 评测失败: {err}")
+            self.log_line.emit(f"[ERROR] {err}")
+            self.result_ready.emit({"ok": False, "error": err, "mode": job})
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 Reward 进程")
+            self.status_message.emit("无法启动 Reward 评测")
             self.running_changed.emit(False)
 
 
@@ -16283,13 +17148,18 @@ class CameraTopicWindow(QMainWindow):
         bagel_api_row.addWidget(self.bagel_api_status_label, 1)
         self.bagel_api_start_btn = QPushButton("部署推理 API")
         self.bagel_api_start_btn.setToolTip(
-            "只加载模型并启动 HTTP（无 Gradio）。随后可用下方「调用」或 AI 对话。"
+            "只加载模型并启动 HTTP（无 Gradio）。\n"
+            "若目标端口上已有就绪的 serve_api，将直接复用，不重复加载。\n"
+            "随后可用下方「调用」或 AI 对话。"
         )
         self.bagel_api_start_btn.clicked.connect(self._on_bagel_api_start_clicked)
         bagel_api_row.addWidget(self.bagel_api_start_btn)
         self.bagel_api_stop_btn = QPushButton("停止 API")
         self.bagel_api_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
         self.bagel_api_stop_btn.setEnabled(False)
+        self.bagel_api_stop_btn.setToolTip(
+            "停止推理 API，并清理所有相关 Bagel 进程（含 Gradio / 残留 serve_api）。"
+        )
         self.bagel_api_stop_btn.clicked.connect(self._on_bagel_api_stop_clicked)
         bagel_api_row.addWidget(self.bagel_api_stop_btn)
         bagel_outer.addLayout(bagel_api_row)
@@ -16313,6 +17183,24 @@ class CameraTopicWindow(QMainWindow):
             "文生图 / 图像编辑的去噪步数 num_timesteps（默认 25，越大越慢越细）"
         )
         bagel_call_row.addWidget(self.bagel_num_timesteps_spin)
+        bagel_call_row.addWidget(QLabel("尺寸"))
+        self.bagel_image_size_combo = ImeSafeComboBox()
+        self.bagel_image_size_combo.addItem("跟随输入", "input")
+        self.bagel_image_size_combo.addItem("320² psi", "320")
+        self.bagel_image_size_combo.addItem("512² 快", "512")
+        self.bagel_image_size_combo.addItem("768²", "768")
+        self.bagel_image_size_combo.addItem("1024²", "1024")
+        self.bagel_image_size_combo.addItem("1:1 1024", "1:1")
+        self.bagel_image_size_combo.addItem("16:9", "16:9")
+        self.bagel_image_size_combo.addItem("9:16", "9:16")
+        self.bagel_image_size_combo.addItem("4:3", "4:3")
+        self.bagel_image_size_combo.addItem("3:4", "3:4")
+        self.bagel_image_size_combo.setCurrentIndex(0)  # 跟随输入
+        self.bagel_image_size_combo.setToolTip(
+            "输出分辨率。默认「跟随输入」：有输入图则用其大小；"
+            "纯文生图无输入时回退 512²。320² 与 psi-policy 训练图一致。"
+        )
+        bagel_call_row.addWidget(self.bagel_image_size_combo)
         self.bagel_call_prompt_edit = ImeSafeLineEdit("")
         self.bagel_call_prompt_edit.setPlaceholderText("输入提示词后点「调用」")
         bagel_call_row.addWidget(self.bagel_call_prompt_edit, 1)
@@ -16336,15 +17224,74 @@ class CameraTopicWindow(QMainWindow):
         bagel_call_row.addWidget(self.bagel_call_btn)
         bagel_outer.addLayout(bagel_call_row)
 
+        bagel_hist_row = QHBoxLayout()
+        bagel_hist_row.setSpacing(6)
+        self.bagel_history_title_label = QLabel("当前: 新对话（未保存）")
+        self.bagel_history_title_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.bagel_history_title_label.setWordWrap(True)
+        bagel_hist_row.addWidget(self.bagel_history_title_label, 1)
+        self.bagel_history_new_btn = QPushButton("新对话")
+        self.bagel_history_new_btn.setToolTip("清空当前轮次，开始新的 Bagel 会话")
+        self.bagel_history_new_btn.clicked.connect(self._on_bagel_history_new_clicked)
+        bagel_hist_row.addWidget(self.bagel_history_new_btn)
+        self.bagel_history_save_btn = QPushButton("保存")
+        self.bagel_history_save_btn.setToolTip(
+            f"保存当前会话到本地（{BAGEL_HISTORY_DIR}）"
+        )
+        self.bagel_history_save_btn.clicked.connect(self._on_bagel_history_save_clicked)
+        bagel_hist_row.addWidget(self.bagel_history_save_btn)
+        self.bagel_history_btn = QPushButton("历史")
+        self.bagel_history_btn.setToolTip("浏览 / 加载 / 改名 / 删除 Bagel 历史对话")
+        self.bagel_history_btn.clicked.connect(self._on_bagel_history_clicked)
+        bagel_hist_row.addWidget(self.bagel_history_btn)
+        self.bagel_history_del_turn_btn = QPushButton("删本轮")
+        self.bagel_history_del_turn_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.bagel_history_del_turn_btn.setToolTip("删除左侧列表中选中的调用轮次")
+        self.bagel_history_del_turn_btn.clicked.connect(
+            self._on_bagel_history_delete_turn_clicked
+        )
+        bagel_hist_row.addWidget(self.bagel_history_del_turn_btn)
+        bagel_outer.addLayout(bagel_hist_row)
+
         bagel_preview_row = QHBoxLayout()
         bagel_preview_row.setSpacing(6)
+        bagel_turns_col = QVBoxLayout()
+        bagel_turns_col.setContentsMargins(0, 0, 0, 0)
+        bagel_turns_col.setSpacing(4)
+        bagel_turns_col.addWidget(QLabel("本会话轮次"))
+        self.bagel_history_turns_list = QListWidget()
+        self.bagel_history_turns_list.setMinimumWidth(160)
+        self.bagel_history_turns_list.setMaximumWidth(220)
+        self.bagel_history_turns_list.setStyleSheet(
+            "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+        )
+        self.bagel_history_turns_list.itemClicked.connect(
+            self._on_bagel_history_turn_clicked
+        )
+        bagel_turns_col.addWidget(self.bagel_history_turns_list, 1)
+        bagel_preview_row.addLayout(bagel_turns_col)
+        bagel_in_col = QVBoxLayout()
+        bagel_in_col.setContentsMargins(0, 0, 0, 0)
+        bagel_in_col.setSpacing(4)
         self.bagel_call_input_preview = QLabel("输入图")
         self.bagel_call_input_preview.setFixedSize(120, 90)
         self.bagel_call_input_preview.setAlignment(Qt.AlignCenter)
         self.bagel_call_input_preview.setStyleSheet(
             "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #888; }"
         )
-        bagel_preview_row.addWidget(self.bagel_call_input_preview)
+        bagel_in_col.addWidget(self.bagel_call_input_preview)
+        self.bagel_call_input_size_label = QLabel("输入分辨率: —")
+        self.bagel_call_input_size_label.setAlignment(Qt.AlignCenter)
+        self.bagel_call_input_size_label.setFont(
+            QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
+        )
+        self.bagel_call_input_size_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.bagel_call_input_size_label.setToolTip("输入图像的宽×高（像素）")
+        bagel_in_col.addWidget(self.bagel_call_input_size_label)
+        bagel_preview_row.addLayout(bagel_in_col)
+        bagel_out_col = QVBoxLayout()
+        bagel_out_col.setContentsMargins(0, 0, 0, 0)
+        bagel_out_col.setSpacing(4)
         self.bagel_call_output_preview = QLabel("输出图")
         self.bagel_call_output_preview.setMinimumHeight(160)
         self.bagel_call_output_preview.setAlignment(Qt.AlignCenter)
@@ -16354,11 +17301,44 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_call_output_preview.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding
         )
-        bagel_preview_row.addWidget(self.bagel_call_output_preview, 1)
+        bagel_out_col.addWidget(self.bagel_call_output_preview, 1)
+        self.bagel_call_output_size_label = QLabel("输出分辨率: —")
+        self.bagel_call_output_size_label.setAlignment(Qt.AlignCenter)
+        self.bagel_call_output_size_label.setFont(
+            QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
+        )
+        self.bagel_call_output_size_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.bagel_call_output_size_label.setToolTip("实际输出图像的宽×高（像素）")
+        bagel_out_col.addWidget(self.bagel_call_output_size_label)
+        self.bagel_call_model_size_label = QLabel("模型输入: —")
+        self.bagel_call_model_size_label.setAlignment(Qt.AlignCenter)
+        self.bagel_call_model_size_label.setFont(
+            QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
+        )
+        self.bagel_call_model_size_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.bagel_call_model_size_label.setToolTip(
+            "实际送进模型的条件图尺寸（编辑时经 VAE resize，最短边常被抬到 ≥512）"
+        )
+        bagel_out_col.addWidget(self.bagel_call_model_size_label)
+        self.bagel_call_latency_label = QLabel("调用耗时: —")
+        self.bagel_call_latency_label.setAlignment(Qt.AlignCenter)
+        self.bagel_call_latency_label.setFont(
+            QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
+        )
+        self.bagel_call_latency_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.bagel_call_latency_label.setToolTip("Bagel 推理 API 返回的 latency_s（秒）")
+        bagel_out_col.addWidget(self.bagel_call_latency_label)
+        bagel_preview_row.addLayout(bagel_out_col, 1)
         self._bagel_preview_layout = bagel_preview_row
         bagel_outer.addLayout(bagel_preview_row, 1)
         self._bagel_call_image_path = ""
         self._bagel_call_busy = False
+        self._bagel_history_id = ""
+        self._bagel_history_title = ""
+        self._bagel_history_turns: List[Dict[str, object]] = []
+        self._bagel_history_dialog = None
+        self._refresh_bagel_history_title_label()
+        self._refresh_bagel_history_turns_list()
 
         self.bagel_log_edit = QTextEdit()
         self.bagel_log_edit.setReadOnly(True)
@@ -17705,8 +18685,293 @@ class CameraTopicWindow(QMainWindow):
 
         self._load_ctx_default_video()
 
+        reward_tab = QWidget()
+        reward_tab.setObjectName("rewardTab")
+        reward_outer = QVBoxLayout(reward_tab)
+        reward_outer.setContentsMargins(8, 6, 8, 6)
+        reward_outer.setSpacing(6)
+        reward_hint = QLabel(
+            "RLinf 具身 Reward Model 评测：单帧打分 / A-B 偏好 / 批量 .pt 指标 / "
+            "真机 teleop 在线打分。需本地 RLinf 仓库与权重；真机模式还需按 "
+            "realworld_teleop.yaml 配好 Franka / SpaceMouse。"
+        )
+        reward_hint.setWordWrap(True)
+        reward_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        reward_outer.addWidget(reward_hint)
+
+        rm_path_row = QHBoxLayout()
+        rm_path_row.setSpacing(6)
+        rm_path_row.addWidget(QLabel("RLinf"))
+        self.reward_root_edit = QLineEdit(
+            os.environ.get("RLINF_ROOT", RLINF_ROOT_DEFAULT)
+        )
+        self.reward_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_path_row.addWidget(self.reward_root_edit, 1)
+        self.reward_root_browse_btn = QPushButton("…")
+        self.reward_root_browse_btn.setFixedWidth(28)
+        self.reward_root_browse_btn.clicked.connect(self._on_reward_root_browse)
+        rm_path_row.addWidget(self.reward_root_browse_btn)
+        rm_path_row.addWidget(QLabel("Python"))
+        self.reward_python_edit = QLineEdit(
+            resolve_rlinf_python(self.reward_root_edit.text())
+        )
+        self.reward_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_path_row.addWidget(self.reward_python_edit, 1)
+        reward_outer.addLayout(rm_path_row)
+
+        rm_model_row = QHBoxLayout()
+        rm_model_row.setSpacing(6)
+        rm_model_row.addWidget(QLabel("类型"))
+        self.reward_type_combo = ImeSafeComboBox()
+        self.reward_type_combo.addItem("resnet", "resnet")
+        self.reward_type_combo.addItem("vlm", "vlm")
+        rm_model_row.addWidget(self.reward_type_combo)
+        rm_model_row.addWidget(QLabel("arch"))
+        self.reward_arch_combo = ImeSafeComboBox()
+        for arch in ("resnet18", "resnet34", "resnet50"):
+            self.reward_arch_combo.addItem(arch, arch)
+        rm_model_row.addWidget(self.reward_arch_combo)
+        rm_model_row.addWidget(QLabel("size"))
+        self.reward_image_size_edit = QLineEdit("3,224,224")
+        self.reward_image_size_edit.setFixedWidth(100)
+        self.reward_image_size_edit.setToolTip("C,H,W 或 H,W / 单边边长")
+        rm_model_row.addWidget(self.reward_image_size_edit)
+        rm_model_row.addWidget(QLabel("设备"))
+        self.reward_device_combo = ImeSafeComboBox()
+        self.reward_device_combo.addItem("auto", "auto")
+        self.reward_device_combo.addItem("cuda", "cuda")
+        self.reward_device_combo.addItem("cpu", "cpu")
+        rm_model_row.addWidget(self.reward_device_combo)
+        rm_model_row.addWidget(QLabel("阈值"))
+        self.reward_threshold_spin = QDoubleSpinBox()
+        self.reward_threshold_spin.setRange(0.0, 1.0)
+        self.reward_threshold_spin.setSingleStep(0.05)
+        self.reward_threshold_spin.setValue(0.5)
+        self.reward_threshold_spin.setDecimals(2)
+        self.reward_threshold_spin.setFixedWidth(72)
+        self.reward_threshold_spin.setToolTip("批量二分类阈值；teleop 默认也可改")
+        rm_model_row.addWidget(self.reward_threshold_spin)
+        reward_outer.addLayout(rm_model_row)
+
+        rm_ckpt_row = QHBoxLayout()
+        rm_ckpt_row.setSpacing(6)
+        rm_ckpt_row.addWidget(QLabel("ckpt"))
+        self.reward_ckpt_edit = QLineEdit()
+        self.reward_ckpt_edit.setPlaceholderText("reward 权重 .pt / .pth / .safetensors 或 VLM 目录")
+        self.reward_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_ckpt_row.addWidget(self.reward_ckpt_edit, 1)
+        self.reward_ckpt_browse_btn = QPushButton("…")
+        self.reward_ckpt_browse_btn.setFixedWidth(28)
+        self.reward_ckpt_browse_btn.clicked.connect(self._on_reward_ckpt_browse)
+        rm_ckpt_row.addWidget(self.reward_ckpt_browse_btn)
+        rm_ckpt_row.addWidget(QLabel("task"))
+        self.reward_task_edit = QLineEdit()
+        self.reward_task_edit.setPlaceholderText("VLM 任务描述（可选）")
+        rm_ckpt_row.addWidget(self.reward_task_edit, 1)
+        reward_outer.addLayout(rm_ckpt_row)
+
+        rm_mode_row = QHBoxLayout()
+        rm_mode_row.setSpacing(6)
+        rm_mode_row.addWidget(QLabel("模式"))
+        self.reward_mode_combo = ImeSafeComboBox()
+        self.reward_mode_combo.addItem("① 单帧打分", "single")
+        self.reward_mode_combo.addItem("② A/B 偏好", "pair")
+        self.reward_mode_combo.addItem("③ 批量数据集", "batch")
+        self.reward_mode_combo.addItem("④ 真机 teleop", "teleop")
+        self.reward_mode_combo.currentIndexChanged.connect(self._on_reward_mode_changed)
+        rm_mode_row.addWidget(self.reward_mode_combo)
+        self.reward_run_btn = QPushButton("运行评测")
+        self.reward_run_btn.setToolTip("按当前模式启动打分或 teleop")
+        self.reward_run_btn.clicked.connect(self._on_reward_run_clicked)
+        rm_mode_row.addWidget(self.reward_run_btn)
+        self.reward_stop_btn = QPushButton("停止")
+        self.reward_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.reward_stop_btn.setEnabled(False)
+        self.reward_stop_btn.clicked.connect(self._on_reward_stop_clicked)
+        rm_mode_row.addWidget(self.reward_stop_btn)
+        self.reward_status_label = QLabel("空闲")
+        self.reward_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_mode_row.addWidget(self.reward_status_label, 1)
+        reward_outer.addLayout(rm_mode_row)
+
+        self.reward_stack = QStackedWidget()
+
+        # --- single ---
+        rm_single = QWidget()
+        rm_single_l = QVBoxLayout(rm_single)
+        rm_single_l.setContentsMargins(0, 0, 0, 0)
+        rm_single_l.setSpacing(6)
+        rm_s_row = QHBoxLayout()
+        rm_s_row.addWidget(QLabel("输入"))
+        self.reward_single_source_combo = ImeSafeComboBox()
+        self.reward_single_source_combo.addItem("当前相机", "camera")
+        self.reward_single_source_combo.addItem("本地文件", "file")
+        rm_s_row.addWidget(self.reward_single_source_combo)
+        rm_s_row.addWidget(QLabel("预览 topic"))
+        self.reward_topic_combo = ImeSafeComboBox()
+        self.reward_topic_combo.setMinimumWidth(200)
+        rm_s_row.addWidget(self.reward_topic_combo, 1)
+        self.reward_topic_refresh_btn = QPushButton("刷新")
+        self.reward_topic_refresh_btn.setFixedWidth(48)
+        self.reward_topic_refresh_btn.clicked.connect(self._refresh_reward_topic_combo)
+        rm_s_row.addWidget(self.reward_topic_refresh_btn)
+        rm_single_l.addLayout(rm_s_row)
+        rm_s_path = QHBoxLayout()
+        self.reward_single_path_edit = QLineEdit()
+        self.reward_single_path_edit.setPlaceholderText("本地图像路径…")
+        rm_s_path.addWidget(self.reward_single_path_edit, 1)
+        self.reward_single_browse_btn = QPushButton("…")
+        self.reward_single_browse_btn.setFixedWidth(28)
+        self.reward_single_browse_btn.clicked.connect(
+            lambda: self._on_reward_image_browse(self.reward_single_path_edit)
+        )
+        rm_s_path.addWidget(self.reward_single_browse_btn)
+        rm_single_l.addLayout(rm_s_path)
+        rm_s_prev = QHBoxLayout()
+        self.reward_single_preview = ScaledPixmapLabel("输入")
+        self.reward_single_preview.setMinimumHeight(160)
+        rm_s_prev.addWidget(self.reward_single_preview, 1)
+        self.reward_score_label = QLabel("score: —")
+        self.reward_score_label.setAlignment(Qt.AlignCenter)
+        self.reward_score_label.setStyleSheet(
+            f"font-size: 28px; color: {UI_TEXT_PRIMARY}; font-weight: bold;"
+        )
+        rm_s_prev.addWidget(self.reward_score_label, 1)
+        rm_single_l.addLayout(rm_s_prev, 1)
+        self.reward_stack.addWidget(rm_single)
+
+        # --- pair ---
+        rm_pair = QWidget()
+        rm_pair_l = QVBoxLayout(rm_pair)
+        rm_pair_l.setContentsMargins(0, 0, 0, 0)
+        rm_pair_l.setSpacing(6)
+        rm_p_src = QHBoxLayout()
+        rm_p_src.addWidget(QLabel("输入"))
+        self.reward_pair_source_combo = ImeSafeComboBox()
+        self.reward_pair_source_combo.addItem("本地文件", "file")
+        self.reward_pair_source_combo.addItem("相机抓两帧(A=当前)", "camera")
+        rm_p_src.addWidget(self.reward_pair_source_combo)
+        self.reward_capture_a_btn = QPushButton("抓 A")
+        self.reward_capture_a_btn.clicked.connect(
+            lambda: self._on_reward_capture_slot("a")
+        )
+        rm_p_src.addWidget(self.reward_capture_a_btn)
+        self.reward_capture_b_btn = QPushButton("抓 B")
+        self.reward_capture_b_btn.clicked.connect(
+            lambda: self._on_reward_capture_slot("b")
+        )
+        rm_p_src.addWidget(self.reward_capture_b_btn)
+        rm_p_src.addStretch(1)
+        rm_pair_l.addLayout(rm_p_src)
+        for side, attr in (("A", "reward_pair_a_edit"), ("B", "reward_pair_b_edit")):
+            row = QHBoxLayout()
+            row.addWidget(QLabel(f"图{side}"))
+            edit = QLineEdit()
+            edit.setPlaceholderText(f"图像 {side} 路径…")
+            setattr(self, attr, edit)
+            row.addWidget(edit, 1)
+            btn = QPushButton("…")
+            btn.setFixedWidth(28)
+            btn.clicked.connect(lambda _=False, e=edit: self._on_reward_image_browse(e))
+            row.addWidget(btn)
+            rm_pair_l.addLayout(row)
+        rm_p_prev = QHBoxLayout()
+        self.reward_pair_a_preview = ScaledPixmapLabel("A")
+        self.reward_pair_a_preview.setMinimumHeight(140)
+        rm_p_prev.addWidget(self.reward_pair_a_preview, 1)
+        self.reward_pair_b_preview = ScaledPixmapLabel("B")
+        self.reward_pair_b_preview.setMinimumHeight(140)
+        rm_p_prev.addWidget(self.reward_pair_b_preview, 1)
+        self.reward_pair_result_label = QLabel("A/B: —")
+        self.reward_pair_result_label.setAlignment(Qt.AlignCenter)
+        self.reward_pair_result_label.setStyleSheet(
+            f"font-size: 18px; color: {UI_TEXT_PRIMARY};"
+        )
+        rm_p_prev.addWidget(self.reward_pair_result_label, 1)
+        rm_pair_l.addLayout(rm_p_prev, 1)
+        self.reward_stack.addWidget(rm_pair)
+
+        # --- batch ---
+        rm_batch = QWidget()
+        rm_batch_l = QVBoxLayout(rm_batch)
+        rm_batch_l.setContentsMargins(0, 0, 0, 0)
+        rm_batch_l.setSpacing(6)
+        rm_b_row = QHBoxLayout()
+        rm_b_row.addWidget(QLabel("数据集 .pt"))
+        self.reward_dataset_edit = QLineEdit()
+        self.reward_dataset_edit.setPlaceholderText(
+            "RLinf processed reward 数据（含 images/labels）"
+        )
+        self.reward_dataset_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_b_row.addWidget(self.reward_dataset_edit, 1)
+        self.reward_dataset_browse_btn = QPushButton("…")
+        self.reward_dataset_browse_btn.setFixedWidth(28)
+        self.reward_dataset_browse_btn.clicked.connect(self._on_reward_dataset_browse)
+        rm_b_row.addWidget(self.reward_dataset_browse_btn)
+        rm_b_row.addWidget(QLabel("max"))
+        self.reward_max_samples_spin = QSpinBox()
+        self.reward_max_samples_spin.setRange(0, 1_000_000)
+        self.reward_max_samples_spin.setValue(0)
+        self.reward_max_samples_spin.setSpecialValueText("全部")
+        self.reward_max_samples_spin.setToolTip("0 = 全部样本")
+        rm_b_row.addWidget(self.reward_max_samples_spin)
+        rm_batch_l.addLayout(rm_b_row)
+        self.reward_batch_summary = QLabel("批量结果: —")
+        self.reward_batch_summary.setWordWrap(True)
+        self.reward_batch_summary.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.reward_batch_summary.setStyleSheet(
+            "background-color: #1a1a1a; padding: 10px; border: 1px solid #444;"
+        )
+        self.reward_batch_summary.setMinimumHeight(120)
+        rm_batch_l.addWidget(self.reward_batch_summary, 1)
+        self.reward_stack.addWidget(rm_batch)
+
+        # --- teleop ---
+        rm_teleop = QWidget()
+        rm_teleop_l = QVBoxLayout(rm_teleop)
+        rm_teleop_l.setContentsMargins(0, 0, 0, 0)
+        rm_teleop_l.setSpacing(6)
+        rm_t_row = QHBoxLayout()
+        rm_t_row.addWidget(QLabel("config"))
+        self.reward_teleop_config_edit = QLineEdit("realworld_teleop")
+        self.reward_teleop_config_edit.setFixedWidth(180)
+        rm_t_row.addWidget(self.reward_teleop_config_edit)
+        rm_t_row.addStretch(1)
+        rm_teleop_l.addLayout(rm_t_row)
+        rm_teleop_note = QLabel(
+            "将调用 RLinf examples/reward/eval_realworld_teleop.py。"
+            "需集群 / Franka / SpaceMouse 已按 yaml 配置；本页只负责启停与日志。"
+        )
+        rm_teleop_note.setWordWrap(True)
+        rm_teleop_note.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        rm_teleop_l.addWidget(rm_teleop_note)
+        rm_teleop_l.addStretch(1)
+        self.reward_stack.addWidget(rm_teleop)
+
+        reward_outer.addWidget(self.reward_stack, 1)
+
+        self.reward_log_edit = QTextEdit()
+        self.reward_log_edit.setReadOnly(True)
+        self.reward_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.reward_log_edit.setMaximumHeight(140)
+        self.reward_log_edit.setPlaceholderText("Reward 评测日志…")
+        self.reward_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        reward_outer.addWidget(self.reward_log_edit)
+
+        self._reward_launcher = RewardModelLauncher(self)
+        self._reward_launcher.log_line.connect(self._append_reward_log)
+        self._reward_launcher.status_message.connect(self._on_reward_status)
+        self._reward_launcher.running_changed.connect(self._update_reward_ui)
+        self._reward_launcher.result_ready.connect(self._on_reward_result)
+        self._on_reward_mode_changed()
+        self._refresh_reward_topic_combo()
+
         control_tabs.addTab(sim_tab, "仿真评测")
         control_tabs.addTab(real_tab, "真机评测")
+        control_tabs.addTab(reward_tab, "Reward评测")
         control_tabs.addTab(ctx_tab, "ICL")
         # sub task / sub image 挂在全部 tab 最后，见下方 addTab
 
@@ -18456,8 +19721,18 @@ class CameraTopicWindow(QMainWindow):
         self._update_bagel_run_ui()
 
     def _on_bagel_stop_clicked(self) -> None:
+        # Gradio「停止」也清掉推理 API 等全部相关进程
+        if getattr(self, "_bagel_api_launcher", None) is not None:
+            try:
+                self._bagel_api_launcher._clear_adopted(emit_stopped=False)
+                self._bagel_api_launcher._process = None
+                self._bagel_api_launcher._ready_emitted = False
+                self._bagel_api_launcher.running_changed.emit(False)
+            except Exception:
+                pass
         self._bagel_launcher.stop()
         self._update_bagel_run_ui()
+        self._update_bagel_api_ui()
 
     def _on_bagel_clear_log_clicked(self) -> None:
         self.bagel_log_edit.clear()
@@ -18762,14 +20037,18 @@ class CameraTopicWindow(QMainWindow):
     def _update_bagel_api_ui(self, *_args) -> None:
         running = self._bagel_api_launcher.is_running()
         ready = bool(self._bagel_api_launcher._ready_emitted) and running
-        self.bagel_api_start_btn.setEnabled(not running)
+        adopted = bool(getattr(self._bagel_api_launcher, "_adopted", False))
+        # 复用中仍允许再点部署（会再次探测）；仅本窗口自启进程时禁用
+        self.bagel_api_start_btn.setEnabled(not running or adopted)
         self.bagel_api_stop_btn.setEnabled(running)
-        self.bagel_api_port_spin.setEnabled(not running)
+        self.bagel_api_port_spin.setEnabled(not running or adopted)
         self.bagel_call_btn.setEnabled(running and ready and not self._bagel_call_busy)
         if running:
             self.bagel_api_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
-            if not self._bagel_api_ready_poll_timer.isActive():
+            if not self._bagel_api_ready_poll_timer.isActive() and not ready:
                 self._bagel_api_ready_poll_timer.start()
+            if adopted and ready:
+                self._bagel_api_ready_poll_timer.stop()
         else:
             self.bagel_api_status_label.setStyleSheet("")
             self._bagel_api_ready_poll_timer.stop()
@@ -18782,6 +20061,20 @@ class CameraTopicWindow(QMainWindow):
                 pass
 
     def _on_bagel_api_start_clicked(self) -> None:
+        host = self.bagel_host_edit.text().strip() or BAGEL_SERVER_HOST_DEFAULT
+        port = int(self.bagel_api_port_spin.value())
+        # 先探测已部署实例；命中则直接复用，无需停 Gradio
+        if bagel_probe_api_health(host, port) is not None:
+            self._bagel_api_launcher.start(
+                repo_dir=self.bagel_root_edit.text(),
+                model_path=self.bagel_model_edit.text(),
+                python_bin=self.bagel_python_edit.text(),
+                server_name=host,
+                server_port=port,
+                mode=int(self.bagel_mode_combo.currentData() or 1),
+            )
+            self._update_bagel_api_ui()
+            return
         if self._bagel_launcher.is_running():
             QMessageBox.warning(
                 self,
@@ -18794,15 +20087,24 @@ class CameraTopicWindow(QMainWindow):
             repo_dir=self.bagel_root_edit.text(),
             model_path=self.bagel_model_edit.text(),
             python_bin=self.bagel_python_edit.text(),
-            server_name=self.bagel_host_edit.text().strip() or BAGEL_SERVER_HOST_DEFAULT,
-            server_port=int(self.bagel_api_port_spin.value()),
+            server_name=host,
+            server_port=port,
             mode=int(self.bagel_mode_combo.currentData() or 1),
         )
         self._update_bagel_api_ui()
 
     def _on_bagel_api_stop_clicked(self) -> None:
+        # 同时清掉 Gradio launcher 状态（进程会被 pkill 一并杀掉）
+        if getattr(self, "_bagel_launcher", None) is not None:
+            try:
+                self._bagel_launcher._process = None
+                self._bagel_launcher._ready_emitted = False
+                self._bagel_launcher.running_changed.emit(False)
+            except Exception:
+                pass
         self._bagel_api_launcher.stop()
         self._update_bagel_api_ui()
+        self._update_bagel_run_ui()
 
     def _on_bagel_api_ready(self, url: str) -> None:
         mode_txt = bagel_mode_label(self._bagel_api_launcher.current_mode())
@@ -18815,7 +20117,8 @@ class CameraTopicWindow(QMainWindow):
         except Exception:
             pass
         self.bagel_api_status_label.setText(
-            f"推理 API: 已就绪 {url}  ·  mode={mode_txt}"
+            f"推理 API: {'已复用' if getattr(self._bagel_api_launcher, '_adopted', False) else '已就绪'} "
+            f"{url}  ·  mode={mode_txt}"
         )
         self.bagel_api_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
         self.bagel_call_btn.setEnabled(not self._bagel_call_busy)
@@ -18866,6 +20169,9 @@ class CameraTopicWindow(QMainWindow):
         if image is None:
             return False
         self._bagel_call_image_path = path
+        h, w = image.shape[:2]
+        if hasattr(self, "bagel_call_input_size_label"):
+            self.bagel_call_input_size_label.setText(f"输入分辨率: {w}×{h}")
         pix = cv2_to_qpixmap(image)
         if pix is not None and not pix.isNull():
             self.bagel_call_input_preview.setPixmap(
@@ -18877,7 +20183,7 @@ class CameraTopicWindow(QMainWindow):
             )
             self.bagel_call_input_preview.setText("")
         tip = display_name or os.path.basename(path)
-        self.bagel_call_input_preview.setToolTip(f"{tip}\n{path}")
+        self.bagel_call_input_preview.setToolTip(f"{tip}\n{path}\n{w}×{h}")
         return True
 
     def _on_bagel_import_from_sub_task_clicked(self) -> None:
@@ -18957,26 +20263,52 @@ class CameraTopicWindow(QMainWindow):
                 return
         api_base = self._bagel_api_launcher.api_base()
         steps = int(self.bagel_num_timesteps_spin.value())
+        image_ratio = str(
+            self.bagel_image_size_combo.currentData() or BAGEL_IMAGE_SIZE_DEFAULT
+        )
         self._bagel_call_busy = True
         self.bagel_call_btn.setEnabled(False)
         self.bagel_call_btn.setText("调用中…")
         self._append_bagel_log(
-            f"[call] {task}: num_timesteps={steps}  {prompt[:80]}"
+            f"[call] {task}: size={image_ratio}  num_timesteps={steps}  {prompt[:80]}"
         )
         img_copy = None if image_bgr is None else np.asarray(image_bgr).copy()
+        input_image_path = str(self._bagel_call_image_path or "")
 
         def _work() -> None:
             try:
-                reply = call_bagel_inference(
+                reply, latency_s, meta = call_bagel_inference(
                     api_base,
                     prompt,
                     image_bgr=img_copy,
                     task=task,
                     num_timesteps=steps,
+                    image_ratio=image_ratio,
                 )
-                self._bagel_call_bridge.finished.emit({"ok": True, "reply": reply})
+                payload_out: Dict[str, object] = {
+                    "ok": True,
+                    "reply": reply,
+                    "latency_s": latency_s,
+                    "task": task,
+                    "prompt": prompt,
+                    "image_ratio": image_ratio,
+                    "num_timesteps": steps,
+                    "input_image": input_image_path,
+                }
+                payload_out.update(meta)
+                self._bagel_call_bridge.finished.emit(payload_out)
             except Exception as exc:
-                self._bagel_call_bridge.finished.emit({"ok": False, "error": str(exc)})
+                self._bagel_call_bridge.finished.emit(
+                    {
+                        "ok": False,
+                        "error": str(exc),
+                        "task": task,
+                        "prompt": prompt,
+                        "image_ratio": image_ratio,
+                        "num_timesteps": steps,
+                        "input_image": input_image_path,
+                    }
+                )
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -18985,12 +20317,49 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_call_btn.setText("调用")
         self.bagel_call_btn.setEnabled(self._bagel_api_launcher.is_running())
         data = result if isinstance(result, dict) else {}
+        latency_s = data.get("latency_s")
+        try:
+            latency_txt = f"{float(latency_s):.2f}s"
+        except (TypeError, ValueError):
+            latency_txt = "—"
+        if hasattr(self, "bagel_call_latency_label"):
+            self.bagel_call_latency_label.setText(f"调用耗时: {latency_txt}")
+        model_w = data.get("model_input_width")
+        model_h = data.get("model_input_height")
+        try:
+            model_txt = f"{int(model_w)}×{int(model_h)}"
+        except (TypeError, ValueError):
+            model_txt = "—"
+        if hasattr(self, "bagel_call_model_size_label"):
+            self.bagel_call_model_size_label.setText(f"模型输入: {model_txt}")
         if not data.get("ok"):
             err = str(data.get("error") or result)
             self._append_bagel_log(f"[call error] {err}")
             self.bagel_call_output_preview.setPixmap(QPixmap())
             self.bagel_call_output_preview.setText("调用失败")
+            if hasattr(self, "bagel_call_output_size_label"):
+                self.bagel_call_output_size_label.setText("输出分辨率: —")
+            if hasattr(self, "bagel_call_model_size_label"):
+                self.bagel_call_model_size_label.setText("模型输入: —")
             self.status_bar.showMessage(f"Bagel 调用失败: {err[:80]}")
+            try:
+                self._bagel_history_append_turn(
+                    task=str(data.get("task") or ""),
+                    prompt=str(data.get("prompt") or ""),
+                    image_ratio=str(data.get("image_ratio") or ""),
+                    num_timesteps=int(data.get("num_timesteps") or 0),
+                    input_image=str(
+                        data.get("input_image") or self._bagel_call_image_path or ""
+                    ),
+                    output_image="",
+                    output_text="",
+                    latency_s=None,
+                    ok=False,
+                    error=err,
+                    autosave=True,
+                )
+            except Exception as exc:
+                self._append_bagel_log(f"[history warn] 保存失败轮次失败: {exc}")
             return
         reply = str(data.get("reply") or "")
         path = ""
@@ -19011,13 +20380,344 @@ class CameraTopicWindow(QMainWindow):
                 )
                 self.bagel_call_output_preview.setText("")
                 self.bagel_call_output_preview.setToolTip(path)
-            self._append_bagel_log(f"[call ok] 图像: {path}")
+                if hasattr(self, "bagel_call_output_size_label"):
+                    self.bagel_call_output_size_label.setText(
+                        f"输出分辨率: {pix.width()}×{pix.height()}"
+                    )
+            elif hasattr(self, "bagel_call_output_size_label"):
+                self.bagel_call_output_size_label.setText("输出分辨率: —")
+            self._append_bagel_log(
+                f"[call ok] {latency_txt}  模型输入:{model_txt}  图像: {path}"
+            )
         else:
             self.bagel_call_output_preview.setPixmap(QPixmap())
             preview = text.strip() or "(无图像输出)"
             self.bagel_call_output_preview.setText(preview[:400])
-            self._append_bagel_log(f"[call ok] {preview[:200]}")
-        self.status_bar.showMessage("Bagel 调用完成")
+            if hasattr(self, "bagel_call_output_size_label"):
+                self.bagel_call_output_size_label.setText("输出分辨率: —")
+            self._append_bagel_log(
+                f"[call ok] {latency_txt}  模型输入:{model_txt}  {preview[:200]}"
+            )
+        self.status_bar.showMessage(f"Bagel 调用完成 · {latency_txt}")
+        # 写入当前会话并自动保存
+        try:
+            lat_val: Optional[float] = None
+            try:
+                lat_val = float(latency_s) if latency_s is not None else None
+            except (TypeError, ValueError):
+                lat_val = None
+            self._bagel_history_append_turn(
+                task=str(data.get("task") or ""),
+                prompt=str(data.get("prompt") or ""),
+                image_ratio=str(data.get("image_ratio") or ""),
+                num_timesteps=int(data.get("num_timesteps") or 0),
+                input_image=str(data.get("input_image") or self._bagel_call_image_path or ""),
+                output_image=path,
+                output_text=text.strip(),
+                latency_s=lat_val,
+                ok=True,
+                error="",
+                autosave=True,
+            )
+        except Exception as exc:
+            self._append_bagel_log(f"[history warn] 保存轮次失败: {exc}")
+
+    def _refresh_bagel_history_title_label(self) -> None:
+        label = getattr(self, "bagel_history_title_label", None)
+        if label is None:
+            return
+        if self._bagel_history_id and self._bagel_history_title:
+            label.setText(f"当前: {self._bagel_history_title}")
+        elif self._bagel_history_turns:
+            label.setText("当前: 未命名会话（有未落盘轮次，点「保存」）")
+        else:
+            label.setText("当前: 新对话（未保存）")
+
+    def _refresh_bagel_history_turns_list(self) -> None:
+        lw = getattr(self, "bagel_history_turns_list", None)
+        if lw is None:
+            return
+        lw.clear()
+        for i, turn in enumerate(self._bagel_history_turns):
+            task = str(turn.get("task") or "")
+            task_lbl = BAGEL_TASK_LABELS.get(task, task or "?")
+            prompt = " ".join(str(turn.get("prompt") or "").split())
+            if len(prompt) > 28:
+                prompt = prompt[:25] + "…"
+            lat = turn.get("latency_s")
+            try:
+                lat_txt = f" {float(lat):.1f}s" if lat is not None else ""
+            except (TypeError, ValueError):
+                lat_txt = ""
+            ok = bool(turn.get("ok", True))
+            mark = "" if ok else "!"
+            row = QListWidgetItem(f"{i + 1}. {mark}{task_lbl}  {prompt}{lat_txt}")
+            row.setData(Qt.UserRole, i)
+            tip_parts = [
+                f"task={task}",
+                f"prompt={turn.get('prompt') or ''}",
+                f"in={turn.get('input_image') or ''}",
+                f"out={turn.get('output_image') or ''}",
+            ]
+            row.setToolTip("\n".join(tip_parts))
+            lw.addItem(row)
+
+    def _on_bagel_history_new_clicked(self) -> None:
+        self._bagel_history_id = ""
+        self._bagel_history_title = ""
+        self._bagel_history_turns = []
+        self._bagel_call_image_path = ""
+        self.bagel_call_input_preview.setPixmap(QPixmap())
+        self.bagel_call_input_preview.setText("输入图")
+        self.bagel_call_input_preview.setToolTip("")
+        if hasattr(self, "bagel_call_input_size_label"):
+            self.bagel_call_input_size_label.setText("输入分辨率: —")
+        self.bagel_call_output_preview.setPixmap(QPixmap())
+        self.bagel_call_output_preview.setText("输出图")
+        self.bagel_call_output_preview.setToolTip("")
+        if hasattr(self, "bagel_call_output_size_label"):
+            self.bagel_call_output_size_label.setText("输出分辨率: —")
+        if hasattr(self, "bagel_call_model_size_label"):
+            self.bagel_call_model_size_label.setText("模型输入: —")
+        if hasattr(self, "bagel_call_latency_label"):
+            self.bagel_call_latency_label.setText("调用耗时: —")
+        self._refresh_bagel_history_title_label()
+        self._refresh_bagel_history_turns_list()
+        self._append_bagel_log("[history] 已新建空对话")
+        self.status_bar.showMessage("Bagel: 新对话")
+
+    def _on_bagel_history_save_clicked(self) -> None:
+        if not self._bagel_history_turns and not self._bagel_history_id:
+            QMessageBox.information(self, "Bagel 历史", "当前没有可保存的调用轮次。")
+            return
+        try:
+            path = self._bagel_history_save(ask_title=True)
+        except Exception as exc:
+            QMessageBox.warning(self, "Bagel 历史", f"保存失败: {exc}")
+            return
+        self._append_bagel_log(f"[history] 已保存: {path}")
+        self.status_bar.showMessage(f"Bagel 历史已保存: {self._bagel_history_title}")
+
+    def _on_bagel_history_clicked(self) -> None:
+        if self._bagel_history_dialog is not None:
+            try:
+                self._bagel_history_dialog.close()
+            except Exception:
+                pass
+            self._bagel_history_dialog = None
+        dlg = BagelHistoryDialog(self)
+        self._bagel_history_dialog = dlg
+
+        def _on_finished(code: int) -> None:
+            accepted = int(code) == int(QDialog.Accepted)
+            hid = str(getattr(dlg, "selected_id", "") or "")
+            self._bagel_history_dialog = None
+            if accepted and hid:
+                try:
+                    self._bagel_history_load_by_id(hid)
+                except Exception as exc:
+                    QMessageBox.warning(self, "Bagel 历史", f"加载失败: {exc}")
+
+        dlg.finished.connect(_on_finished)
+        dlg.show()
+        dlg.raise_()
+
+    def _on_bagel_history_delete_turn_clicked(self) -> None:
+        lw = getattr(self, "bagel_history_turns_list", None)
+        if lw is None:
+            return
+        item = lw.currentItem()
+        if item is None:
+            QMessageBox.information(self, "Bagel 历史", "请先在左侧选中一轮。")
+            return
+        idx = int(item.data(Qt.UserRole) or -1)
+        if idx < 0 or idx >= len(self._bagel_history_turns):
+            return
+        del self._bagel_history_turns[idx]
+        if self._bagel_history_id:
+            try:
+                self._bagel_history_save(ask_title=False)
+            except Exception as exc:
+                self._append_bagel_log(f"[history warn] 删轮后保存失败: {exc}")
+        self._refresh_bagel_history_turns_list()
+        self._refresh_bagel_history_title_label()
+        self._append_bagel_log(f"[history] 已删除第 {idx + 1} 轮")
+
+    def _on_bagel_history_turn_clicked(self, item: object) -> None:
+        if not isinstance(item, QListWidgetItem):
+            return
+        idx = int(item.data(Qt.UserRole) or -1)
+        if idx < 0 or idx >= len(self._bagel_history_turns):
+            return
+        self._bagel_history_apply_turn(self._bagel_history_turns[idx])
+
+    def _bagel_history_save(self, *, ask_title: bool = False) -> str:
+        hid = self._bagel_history_id or uuid.uuid4().hex[:12]
+        title = self._bagel_history_title
+        if ask_title or not title:
+            default = title or default_bagel_history_title(self._bagel_history_turns)
+            text, ok = QInputDialog.getText(
+                self,
+                "Bagel 历史标题",
+                "会话标题:",
+                text=default,
+            )
+            if ok:
+                title = str(text or "").strip() or default
+            elif not title:
+                title = default
+        # 持久化媒体
+        turns_out: List[Dict[str, object]] = []
+        for i, turn in enumerate(self._bagel_history_turns):
+            t = dict(turn)
+            t["input_image"] = bagel_persist_media(
+                hid, str(t.get("input_image") or ""), f"in{i}"
+            ) or str(t.get("input_image") or "")
+            t["output_image"] = bagel_persist_media(
+                hid, str(t.get("output_image") or ""), f"out{i}"
+            ) or str(t.get("output_image") or "")
+            turns_out.append(t)
+        self._bagel_history_turns = turns_out
+        record: Dict[str, object] = {
+            "id": hid,
+            "title": title,
+            "turns": turns_out,
+        }
+        if self._bagel_history_id:
+            try:
+                old = load_bagel_history(self._bagel_history_id)
+                if old.get("created_at"):
+                    record["created_at"] = old["created_at"]
+            except Exception:
+                pass
+        path = save_bagel_history_record(record)
+        self._bagel_history_id = hid
+        self._bagel_history_title = title
+        self._refresh_bagel_history_title_label()
+        return path
+
+    def _bagel_history_load_by_id(self, hid: str) -> None:
+        data = load_bagel_history(hid)
+        turns = data.get("turns") if isinstance(data.get("turns"), list) else []
+        self._bagel_history_id = str(data.get("id") or hid)
+        self._bagel_history_title = str(data.get("title") or self._bagel_history_id)
+        self._bagel_history_turns = [dict(t) for t in turns if isinstance(t, dict)]
+        self._refresh_bagel_history_title_label()
+        self._refresh_bagel_history_turns_list()
+        if self._bagel_history_turns:
+            last = self._bagel_history_turns[-1]
+            self._bagel_history_apply_turn(last)
+            lw = getattr(self, "bagel_history_turns_list", None)
+            if lw is not None and lw.count() > 0:
+                lw.setCurrentRow(lw.count() - 1)
+        self._append_bagel_log(
+            f"[history] 已加载: {self._bagel_history_title}  "
+            f"({len(self._bagel_history_turns)} 轮)"
+        )
+        self.status_bar.showMessage(f"已加载 Bagel 历史: {self._bagel_history_title}")
+
+    def _bagel_history_apply_turn(self, turn: Dict[str, object]) -> None:
+        task = str(turn.get("task") or "").strip()
+        if task:
+            idx = self.bagel_call_task_combo.findData(task)
+            if idx >= 0:
+                self.bagel_call_task_combo.setCurrentIndex(idx)
+        prompt = str(turn.get("prompt") or "")
+        self.bagel_call_prompt_edit.setText(prompt)
+        ratio = str(turn.get("image_ratio") or "").strip()
+        if ratio:
+            ridx = self.bagel_image_size_combo.findData(ratio)
+            if ridx >= 0:
+                self.bagel_image_size_combo.setCurrentIndex(ridx)
+        steps = turn.get("num_timesteps")
+        try:
+            if steps is not None and int(steps) > 0:
+                self.bagel_num_timesteps_spin.setValue(int(steps))
+        except (TypeError, ValueError):
+            pass
+        in_path = str(turn.get("input_image") or "").strip()
+        if in_path and os.path.isfile(in_path):
+            self._set_bagel_call_input_image(in_path)
+        else:
+            self._bagel_call_image_path = ""
+            self.bagel_call_input_preview.setPixmap(QPixmap())
+            self.bagel_call_input_preview.setText("输入图")
+            if hasattr(self, "bagel_call_input_size_label"):
+                self.bagel_call_input_size_label.setText("输入分辨率: —")
+        out_path = str(turn.get("output_image") or "").strip()
+        out_text = str(turn.get("output_text") or "").strip()
+        if out_path and os.path.isfile(out_path):
+            pix = QPixmap(out_path)
+            if not pix.isNull():
+                self.bagel_call_output_preview.setPixmap(
+                    pix.scaled(
+                        self.bagel_call_output_preview.size(),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                )
+                self.bagel_call_output_preview.setText("")
+                self.bagel_call_output_preview.setToolTip(out_path)
+                if hasattr(self, "bagel_call_output_size_label"):
+                    self.bagel_call_output_size_label.setText(
+                        f"输出分辨率: {pix.width()}×{pix.height()}"
+                    )
+        else:
+            self.bagel_call_output_preview.setPixmap(QPixmap())
+            self.bagel_call_output_preview.setText(out_text[:400] if out_text else "输出图")
+            if hasattr(self, "bagel_call_output_size_label"):
+                self.bagel_call_output_size_label.setText("输出分辨率: —")
+        lat = turn.get("latency_s")
+        if hasattr(self, "bagel_call_latency_label"):
+            try:
+                self.bagel_call_latency_label.setText(
+                    f"调用耗时: {float(lat):.2f}s" if lat is not None else "调用耗时: —"
+                )
+            except (TypeError, ValueError):
+                self.bagel_call_latency_label.setText("调用耗时: —")
+
+    def _bagel_history_append_turn(
+        self,
+        *,
+        task: str,
+        prompt: str,
+        image_ratio: str,
+        num_timesteps: int,
+        input_image: str,
+        output_image: str,
+        output_text: str,
+        latency_s: Optional[float],
+        ok: bool,
+        error: str,
+        autosave: bool = True,
+    ) -> None:
+        turn: Dict[str, object] = {
+            "ts": _utc_now_iso(),
+            "task": task,
+            "prompt": prompt,
+            "image_ratio": image_ratio,
+            "num_timesteps": int(num_timesteps or 0),
+            "input_image": input_image,
+            "output_image": output_image,
+            "output_text": output_text,
+            "ok": bool(ok),
+            "error": error or "",
+        }
+        if latency_s is not None:
+            turn["latency_s"] = float(latency_s)
+        self._bagel_history_turns.append(turn)
+        self._refresh_bagel_history_turns_list()
+        lw = getattr(self, "bagel_history_turns_list", None)
+        if lw is not None and lw.count() > 0:
+            lw.setCurrentRow(lw.count() - 1)
+        if autosave:
+            try:
+                self._bagel_history_save(ask_title=False)
+            except Exception as exc:
+                self._append_bagel_log(f"[history warn] 自动保存失败: {exc}")
+                self._refresh_bagel_history_title_label()
+        else:
+            self._refresh_bagel_history_title_label()
 
     def _load_bagel_web(self, url: str) -> None:
         if self.bagel_web_view is None:
@@ -21255,6 +22955,8 @@ class CameraTopicWindow(QMainWindow):
             self._lingbot_launcher.shutdown()
         if getattr(self, "_lingbot_depth_launcher", None) is not None:
             self._lingbot_depth_launcher.shutdown()
+        if getattr(self, "_reward_launcher", None) is not None:
+            self._reward_launcher.shutdown()
         if getattr(self, "_lingbot_map_launcher", None) is not None:
             self._lingbot_map_launcher.shutdown()
         if getattr(self, "_lingbot_video_launcher", None) is not None:
@@ -22414,6 +24116,291 @@ class CameraTopicWindow(QMainWindow):
             f"load={result.get('load_s')}s infer={result.get('infer_s')}s "
             f"points={result.get('points')} device={result.get('device')}"
         )
+
+    def _append_reward_log(self, line: str) -> None:
+        if not hasattr(self, "reward_log_edit"):
+            return
+        self.reward_log_edit.append(line)
+        bar = self.reward_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_reward_status(self, msg: str) -> None:
+        if hasattr(self, "reward_status_label"):
+            self.reward_status_label.setText(msg)
+        self.status_bar.showMessage(msg)
+
+    def _update_reward_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_reward_launcher", None)
+            and self._reward_launcher.is_running()
+        )
+        if hasattr(self, "reward_run_btn"):
+            self.reward_run_btn.setEnabled(not running)
+        if hasattr(self, "reward_stop_btn"):
+            self.reward_stop_btn.setEnabled(running)
+        for w in (
+            getattr(self, "reward_mode_combo", None),
+            getattr(self, "reward_type_combo", None),
+            getattr(self, "reward_arch_combo", None),
+            getattr(self, "reward_ckpt_edit", None),
+            getattr(self, "reward_root_edit", None),
+        ):
+            if w is not None:
+                w.setEnabled(not running)
+
+    def _on_reward_mode_changed(self, *_args) -> None:
+        if not hasattr(self, "reward_stack"):
+            return
+        mode = str(self.reward_mode_combo.currentData() or "single")
+        idx = {"single": 0, "pair": 1, "batch": 2, "teleop": 3}.get(mode, 0)
+        self.reward_stack.setCurrentIndex(idx)
+        if mode == "teleop":
+            self.reward_run_btn.setText("启动 teleop")
+            self.reward_image_size_edit.setText(
+                self.reward_image_size_edit.text().strip() or "3,128,128"
+            )
+            if abs(self.reward_threshold_spin.value() - 0.5) < 1e-6:
+                self.reward_threshold_spin.setValue(0.2)
+        else:
+            self.reward_run_btn.setText("运行评测")
+
+    def _refresh_reward_topic_combo(self, prefer: Optional[str] = None) -> None:
+        if not hasattr(self, "reward_topic_combo"):
+            return
+        self._refresh_preview_topic_combo(self.reward_topic_combo, prefer=prefer)
+
+    def _on_reward_root_browse(self) -> None:
+        cur = self.reward_root_edit.text().strip() or RLINF_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 RLinf 仓库", cur)
+        if selected:
+            self.reward_root_edit.setText(selected)
+            self.reward_python_edit.setText(resolve_rlinf_python(selected))
+
+    def _on_reward_ckpt_browse(self) -> None:
+        cur = self.reward_ckpt_edit.text().strip()
+        initial = (
+            os.path.dirname(cur)
+            if cur and os.path.exists(cur)
+            else resolve_rlinf_root(self.reward_root_edit.text())
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 reward 权重",
+            initial,
+            "Weights (*.pt *.pth *.safetensors *.bin);;All (*)",
+        )
+        if path:
+            self.reward_ckpt_edit.setText(path)
+
+    def _on_reward_dataset_browse(self) -> None:
+        cur = self.reward_dataset_edit.text().strip()
+        initial = os.path.dirname(cur) if cur else resolve_rlinf_root(
+            self.reward_root_edit.text()
+        )
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 reward 数据集 .pt",
+            initial,
+            "PyTorch (*.pt *.pth);;All (*)",
+        )
+        if path:
+            self.reward_dataset_edit.setText(path)
+
+    def _on_reward_image_browse(self, edit: QLineEdit) -> None:
+        cur = edit.text().strip()
+        initial = os.path.dirname(cur) if cur else EAI_DIR
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择图像",
+            initial,
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp);;All (*)",
+        )
+        if path:
+            edit.setText(path)
+
+    def _reward_grab_camera_image(self, out_name: str) -> Optional[str]:
+        topic = str(self.reward_topic_combo.currentData() or "").strip()
+        picked = None
+        if topic:
+            panel = self.panels.get(topic)
+            if isinstance(panel, CameraPanel) and panel._latest_image is not None:
+                picked = (topic, panel._latest_image.copy())
+            else:
+                cached = self._frame_cache.get(topic)
+                if cached is not None and np.asarray(cached).ndim >= 2:
+                    picked = (topic, np.asarray(cached).copy())
+        if picked is None:
+            src = self._pick_sam3_color_source()
+            if src is None:
+                self._append_reward_log("[ERROR] 无可用彩色图像")
+                self._on_reward_status("无可用相机图像")
+                return None
+            picked = (src[0], src[1])
+        topic, image = picked
+        os.makedirs(RLINF_REWARD_CACHE_DIR, exist_ok=True)
+        path = os.path.join(RLINF_REWARD_CACHE_DIR, out_name)
+        bgr = np.asarray(image)
+        if bgr.ndim == 2:
+            bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+        cv2.imwrite(path, bgr)
+        self._append_reward_log(f"已从 {topic} 抓帧 -> {path}")
+        return path
+
+    def _on_reward_capture_slot(self, slot: str) -> None:
+        path = self._reward_grab_camera_image(f"pair_{slot}.png")
+        if not path:
+            return
+        if slot == "a":
+            self.reward_pair_a_edit.setText(path)
+            self.reward_pair_a_preview.set_source_pixmap(QPixmap(path))
+        else:
+            self.reward_pair_b_edit.setText(path)
+            self.reward_pair_b_preview.set_source_pixmap(QPixmap(path))
+
+    def _reward_common_kwargs(self) -> dict:
+        return {
+            "rlinf_root": self.reward_root_edit.text().strip(),
+            "python_bin": self.reward_python_edit.text().strip(),
+            "ckpt": self.reward_ckpt_edit.text().strip(),
+            "model_type": str(self.reward_type_combo.currentData() or "resnet"),
+            "arch": str(self.reward_arch_combo.currentData() or "resnet18"),
+            "image_size": self.reward_image_size_edit.text().strip() or "3,224,224",
+            "device": str(self.reward_device_combo.currentData() or "auto"),
+            "threshold": float(self.reward_threshold_spin.value()),
+            "task": self.reward_task_edit.text().strip(),
+        }
+
+    def _on_reward_run_clicked(self) -> None:
+        if self._reward_launcher.is_running():
+            return
+        mode = str(self.reward_mode_combo.currentData() or "single")
+        common = self._reward_common_kwargs()
+        if mode != "teleop" and not common["ckpt"]:
+            self._append_reward_log("[ERROR] 请填写 ckpt 权重路径")
+            self._on_reward_status("缺少 ckpt")
+            return
+        if mode == "teleop":
+            self._reward_launcher.start_teleop(
+                rlinf_root=common["rlinf_root"],
+                python_bin=common["python_bin"],
+                config_name=self.reward_teleop_config_edit.text().strip()
+                or "realworld_teleop",
+                ckpt=common["ckpt"],
+                threshold=common["threshold"],
+                model_type=common["model_type"],
+                arch=common["arch"],
+                image_size=common["image_size"],
+            )
+            self._update_reward_ui()
+            return
+
+        if mode == "single":
+            source = str(self.reward_single_source_combo.currentData() or "camera")
+            if source == "camera":
+                path = self._reward_grab_camera_image("single_input.png")
+            else:
+                path = os.path.abspath(
+                    os.path.expanduser(self.reward_single_path_edit.text().strip())
+                )
+                if not os.path.isfile(path):
+                    self._append_reward_log(f"[ERROR] 图像不存在: {path}")
+                    return
+            self.reward_single_preview.set_source_pixmap(QPixmap(path))
+            self.reward_score_label.setText("score: …")
+            self._reward_launcher.start_score(mode="single", image=path, **common)
+        elif mode == "pair":
+            path_a = self.reward_pair_a_edit.text().strip()
+            path_b = self.reward_pair_b_edit.text().strip()
+            if str(self.reward_pair_source_combo.currentData() or "") == "camera":
+                if not path_a:
+                    path_a = self._reward_grab_camera_image("pair_a.png") or ""
+                    if path_a:
+                        self.reward_pair_a_edit.setText(path_a)
+                if not path_b:
+                    self._append_reward_log(
+                        "[ERROR] 请先点「抓 B」再运行（或填本地路径）"
+                    )
+                    return
+            path_a = os.path.abspath(os.path.expanduser(path_a))
+            path_b = os.path.abspath(os.path.expanduser(path_b))
+            if not os.path.isfile(path_a) or not os.path.isfile(path_b):
+                self._append_reward_log("[ERROR] 图 A/B 路径无效")
+                return
+            self.reward_pair_a_preview.set_source_pixmap(QPixmap(path_a))
+            self.reward_pair_b_preview.set_source_pixmap(QPixmap(path_b))
+            self.reward_pair_result_label.setText("A/B: …")
+            self._reward_launcher.start_score(
+                mode="pair", image_a=path_a, image_b=path_b, **common
+            )
+        else:
+            dataset = self.reward_dataset_edit.text().strip()
+            if not dataset or not os.path.isfile(
+                os.path.abspath(os.path.expanduser(dataset))
+            ):
+                self._append_reward_log("[ERROR] 请选择有效的 .pt 数据集")
+                return
+            self.reward_batch_summary.setText("批量评测运行中…")
+            self._reward_launcher.start_score(
+                mode="batch",
+                dataset=dataset,
+                max_samples=int(self.reward_max_samples_spin.value()),
+                **common,
+            )
+        self._update_reward_ui()
+
+    def _on_reward_stop_clicked(self) -> None:
+        self._append_reward_log("--- 用户停止 Reward 评测 ---")
+        self._reward_launcher.stop()
+        self._update_reward_ui()
+
+    def _on_reward_result(self, result: dict) -> None:
+        if not result.get("ok"):
+            return
+        mode = str(result.get("mode") or "")
+        if mode == "single":
+            score = result.get("score")
+            self.reward_score_label.setText(
+                f"score: {float(score):.4f}" if score is not None else "score: —"
+            )
+            img = str(result.get("image") or "")
+            if img and os.path.isfile(img):
+                self.reward_single_preview.set_source_pixmap(QPixmap(img))
+            self._append_reward_log(
+                f"单帧 score={score} infer={result.get('infer_s')}s "
+                f"device={result.get('device')}"
+            )
+        elif mode == "pair":
+            sa, sb = result.get("score_a"), result.get("score_b")
+            prefer = result.get("prefer")
+            delta = result.get("delta")
+            self.reward_pair_result_label.setText(
+                f"A={float(sa):.4f}  B={float(sb):.4f}\n"
+                f"prefer={prefer}  Δ={float(delta):+.4f}"
+            )
+            self._append_reward_log(
+                f"A/B prefer={prefer} A={sa} B={sb} Δ={delta} "
+                f"infer={result.get('infer_s')}s"
+            )
+        elif mode == "batch":
+            lines = [
+                f"samples={result.get('num_samples')}/{result.get('num_total')}",
+                f"accuracy={result.get('accuracy'):.4f}  "
+                f"correct={result.get('correct')}",
+                f"threshold={result.get('threshold')}  "
+                f"mean={result.get('mean_score')}",
+                f"pos_mean={result.get('pos_mean')}  "
+                f"neg_mean={result.get('neg_mean')}",
+                f"TP={result.get('tp')} TN={result.get('tn')} "
+                f"FP={result.get('fp')} FN={result.get('fn')}",
+                f"infer={result.get('infer_s')}s device={result.get('device')}",
+            ]
+            self.reward_batch_summary.setText("\n".join(lines))
+            self._append_reward_log(
+                f"批量 accuracy={result.get('accuracy'):.4f} "
+                f"n={result.get('num_samples')}"
+            )
+        elif mode == "teleop":
+            self._append_reward_log("teleop 进程正常结束")
 
     def _append_lingbot_map_log(self, line: str) -> None:
         if not hasattr(self, "lingbot_map_log_edit"):
@@ -25257,6 +27244,8 @@ class CameraTopicWindow(QMainWindow):
             self._refresh_lingbot_video_topic_combo()
         if hasattr(self, "lingbot_world_topic_combo"):
             self._refresh_lingbot_world_topic_combo()
+        if hasattr(self, "reward_topic_combo"):
+            self._refresh_reward_topic_combo()
 
     def _cached_topic_names(self) -> List[str]:
         """已知 topic：缓存帧 + 列表勾选 + 发现类型 + 当前面板。"""
@@ -25391,8 +27380,8 @@ def parse_args() -> argparse.Namespace:
         metavar="NAME",
         help=(
             "只展示指定控制区 tab，可同时指定多个。"
-            "例: --tab \"sub image\" \"sub task\"  或  --tab bagel,test  或  --tab bagel --tab test。"
-            "可用中文名或英文别名；亦支持环境变量 EAI_ONLY_TAB=a,b。"
+            "例: --tab \"sub image\" \"sub task\"  或  --tab bagel,test  或  --tab reward。"
+            "可用中文名或英文别名（reward/rm/sim/…）；亦支持环境变量 EAI_ONLY_TAB=a,b。"
         ),
     )
     parser.add_argument(
@@ -25469,7 +27458,7 @@ def parse_only_tabs(tab_args: Optional[List[object]]) -> List[str]:
     if unknown:
         known = " / ".join(CONTROL_TAB_TITLES)
         aliases = (
-            "test→sub task, bagel→sub image, sim→仿真评测, world→世界模型, …"
+            "test→sub task, bagel→sub image, reward→Reward评测, sim→仿真评测, world→世界模型, …"
         )
         raise SystemExit(
             f"未知 tab: {', '.join(unknown)}\n"
