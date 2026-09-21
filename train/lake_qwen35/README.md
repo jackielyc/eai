@@ -128,11 +128,11 @@ SKIP_FULL=0 RESUME=1 SKIP_EXISTING=1 bash scripts/run_convert.sh
 SKIP_FULL=0 RESUME=0 bash scripts/run_convert.sh
 ```
 
-全量训练请指向 jsonl：
+默认训练使用 VN 英文 jsonl：
 
 ```yaml
-dataset_path: .../data/hermas_sys2_train.jsonl
-eval_dataset_path: .../data/hermas_sys2_val.jsonl
+dataset_path: .../data/vn_sys2_train-en.jsonl
+eval_dataset_path: .../data/vn_sys2_val-en.jsonl
 ```
 
 子集兼容文件仍会自动生成：`hermas_sys2_train_20k.json`（从 jsonl 流式截取前 N 行）。

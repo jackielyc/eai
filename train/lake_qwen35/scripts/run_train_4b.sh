@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Multimodal LoRA SFT Qwen3.5-4B on Hermes approved (valid_pass=1) data
+# Multimodal LoRA SFT Qwen3.5-4B on VN sys2 English data
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

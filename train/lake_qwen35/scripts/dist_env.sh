@@ -316,9 +316,9 @@ PY
   fi
 
   if [[ -z "${train_jsonl}" || -z "${val_jsonl}" ]]; then
-    train_jsonl="${ROOT}/data/hermas_sys2_train_approved.jsonl"
-    val_jsonl="${ROOT}/data/hermas_sys2_val_approved.jsonl"
-    label="Hermes approved"
+    train_jsonl="${ROOT}/data/vn_sys2_train-en.jsonl"
+    val_jsonl="${ROOT}/data/vn_sys2_val-en.jsonl"
+    label="VN English"
   fi
 
   _paths_ready() {

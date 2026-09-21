@@ -27,6 +27,34 @@
       "system_tag": "system"
     }
   },
+  "hermas_sys2_train_en": {
+    "file_name": "hermas_sys2_train-en.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "hermas_sys2_val_en": {
+    "file_name": "hermas_sys2_val-en.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
   "vn_sys2_train": {
     "file_name": "vn_sys2_train.jsonl",
     "formatting": "sharegpt",
@@ -43,6 +71,34 @@
   },
   "vn_sys2_val": {
     "file_name": "vn_sys2_val.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "vn_sys2_train_en": {
+    "file_name": "vn_sys2_train-en.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "vn_sys2_val_en": {
+    "file_name": "vn_sys2_val-en.jsonl",
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages"

@@ -1,9 +1,9 @@
 ### Incremental LoRA SFT — continue Hermes-approved adapter on VN data
 model_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-4B
 adapter_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-hermas-approved
-dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_train.jsonl
-eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_val.jsonl
-output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-vn-from-hermas-approved
+dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_train-en.jsonl
+eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_val-en.jsonl
+output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-4b-lora-vn-en-from-hermas-approved
 
 max_seq_length: 2048
 max_samples: null
