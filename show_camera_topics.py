@@ -260,6 +260,10 @@ class ImeSafeLineEdit(QLineEdit):
     """支持 fcitx 中文输入的单行框。"""
 
     def __init__(self, text: str = "", parent=None) -> None:
+        # 兼容 ImeSafeLineEdit(parent) / ImeSafeLineEdit("", parent)
+        if not isinstance(text, str):
+            parent = text
+            text = ""
         super().__init__(text, parent)
         self.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -412,6 +416,245 @@ class ImeSafeComboBox(QComboBox):
         super().mousePressEvent(event)
 
 
+def _combo_fuzzy_match(query: str, text: str) -> bool:
+    """大小写不敏感：整句包含、空格分词全命中、或字符子序列。"""
+    q = (query or "").strip().lower()
+    t = (text or "").lower()
+    if not q:
+        return True
+    if q in t:
+        return True
+    tokens = [tok for tok in q.split() if tok]
+    if len(tokens) > 1 and all(tok in t for tok in tokens):
+        return True
+    i = 0
+    for ch in t:
+        if i < len(q) and ch == q[i]:
+            i += 1
+            if i >= len(q):
+                return True
+    return i >= len(q)
+
+
+class FilterableImeSafeComboBox(ImeSafeComboBox):
+    """带搜索框的 IME 安全下拉：在浮层顶部输入关键词模糊过滤。"""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._ime_popup: Optional[QWidget] = None
+        self._ime_filter: Optional[QLineEdit] = None
+        self._filter_source_indices: List[int] = []
+
+    def _ensure_popup(self) -> Tuple[QWidget, QLineEdit, QListWidget]:
+        win = self.window()
+        if self._ime_popup is not None and self._ime_popup.parent() is win:
+            assert self._ime_filter is not None and self._ime_list is not None
+            return self._ime_popup, self._ime_filter, self._ime_list
+        if self._ime_popup is not None:
+            try:
+                self._ime_popup.hide()
+                self._ime_popup.setParent(None)
+                self._ime_popup.deleteLater()
+            except Exception:
+                pass
+            self._ime_popup = None
+            self._ime_list = None
+            self._ime_filter = None
+
+        panel = QWidget(win)
+        panel.setWindowFlags(Qt.Widget)
+        panel.setAttribute(Qt.WA_InputMethodEnabled, False)
+        panel.setStyleSheet(
+            "QWidget { background: #2d2d2d; border: 1px solid #666; }"
+        )
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        filt = ImeSafeLineEdit("", panel)
+        filt.setPlaceholderText("输入关键词过滤…")
+        filt.setClearButtonEnabled(True)
+        filt.setStyleSheet(
+            "QLineEdit { background: #1e1e1e; color: #eee; border: 1px solid #555; "
+            "padding: 3px 6px; }"
+        )
+        filt.textChanged.connect(self._on_filter_text_changed)
+        filt.returnPressed.connect(self._on_filter_return)
+        filt.installEventFilter(self)
+        layout.addWidget(filt)
+
+        lw = QListWidget(panel)
+        lw.setWindowFlags(Qt.Widget)
+        lw.setAttribute(Qt.WA_InputMethodEnabled, False)
+        lw.setFocusPolicy(Qt.NoFocus)
+        lw.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        lw.setStyleSheet(
+            "QListWidget { background: #2d2d2d; color: #eee; border: none; }"
+            "QListWidget::item:selected { background: #3d6ea8; }"
+            "QListWidget::item:hover { background: #454545; }"
+        )
+        lw.itemClicked.connect(self._on_ime_item_clicked)
+        layout.addWidget(lw, 1)
+
+        self._ime_popup = panel
+        self._ime_filter = filt
+        self._ime_list = lw
+        return panel, filt, lw
+
+    def _ensure_list(self) -> QListWidget:
+        return self._ensure_popup()[2]
+
+    def _rebuild_filtered_list(self, query: str = "") -> None:
+        lw = self._ime_list
+        if lw is None:
+            return
+        lw.clear()
+        self._filter_source_indices = []
+        cur = self.currentIndex()
+        select_row = -1
+        for i in range(self.count()):
+            text = self.itemText(i)
+            tip = self.itemData(i, Qt.ToolTipRole)
+            data = self.itemData(i)
+            path_bits: List[str] = []
+            if isinstance(data, dict):
+                path_bits.extend(
+                    str(data.get(k) or "")
+                    for k in ("path", "name", "model_id", "label", "root")
+                )
+            hay = " ".join([text, str(tip or ""), *path_bits])
+            if not _combo_fuzzy_match(query, hay):
+                continue
+            item = QListWidgetItem(text)
+            if tip:
+                item.setToolTip(str(tip))
+            item.setData(Qt.UserRole, i)
+            try:
+                enabled = bool(
+                    self.model().flags(self.model().index(i, self.modelColumn()))
+                    & Qt.ItemIsEnabled
+                )
+            except Exception:
+                enabled = True
+            if not enabled:
+                item.setFlags(item.flags() & ~Qt.ItemIsEnabled & ~Qt.ItemIsSelectable)
+            lw.addItem(item)
+            self._filter_source_indices.append(i)
+            if i == cur:
+                select_row = lw.count() - 1
+        if select_row >= 0:
+            lw.setCurrentRow(select_row)
+        elif lw.count() > 0:
+            lw.setCurrentRow(0)
+
+    def showPopup(self) -> None:  # type: ignore[override]
+        _remember_text_focus()
+        for c in list(_IME_OPEN_POPUPS):
+            try:
+                if c is not self:
+                    c.hidePopup()
+            except Exception:
+                pass
+        panel, filt, lw = self._ensure_popup()
+        filt.blockSignals(True)
+        filt.clear()
+        filt.blockSignals(False)
+        self._rebuild_filtered_list("")
+        rows = max(lw.count(), 1)
+        row_h = lw.sizeHintForRow(0) if lw.count() else 24
+        if row_h <= 0:
+            row_h = 24
+        visible = min(rows, max(self.maxVisibleItems(), 10))
+        list_h = min(320, row_h * visible + 4)
+        panel.setFixedWidth(max(self.width(), 280))
+        panel.setFixedHeight(list_h + filt.sizeHint().height() + 16)
+        parent = panel.parentWidget()
+        gp = self.mapToGlobal(QPoint(0, self.height()))
+        if parent is not None:
+            lp = parent.mapFromGlobal(gp)
+            if lp.y() + panel.height() > parent.height():
+                gp2 = self.mapToGlobal(QPoint(0, 0))
+                lp2 = parent.mapFromGlobal(gp2)
+                lp = QPoint(lp2.x(), max(0, lp2.y() - panel.height()))
+            panel.move(lp)
+        panel.show()
+        panel.raise_()
+        if self not in _IME_OPEN_POPUPS:
+            _IME_OPEN_POPUPS.append(self)
+        QTimer.singleShot(0, filt.setFocus)
+        QTimer.singleShot(0, filt.selectAll)
+
+    def hidePopup(self) -> None:  # type: ignore[override]
+        panel = self._ime_popup
+        if panel is not None:
+            panel.hide()
+        elif self._ime_list is not None:
+            self._ime_list.hide()
+        try:
+            _IME_OPEN_POPUPS.remove(self)
+        except ValueError:
+            pass
+
+    def _on_filter_text_changed(self, text: str) -> None:
+        self._rebuild_filtered_list(text)
+
+    def _on_filter_return(self) -> None:
+        lw = self._ime_list
+        if lw is None or lw.count() <= 0:
+            return
+        item = lw.currentItem() or lw.item(0)
+        if item is not None:
+            self._on_ime_item_clicked(item)
+
+    def _on_ime_item_clicked(self, item: QListWidgetItem) -> None:
+        if item is None or not (item.flags() & Qt.ItemIsEnabled):
+            return
+        src = item.data(Qt.UserRole)
+        try:
+            row = int(src)
+        except (TypeError, ValueError):
+            row = -1
+        if row < 0:
+            return
+        self.hidePopup()
+        if row != self.currentIndex():
+            self.setCurrentIndex(row)
+        self.activated.emit(row)
+        QTimer.singleShot(0, _revive_ime_after_combo)
+        QTimer.singleShot(100, _revive_ime_after_combo)
+
+    def eventFilter(self, obj, event):  # type: ignore[override]
+        if obj is self._ime_filter and event.type() == QEvent.KeyPress:
+            key = event.key()
+            lw = self._ime_list
+            if key == Qt.Key_Escape:
+                self.hidePopup()
+                QTimer.singleShot(0, _revive_ime_after_combo)
+                return True
+            if lw is not None and lw.count() > 0:
+                row = lw.currentRow()
+                if key == Qt.Key_Down:
+                    lw.setCurrentRow(min(row + 1, lw.count() - 1) if row >= 0 else 0)
+                    return True
+                if key == Qt.Key_Up:
+                    lw.setCurrentRow(max(row - 1, 0) if row >= 0 else 0)
+                    return True
+        return super().eventFilter(obj, event)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            panel = self._ime_popup
+            visible = panel is not None and panel.isVisible()
+            if visible:
+                self.hidePopup()
+                QTimer.singleShot(0, _revive_ime_after_combo)
+            else:
+                self.showPopup()
+            event.accept()
+            return
+        super(ImeSafeComboBox, self).mousePressEvent(event)
+
+
 class ImePopupDismissFilter(QObject):
     """点击浮层外关闭；关闭后恢复中文 IC。"""
 
@@ -429,19 +672,25 @@ class ImePopupDismissFilter(QObject):
                     return False
                 closed = False
                 for combo in list(_IME_OPEN_POPUPS):
+                    popup = getattr(combo, "_ime_popup", None)
                     lw = getattr(combo, "_ime_list", None)
-                    if lw is None or not lw.isVisible():
+                    surface = popup if (popup is not None and popup.isVisible()) else lw
+                    if surface is None or not surface.isVisible():
                         continue
                     if combo.rect().contains(combo.mapFromGlobal(gp)):
                         continue
-                    if lw.rect().contains(lw.mapFromGlobal(gp)):
+                    if surface.rect().contains(surface.mapFromGlobal(gp)):
                         continue
                     combo.hidePopup()
                     closed = True
                 if closed:
                     QTimer.singleShot(0, _revive_ime_after_combo)
             elif et == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                # 搜索框自己处理 Escape；此处兜底关闭无焦点浮层
                 for combo in list(_IME_OPEN_POPUPS):
+                    filt = getattr(combo, "_ime_filter", None)
+                    if filt is not None and filt.hasFocus():
+                        continue
                     combo.hidePopup()
                 QTimer.singleShot(0, _revive_ime_after_combo)
         except Exception:
@@ -2234,22 +2483,66 @@ LLM_CHAT_MAX_HISTORY = 24
 LLM_CHAT_TIMEOUT_S = 120.0
 LLM_CHAT_VISION_TIMEOUT_S = float(os.environ.get("LLM_CHAT_VISION_TIMEOUT_S", "300"))
 
-# Lake Sys2 提示词（中文；user 输出要求随 system 自动对齐）
+# Lake Sys2 提示词（user 输出要求随 system 语言自动对齐）
 LAKE_ORCHESTRATOR_SYSTEM_PROMPT = (
     "你是机器人操作任务编排器。给定场景图像、高层任务名称和上一个子任务，"
     "预测该任务下的全部子任务列表，以及当前可执行的子任务。"
     "请先输出「所有子任务」编号列表，再分别用「技能」「当前子任务」「"
     "上一个子任务」「下一个子任务」四行作答。"
 )
+LAKE_ORCHESTRATOR_SYSTEM_PROMPT_EN = (
+    "You are a robot manipulation task orchestrator. Given a scene image, "
+    "a high-level task name, and the previous subtask, predict the full list "
+    "of subtasks under this task, and the currently executable subtask. "
+    "First output a numbered list under All subtasks, then answer in four "
+    "lines labeled Skill, Current subtask, Previous subtask, and Next subtask."
+)
 LAKE_ORCHESTRATOR_SYSTEM_PROMPT_TRAINING = (
     "你是机器人操作任务的认知编排器。给定场景图像与高层任务名称，"
     "预测该任务下的全部二层（layer-2）子任务列表，以及当前可执行的子任务。"
     "请先输出「所有子任务」编号列表，再分别用「技能」「子任务」两行作答。"
 )
-LAKE_DEFAULT_LANGUAGE_MEMORY = "尚无已完成子任务。"
+LAKE_DEFAULT_LANGUAGE_MEMORY = "这是第一个子任务，尚未完成任何子任务。"
+LAKE_DEFAULT_LANGUAGE_MEMORY_EN = (
+    "This is the first subtask; no subtasks have been completed yet."
+)
 TRADITIONAL_CHAT_INPUT_PLACEHOLDER = "输入问题或指令，Enter 发送（传统对话，无 System/Lake 提示词）"
 LAKE_CHAT_INPUT_PLACEHOLDER = "输入高层任务名（如：合上后盖并拧紧）；Enter 发送"
+LAKE_CHAT_INPUT_PLACEHOLDER_EN = (
+    "Enter a high-level task name (e.g. close the laptop cover); press Enter"
+)
 LAKE_USER_PROMPT_TEMPLATE = "任务：{task}"
+LAKE_USER_PROMPT_TEMPLATE_EN = "Task: {task}"
+
+
+def lake_orchestrator_prompt_lang(system_prompt: str = "") -> str:
+    """根据 system prompt 判断编排语言：'en' / 'zh'。"""
+    s = (system_prompt or "").strip()
+    if not s:
+        return "zh"
+    low = s.lower()
+    if (
+        s.startswith("You are a robot")
+        or "all subtasks" in low
+        or "current subtask" in low
+        or "previous subtask" in low
+    ):
+        return "en"
+    return "zh"
+
+
+def lake_orchestrator_system_prompt_for_lang(lang: str) -> str:
+    return (
+        LAKE_ORCHESTRATOR_SYSTEM_PROMPT_EN
+        if (lang or "").lower().startswith("en")
+        else LAKE_ORCHESTRATOR_SYSTEM_PROMPT
+    )
+
+
+def lake_default_previous_subtask(lang: str = "zh") -> str:
+    if (lang or "").lower().startswith("en"):
+        return LAKE_DEFAULT_LANGUAGE_MEMORY_EN
+    return LAKE_DEFAULT_LANGUAGE_MEMORY
 
 
 def lake_user_output_instruction(system_prompt: str = "") -> str:
@@ -2264,18 +2557,30 @@ def format_lake_user_prompt(
     *,
     system_prompt: str = "",
 ) -> str:
-    """把用户任务描述包装成 Lake user 文本（不含语言记忆与输出要求尾句）。"""
+    """把用户任务描述包装成 Lake user 文本（仅 Task / 任务行）。"""
     del memory  # 保留参数兼容旧调用，不再写入 prompt
-    del system_prompt
+    lang = lake_orchestrator_prompt_lang(system_prompt)
     task_line = _strip_language_memory_from_prompt((task or "").strip())
     task_line = _strip_lake_output_instruction(task_line)
-    # 已带「任务：」前缀则直接返回
-    if task_line.startswith("任务：") or task_line.startswith("Task:"):
-        return task_line
-    if task_line.startswith("任务:"):
+    # 已带「任务：」/ Task: 前缀则剥掉，再按当前语言重包
+    if task_line.startswith("任务："):
+        task_line = task_line[len("任务：") :].strip()
+    elif task_line.startswith("任务:"):
         task_line = task_line[len("任务:") :].strip()
     elif task_line.lower().startswith("task:"):
         task_line = task_line.split(":", 1)[-1].strip()
+    # 若用户粘贴了完整多段 prompt，尽量只取任务首段
+    for sep in (
+        "\n\n上一个子任务",
+        "\n\nPrevious subtask",
+        "\n\n请输出",
+        "\n\nPlease output",
+    ):
+        if sep in task_line:
+            task_line = task_line.split(sep, 1)[0].strip()
+            break
+    if lang == "en":
+        return LAKE_USER_PROMPT_TEMPLATE_EN.format(task=task_line)
     return LAKE_USER_PROMPT_TEMPLATE.format(task=task_line)
 
 
@@ -2287,10 +2592,14 @@ def _strip_lake_output_instruction(text: str) -> str:
     drop_prefixes = (
         "请输出全部子任务",
         "请输出全部子任务，以及当前技能",
+        "please output all subtasks",
     )
     while lines:
         stripped = lines[-1].strip()
-        if any(stripped.startswith(p) for p in drop_prefixes):
+        low = stripped.lower()
+        if any(stripped.startswith(p) for p in drop_prefixes) or any(
+            low.startswith(p) for p in drop_prefixes if p[:1].isascii()
+        ):
             lines.pop()
             while lines and not lines[-1].strip():
                 lines.pop()
@@ -2333,7 +2642,7 @@ def _strip_language_memory_from_prompt(text: str) -> str:
 
 
 def extract_lake_memory_from_assistant(text: str) -> Optional[str]:
-    """从模型回复中解析记忆字段，供下一轮「语言记忆」使用。"""
+    """从模型回复中解析「当前子任务」，供下一轮 Previous subtask 使用。"""
     if not text:
         return None
     memory_line: Optional[str] = None
@@ -2355,15 +2664,24 @@ def extract_lake_memory_from_assistant(text: str) -> Optional[str]:
             ).strip() or None
         elif low.startswith("memory:"):
             memory_line = line.split(":", 1)[-1].strip() or None
+        elif low.startswith("current subtask:"):
+            current_subtask = line.split(":", 1)[-1].strip() or None
+        elif low.startswith("previous subtask:"):
+            previous_subtask = line.split(":", 1)[-1].strip() or None
+        elif line.startswith("子任务：") or line.startswith("子任务:"):
+            # 旧三行版：Subtask / 子任务
+            current_subtask = (
+                line.split("：", 1)[-1] if "：" in line else line.split(":", 1)[-1]
+            ).strip() or None
+        elif low.startswith("subtask:"):
+            current_subtask = line.split(":", 1)[-1].strip() or None
+    # 下一轮 Previous = 本轮 Current（对齐训练递推）
+    if current_subtask:
+        return current_subtask
     if memory_line:
         return memory_line
-    if current_subtask:
-        parts: List[str] = []
-        empty_prev = {"", "无", "暂无", "—", "-", "none", "null", "n/a"}
-        if previous_subtask and previous_subtask.lower() not in empty_prev:
-            parts.append(f"机器人已完成：{previous_subtask}。")
-        parts.append(f"机器人正在执行：{current_subtask}")
-        return "".join(parts)
+    if previous_subtask:
+        return previous_subtask
     return None
 
 
@@ -6982,9 +7300,16 @@ class ChatPanelWidget(QWidget):
         saved_system = str(saved_settings.get("system_prompt") or "").strip()
         if saved_system:
             self._config.system_prompt = saved_system
+        saved_lang = str(saved_settings.get("system_prompt_lang") or "").strip().lower()
+        if saved_lang in ("en", "zh") and not saved_system:
+            self._config.system_prompt = lake_orchestrator_system_prompt_for_lang(
+                saved_lang
+            )
         self._client = LlmChatClient(self._config)
         self._messages: List[Dict[str, object]] = []
-        self._lake_language_memory: str = LAKE_DEFAULT_LANGUAGE_MEMORY
+        self._lake_language_memory: str = lake_default_previous_subtask(
+            lake_orchestrator_prompt_lang(self._config.system_prompt)
+        )
         self._traditional_chat_mode: bool = False
         self._busy = False
         self._history_id: str = ""
@@ -7081,6 +7406,14 @@ class ChatPanelWidget(QWidget):
         )
         self.traditional_chat_btn.clicked.connect(self._on_traditional_chat_clicked)
         header.addWidget(self.traditional_chat_btn)
+        self.system_lang_btn = QPushButton("English")
+        self.system_lang_btn.setFixedWidth(64)
+        self.system_lang_btn.setFocusPolicy(Qt.NoFocus)
+        self.system_lang_btn.setToolTip(
+            "中文 / English 编排提示词切换（对齐对应语言训练数据）"
+        )
+        self.system_lang_btn.clicked.connect(self._on_toggle_system_prompt_lang)
+        header.addWidget(self.system_lang_btn)
         self.clear_btn = QPushButton("清空")
         self.clear_btn.setFixedWidth(44)
         self.clear_btn.clicked.connect(self._clear_chat)
@@ -7150,6 +7483,7 @@ class ChatPanelWidget(QWidget):
         settings_layout.addLayout(system_btn_row)
         self.settings_panel.setVisible(False)
         layout.addWidget(self.settings_panel)
+        self._refresh_system_lang_btn()
 
         opt_row = QHBoxLayout()
         opt_row.setSpacing(4)
@@ -7198,10 +7532,12 @@ class ChatPanelWidget(QWidget):
         self.history_view.setReadOnly(True)
         self.history_view.setPlaceholderText("对话记录将显示在这里…")
         self.history_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.history_view.setMinimumHeight(180)
+        self.history_view.setMinimumHeight(100)
         self.history_view.setFocusPolicy(Qt.NoFocus)
+        self.history_view.document().setDocumentMargin(8)
         self.history_view.setStyleSheet(
-            "QTextEdit { background-color: #1a1a1a; color: #ddd; border: 1px solid #444; }"
+            "QTextEdit { background-color: #1a1a1a; color: #ddd; border: 1px solid #444; "
+            "padding: 4px 6px 12px 6px; }"
         )
         layout.addWidget(self.history_view, stretch=1)
 
@@ -7211,11 +7547,16 @@ class ChatPanelWidget(QWidget):
         self.input_edit = ChatInputEdit()
         self.input_edit._chat_panel = self
         self.input_edit.setPlaceholderText(LAKE_CHAT_INPUT_PLACEHOLDER)
-        self.input_edit.setFixedHeight(96)
+        # 紧凑高度，避免挤占/盖住上方结果区
+        self.input_edit.setFixedHeight(72)
+        self.input_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.input_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
+        self.input_edit.document().setDocumentMargin(4)
         self.input_edit.setStyleSheet(
-            "QTextEdit { background-color: #252525; color: #eee; border: 1px solid #555; }"
+            "QTextEdit { background-color: #252525; color: #eee; border: 1px solid #555; "
+            "padding: 4px 6px 6px 6px; }"
         )
+        self._refresh_system_lang_btn()
         self._suppress_send_until = 0.0
         self._ime_dirty_from_history = False
         self._ime_rebuilding = False
@@ -7668,8 +8009,11 @@ class ChatPanelWidget(QWidget):
                 )
                 self.status_message.emit("传统对话模式")
         else:
-            self.input_edit.setPlaceholderText(LAKE_CHAT_INPUT_PLACEHOLDER)
             self.traditional_chat_btn.setStyleSheet("")
+            if not self.system_prompt_edit.toPlainText().strip():
+                self.system_prompt_edit.setPlainText(LAKE_ORCHESTRATOR_SYSTEM_PROMPT)
+                self._config.system_prompt = LAKE_ORCHESTRATOR_SYSTEM_PROMPT
+            self._refresh_system_lang_btn()
 
     def _on_traditional_chat_clicked(self) -> None:
         self._apply_traditional_chat_mode(True)
@@ -7981,9 +8325,14 @@ class ChatPanelWidget(QWidget):
             new = ChatInputEdit(self)
             new._chat_panel = self
             new.setPlaceholderText(placeholder)
-            new.setFixedHeight(height if height > 0 else 96)
+            new.setFixedHeight(height if height > 0 else 72)
+            new.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             new.setAttribute(Qt.WA_InputMethodEnabled, True)
             new.setStyleSheet(style)
+            try:
+                new.document().setDocumentMargin(4)
+            except Exception:
+                pass
             new.setPlainText(text)
             cursor = new.textCursor()
             cursor.movePosition(cursor.End)
@@ -8031,9 +8380,13 @@ class ChatPanelWidget(QWidget):
             self._apply_traditional_chat_mode(False, notify=False)
         else:
             self._apply_traditional_chat_mode(True, notify=False)
+        lang = lake_orchestrator_prompt_lang(self._config.system_prompt)
         try:
             path = save_chat_user_settings(
-                {"system_prompt": self._config.system_prompt}
+                {
+                    "system_prompt": self._config.system_prompt,
+                    "system_prompt_lang": lang,
+                }
             )
         except Exception as exc:
             QMessageBox.warning(self, "保存 System", f"保存失败: {exc}")
@@ -8047,18 +8400,95 @@ class ChatPanelWidget(QWidget):
             self._append_system_line(f"User 输出要求已对齐: {aligned}")
         else:
             self._append_system_line("User 不再附加「请输出全部子任务…」尾句")
+        self._refresh_system_lang_btn()
         self.status_message.emit(f"System prompt 已保存: {path}")
 
     def _on_reset_system_prompt_clicked(self) -> None:
         self._apply_traditional_chat_mode(False, notify=False)
         self.system_prompt_edit.setPlainText(LAKE_ORCHESTRATOR_SYSTEM_PROMPT_TRAINING)
         self._sync_config_from_ui()
+        self._refresh_system_lang_btn()
         self._append_system_line(
             "已恢复训练默认 System（三行版）；user 将自动对齐为「技能/子任务/记忆」"
         )
 
+    def _refresh_system_lang_btn(self) -> None:
+        if not hasattr(self, "system_lang_btn"):
+            return
+        lang = lake_orchestrator_prompt_lang(
+            self.system_prompt_edit.toPlainText()
+            if hasattr(self, "system_prompt_edit")
+            else self._config.system_prompt
+        )
+        if lang == "en":
+            self.system_lang_btn.setText("中文")
+            self.system_lang_btn.setToolTip(
+                "当前为 English system prompt；点击切换回中文编排提示词"
+            )
+            placeholder = LAKE_CHAT_INPUT_PLACEHOLDER_EN
+        else:
+            self.system_lang_btn.setText("English")
+            self.system_lang_btn.setToolTip(
+                "当前为中文 system prompt；点击切换为 English 编排提示词\n"
+                "（对齐 hermas_sys2_*-en：All subtasks / Skill / Current subtask …）"
+            )
+            placeholder = LAKE_CHAT_INPUT_PLACEHOLDER
+        if (
+            not self._traditional_chat_mode
+            and hasattr(self, "input_edit")
+            and self.input_edit is not None
+        ):
+            self.input_edit.setPlaceholderText(placeholder)
+
+    def _on_toggle_system_prompt_lang(self) -> None:
+        self._apply_traditional_chat_mode(False, notify=False)
+        cur = lake_orchestrator_prompt_lang(self.system_prompt_edit.toPlainText())
+        new_lang = "zh" if cur == "en" else "en"
+        prompt = lake_orchestrator_system_prompt_for_lang(new_lang)
+        self.system_prompt_edit.setPlainText(prompt)
+        self._config.system_prompt = prompt
+        # 切换语言时重置「上一个子任务」为该语言默认首步
+        self._lake_language_memory = lake_default_previous_subtask(new_lang)
+        self._sync_config_from_ui()
+        self._refresh_system_lang_btn()
+        label = "English" if new_lang == "en" else "中文"
+        self._append_system_line(
+            f"已切换 System prompt 为 {label}；user 仅包装「任务 / Task」行"
+        )
+        try:
+            save_chat_user_settings(
+                {
+                    "system_prompt": prompt,
+                    "system_prompt_lang": new_lang,
+                }
+            )
+        except Exception as exc:
+            self._append_system_line(f"保存语言设置失败: {exc}")
+
     def _append_system_line(self, text: str) -> None:
-        self.history_view.append(f'<span style="color:{UI_TEXT_MUTED};">[系统] {text}</span>')
+        self.history_view.append(
+            f'<p style="margin:4px 0 10px 0;">'
+            f'<span style="color:{UI_TEXT_MUTED};">[系统] {text}</span></p>'
+        )
+        self._scroll_history_to_bottom()
+
+    def _scroll_history_to_bottom(self) -> None:
+        """滚到底部并留出一点底边距，避免最后一行被裁切。"""
+        view = self.history_view
+
+        def _go() -> None:
+            try:
+                cursor = view.textCursor()
+                cursor.movePosition(cursor.End)
+                view.setTextCursor(cursor)
+                view.ensureCursorVisible()
+                bar = view.verticalScrollBar()
+                bar.setValue(bar.maximum())
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _go)
+        QTimer.singleShot(30, _go)
 
     def _append_prompt_dump(self, messages: List[Dict[str, object]]) -> None:
         """在对话框中打印即将发送的全部提示词。"""
@@ -8089,11 +8519,12 @@ class ChatPanelWidget(QWidget):
         )
         safe = _html_escape(dump).replace("\n", "<br>")
         self.history_view.append(
-            f'<pre style="margin:8px 0; padding:8px; white-space:pre-wrap; '
+            f'<pre style="margin:8px 0 14px 0; padding:8px; white-space:pre-wrap; '
             f'word-wrap:break-word; color:{UI_TEXT_MUTED}; '
             f'background:rgba(127,127,127,0.12); border-radius:6px; '
             f'font-size:11px; font-family:monospace;">{safe}</pre>'
         )
+        self._scroll_history_to_bottom()
 
     def _meta_span(self, ts: Optional[str] = None, latency_s: Optional[float] = None) -> str:
         parts = [format_chat_timestamp(ts)]
@@ -8109,10 +8540,11 @@ class ChatPanelWidget(QWidget):
     def _append_user_line(self, text: str, ts: Optional[str] = None) -> None:
         safe = _html_escape(text).replace("\n", "<br>")
         self.history_view.append(
-            f'<p style="margin:6px 0;">'
+            f'<p style="margin:6px 0 12px 0;">'
             f'<b style="color:#7ec8ff;">你:</b>{self._meta_span(ts)}'
             f"<br>{safe}</p>"
         )
+        self._scroll_history_to_bottom()
 
     def _append_assistant_line(
         self,
@@ -8131,10 +8563,11 @@ class ChatPanelWidget(QWidget):
                 image_html = f'<br><img src="{url}" width="380" />'
         safe = _html_escape(body).replace("\n", "<br>") if body else ""
         self.history_view.append(
-            f'<p style="margin:6px 0;">'
+            f'<p style="margin:6px 0 12px 0;">'
             f'<b style="color:#50fa7b;">AI:</b>{self._meta_span(ts, latency_s)}'
             f"<br>{safe}{image_html}</p>"
         )
+        self._scroll_history_to_bottom()
 
     def _append_error_line(
         self,
@@ -8144,10 +8577,11 @@ class ChatPanelWidget(QWidget):
     ) -> None:
         safe = _html_escape(text).replace("\n", "<br>")
         self.history_view.append(
-            f'<p style="margin:6px 0;">'
-            f'<b style="color:#ff5555;">错误:</b>{self._meta_span(ts, latency_s)}'
+            f'<p style="margin:6px 0 12px 0;">'
+            f'<b style="color:{UI_ACCENT_RED};">错误:</b>{self._meta_span(ts, latency_s)}'
             f"<br>{safe}</p>"
         )
+        self._scroll_history_to_bottom()
 
     def _trim_history(self) -> None:
         # 只保留最近的 user/assistant 轮次
@@ -8342,6 +8776,7 @@ class ChatPanelWidget(QWidget):
             self._apply_traditional_chat_mode(False, notify=False)
             self.system_prompt_edit.setPlainText(saved_system)
             self._config.system_prompt = saved_system
+            self._refresh_system_lang_btn()
         else:
             self._apply_traditional_chat_mode(True, notify=False)
         self._on_clear_chat_image_clicked(notify=False)
@@ -8359,7 +8794,9 @@ class ChatPanelWidget(QWidget):
 
     def _clear_chat(self) -> None:
         self._messages = []
-        self._lake_language_memory = LAKE_DEFAULT_LANGUAGE_MEMORY
+        self._lake_language_memory = lake_default_previous_subtask(
+            lake_orchestrator_prompt_lang(self._config.system_prompt)
+        )
         self.history_view.clear()
         self._history_id = ""
         self._history_title = ""
@@ -8382,6 +8819,7 @@ class ChatPanelWidget(QWidget):
         prompt_text = (
             format_lake_user_prompt(
                 user_text,
+                memory=self._lake_language_memory,
                 system_prompt=self._config.system_prompt,
             )
             if use_lake
@@ -19000,10 +19438,11 @@ class CameraTopicWindow(QMainWindow):
         )
         service_row.addWidget(self.test_qwen_refresh_btn)
         service_row.addWidget(QLabel("模型"))
-        self.test_qwen_model_combo = ImeSafeComboBox()
+        self.test_qwen_model_combo = FilterableImeSafeComboBox()
         self.test_qwen_model_combo.setMinimumWidth(200)
         self.test_qwen_model_combo.setToolTip(
-            "从上方根目录扫描到的可部署权重；选中后点「启动推理服务」。"
+            "从上方根目录扫描到的可部署权重；点击后可输入关键词模糊过滤，"
+            "选中后点「启动推理服务」。"
         )
         service_row.addWidget(self.test_qwen_model_combo)
         self.test_model_path_label = QLabel("")

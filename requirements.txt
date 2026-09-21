@@ -39,8 +39,12 @@ PyOpenGL==3.1.7
 #   export LLM_MODEL=qwen2.5
 #   export LLM_API_KEY=ollama
 
-# 手骨架遥控（可选）: MediaPipe Hands；须保持 numpy<2 与 ROS2 cv_bridge 兼容
-#   python3.10 -m pip install 'mediapipe==0.10.14'
+# 手骨架遥控（可选）: MediaPipe Hands（solutions API）
+#   在 ros-humble conda（Python 3.11）中:
+#     python -m pip install 'mediapipe==0.10.14'
+#     # 若缺依赖再装: protobuf absl-py attrs flatbuffers sounddevice matplotlib
+#     # 不要装 opencv-contrib-python（会劫持 Qt xcb，导致 run_local 崩溃）；用 opencv-python-headless
+#   本环境 cv_bridge 已与 numpy 2.x 共存；勿为 mediapipe 强行降 numpy。
 # mediapipe==0.10.14
 
 # SAM3 分割（可选，独立环境）: 见 requirements-sam3.txt 与 sam3_segment_worker.py

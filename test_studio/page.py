@@ -89,10 +89,16 @@ class TestStudioPage(QWidget):
         row.addWidget(self.root_combo)
         self.refresh_btn = QPushButton("刷新")
         self.refresh_btn.setFocusPolicy(Qt.NoFocus)
+        self.refresh_btn.setToolTip(
+            "扫描所选根目录下含 config.json / adapter_config.json 的子目录"
+        )
         row.addWidget(self.refresh_btn)
         row.addWidget(QLabel("模型"))
-        self.model_combo = sct.ImeSafeComboBox()
+        self.model_combo = sct.FilterableImeSafeComboBox()
         self.model_combo.setMinimumWidth(200)
+        self.model_combo.setToolTip(
+            "可部署权重列表；点击后可输入关键词模糊过滤。"
+        )
         row.addWidget(self.model_combo, 1)
         self.path_label = QLabel("")
         self.path_label.setFont(QFont(sct.UI_MONO_FAMILY, sct.UI_MONO_SIZE_SMALL))
