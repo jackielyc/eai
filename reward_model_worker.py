@@ -124,9 +124,11 @@ def _score_images(
     import torch
 
     batch = np.stack(images_rgb, axis=0)  # NHWC uint8
-    if model_type == "vlm":
+    if model_type in ("vlm", "history_vlm"):
+        # RLinf input_builder 期望 torch.Tensor [B,H,W,C]
+        images_t = torch.from_numpy(np.ascontiguousarray(batch))
         observations = {
-            "main_images": batch,
+            "main_images": images_t,
             "task_descriptions": [task or ""] * len(images_rgb),
         }
         with torch.no_grad():
@@ -332,6 +334,11 @@ def main() -> int:
         )
         model = _build_model(args)
         device = _resolve_device(args.device)
+        # VLM / history_vlm: move backbone to target device (resnet does this in _score_images)
+        if args.model_type in ("vlm", "history_vlm"):
+            backbone = getattr(model, "_model", None)
+            if backbone is not None:
+                backbone.to(device)
         print(f"[reward] loaded in {time.time() - t_load:.1f}s device={device}", flush=True)
 
         if args.mode == "single":

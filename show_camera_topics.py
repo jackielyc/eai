@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测 / 真机评测 / Reward评测 / ICL / Astra / HumanEgo / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测 / 真机评测 / Reward评测 / 仿真在线强化学习 / ICL / Astra / HumanEgo / 数据集 / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -714,6 +714,161 @@ def resolve_rlinf_python(repo: str = "") -> str:
     return "python3"
 
 
+def list_sim_online_rl_configs(
+    rlinf_root: str = "",
+    *,
+    mode: str = "",
+) -> List[str]:
+    """扫描 examples/embodiment/config 下可用于仿真在线 RL 的 yaml 名。"""
+    root = resolve_rlinf_root(rlinf_root)
+    cfg_dir = os.path.join(root, "examples", "embodiment", "config")
+    if not os.path.isdir(cfg_dir):
+        return []
+    mode_key = (mode or "").strip().lower()
+    names: List[str] = []
+    try:
+        for fname in os.listdir(cfg_dir):
+            if not fname.endswith(".yaml"):
+                continue
+            stem = fname[: -len(".yaml")]
+            # 跳过真机 / 采集 / 评测专用
+            low = stem.lower()
+            if low.startswith("realworld_") or low.endswith("_eval"):
+                continue
+            if "collect_data" in low or low.startswith("realworld_collect"):
+                continue
+            if mode_key == "async":
+                if "async" not in low:
+                    continue
+            elif mode_key == "sync":
+                if "async" in low:
+                    continue
+            names.append(stem)
+    except OSError:
+        return []
+    return sorted(names)
+
+
+def count_visible_cuda_devices(cuda_devices: str = "") -> int:
+    """根据 CUDA_VISIBLE_DEVICES / nvidia-smi 估计可见 GPU 数。"""
+    raw = (cuda_devices or "").strip()
+    if not raw:
+        raw = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").strip()
+    if raw:
+        parts = [p.strip() for p in raw.split(",") if p.strip() != ""]
+        if parts:
+            return len(parts)
+    try:
+        import subprocess
+
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=index",
+                "--format=csv,noheader",
+            ],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+        return len([ln for ln in out.splitlines() if ln.strip()])
+    except Exception:
+        return 0
+
+
+def default_sim_online_rl_single_gpu_overrides() -> List[str]:
+    """单卡机器上覆盖官方多卡 placement / 大批次，避免 rank 断言失败。
+
+    quickstart 等配置用合并键 ``actor,env,rollout``，不能直接改
+    ``cluster.component_placement.actor``；需先 ``~`` 删掉再 ``+`` 写入分键。
+    """
+    return [
+        "~cluster.component_placement",
+        "+cluster.component_placement.actor=0-0",
+        "+cluster.component_placement.env=0-0",
+        "+cluster.component_placement.rollout=0-0",
+        "env.train.total_num_envs=8",
+        "env.eval.total_num_envs=4",
+        "actor.micro_batch_size=1",
+        "actor.global_batch_size=40",
+        "actor.enable_offload=True",
+        "rollout.enable_offload=True",
+        "++env.train.enable_offload=True",
+    ]
+
+
+def default_openvlaoft_model_overrides() -> List[str]:
+    """若本地已有 OpenVLA-OFT 权重，返回 Hydra model_path / lora_path 覆盖。"""
+    model_dir = os.path.join(
+        RLINF_SIM_ONLINE_RL_CACHE_DIR,
+        "models",
+        "Openvla-oft-SFT-libero10-trajall",
+    )
+    lora_dir = os.path.join(
+        RLINF_SIM_ONLINE_RL_CACHE_DIR, "models", "oft-sft", "lora_004000"
+    )
+    out: List[str] = []
+    if os.path.isdir(model_dir) and (
+        os.path.isfile(os.path.join(model_dir, "config.json"))
+        or os.path.isfile(os.path.join(model_dir, "model.safetensors.index.json"))
+    ):
+        out.append(f"actor.model.model_path={model_dir}")
+        out.append(f"rollout.model.model_path={model_dir}")
+    if os.path.isdir(lora_dir):
+        out.append(f"actor.model.lora_path={lora_dir}")
+    return out
+
+
+def merge_sim_online_rl_overrides(
+    user_overrides: Sequence[str],
+    *,
+    cuda_devices: str = "",
+    auto_single_gpu: bool = True,
+    config_name: str = "",
+) -> List[str]:
+    """合并用户 Hydra overrides；单卡时自动补 placement（用户已写同名 key 则不覆盖）。"""
+    merged: List[str] = [str(x).strip() for x in user_overrides if str(x).strip()]
+
+    def _override_key(item: str) -> str:
+        text = item.strip()
+        if text.startswith("~"):
+            return text[1:]
+        if "=" in text:
+            return text.split("=", 1)[0].lstrip("+~")
+        return text.lstrip("+~")
+
+    existing_keys = {_override_key(item) for item in merged}
+
+    # OpenVLA-OFT：自动填本地已下载权重
+    cfg = (config_name or "").lower()
+    if "openvlaoft" in cfg or "openvla_oft" in cfg:
+        for item in default_openvlaoft_model_overrides():
+            key = _override_key(item)
+            if key not in existing_keys:
+                merged.append(item)
+                existing_keys.add(key)
+
+    if not auto_single_gpu:
+        return merged
+    n_gpu = count_visible_cuda_devices(cuda_devices)
+    if n_gpu != 1:
+        return merged
+
+    placement_touched = any(
+        k == "cluster.component_placement"
+        or k.startswith("cluster.component_placement.")
+        for k in existing_keys
+    )
+    for item in default_sim_online_rl_single_gpu_overrides():
+        key = _override_key(item)
+        if key.startswith("cluster.component_placement") and placement_touched:
+            continue
+        if key not in existing_keys:
+            merged.append(item)
+            existing_keys.add(key)
+    return merged
+
+
 def astra_url_prefers_external_browser(url: str) -> bool:
     """含视频的 Gallery 页：Qt5 WebEngine 常播不了 H.264，优先系统浏览器。"""
     u = (url or "").lower()
@@ -785,6 +940,26 @@ RLINF_PYTHON_CANDIDATES: Tuple[str, ...] = (
 )
 RLINF_RUN_SCRIPT = os.path.join(EAI_DIR, "run_reward_model.sh")
 RLINF_REWARD_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "reward_model")
+RLINF_SIM_ONLINE_RL_SCRIPT = os.path.join(EAI_DIR, "run_sim_online_rl.sh")
+RLINF_SIM_ONLINE_RL_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "sim_online_rl")
+# 常用仿真在线 RL 预设：(显示名, mode sync|async, config_name, robot_platform)
+SIM_ONLINE_RL_PRESETS: Tuple[Tuple[str, str, str, str], ...] = (
+    (
+        "同步 PPO · ManiSkill OpenVLA-OFT（单卡 quickstart）",
+        "sync",
+        "maniskill_ppo_openvlaoft_quickstart",
+        "LIBERO",
+    ),
+    ("同步 PPO · ManiSkill OpenPI", "sync", "maniskill_ppo_openpi", "LIBERO"),
+    ("同步 PPO · ManiSkill + ResNet Reward", "sync", "maniskill_ppo_mlp_resnet_reward", "LIBERO"),
+    ("同步 PPO · ManiSkill + QwenTrend Reward", "sync", "maniskill_ppo_mlp_qwentrend_reward", "LIBERO"),
+    ("同步 PPO · LIBERO Spatial OpenPI", "sync", "libero_spatial_ppo_openpi", "LIBERO"),
+    ("同步 PPO · ManiSkill OpenVLA-OFT（8 卡）", "sync", "maniskill_ppo_openvlaoft", "LIBERO"),
+    ("异步 PPO · ManiSkill OpenVLA", "async", "maniskill_async_ppo_openvla", "LIBERO"),
+    ("异步 PPO · ManiSkill OpenPI", "async", "maniskill_async_ppo_openpi", "LIBERO"),
+    ("异步 PPO · LIBERO Spatial OpenPI", "async", "libero_spatial_async_ppo_openpi", "LIBERO"),
+    ("异步 SAC · ManiSkill MLP", "async", "maniskill_sac_mlp_async", "LIBERO"),
+)
 RLINF_TELEOP_SCRIPT = os.path.join(
     RLINF_ROOT_DEFAULT, "examples", "reward", "run_realworld_teleop.sh"
 )
@@ -813,9 +988,11 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "仿真评测",
     "真机评测",
     "Reward评测",
+    "仿真在线强化学习",
     "ICL",
     "Astra",
     "HumanEgo",
+    "数据集",
     "sub task",
     "sub image",
 )
@@ -875,6 +1052,11 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "reward_eval": "Reward评测",
     "reward_model": "Reward评测",
     "Reward评测": "Reward评测",
+    "sim_online_rl": "仿真在线强化学习",
+    "online_rl": "仿真在线强化学习",
+    "sim_rl": "仿真在线强化学习",
+    "rlinf_online": "仿真在线强化学习",
+    "仿真在线强化学习": "仿真在线强化学习",
     "ctx": "ICL",
     "context": "ICL",
     "icl": "ICL",
@@ -891,6 +1073,10 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "HumanEgo": "HumanEgo",
     "human-ego": "HumanEgo",
     "human_ego": "HumanEgo",
+    "dataset": "数据集",
+    "datasets": "数据集",
+    "data": "数据集",
+    "数据集": "数据集",
 }
 CAD_MESHES_DIR = os.path.join(EAI_DIR, "meshes")
 TEST_IMAGES_DIR = os.path.join(EAI_DIR, "images")
@@ -2196,7 +2382,10 @@ def should_use_lake_orchestrator_prompt(api_base: str, model: str) -> bool:
 
 CHAT_HISTORY_DIR = os.path.join(EAI_DIR, "chat_history")
 BAGEL_HISTORY_DIR = os.path.join(EAI_DIR, "bagel_history")
+EAI_DATASETS_DIR = os.path.join(EAI_DIR, "datasets")
+EAI_IMAGES_DIR = os.path.join(EAI_DIR, "images")
 CHAT_USER_SETTINGS_PATH = os.path.join(EAI_DIR, "chat_user_settings.json")
+CONTROL_TABS_ORDER_PATH = os.path.join(EAI_DIR, "control_tabs_order.json")
 TEST_QWEN_LAST_CONFIG_PATH = os.path.join(EAI_DIR, "test_qwen_last_config.json")
 HY_EMBODIED_VLM_API_BASE = os.environ.get(
     "HY_EMBODIED_VLM_API_BASE", "http://127.0.0.1:8080/v1"
@@ -5941,6 +6130,67 @@ def save_chat_user_settings(data: Dict[str, object]) -> str:
     with open(CHAT_USER_SETTINGS_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     return CHAT_USER_SETTINGS_PATH
+
+
+def load_control_tabs_order() -> List[str]:
+    """加载控制区 tab 自定义顺序；无效则返回空列表。"""
+    try:
+        with open(CONTROL_TABS_ORDER_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            raw = data
+        elif isinstance(data, dict):
+            raw = data.get("order") or []
+        else:
+            raw = []
+        out: List[str] = []
+        seen = set()
+        for item in raw:
+            title = str(item or "").strip()
+            if not title or title in seen:
+                continue
+            if title not in CONTROL_TAB_TITLES:
+                continue
+            seen.add(title)
+            out.append(title)
+        return out
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+def save_control_tabs_order(titles: Sequence[str]) -> str:
+    cleaned: List[str] = []
+    seen = set()
+    for item in titles:
+        title = str(item or "").strip()
+        if not title or title in seen:
+            continue
+        seen.add(title)
+        cleaned.append(title)
+    os.makedirs(os.path.dirname(CONTROL_TABS_ORDER_PATH), exist_ok=True)
+    with open(CONTROL_TABS_ORDER_PATH, "w", encoding="utf-8") as f:
+        json.dump({"order": cleaned}, f, ensure_ascii=False, indent=2)
+    return CONTROL_TABS_ORDER_PATH
+
+
+def preferred_control_tabs_order(available: Sequence[str]) -> List[str]:
+    """在 available 中按「已保存顺序 → 默认 CONTROL_TAB_TITLES」排列。"""
+    avail = [str(t) for t in available if str(t).strip()]
+    avail_set = set(avail)
+    saved = load_control_tabs_order()
+    ordered: List[str] = []
+    for title in saved:
+        if title in avail_set and title not in ordered:
+            ordered.append(title)
+    for title in CONTROL_TAB_TITLES:
+        if title in avail_set and title not in ordered:
+            ordered.append(title)
+    for title in avail:
+        if title not in ordered:
+            ordered.append(title)
+    return ordered
 
 
 def load_test_qwen_last_config() -> Dict[str, object]:
@@ -11450,6 +11700,43 @@ def default_rrd_dataset_dir() -> str:
     return "/home/psibot/dataset"
 
 
+def dataset_browser_presets() -> List[Tuple[str, str]]:
+    """数据集浏览预设：(显示名, 绝对路径)。"""
+    items: List[Tuple[str, str]] = [
+        ("eai/datasets (.rrd)", EAI_DATASETS_DIR),
+        ("Bagel 历史", BAGEL_HISTORY_DIR),
+        ("Bagel 输出缓存", BAGEL_API_OUTPUT_DIR),
+        ("场景图 images/", EAI_IMAGES_DIR),
+        ("RRD 数据目录", default_rrd_dataset_dir()),
+    ]
+    out: List[Tuple[str, str]] = []
+    seen = set()
+    for label, path in items:
+        abs_path = os.path.abspath(os.path.expanduser(path))
+        if abs_path in seen:
+            continue
+        seen.add(abs_path)
+        out.append((label, abs_path))
+    return out
+
+
+_DATASET_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"})
+_DATASET_VIDEO_EXTS = frozenset({".mp4", ".avi", ".mkv", ".webm", ".mov"})
+_DATASET_RRD_EXTS = frozenset({".rrd"})
+_DATASET_JSON_EXTS = frozenset({".json"})
+
+
+def _dataset_format_bytes(n: int) -> str:
+    size = float(max(0, int(n)))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024.0 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{int(n)} B"
+
+
 def resolve_rrd_path(path: str) -> str:
     """解析 RRD 路径，兼容容器内 /root/dataset 与 /home/psibot/dataset。"""
     if not path:
@@ -15116,6 +15403,8 @@ class RewardModelLauncher(QObject):
             str(threshold),
             "--batch-size",
             str(int(batch_size)),
+            "--precision",
+            "bf16" if model_type in ("vlm", "history_vlm") else "fp32",
         ]
         if task.strip():
             args.extend(["--task", task.strip()])
@@ -15308,6 +15597,198 @@ class RewardModelLauncher(QObject):
         if error == QProcess.FailedToStart:
             self.log_line.emit("[ERROR] 无法启动 Reward 进程")
             self.status_message.emit("无法启动 Reward 评测")
+            self.running_changed.emit(False)
+
+
+class SimOnlineRLLauncher(QObject):
+    """启动 RLinf 仿真在线强化学习（sync PPO/GRPO 或 async PPO/SAC）。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    log_dir_ready = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._log_dir: str = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        mode: str,
+        config_name: str,
+        rlinf_root: str,
+        python_bin: str = "",
+        robot_platform: str = "LIBERO",
+        cuda_devices: str = "",
+        hydra_overrides: Sequence[str] = (),
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("仿真在线 RL 正在运行")
+            return
+        script = RLINF_SIM_ONLINE_RL_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        root = resolve_rlinf_root(rlinf_root)
+        py = (python_bin or "").strip() or resolve_rlinf_python(root)
+        cfg = (config_name or "").strip()
+        if not cfg:
+            self.status_message.emit("请选择 Hydra config")
+            return
+        cfg_path = os.path.join(root, "examples", "embodiment", "config", f"{cfg}.yaml")
+        if not os.path.isfile(cfg_path):
+            self.status_message.emit(f"配置不存在: {cfg_path}")
+            return
+        mode_norm = (mode or "sync").strip().lower()
+        if mode_norm not in ("sync", "async"):
+            self.status_message.emit(f"未知 mode: {mode}")
+            return
+        platform = (robot_platform or "LIBERO").strip() or "LIBERO"
+        os.makedirs(RLINF_SIM_ONLINE_RL_CACHE_DIR, exist_ok=True)
+
+        args = [
+            "--mode",
+            mode_norm,
+            "--config",
+            cfg,
+            "--robot-platform",
+            platform,
+            "--rlinf-root",
+            root,
+            "--python",
+            py,
+        ]
+        overrides = [str(x).strip() for x in hydra_overrides if str(x).strip()]
+        if overrides:
+            args.append("--")
+            args.extend(overrides)
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("PYTHONUNBUFFERED", "1")
+        qenv.insert("RLINF_ROOT", root)
+        qenv.insert("RLINF_PYTHON", py)
+        qenv.insert("ROBOT_PLATFORM", platform)
+        qenv.insert("MUJOCO_GL", qenv.value("MUJOCO_GL") or "egl")
+        qenv.insert("PYOPENGL_PLATFORM", qenv.value("PYOPENGL_PLATFORM") or "egl")
+        cuda = (cuda_devices or "").strip()
+        if cuda:
+            qenv.insert("CUDA_VISIBLE_DEVICES", cuda)
+
+        self._log_dir = ""
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(root)
+        proc.setProcessEnvironment(qenv)
+        # setsid：便于停止时杀掉整个训练进程组（含可能的 Ray 子进程）
+        proc.start("setsid", ["bash", script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(
+            f"$ bash run_sim_online_rl.sh --mode {mode_norm} --config {cfg} "
+            f"--robot-platform {platform}"
+        )
+        if overrides:
+            self.log_line.emit(f"  overrides: {' '.join(overrides)}")
+        self.status_message.emit(
+            f"正在启动仿真在线 RL（{mode_norm} / {cfg}）…"
+        )
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的仿真在线 RL")
+            return
+        self.status_message.emit("正在停止仿真在线 RL…")
+        if self._process is not None:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            QTimer.singleShot(4000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            self._process.waitForFinished(2000)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.kill()
+            else:
+                self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is None or self._process.state() == QProcess.NotRunning:
+            return
+        pid = int(self._process.processId())
+        if pid > 0:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[sim-online-rl] log_dir="):
+                self._log_dir = text.split("=", 1)[-1].strip()
+                if self._log_dir:
+                    self.log_dir_ready.emit(self._log_dir)
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- 仿真在线 RL 正常退出 ---")
+            self.status_message.emit("仿真在线 RL 已完成")
+        else:
+            self.log_line.emit(f"--- 仿真在线 RL 退出 (code={exit_code}) ---")
+            self.status_message.emit(f"仿真在线 RL 异常退出 (code={exit_code})")
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动仿真在线 RL 进程")
+            self.status_message.emit("无法启动仿真在线 RL")
             self.running_changed.emit(False)
 
 
@@ -15869,9 +16350,13 @@ class CameraTopicWindow(QMainWindow):
         root_layout = QVBoxLayout(central)
 
         control_tabs = QTabWidget()
+        self.control_tabs = control_tabs
         control_tabs.setDocumentMode(True)
         control_tabs.setTabPosition(QTabWidget.North)
-        self.control_tabs = control_tabs
+        control_tabs.setMovable(True)
+        control_tabs.tabBar().setToolTip(
+            "可拖动标签调整顺序；下次启动会按此顺序打开（写入 eai/control_tabs_order.json）"
+        )
 
         camera_tab = QWidget()
         camera_layout = QHBoxLayout(camera_tab)
@@ -17302,14 +17787,17 @@ class CameraTopicWindow(QMainWindow):
             QSizePolicy.Expanding, QSizePolicy.Expanding
         )
         bagel_out_col.addWidget(self.bagel_call_output_preview, 1)
+        bagel_meta_row = QHBoxLayout()
+        bagel_meta_row.setContentsMargins(0, 0, 0, 0)
+        bagel_meta_row.setSpacing(10)
         self.bagel_call_output_size_label = QLabel("输出分辨率: —")
-        self.bagel_call_output_size_label.setAlignment(Qt.AlignCenter)
+        self.bagel_call_output_size_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.bagel_call_output_size_label.setFont(
             QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
         )
         self.bagel_call_output_size_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         self.bagel_call_output_size_label.setToolTip("实际输出图像的宽×高（像素）")
-        bagel_out_col.addWidget(self.bagel_call_output_size_label)
+        bagel_meta_row.addWidget(self.bagel_call_output_size_label)
         self.bagel_call_model_size_label = QLabel("模型输入: —")
         self.bagel_call_model_size_label.setAlignment(Qt.AlignCenter)
         self.bagel_call_model_size_label.setFont(
@@ -17319,15 +17807,16 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_call_model_size_label.setToolTip(
             "实际送进模型的条件图尺寸（编辑时经 VAE resize，最短边常被抬到 ≥512）"
         )
-        bagel_out_col.addWidget(self.bagel_call_model_size_label)
+        bagel_meta_row.addWidget(self.bagel_call_model_size_label)
         self.bagel_call_latency_label = QLabel("调用耗时: —")
-        self.bagel_call_latency_label.setAlignment(Qt.AlignCenter)
+        self.bagel_call_latency_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.bagel_call_latency_label.setFont(
             QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
         )
         self.bagel_call_latency_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         self.bagel_call_latency_label.setToolTip("Bagel 推理 API 返回的 latency_s（秒）")
-        bagel_out_col.addWidget(self.bagel_call_latency_label)
+        bagel_meta_row.addWidget(self.bagel_call_latency_label)
+        bagel_out_col.addLayout(bagel_meta_row)
         bagel_preview_row.addLayout(bagel_out_col, 1)
         self._bagel_preview_layout = bagel_preview_row
         bagel_outer.addLayout(bagel_preview_row, 1)
@@ -18725,6 +19214,14 @@ class CameraTopicWindow(QMainWindow):
         self.reward_type_combo = ImeSafeComboBox()
         self.reward_type_combo.addItem("resnet", "resnet")
         self.reward_type_combo.addItem("vlm", "vlm")
+        # 默认用本地 Qwen3-VL 做零样本 VLM reward 实验
+        _default_reward_ckpt = os.path.join(
+            RLINF_REWARD_CACHE_DIR, "Qwen3-VL-4B-Instruct"
+        )
+        if os.path.isdir(_default_reward_ckpt):
+            idx = self.reward_type_combo.findData("vlm")
+            if idx >= 0:
+                self.reward_type_combo.setCurrentIndex(idx)
         rm_model_row.addWidget(self.reward_type_combo)
         rm_model_row.addWidget(QLabel("arch"))
         self.reward_arch_combo = ImeSafeComboBox()
@@ -18756,8 +19253,15 @@ class CameraTopicWindow(QMainWindow):
         rm_ckpt_row = QHBoxLayout()
         rm_ckpt_row.setSpacing(6)
         rm_ckpt_row.addWidget(QLabel("ckpt"))
-        self.reward_ckpt_edit = QLineEdit()
-        self.reward_ckpt_edit.setPlaceholderText("reward 权重 .pt / .pth / .safetensors 或 VLM 目录")
+        _default_reward_ckpt = os.path.join(
+            RLINF_REWARD_CACHE_DIR, "Qwen3-VL-4B-Instruct"
+        )
+        self.reward_ckpt_edit = QLineEdit(
+            _default_reward_ckpt if os.path.isdir(_default_reward_ckpt) else ""
+        )
+        self.reward_ckpt_edit.setPlaceholderText(
+            "reward 权重 .pt / .pth / .safetensors 或 VLM 目录"
+        )
         self.reward_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         rm_ckpt_row.addWidget(self.reward_ckpt_edit, 1)
         self.reward_ckpt_browse_btn = QPushButton("…")
@@ -18969,9 +19473,156 @@ class CameraTopicWindow(QMainWindow):
         self._on_reward_mode_changed()
         self._refresh_reward_topic_combo()
 
+        # --- 仿真在线强化学习 ---
+        sim_rl_tab = QWidget()
+        sim_rl_tab.setObjectName("simOnlineRlTab")
+        sim_rl_outer = QVBoxLayout(sim_rl_tab)
+        sim_rl_outer.setContentsMargins(8, 6, 8, 6)
+        sim_rl_outer.setSpacing(6)
+        sim_rl_hint = QLabel(
+            "RLinf 仿真在线强化学习：在 ManiSkill / LIBERO 等模拟器中边交互边更新策略。"
+            "同步模式走 train_embodied_agent.py（PPO/GRPO）；异步模式走 train_async.py"
+            "（Async PPO / SAC）。本机单卡时会自动把 placement 压到 0-0 并缩小 batch；"
+            "官方 8 卡 config（如 maniskill_ppo_openvlaoft）请改用 quickstart 或自行覆盖。"
+            "开训前请填好 config 内 model_path 权重。"
+        )
+        sim_rl_hint.setWordWrap(True)
+        sim_rl_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        sim_rl_outer.addWidget(sim_rl_hint)
+
+        srl_path_row = QHBoxLayout()
+        srl_path_row.setSpacing(6)
+        srl_path_row.addWidget(QLabel("RLinf"))
+        self.sim_rl_root_edit = QLineEdit(
+            os.environ.get("RLINF_ROOT", RLINF_ROOT_DEFAULT)
+        )
+        self.sim_rl_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        srl_path_row.addWidget(self.sim_rl_root_edit, 1)
+        self.sim_rl_root_browse_btn = QPushButton("…")
+        self.sim_rl_root_browse_btn.setFixedWidth(28)
+        self.sim_rl_root_browse_btn.clicked.connect(self._on_sim_rl_root_browse)
+        srl_path_row.addWidget(self.sim_rl_root_browse_btn)
+        srl_path_row.addWidget(QLabel("Python"))
+        self.sim_rl_python_edit = QLineEdit(
+            resolve_rlinf_python(self.sim_rl_root_edit.text())
+        )
+        self.sim_rl_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        srl_path_row.addWidget(self.sim_rl_python_edit, 1)
+        sim_rl_outer.addLayout(srl_path_row)
+
+        srl_mode_row = QHBoxLayout()
+        srl_mode_row.setSpacing(6)
+        srl_mode_row.addWidget(QLabel("模式"))
+        self.sim_rl_mode_combo = ImeSafeComboBox()
+        self.sim_rl_mode_combo.addItem("同步 (PPO/GRPO)", "sync")
+        self.sim_rl_mode_combo.addItem("异步 (Async PPO/SAC)", "async")
+        self.sim_rl_mode_combo.currentIndexChanged.connect(self._on_sim_rl_mode_changed)
+        srl_mode_row.addWidget(self.sim_rl_mode_combo)
+        srl_mode_row.addWidget(QLabel("平台"))
+        self.sim_rl_platform_combo = ImeSafeComboBox()
+        for plat in ("LIBERO", "ALOHA", "BRIDGE"):
+            self.sim_rl_platform_combo.addItem(plat, plat)
+        srl_mode_row.addWidget(self.sim_rl_platform_combo)
+        srl_mode_row.addWidget(QLabel("GPU"))
+        self.sim_rl_cuda_edit = QLineEdit(
+            os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+        )
+        self.sim_rl_cuda_edit.setFixedWidth(72)
+        self.sim_rl_cuda_edit.setPlaceholderText("0")
+        self.sim_rl_cuda_edit.setToolTip("CUDA_VISIBLE_DEVICES，留空则用系统默认")
+        srl_mode_row.addWidget(self.sim_rl_cuda_edit)
+        srl_mode_row.addStretch(1)
+        sim_rl_outer.addLayout(srl_mode_row)
+
+        srl_cfg_row = QHBoxLayout()
+        srl_cfg_row.setSpacing(6)
+        srl_cfg_row.addWidget(QLabel("预设"))
+        self.sim_rl_preset_combo = ImeSafeComboBox()
+        for label, mode, cfg, plat in SIM_ONLINE_RL_PRESETS:
+            self.sim_rl_preset_combo.addItem(
+                label, {"mode": mode, "config": cfg, "platform": plat}
+            )
+        self.sim_rl_preset_combo.currentIndexChanged.connect(
+            self._on_sim_rl_preset_changed
+        )
+        srl_cfg_row.addWidget(self.sim_rl_preset_combo, 1)
+        srl_cfg_row.addWidget(QLabel("config"))
+        self.sim_rl_config_combo = ImeSafeComboBox()
+        self.sim_rl_config_combo.setEditable(True)
+        self.sim_rl_config_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.sim_rl_config_combo.setMinimumWidth(260)
+        self.sim_rl_config_combo.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        srl_cfg_row.addWidget(self.sim_rl_config_combo, 1)
+        self.sim_rl_refresh_btn = QPushButton("刷新")
+        self.sim_rl_refresh_btn.setToolTip("重新扫描 examples/embodiment/config")
+        self.sim_rl_refresh_btn.clicked.connect(self._refresh_sim_rl_configs)
+        srl_cfg_row.addWidget(self.sim_rl_refresh_btn)
+        sim_rl_outer.addLayout(srl_cfg_row)
+
+        srl_ov_row = QHBoxLayout()
+        srl_ov_row.setSpacing(6)
+        srl_ov_row.addWidget(QLabel("Hydra"))
+        self.sim_rl_overrides_edit = QLineEdit()
+        self.sim_rl_overrides_edit.setPlaceholderText(
+            "可选 Hydra 覆盖；单卡会自动追加 placement=0-0。例: "
+            "actor.model.model_path=/path/to/ckpt env.train.total_num_envs=4"
+        )
+        self.sim_rl_overrides_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        srl_ov_row.addWidget(self.sim_rl_overrides_edit, 1)
+        sim_rl_outer.addLayout(srl_ov_row)
+
+        srl_run_row = QHBoxLayout()
+        srl_run_row.setSpacing(6)
+        self.sim_rl_start_btn = QPushButton("启动训练")
+        self.sim_rl_start_btn.setToolTip("启动 RLinf 仿真在线强化学习")
+        self.sim_rl_start_btn.clicked.connect(self._on_sim_rl_start_clicked)
+        srl_run_row.addWidget(self.sim_rl_start_btn)
+        self.sim_rl_stop_btn = QPushButton("停止")
+        self.sim_rl_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.sim_rl_stop_btn.setEnabled(False)
+        self.sim_rl_stop_btn.clicked.connect(self._on_sim_rl_stop_clicked)
+        srl_run_row.addWidget(self.sim_rl_stop_btn)
+        self.sim_rl_status_label = QLabel("空闲")
+        self.sim_rl_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        srl_run_row.addWidget(self.sim_rl_status_label, 1)
+        sim_rl_outer.addLayout(srl_run_row)
+
+        srl_log_row = QHBoxLayout()
+        srl_log_row.setSpacing(6)
+        srl_log_row.addWidget(QLabel("日志目录"))
+        self.sim_rl_log_dir_edit = QLineEdit()
+        self.sim_rl_log_dir_edit.setReadOnly(True)
+        self.sim_rl_log_dir_edit.setPlaceholderText("启动后显示 runner.logger.log_path")
+        self.sim_rl_log_dir_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        srl_log_row.addWidget(self.sim_rl_log_dir_edit, 1)
+        self.sim_rl_open_log_btn = QPushButton("打开")
+        self.sim_rl_open_log_btn.setEnabled(False)
+        self.sim_rl_open_log_btn.clicked.connect(self._on_sim_rl_open_log_clicked)
+        srl_log_row.addWidget(self.sim_rl_open_log_btn)
+        sim_rl_outer.addLayout(srl_log_row)
+
+        self.sim_rl_log_edit = QTextEdit()
+        self.sim_rl_log_edit.setReadOnly(True)
+        self.sim_rl_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_rl_log_edit.setPlaceholderText("仿真在线 RL 训练日志…")
+        self.sim_rl_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        sim_rl_outer.addWidget(self.sim_rl_log_edit, 1)
+
+        self._sim_rl_launcher = SimOnlineRLLauncher(self)
+        self._sim_rl_launcher.log_line.connect(self._append_sim_rl_log)
+        self._sim_rl_launcher.status_message.connect(self._on_sim_rl_status)
+        self._sim_rl_launcher.running_changed.connect(self._update_sim_rl_ui)
+        self._sim_rl_launcher.log_dir_ready.connect(self._on_sim_rl_log_dir)
+        self._refresh_sim_rl_configs()
+        self._on_sim_rl_preset_changed()
+
         control_tabs.addTab(sim_tab, "仿真评测")
         control_tabs.addTab(real_tab, "真机评测")
         control_tabs.addTab(reward_tab, "Reward评测")
+        control_tabs.addTab(sim_rl_tab, "仿真在线强化学习")
         control_tabs.addTab(ctx_tab, "ICL")
         # sub task / sub image 挂在全部 tab 最后，见下方 addTab
 
@@ -19228,6 +19879,143 @@ class CameraTopicWindow(QMainWindow):
         self._on_humanego_action_changed()
         self._on_humanego_refresh_mps()
         control_tabs.addTab(humanego_tab, "HumanEgo")
+
+        # ---- 数据集浏览 ----
+        dataset_tab = QWidget()
+        dataset_tab.setObjectName("datasetTab")
+        dataset_outer = QVBoxLayout(dataset_tab)
+        dataset_outer.setContentsMargins(8, 6, 8, 6)
+        dataset_outer.setSpacing(6)
+        ds_hint = QLabel(
+            "浏览本地数据集目录（.rrd / 图像 / Bagel 历史 JSON 等）。"
+            "可选中图像送入 sub image，或把 .rrd 设为回放文件。"
+        )
+        ds_hint.setWordWrap(True)
+        ds_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        dataset_outer.addWidget(ds_hint)
+
+        ds_root_row = QHBoxLayout()
+        ds_root_row.setSpacing(6)
+        ds_root_row.addWidget(QLabel("预设"))
+        self.dataset_preset_combo = ImeSafeComboBox()
+        for label, path in dataset_browser_presets():
+            self.dataset_preset_combo.addItem(label, path)
+        self.dataset_preset_combo.setToolTip("切换常用数据集根目录")
+        self.dataset_preset_combo.currentIndexChanged.connect(
+            self._on_dataset_preset_changed
+        )
+        ds_root_row.addWidget(self.dataset_preset_combo)
+        ds_root_row.addWidget(QLabel("根目录"))
+        _ds_default = EAI_DATASETS_DIR if os.path.isdir(EAI_DATASETS_DIR) else (
+            dataset_browser_presets()[0][1] if dataset_browser_presets() else EAI_DIR
+        )
+        self.dataset_root_edit = QLineEdit(_ds_default)
+        self.dataset_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.dataset_root_edit.setToolTip("当前浏览的根目录（可手动改路径后点刷新）")
+        ds_root_row.addWidget(self.dataset_root_edit, 1)
+        self.dataset_root_browse_btn = QPushButton("…")
+        self.dataset_root_browse_btn.setFixedWidth(28)
+        self.dataset_root_browse_btn.clicked.connect(self._on_dataset_root_browse)
+        ds_root_row.addWidget(self.dataset_root_browse_btn)
+        self.dataset_refresh_btn = QPushButton("刷新")
+        self.dataset_refresh_btn.clicked.connect(self._on_dataset_refresh_clicked)
+        ds_root_row.addWidget(self.dataset_refresh_btn)
+        self.dataset_up_btn = QPushButton("上级")
+        self.dataset_up_btn.clicked.connect(self._on_dataset_up_clicked)
+        ds_root_row.addWidget(self.dataset_up_btn)
+        dataset_outer.addLayout(ds_root_row)
+
+        ds_filter_row = QHBoxLayout()
+        ds_filter_row.setSpacing(6)
+        ds_filter_row.addWidget(QLabel("过滤"))
+        self.dataset_filter_edit = ImeSafeLineEdit("")
+        self.dataset_filter_edit.setPlaceholderText("按文件名过滤…")
+        self.dataset_filter_edit.textChanged.connect(self._on_dataset_filter_changed)
+        ds_filter_row.addWidget(self.dataset_filter_edit, 1)
+        self.dataset_type_combo = ImeSafeComboBox()
+        self.dataset_type_combo.addItem("全部", "all")
+        self.dataset_type_combo.addItem("目录", "dir")
+        self.dataset_type_combo.addItem("图像", "image")
+        self.dataset_type_combo.addItem("视频", "video")
+        self.dataset_type_combo.addItem("RRD", "rrd")
+        self.dataset_type_combo.addItem("JSON", "json")
+        self.dataset_type_combo.currentIndexChanged.connect(
+            self._on_dataset_filter_changed
+        )
+        ds_filter_row.addWidget(self.dataset_type_combo)
+        dataset_outer.addLayout(ds_filter_row)
+
+        ds_split = QSplitter(Qt.Horizontal)
+        self.dataset_list = QListWidget()
+        self.dataset_list.setStyleSheet(
+            "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+        )
+        self.dataset_list.setMinimumWidth(220)
+        self.dataset_list.itemSelectionChanged.connect(
+            self._on_dataset_selection_changed
+        )
+        self.dataset_list.itemDoubleClicked.connect(self._on_dataset_item_activated)
+        ds_split.addWidget(self.dataset_list)
+
+        ds_right = QWidget()
+        ds_right_layout = QVBoxLayout(ds_right)
+        ds_right_layout.setContentsMargins(0, 0, 0, 0)
+        ds_right_layout.setSpacing(6)
+        self.dataset_preview = QLabel("选择左侧条目预览")
+        self.dataset_preview.setMinimumHeight(180)
+        self.dataset_preview.setAlignment(Qt.AlignCenter)
+        self.dataset_preview.setStyleSheet(
+            "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #888; }"
+        )
+        self.dataset_preview.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        ds_right_layout.addWidget(self.dataset_preview, 2)
+        self.dataset_detail_edit = QTextEdit()
+        self.dataset_detail_edit.setReadOnly(True)
+        self.dataset_detail_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.dataset_detail_edit.setMinimumHeight(100)
+        self.dataset_detail_edit.setMaximumHeight(180)
+        self.dataset_detail_edit.setPlaceholderText("条目详情…")
+        self.dataset_detail_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        ds_right_layout.addWidget(self.dataset_detail_edit, 1)
+        ds_action_row = QHBoxLayout()
+        ds_action_row.setSpacing(6)
+        self.dataset_open_dir_btn = QPushButton("打开目录")
+        self.dataset_open_dir_btn.clicked.connect(self._on_dataset_open_dir)
+        ds_action_row.addWidget(self.dataset_open_dir_btn)
+        self.dataset_copy_path_btn = QPushButton("复制路径")
+        self.dataset_copy_path_btn.clicked.connect(self._on_dataset_copy_path)
+        ds_action_row.addWidget(self.dataset_copy_path_btn)
+        self.dataset_to_replay_btn = QPushButton("设为回放")
+        self.dataset_to_replay_btn.setToolTip("将选中的 .rrd 设为回放页路径")
+        self.dataset_to_replay_btn.clicked.connect(self._on_dataset_to_replay)
+        ds_action_row.addWidget(self.dataset_to_replay_btn)
+        self.dataset_to_bagel_btn = QPushButton("送入 Bagel")
+        self.dataset_to_bagel_btn.setToolTip("将选中图像设为 sub image 输入图")
+        self.dataset_to_bagel_btn.clicked.connect(self._on_dataset_to_bagel)
+        ds_action_row.addWidget(self.dataset_to_bagel_btn)
+        ds_action_row.addStretch(1)
+        ds_right_layout.addLayout(ds_action_row)
+        ds_split.addWidget(ds_right)
+        ds_split.setStretchFactor(0, 1)
+        ds_split.setStretchFactor(1, 2)
+        dataset_outer.addWidget(ds_split, 1)
+
+        self._dataset_cwd = ""
+        control_tabs.addTab(dataset_tab, "数据集")
+        # 同步预设到根目录并刷新列表
+        for i in range(self.dataset_preset_combo.count()):
+            if os.path.abspath(str(self.dataset_preset_combo.itemData(i) or "")) == os.path.abspath(
+                self.dataset_root_edit.text().strip() or ""
+            ):
+                self.dataset_preset_combo.setCurrentIndex(i)
+                break
+        self._refresh_dataset_browser()
+
         control_tabs.addTab(test_tab, "sub task")
         control_tabs.addTab(bagel_tab, "sub image")
 
@@ -19356,6 +20144,9 @@ class CameraTopicWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         self.status_bar.showMessage("就绪")
         self._apply_only_tabs(self._only_tabs)
+        self._restore_control_tabs_order()
+        self._control_tabs_order_guard = False
+        self.control_tabs.tabBar().tabMoved.connect(self._on_control_tab_moved)
         self.chat_panel.status_message.connect(self.status_bar.showMessage)
         self._init_qwen_deploy_controller()
         self._stack_launcher.status_message.connect(self.status_bar.showMessage)
@@ -19987,6 +20778,306 @@ class CameraTopicWindow(QMainWindow):
             QMessageBox.warning(self, "HumanEgo", f"目录不存在: {repo}")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(repo))
+
+    def _dataset_current_root(self) -> str:
+        text = self.dataset_root_edit.text().strip() if hasattr(self, "dataset_root_edit") else ""
+        if text:
+            return os.path.abspath(os.path.expanduser(text))
+        return os.path.abspath(EAI_DATASETS_DIR)
+
+    def _dataset_selected_path(self) -> str:
+        item = self.dataset_list.currentItem() if hasattr(self, "dataset_list") else None
+        if item is None:
+            return ""
+        return str(item.data(Qt.UserRole) or "")
+
+    def _on_dataset_preset_changed(self, _index: int = 0) -> None:
+        path = str(self.dataset_preset_combo.currentData() or "").strip()
+        if not path:
+            return
+        self.dataset_root_edit.setText(path)
+        self._refresh_dataset_browser()
+
+    def _on_dataset_root_browse(self) -> None:
+        current = self._dataset_current_root()
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择数据集根目录", current if os.path.isdir(current) else EAI_DIR
+        )
+        if not selected:
+            return
+        self.dataset_root_edit.setText(selected)
+        # 若匹配预设则同步 combo，否则保持当前预设项不动
+        for i in range(self.dataset_preset_combo.count()):
+            if os.path.abspath(str(self.dataset_preset_combo.itemData(i) or "")) == os.path.abspath(
+                selected
+            ):
+                self.dataset_preset_combo.blockSignals(True)
+                self.dataset_preset_combo.setCurrentIndex(i)
+                self.dataset_preset_combo.blockSignals(False)
+                break
+        self._refresh_dataset_browser()
+
+    def _on_dataset_refresh_clicked(self) -> None:
+        self._refresh_dataset_browser()
+
+    def _on_dataset_up_clicked(self) -> None:
+        root = self._dataset_current_root()
+        parent = os.path.dirname(root.rstrip(os.sep))
+        if parent and parent != root and os.path.isdir(parent):
+            self.dataset_root_edit.setText(parent)
+            self._refresh_dataset_browser()
+
+    def _on_dataset_filter_changed(self, *_args) -> None:
+        self._refresh_dataset_browser(keep_selection=True)
+
+    def _refresh_dataset_browser(self, *, keep_selection: bool = False) -> None:
+        if not hasattr(self, "dataset_list"):
+            return
+        prev = self._dataset_selected_path() if keep_selection else ""
+        root = self._dataset_current_root()
+        self._dataset_cwd = root
+        self.dataset_list.clear()
+        self.dataset_preview.setPixmap(QPixmap())
+        self.dataset_preview.setText("选择左侧条目预览")
+        self.dataset_detail_edit.clear()
+        if not os.path.isdir(root):
+            self.dataset_detail_edit.setPlainText(f"目录不存在:\n{root}")
+            if getattr(self, "status_bar", None) is not None:
+                self.status_bar.showMessage(f"数据集目录不存在: {root}", 4000)
+            return
+        filter_text = self.dataset_filter_edit.text().strip().lower()
+        type_key = str(self.dataset_type_combo.currentData() or "all")
+        try:
+            names = sorted(os.listdir(root), key=lambda x: x.lower())
+        except OSError as exc:
+            self.dataset_detail_edit.setPlainText(f"无法读取目录: {exc}")
+            return
+        restore_row = -1
+        for name in names:
+            if name.startswith("."):
+                continue
+            if filter_text and filter_text not in name.lower():
+                continue
+            path = os.path.join(root, name)
+            is_dir = os.path.isdir(path)
+            ext = os.path.splitext(name)[1].lower()
+            kind = "dir" if is_dir else "file"
+            if is_dir:
+                kind = "dir"
+            elif ext in _DATASET_IMAGE_EXTS:
+                kind = "image"
+            elif ext in _DATASET_VIDEO_EXTS:
+                kind = "video"
+            elif ext in _DATASET_RRD_EXTS:
+                kind = "rrd"
+            elif ext in _DATASET_JSON_EXTS:
+                kind = "json"
+            if type_key != "all" and kind != type_key:
+                continue
+            try:
+                st = os.stat(path)
+                size_txt = "DIR" if is_dir else _dataset_format_bytes(st.st_size)
+                mtime = datetime.fromtimestamp(st.st_mtime).strftime("%m-%d %H:%M")
+            except OSError:
+                size_txt = "?"
+                mtime = ""
+            prefix = {
+                "dir": "[D]",
+                "image": "[I]",
+                "video": "[V]",
+                "rrd": "[R]",
+                "json": "[J]",
+            }.get(kind, "[F]")
+            label = f"{prefix} {name}  ·  {size_txt}"
+            if mtime:
+                label += f"  ·  {mtime}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.UserRole, path)
+            item.setData(Qt.UserRole + 1, kind)
+            item.setToolTip(path)
+            self.dataset_list.addItem(item)
+            if prev and os.path.abspath(path) == os.path.abspath(prev):
+                restore_row = self.dataset_list.count() - 1
+        if restore_row >= 0:
+            self.dataset_list.setCurrentRow(restore_row)
+        if getattr(self, "status_bar", None) is not None:
+            self.status_bar.showMessage(
+                f"数据集: {self.dataset_list.count()} 项 @ {root}", 4000
+            )
+
+    def _on_dataset_item_activated(self, item: object) -> None:
+        if not isinstance(item, QListWidgetItem):
+            return
+        path = str(item.data(Qt.UserRole) or "")
+        kind = str(item.data(Qt.UserRole + 1) or "")
+        if kind == "dir" and os.path.isdir(path):
+            self.dataset_root_edit.setText(path)
+            self._refresh_dataset_browser()
+
+    def _on_dataset_selection_changed(self) -> None:
+        path = self._dataset_selected_path()
+        self.dataset_preview.setPixmap(QPixmap())
+        self.dataset_preview.setText("选择左侧条目预览")
+        self.dataset_detail_edit.clear()
+        if not path:
+            return
+        kind = "file"
+        item = self.dataset_list.currentItem()
+        if item is not None:
+            kind = str(item.data(Qt.UserRole + 1) or "file")
+        lines: List[str] = [f"路径: {path}", f"类型: {kind}"]
+        try:
+            st = os.stat(path)
+            lines.append(f"大小: {_dataset_format_bytes(st.st_size)}")
+            lines.append(
+                f"修改: {datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+        except OSError as exc:
+            lines.append(f"stat 失败: {exc}")
+            self.dataset_detail_edit.setPlainText("\n".join(lines))
+            return
+        if kind == "dir":
+            try:
+                children = [n for n in os.listdir(path) if not n.startswith(".")]
+                lines.append(f"子项: {len(children)}")
+                preview_names = sorted(children, key=lambda x: x.lower())[:30]
+                if preview_names:
+                    lines.append("内容:")
+                    lines.extend(f"  - {n}" for n in preview_names)
+                    if len(children) > 30:
+                        lines.append(f"  … 另有 {len(children) - 30} 项")
+            except OSError as exc:
+                lines.append(f"列出失败: {exc}")
+        elif kind == "image" and os.path.isfile(path):
+            pix = QPixmap(path)
+            if not pix.isNull():
+                lines.append(f"分辨率: {pix.width()}×{pix.height()}")
+                self.dataset_preview.setPixmap(
+                    pix.scaled(
+                        self.dataset_preview.size(),
+                        Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation,
+                    )
+                )
+                self.dataset_preview.setText("")
+                self.dataset_preview.setToolTip(path)
+            else:
+                self.dataset_preview.setText("无法加载图像")
+        elif kind == "json" and os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                pretty = json.dumps(data, ensure_ascii=False, indent=2)
+                if len(pretty) > 4000:
+                    pretty = pretty[:4000] + "\n…(截断)"
+                lines.append("内容预览:")
+                lines.append(pretty)
+                # Bagel 历史：尝试预览输出图
+                if isinstance(data, dict):
+                    turns = data.get("turns")
+                    if isinstance(turns, list) and turns:
+                        last = turns[-1] if isinstance(turns[-1], dict) else {}
+                        out_img = str(last.get("output_image") or "")
+                        if out_img and os.path.isfile(out_img):
+                            pix = QPixmap(out_img)
+                            if not pix.isNull():
+                                self.dataset_preview.setPixmap(
+                                    pix.scaled(
+                                        self.dataset_preview.size(),
+                                        Qt.KeepAspectRatio,
+                                        Qt.SmoothTransformation,
+                                    )
+                                )
+                                self.dataset_preview.setText("")
+                                self.dataset_preview.setToolTip(out_img)
+                                lines.append(
+                                    f"末轮输出图: {pix.width()}×{pix.height()}"
+                                )
+            except Exception as exc:
+                lines.append(f"JSON 读取失败: {exc}")
+        elif kind == "rrd":
+            lines.append("RRD 轨迹文件，可点「设为回放」送到回放页。")
+        elif kind == "video":
+            lines.append("视频文件（可点「打开目录」后用系统播放器打开）。")
+        self.dataset_detail_edit.setPlainText("\n".join(lines))
+
+    def _on_dataset_open_dir(self) -> None:
+        path = self._dataset_selected_path() or self._dataset_current_root()
+        if os.path.isfile(path):
+            path = os.path.dirname(path)
+        if not os.path.isdir(path):
+            QMessageBox.warning(self, "数据集", f"目录不存在: {path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _on_dataset_copy_path(self) -> None:
+        path = self._dataset_selected_path() or self._dataset_current_root()
+        if not path:
+            return
+        clip = QApplication.clipboard()
+        if clip is not None:
+            clip.setText(path)
+            self.status_bar.showMessage(f"已复制: {path}", 3000)
+
+    def _on_dataset_to_replay(self) -> None:
+        path = self._dataset_selected_path()
+        if not path or not path.lower().endswith(".rrd"):
+            QMessageBox.information(self, "数据集", "请先选择一个 .rrd 文件。")
+            return
+        resolved = resolve_rrd_path(path)
+        if not os.path.isfile(resolved):
+            QMessageBox.warning(self, "数据集", f"文件不存在: {resolved}")
+            return
+        self._selected_rrd_path = resolved
+        if hasattr(self, "replay_rrd_path_edit"):
+            self.replay_rrd_path_edit.setText(resolved)
+        self.status_bar.showMessage(f"已设为回放文件: {resolved}", 4000)
+
+    def _on_dataset_to_bagel(self) -> None:
+        path = self._dataset_selected_path()
+        if not path or not os.path.isfile(path):
+            QMessageBox.information(self, "数据集", "请先选择一个图像文件。")
+            return
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in _DATASET_IMAGE_EXTS:
+            # Bagel 历史 JSON：取末轮输出图
+            if ext == ".json":
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    turns = data.get("turns") if isinstance(data, dict) else None
+                    if isinstance(turns, list) and turns:
+                        last = turns[-1] if isinstance(turns[-1], dict) else {}
+                        cand = str(
+                            last.get("output_image") or last.get("input_image") or ""
+                        )
+                        if cand and os.path.isfile(cand):
+                            path = cand
+                        else:
+                            raise ValueError("历史中无可用图像")
+                    else:
+                        raise ValueError("不是含 turns 的 Bagel 历史")
+                except Exception as exc:
+                    QMessageBox.information(
+                        self, "数据集", f"请选择图像，或含输出图的 Bagel 历史 JSON。\n{exc}"
+                    )
+                    return
+            else:
+                QMessageBox.information(self, "数据集", "请选择图像文件（或 Bagel 历史 JSON）。")
+                return
+        if not hasattr(self, "_set_bagel_call_input_image"):
+            QMessageBox.warning(self, "数据集", "Bagel 页未就绪。")
+            return
+        if self._set_bagel_call_input_image(path):
+            self.status_bar.showMessage(f"已送入 Bagel 输入: {path}", 4000)
+            tabs = getattr(self, "control_tabs", None)
+            if tabs is not None:
+                for i in range(tabs.count()):
+                    if tabs.tabText(i) == "sub image":
+                        tabs.setCurrentIndex(i)
+                        break
+        else:
+            QMessageBox.warning(self, "数据集", f"无法读取图像: {path}")
 
     def _on_bagel_open_clicked(self) -> None:
         url = self._bagel_launcher.current_url() or bagel_app_url(
@@ -22957,6 +24048,8 @@ class CameraTopicWindow(QMainWindow):
             self._lingbot_depth_launcher.shutdown()
         if getattr(self, "_reward_launcher", None) is not None:
             self._reward_launcher.shutdown()
+        if getattr(self, "_sim_rl_launcher", None) is not None:
+            self._sim_rl_launcher.shutdown()
         if getattr(self, "_lingbot_map_launcher", None) is not None:
             self._lingbot_map_launcher.shutdown()
         if getattr(self, "_lingbot_video_launcher", None) is not None:
@@ -23297,13 +24390,15 @@ class CameraTopicWindow(QMainWindow):
         if tabs is None or not only_tabs:
             return
         wanted = {str(t) for t in only_tabs}
-        # 按 CONTROL_TAB_TITLES 顺序保留（only_tabs 可能是任意顺序）
-        order = [t for t in CONTROL_TAB_TITLES if t in wanted]
+        # 优先按用户保存的顺序，再补默认顺序
+        order = preferred_control_tabs_order(
+            [t for t in CONTROL_TAB_TITLES if t in wanted]
+        )
         for i in range(tabs.count() - 1, -1, -1):
             title = tabs.tabText(i)
             if title not in wanted:
                 tabs.removeTab(i)
-        # 按正式顺序重排
+        # 按目标顺序重排
         if order and tabs.count() > 1:
             widgets: List[Tuple[str, QWidget]] = []
             for i in range(tabs.count()):
@@ -23332,7 +24427,63 @@ class CameraTopicWindow(QMainWindow):
             joined = " / ".join(titles)
             self.setWindowTitle(f"Camera Topic Viewer — {joined}")
             if status_bar is not None:
-                status_bar.showMessage(f"仅显示 tab: {joined}")
+                status_bar.showMessage(f"显示 tabs: {joined}")
+
+    def _control_tab_titles(self) -> List[str]:
+        tabs = getattr(self, "control_tabs", None)
+        if tabs is None:
+            return []
+        return [tabs.tabText(i) for i in range(tabs.count())]
+
+    def _restore_control_tabs_order(self) -> None:
+        """按 eai/control_tabs_order.json 恢复当前可见 tab 顺序。"""
+        tabs = getattr(self, "control_tabs", None)
+        if tabs is None or tabs.count() <= 1:
+            return
+        desired = preferred_control_tabs_order(self._control_tab_titles())
+        if not desired or desired == self._control_tab_titles():
+            return
+        self._control_tabs_order_guard = True
+        try:
+            for target_idx, title in enumerate(desired):
+                cur = -1
+                for i in range(tabs.count()):
+                    if tabs.tabText(i) == title:
+                        cur = i
+                        break
+                if cur >= 0 and cur != target_idx:
+                    tabs.tabBar().moveTab(cur, target_idx)
+        finally:
+            self._control_tabs_order_guard = False
+
+    def _on_control_tab_moved(self, _from: int, _to: int) -> None:
+        if getattr(self, "_control_tabs_order_guard", False):
+            return
+        titles = self._control_tab_titles()
+        if not titles:
+            return
+        try:
+            # 合并：当前可见顺序优先，再补上已保存但不在当前窗口的 tab
+            # （避免 --tab 过滤启动时把完整顺序冲掉）
+            prev = load_control_tabs_order()
+            merged: List[str] = list(titles)
+            seen = set(merged)
+            for title in prev:
+                if title not in seen:
+                    merged.append(title)
+                    seen.add(title)
+            for title in CONTROL_TAB_TITLES:
+                if title not in seen:
+                    merged.append(title)
+                    seen.add(title)
+            path = save_control_tabs_order(merged)
+            status_bar = getattr(self, "status_bar", None)
+            if status_bar is not None:
+                status_bar.showMessage(f"已保存 tab 顺序 → {path}", 3000)
+        except Exception as exc:
+            status_bar = getattr(self, "status_bar", None)
+            if status_bar is not None:
+                status_bar.showMessage(f"保存 tab 顺序失败: {exc}", 4000)
 
     def _update_ctx_ui(self, *_args) -> None:
         if not hasattr(self, "ctx_sync_start_btn"):
@@ -24401,6 +25552,158 @@ class CameraTopicWindow(QMainWindow):
             )
         elif mode == "teleop":
             self._append_reward_log("teleop 进程正常结束")
+
+    def _append_sim_rl_log(self, line: str) -> None:
+        if not hasattr(self, "sim_rl_log_edit"):
+            return
+        self.sim_rl_log_edit.append(line)
+        bar = self.sim_rl_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_sim_rl_status(self, msg: str) -> None:
+        if hasattr(self, "sim_rl_status_label"):
+            self.sim_rl_status_label.setText(msg or "空闲")
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.showMessage(msg)
+
+    def _update_sim_rl_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_sim_rl_launcher", None)
+            and self._sim_rl_launcher.is_running()
+        )
+        if hasattr(self, "sim_rl_start_btn"):
+            self.sim_rl_start_btn.setEnabled(not running)
+        if hasattr(self, "sim_rl_stop_btn"):
+            self.sim_rl_stop_btn.setEnabled(running)
+        for wname in (
+            "sim_rl_mode_combo",
+            "sim_rl_preset_combo",
+            "sim_rl_config_combo",
+            "sim_rl_platform_combo",
+            "sim_rl_root_edit",
+            "sim_rl_python_edit",
+            "sim_rl_cuda_edit",
+            "sim_rl_overrides_edit",
+            "sim_rl_refresh_btn",
+        ):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(not running)
+
+    def _on_sim_rl_log_dir(self, path: str) -> None:
+        if hasattr(self, "sim_rl_log_dir_edit"):
+            self.sim_rl_log_dir_edit.setText(path)
+        if hasattr(self, "sim_rl_open_log_btn"):
+            self.sim_rl_open_log_btn.setEnabled(bool(path) and os.path.isdir(path))
+
+    def _on_sim_rl_root_browse(self) -> None:
+        cur = self.sim_rl_root_edit.text().strip() or RLINF_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 RLinf 仓库", cur)
+        if selected:
+            self.sim_rl_root_edit.setText(selected)
+            self.sim_rl_python_edit.setText(resolve_rlinf_python(selected))
+            self._refresh_sim_rl_configs()
+
+    def _on_sim_rl_mode_changed(self, *_args) -> None:
+        self._refresh_sim_rl_configs()
+
+    def _on_sim_rl_preset_changed(self, *_args) -> None:
+        data = self.sim_rl_preset_combo.currentData()
+        if not isinstance(data, dict):
+            return
+        mode = str(data.get("mode") or "sync")
+        cfg = str(data.get("config") or "")
+        plat = str(data.get("platform") or "LIBERO")
+        midx = self.sim_rl_mode_combo.findData(mode)
+        if midx >= 0:
+            self.sim_rl_mode_combo.blockSignals(True)
+            self.sim_rl_mode_combo.setCurrentIndex(midx)
+            self.sim_rl_mode_combo.blockSignals(False)
+        pidx = self.sim_rl_platform_combo.findData(plat)
+        if pidx >= 0:
+            self.sim_rl_platform_combo.setCurrentIndex(pidx)
+        self._refresh_sim_rl_configs(prefer=cfg)
+
+    def _refresh_sim_rl_configs(self, prefer: Optional[str] = None) -> None:
+        if not hasattr(self, "sim_rl_config_combo"):
+            return
+        root = self.sim_rl_root_edit.text().strip()
+        mode = str(self.sim_rl_mode_combo.currentData() or "sync")
+        names = list_sim_online_rl_configs(root, mode=mode)
+        current = prefer or self.sim_rl_config_combo.currentText().strip()
+        self.sim_rl_config_combo.blockSignals(True)
+        self.sim_rl_config_combo.clear()
+        for name in names:
+            self.sim_rl_config_combo.addItem(name, name)
+        if current:
+            idx = self.sim_rl_config_combo.findData(current)
+            if idx < 0:
+                idx = self.sim_rl_config_combo.findText(current)
+            if idx >= 0:
+                self.sim_rl_config_combo.setCurrentIndex(idx)
+            else:
+                self.sim_rl_config_combo.setEditText(current)
+        self.sim_rl_config_combo.blockSignals(False)
+        if hasattr(self, "sim_rl_log_edit"):
+            self._append_sim_rl_log(
+                f"已扫描 {len(names)} 个 {mode} 配置（{resolve_rlinf_root(root)}）"
+            )
+
+    def _on_sim_rl_start_clicked(self) -> None:
+        if self._sim_rl_launcher.is_running():
+            self._on_sim_rl_status("仿真在线 RL 正在运行")
+            return
+        mode = str(self.sim_rl_mode_combo.currentData() or "sync")
+        cfg = (
+            str(self.sim_rl_config_combo.currentData() or "").strip()
+            or self.sim_rl_config_combo.currentText().strip()
+        )
+        if not cfg:
+            self._append_sim_rl_log("[ERROR] 请选择 config")
+            self._on_sim_rl_status("请选择 config")
+            return
+        overrides_raw = self.sim_rl_overrides_edit.text().strip()
+        user_overrides = shlex.split(overrides_raw) if overrides_raw else []
+        cuda_devices = self.sim_rl_cuda_edit.text().strip()
+        overrides = merge_sim_online_rl_overrides(
+            user_overrides,
+            cuda_devices=cuda_devices,
+            auto_single_gpu=True,
+            config_name=cfg,
+        )
+        n_gpu = count_visible_cuda_devices(cuda_devices)
+        self.sim_rl_log_edit.clear()
+        self.sim_rl_log_dir_edit.clear()
+        self.sim_rl_open_log_btn.setEnabled(False)
+        if n_gpu == 1 and len(overrides) > len(user_overrides):
+            self._append_sim_rl_log(
+                f"[info] 检测到单卡，已自动追加 {len(overrides) - len(user_overrides)} "
+                "条 placement/batch 覆盖（可用 Hydra 栏手动改）"
+            )
+            for item in overrides[len(user_overrides) :]:
+                self._append_sim_rl_log(f"  + {item}")
+        elif n_gpu > 1:
+            self._append_sim_rl_log(f"[info] 可见 GPU 数={n_gpu}，使用 config 原始 placement")
+        self._sim_rl_launcher.start(
+            mode=mode,
+            config_name=cfg,
+            rlinf_root=self.sim_rl_root_edit.text().strip(),
+            python_bin=self.sim_rl_python_edit.text().strip(),
+            robot_platform=str(self.sim_rl_platform_combo.currentData() or "LIBERO"),
+            cuda_devices=cuda_devices,
+            hydra_overrides=overrides,
+        )
+        self._update_sim_rl_ui()
+
+    def _on_sim_rl_stop_clicked(self) -> None:
+        self._append_sim_rl_log("--- 用户停止仿真在线 RL ---")
+        self._sim_rl_launcher.stop()
+        self._update_sim_rl_ui()
+
+    def _on_sim_rl_open_log_clicked(self) -> None:
+        path = self.sim_rl_log_dir_edit.text().strip()
+        if path and os.path.isdir(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _append_lingbot_map_log(self, line: str) -> None:
         if not hasattr(self, "lingbot_map_log_edit"):
@@ -27458,7 +28761,7 @@ def parse_only_tabs(tab_args: Optional[List[object]]) -> List[str]:
     if unknown:
         known = " / ".join(CONTROL_TAB_TITLES)
         aliases = (
-            "test→sub task, bagel→sub image, reward→Reward评测, sim→仿真评测, world→世界模型, …"
+            "test→sub task, bagel→sub image, reward→Reward评测, online_rl→仿真在线强化学习, sim→仿真评测, world→世界模型, …"
         )
         raise SystemExit(
             f"未知 tab: {', '.join(unknown)}\n"
