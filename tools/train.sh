@@ -5,13 +5,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="/share_data/projects/mahjong/share/personal/liyichao"
 PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/Qwen2.5-VL/bin/python}"
-SCRIPT="${ROOT}/tools/gpu_stress.py"
+SCRIPT="${ROOT}/tools/train.py"
 
 usage() {
   cat <<'EOF'
-Usage: run_gpu_stress.sh [options]
+Usage: train.sh [options]
 
-Options (passed to gpu_stress.py):
+Options (passed to train.py):
   -n, --num-gpus N       Use at most N selected GPUs (default: all idle)
   --gpu-ids IDS          Comma-separated GPU indices, e.g. 0,2,4
   --all-gpus             Stress all visible GPUs (skip idle auto-detect)
@@ -31,14 +31,14 @@ Environment:
   PYTHON                 Python interpreter with PyTorch+CUDA
 
 Examples:
-  bash tools/run_gpu_stress.sh                    # idle GPUs only, until Ctrl+C
-  bash tools/run_gpu_stress.sh -n 2              # at most 2 idle GPUs
-  bash tools/run_gpu_stress.sh --all-gpus        # all visible GPUs
-  bash tools/run_gpu_stress.sh --hosts gpu-a,gpu-b
-  bash tools/run_gpu_stress.sh --gpu-ids 0,1 -d 300
-  bash tools/run_gpu_stress.sh -u 70              # cap utilization at 70%
-  bash tools/run_gpu_stress.sh -t 20              # treat util<=20% as idle
-  CUDA_VISIBLE_DEVICES=2,3 bash tools/run_gpu_stress.sh
+  bash tools/train.sh                    # idle GPUs only, until Ctrl+C
+  bash tools/train.sh -n 2              # at most 2 idle GPUs
+  bash tools/train.sh --all-gpus        # all visible GPUs
+  bash tools/train.sh --hosts gpu-a,gpu-b
+  bash tools/train.sh --gpu-ids 0,1 -d 300
+  bash tools/train.sh -u 70              # cap utilization at 70%
+  bash tools/train.sh -t 20              # treat util<=20% as idle
+  CUDA_VISIBLE_DEVICES=2,3 bash tools/train.sh
 EOF
 }
 

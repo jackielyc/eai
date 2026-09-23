@@ -794,7 +794,7 @@ def main() -> None:
     except ImportError as exc:
         raise SystemExit(
             "PyTorch is required. Example:\n"
-            "  PYTHON=/path/to/miniconda3/envs/Qwen2.5-VL/bin/python tools/gpu_stress.py"
+            "  PYTHON=/path/to/miniconda3/envs/Qwen2.5-VL/bin/python tools/train.py"
         ) from exc
 
     if not torch.cuda.is_available():

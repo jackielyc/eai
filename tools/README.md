@@ -13,7 +13,7 @@
 
 ```bash
 # 默认：自动检测空闲 GPU 并压测，直到 Ctrl+C
-bash tools/run_gpu_stress.sh
+bash tools/train.sh
 ```
 
 另开终端观察利用率：
@@ -24,31 +24,31 @@ watch -n1 nvidia-smi
 
 ## 推荐用法（Shell 封装）
 
-`run_gpu_stress.sh` 会调用 `gpu_stress.py`，并默认使用：
+`train.sh` 会调用 `train.py`，并默认使用：
 
 `miniconda3/envs/Qwen2.5-VL/bin/python`
 
 | 场景 | 命令 |
 |------|------|
-| 自动检测空闲 GPU 并压测 | `bash tools/run_gpu_stress.sh` |
-| 最多使用 2 张空闲 GPU | `bash tools/run_gpu_stress.sh -n 2` |
-| 强制压测所有可见 GPU | `bash tools/run_gpu_stress.sh --all-gpus` |
-| 指定卡号（仍跳过繁忙卡） | `bash tools/run_gpu_stress.sh --gpu-ids 0,2,4` |
-| 多机远程压测（Ctrl+C 会同步停远程） | `bash tools/run_gpu_stress.sh --hosts gpu-a,gpu-b gpu-c` |
-| 从文件读 hosts | `bash tools/run_gpu_stress.sh --hosts-file tools/hosts.txt` |
-| 跑 5 分钟后自动停止 | `bash tools/run_gpu_stress.sh -d 300` |
-| 把利用率压到约 70% | `bash tools/run_gpu_stress.sh -u 70` |
-| 故意占更多显存 | `bash tools/run_gpu_stress.sh -s 16384 --mem-fraction 0.85` |
-| 利用率 ≤20% 的卡视为空闲 | `bash tools/run_gpu_stress.sh -t 20` |
-| 限制可见设备后再压测 | `CUDA_VISIBLE_DEVICES=2,3 bash tools/run_gpu_stress.sh` |
-| 查看帮助 | `bash tools/run_gpu_stress.sh -h` |
+| 自动检测空闲 GPU 并压测 | `bash tools/train.sh` |
+| 最多使用 2 张空闲 GPU | `bash tools/train.sh -n 2` |
+| 强制压测所有可见 GPU | `bash tools/train.sh --all-gpus` |
+| 指定卡号（仍跳过繁忙卡） | `bash tools/train.sh --gpu-ids 0,2,4` |
+| 多机远程压测（Ctrl+C 会同步停远程） | `bash tools/train.sh --hosts gpu-a,gpu-b gpu-c` |
+| 从文件读 hosts | `bash tools/train.sh --hosts-file tools/hosts.txt` |
+| 跑 5 分钟后自动停止 | `bash tools/train.sh -d 300` |
+| 把利用率压到约 70% | `bash tools/train.sh -u 70` |
+| 故意占更多显存 | `bash tools/train.sh -s 16384 --mem-fraction 0.85` |
+| 利用率 ≤20% 的卡视为空闲 | `bash tools/train.sh -t 20` |
+| 限制可见设备后再压测 | `CUDA_VISIBLE_DEVICES=2,3 bash tools/train.sh` |
+| 查看帮助 | `bash tools/train.sh -h` |
 
 ### 环境变量
 
 | 变量 | 说明 |
 |------|------|
 | `CUDA_VISIBLE_DEVICES` | 限制 PyTorch 可见的 GPU（逗号分隔），例如 `0,1` |
-| `PYTHON` | 指定带 CUDA 的 Python，例如 `PYTHON=/path/to/python bash tools/run_gpu_stress.sh` |
+| `PYTHON` | 指定带 CUDA 的 Python，例如 `PYTHON=/path/to/python bash tools/train.sh` |
 
 ## 直接调用 Python
 
@@ -56,22 +56,22 @@ watch -n1 nvidia-smi
 PYTHON=/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/Qwen2.5-VL/bin/python
 
 # 自动检测空闲 GPU（默认）
-$PYTHON tools/gpu_stress.py
+$PYTHON tools/train.py
 
 # 强制使用所有可见 GPU
-$PYTHON tools/gpu_stress.py --all-gpus
+$PYTHON tools/train.py --all-gpus
 
 # 最多 2 张空闲 GPU，bf16，跑 600 秒
-$PYTHON tools/gpu_stress.py -n 2 --dtype bf16 -d 600
+$PYTHON tools/train.py -n 2 --dtype bf16 -d 600
 
 # 最高利用率 70%
-$PYTHON tools/gpu_stress.py -u 70
+$PYTHON tools/train.py -u 70
 
 # 闲置门槛 20%（利用率不超过 20% 的卡才压）
-$PYTHON tools/gpu_stress.py -t 20
+$PYTHON tools/train.py -t 20
 
 # 手动指定更大矩阵（会明显占显存）
-$PYTHON tools/gpu_stress.py --gpu-ids 0,1 -s 16384 --streams 8
+$PYTHON tools/train.py --gpu-ids 0,1 -s 16384 --streams 8
 ```
 
 ## 参数说明
@@ -119,7 +119,7 @@ $PYTHON tools/gpu_stress.py --gpu-ids 0,1 -s 16384 --streams 8
 
 ```bash
 # 逗号或空格均可
-bash tools/run_gpu_stress.sh --hosts gpu-a,gpu-b gpu-c
+bash tools/train.sh --hosts gpu-a,gpu-b gpu-c
 
 # hosts 文件
 cat > /tmp/gpu_hosts.txt <<'EOF'
@@ -128,7 +128,7 @@ gpu-b
 # gpu-d   skipped
 user@gpu-c
 EOF
-bash tools/run_gpu_stress.sh --hosts-file /tmp/gpu_hosts.txt --all-gpus -d 300
+bash tools/train.sh --hosts-file /tmp/gpu_hosts.txt --all-gpus -d 300
 ```
 
 本地日志会带主机前缀：
@@ -155,5 +155,5 @@ bash tools/run_gpu_stress.sh --hosts-file /tmp/gpu_hosts.txt --all-gpus -d 300
 
 | 文件 | 作用 |
 |------|------|
-| `gpu_stress.py` | 核心逻辑：多进程 GEMM 压测 |
-| `run_gpu_stress.sh` | 便捷入口，设置默认 Python 并转发参数 |
+| `train.py` | 核心逻辑：多进程 GEMM 压测 |
+| `train.sh` | 便捷入口，设置默认 Python 并转发参数 |
