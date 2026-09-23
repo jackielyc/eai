@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测 / 真机评测 / Reward评测 / 仿真在线强化学习 / ICL / Astra / HumanEgo / 数据集 / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测 / 真机评测 / Reward评测 / Reward训练 / 仿真在线强化学习 / RoboDojo在线RL / ICL / Astra / HumanEgo / 数据集 / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -288,6 +288,22 @@ class ImeSafeTextEdit(QTextEdit):
         global _IME_LAST_TEXT_WIDGET
         _IME_LAST_TEXT_WIDGET = self
         _notify_ime_widget(self)
+
+
+class HoverWheelSpinBox(QSpinBox):
+    """悬停即可滚轮改值（无需先点击获得焦点）。"""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        if not self.isEnabled():
+            event.ignore()
+            return
+        if not self.hasFocus():
+            self.setFocus(Qt.MouseFocusReason)
+        super().wheelEvent(event)
 
 
 class ImeSafeComboBox(QComboBox):
@@ -916,6 +932,9 @@ BAGEL_SERVER_HOST_DEFAULT = "127.0.0.1"
 BAGEL_SERVER_PORT_DEFAULT = 7860
 BAGEL_API_PORT_DEFAULT = 7861
 BAGEL_NUM_TIMESTEPS_DEFAULT = 25
+BAGEL_FAST_NUM_TIMESTEPS = 12
+BAGEL_FAST_IMAGE_SIZE = "224"
+BAGEL_CFG_INTERVAL_DEFAULT = 0.4
 BAGEL_IMAGE_SIZE_DEFAULT = "input"  # 有输入图时跟输入；纯文生图回退 512
 BAGEL_IMAGE_SIZE_FALLBACK = "512"
 BAGEL_VENV_PYTHON_DEFAULT = os.path.join(EAI_DIR, ".cache", "bagel_venv", "bin", "python")
@@ -993,6 +1012,111 @@ def list_sim_online_rl_configs(
                 if "async" in low:
                     continue
             names.append(stem)
+    except OSError:
+        return []
+    return sorted(names)
+
+
+def list_reward_workflow_configs(
+    rlinf_root: str = "",
+    *,
+    kind: str = "train",
+) -> List[str]:
+    """扫描 examples/reward/config 下 yaml 名（train / collect）。"""
+    root = resolve_rlinf_root(rlinf_root)
+    cfg_dir = os.path.join(root, "examples", "reward", "config")
+    if not os.path.isdir(cfg_dir):
+        return []
+    kind_key = (kind or "train").strip().lower()
+    names: List[str] = []
+    try:
+        for fname in os.listdir(cfg_dir):
+            if not fname.endswith(".yaml"):
+                continue
+            stem = fname[: -len(".yaml")]
+            low = stem.lower()
+            if kind_key == "collect":
+                if "collect" not in low and "teleop" not in low:
+                    continue
+                if "teleop" in low:
+                    continue
+            else:
+                # train：排除真机采集 / teleop
+                if "collect" in low or "teleop" in low or low.startswith("realworld_"):
+                    continue
+            names.append(stem)
+    except OSError:
+        return []
+    return sorted(names)
+
+
+def resolve_rise_root(path: str = "") -> str:
+    raw = (path or "").strip() or os.environ.get("RISE_ROOT", "") or RISE_ROOT_DEFAULT
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def resolve_rise_python(repo: str = "") -> str:
+    for env_key in ("RISE_PYTHON", "RLINF_PYTHON"):
+        env = (os.environ.get(env_key) or "").strip()
+        if env and os.path.isfile(env):
+            return os.path.abspath(env)
+    root = resolve_rise_root(repo)
+    candidates = list(RISE_PYTHON_CANDIDATES) + [
+        os.path.join(root, ".venv", "bin", "python"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return os.path.abspath(path)
+    return "python3"
+
+
+def is_rise_openpi_ckpt_dir(path: str) -> bool:
+    """OpenPI/RISE ckpt：目录内有 model.safetensors（可选 assets/）。"""
+    raw = os.path.abspath(os.path.expanduser((path or "").strip()))
+    if not raw or not os.path.isdir(raw):
+        return False
+    return os.path.isfile(os.path.join(raw, "model.safetensors"))
+
+
+def resolve_rise_policy_ckpt(prefer: str = "") -> str:
+    """解析可用策略 ckpt 目录；环境变量 RISE_POLICY_CKPT 优先。"""
+    for cand in (
+        (prefer or "").strip(),
+        (os.environ.get("RISE_POLICY_CKPT") or "").strip(),
+        *RISE_POLICY_CKPT_CANDIDATES,
+    ):
+        if is_rise_openpi_ckpt_dir(cand):
+            return os.path.abspath(os.path.expanduser(cand))
+    return ""
+
+
+def resolve_rise_reward_ckpt(prefer: str = "", *, policy_ckpt: str = "") -> str:
+    """解析可用奖励/value ckpt；无独立产物时回退到策略 ckpt。"""
+    for cand in (
+        (prefer or "").strip(),
+        (os.environ.get("RISE_REWARD_CKPT") or "").strip(),
+        *RISE_REWARD_CKPT_CANDIDATES,
+    ):
+        if is_rise_openpi_ckpt_dir(cand):
+            return os.path.abspath(os.path.expanduser(cand))
+    fallback = resolve_rise_policy_ckpt(policy_ckpt)
+    return fallback
+
+
+def list_robodojo_online_rl_configs(rise_root: str = "") -> List[str]:
+    """扫描 RISE policy_online/examples/embodiment/config 下顶层 yaml。"""
+    root = resolve_rise_root(rise_root)
+    cfg_dir = os.path.join(
+        root, "policy_and_value", "policy_online", "examples", "embodiment", "config"
+    )
+    if not os.path.isdir(cfg_dir):
+        return []
+    names: List[str] = []
+    try:
+        for fname in os.listdir(cfg_dir):
+            if not fname.endswith(".yaml"):
+                continue
+            names.append(fname[: -len(".yaml")])
     except OSError:
         return []
     return sorted(names)
@@ -1189,8 +1313,12 @@ RLINF_PYTHON_CANDIDATES: Tuple[str, ...] = (
 )
 RLINF_RUN_SCRIPT = os.path.join(EAI_DIR, "run_reward_model.sh")
 RLINF_REWARD_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "reward_model")
+RLINF_REWARD_WORKFLOW_SCRIPT = os.path.join(EAI_DIR, "run_reward_workflow.sh")
+RLINF_REWARD_WORKFLOW_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "reward_workflow")
 RLINF_SIM_ONLINE_RL_SCRIPT = os.path.join(EAI_DIR, "run_sim_online_rl.sh")
 RLINF_SIM_ONLINE_RL_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "sim_online_rl")
+ROBODOJO_ONLINE_RL_SCRIPT = os.path.join(EAI_DIR, "run_robodojo_online_rl.sh")
+ROBODOJO_ONLINE_RL_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "robodojo_online_rl")
 # 常用仿真在线 RL 预设：(显示名, mode sync|async, config_name, robot_platform)
 SIM_ONLINE_RL_PRESETS: Tuple[Tuple[str, str, str, str], ...] = (
     (
@@ -1237,7 +1365,9 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "仿真评测",
     "真机评测",
     "Reward评测",
+    "Reward训练",
     "仿真在线强化学习",
+    "RoboDojo在线RL",
     "ICL",
     "Astra",
     "HumanEgo",
@@ -1301,11 +1431,23 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "reward_eval": "Reward评测",
     "reward_model": "Reward评测",
     "Reward评测": "Reward评测",
+    "reward_train": "Reward训练",
+    "reward_training": "Reward训练",
+    "reward_workflow": "Reward训练",
+    "rm_train": "Reward训练",
+    "Reward训练": "Reward训练",
     "sim_online_rl": "仿真在线强化学习",
     "online_rl": "仿真在线强化学习",
     "sim_rl": "仿真在线强化学习",
     "rlinf_online": "仿真在线强化学习",
     "仿真在线强化学习": "仿真在线强化学习",
+    "robodojo_rl": "RoboDojo在线RL",
+    "robodojo_online": "RoboDojo在线RL",
+    "robodojo_online_rl": "RoboDojo在线RL",
+    "rise_online": "RoboDojo在线RL",
+    "rise_rl": "RoboDojo在线RL",
+    "dojo_rl": "RoboDojo在线RL",
+    "RoboDojo在线RL": "RoboDojo在线RL",
     "ctx": "ICL",
     "context": "ICL",
     "icl": "ICL",
@@ -1371,6 +1513,43 @@ ROBODOJO_EVAL_RESULT_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/eval_result/RoboDojo"
 )
 ROBODOJO_ROOT_DEFAULT = "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo"
+RISE_ROOT_DEFAULT = os.path.join(
+    ROBODOJO_ROOT_DEFAULT, "XPolicyLab", "policy", "RISE", "RISE"
+)
+RISE_PYTHON_CANDIDATES: Tuple[str, ...] = (
+    "/home/psibot/miniconda3/envs/rise/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/rise/bin/python",
+    "/home/psibot/miniconda3/envs/RISE/bin/python",
+    "/home/psibot/miniconda3/envs/RLinf/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/envs/RoboDojo/bin/python",
+)
+# 本机可用的 OpenPI/RISE 风格 ckpt（目录内需有 model.safetensors；优先带 assets/）
+RISE_POLICY_CKPT_CANDIDATES: Tuple[str, ...] = (
+    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_droid_jointpos_polaris",
+    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_droid_jointpos",
+    os.path.join(
+        "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo",
+        "XPolicyLab",
+        "policy",
+        "RISE",
+        "weights",
+        "pi05_base_pytorch",
+    ),
+)
+RISE_REWARD_CKPT_CANDIDATES: Tuple[str, ...] = (
+    # 优先独立 value/reward 训练产物；本机若无则回退到策略 ckpt
+    "/share_data/projects/mahjong/share/personal/liyichao/models/value_release",
+    "/share_data/projects/mahjong/share/personal/liyichao/models/rise_value_release",
+    os.path.join(
+        ROBODOJO_ROOT_DEFAULT,
+        "XPolicyLab",
+        "policy",
+        "RISE",
+        "checkpoints",
+        "value_release",
+    ),
+)
 ROBODOJO_ENV_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/envs/RoboDojo"
 )
@@ -5788,18 +5967,22 @@ class LlmChatConfig:
 
 
 def encode_bgr_image_jpeg_b64(image_bgr: np.ndarray, max_side: int = 1280) -> str:
-    """BGR 图像 → JPEG base64（供 OpenAI vision image_url）。"""
+    """BGR 图像 → JPEG base64（供 OpenAI vision image_url）。
+
+    max_side<=0 时不缩放，保持原始宽高。
+    """
     img = np.asarray(image_bgr)
     if img.ndim == 2:
         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
     h, w = img.shape[:2]
-    scale = min(1.0, float(max_side) / float(max(h, w, 1)))
-    if scale < 0.999:
-        img = cv2.resize(
-            img,
-            (max(1, int(w * scale)), max(1, int(h * scale))),
-            interpolation=cv2.INTER_AREA,
-        )
+    if max_side and max_side > 0:
+        scale = min(1.0, float(max_side) / float(max(h, w, 1)))
+        if scale < 0.999:
+            img = cv2.resize(
+                img,
+                (max(1, int(w * scale)), max(1, int(h * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
     ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:
         raise RuntimeError("JPEG 编码失败")
@@ -5858,6 +6041,13 @@ def _http_post_json(
         else:
             parsed = detail
         msg = parsed or exc.reason or "Internal Server Error"
+        # 裸 "Internal Server Error" 多半是服务端异常处理器丢了 detail / 进程崩溃
+        if msg.strip() in ("Internal Server Error", "Internal Server Error."):
+            msg = (
+                "Internal Server Error（服务端未返回 detail；"
+                "常见原因：Bagel 仍在加载、CUDA OOM、或异常处理器异常。"
+                "请查看 eai/.cache/bagel_serve_api_errors.log 并重启 Bagel API）"
+            )
         return False, None, f"HTTP {exc.code}: {msg[:800]}"
     except Exception as exc:
         return False, None, str(exc)
@@ -5881,6 +6071,8 @@ def call_bagel_inference(
     image_ratio: str = BAGEL_IMAGE_SIZE_DEFAULT,
     image_width: int = 0,
     image_height: int = 0,
+    cfg_interval: float = BAGEL_CFG_INTERVAL_DEFAULT,
+    enable_taylorseer: bool = False,
     timeout_s: float = 300.0,
 ) -> Tuple[str, float, Dict[str, object]]:
     """调用 Bagel serve_api.py：有图则理解，无图则文生图。
@@ -5902,6 +6094,7 @@ def call_bagel_inference(
     ratio = (image_ratio or BAGEL_IMAGE_SIZE_DEFAULT).strip() or BAGEL_IMAGE_SIZE_DEFAULT
     width = int(image_width or 0)
     height = int(image_height or 0)
+    cfg_iv = max(0.0, min(1.0, float(cfg_interval)))
     # 默认「跟随输入」：有输入图则用其尺寸
     if ratio in ("input", "auto", "follow") and width <= 0 and height <= 0:
         if image_bgr is not None:
@@ -5909,13 +6102,20 @@ def call_bagel_inference(
             ratio = "custom"
         else:
             ratio = BAGEL_IMAGE_SIZE_FALLBACK
+    # 纯数字边长（如 224/320）：显式传宽高，兼容旧 serve_api 未登记的映射
+    if ratio.isdigit() and width <= 0 and height <= 0:
+        side = max(16, int(ratio))
+        width = height = side
+        ratio = "custom"
     if kind in ("understand", "edit"):
         if image_bgr is None:
             raise RuntimeError("图像理解/编辑需要输入图")
-        payload["image_base64"] = encode_bgr_image_jpeg_b64(image_bgr)
+        payload["image_base64"] = encode_bgr_image_jpeg_b64(image_bgr, max_side=0)
         url = f"{root}/{kind}"
         if kind == "edit":
             payload["num_timesteps"] = steps
+            payload["cfg_interval"] = cfg_iv
+            payload["enable_taylorseer"] = bool(enable_taylorseer)
             if width > 0 and height > 0:
                 payload["image_width"] = width
                 payload["image_height"] = height
@@ -5925,6 +6125,8 @@ def call_bagel_inference(
         url = f"{root}/text2image"
         payload["image_ratio"] = ratio if ratio != "custom" else BAGEL_IMAGE_SIZE_FALLBACK
         payload["num_timesteps"] = steps
+        payload["cfg_interval"] = cfg_iv
+        payload["enable_taylorseer"] = bool(enable_taylorseer)
         if width > 0 and height > 0:
             payload["image_width"] = width
             payload["image_height"] = height
@@ -13497,12 +13699,41 @@ def bagel_probe_api_health(
     *,
     timeout_s: float = 2.0,
 ) -> Optional[dict]:
-    """探测已部署的 serve_api /health；就绪时返回 body，否则 None。"""
-    url = bagel_app_url(host, port).rstrip("/") + "/health"
-    ok, body, _err = _http_get_json(url, timeout_s=timeout_s)
+    """探测已部署的 Bagel serve_api /health；确认是本服务才返回 body，否则 None。
+
+    仅 ``{"ok": true}`` 不够：其它服务的 /health 也会误触发「复用已部署」。
+    需同时具备 Bagel 字段，并校验 ``/v1/models`` 归属 bagel。
+    """
+    base = bagel_app_url(host, port).rstrip("/")
+    ok, body, _err = _http_get_json(f"{base}/health", timeout_s=timeout_s)
     if not ok or not isinstance(body, dict):
         return None
     if not body.get("ok"):
+        return None
+    # Bagel serve_api 健康体特征
+    if "loaded_at" not in body:
+        return None
+    try:
+        mode = int(body.get("mode"))
+    except (TypeError, ValueError):
+        return None
+    if mode not in (1, 2, 3):
+        return None
+    model = str(body.get("model") or "").strip()
+    model_path = str(body.get("model_path") or "").strip()
+    if not model and not model_path:
+        return None
+    # 二次确认：/v1/models 必须是 bagel
+    ok2, models_body, _err2 = _http_get_json(f"{base}/v1/models", timeout_s=timeout_s)
+    if not ok2 or not isinstance(models_body, dict):
+        return None
+    data = models_body.get("data")
+    if not isinstance(data, list) or not data:
+        return None
+    first = data[0] if isinstance(data[0], dict) else {}
+    owned = str(first.get("owned_by") or "").strip().lower()
+    mid = str(first.get("id") or "").strip().lower()
+    if owned != "bagel" and "bagel" not in mid:
         return None
     return body
 
@@ -14100,6 +14331,8 @@ class BagelApiLauncher(QObject):
             return
         self._clear_adopted(emit_stopped=False)
         self._mode = int(mode or 1)
+        self._adopt_host = host
+        self._adopt_port = port
         self._url = bagel_app_url(host, port)
         self._api_base = self._url.rstrip("/") + "/v1"
         self._ready_emitted = False
@@ -16230,6 +16463,438 @@ class SimOnlineRLLauncher(QObject):
             self.running_changed.emit(False)
 
 
+class RewardWorkflowLauncher(QObject):
+    """启动 RLinf 奖励模型工作流（采集 / 预处理 / 训练 / 预处理→训练）。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    log_dir_ready = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._log_dir: str = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        mode: str,
+        rlinf_root: str,
+        python_bin: str = "",
+        config_name: str = "",
+        dataset_type: str = "resnet",
+        raw_data_path: str = "",
+        output_dir: str = "",
+        num_samples: int = 0,
+        val_split: float = 0.2,
+        fail_success_ratio: float = 2.0,
+        seed: int = 42,
+        keep_last_frame: bool = True,
+        cuda_devices: str = "",
+        hydra_overrides: Sequence[str] = (),
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("Reward 训练工作流正在运行")
+            return
+        script = RLINF_REWARD_WORKFLOW_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        root = resolve_rlinf_root(rlinf_root)
+        py = (python_bin or "").strip() or resolve_rlinf_python(root)
+        mode_norm = (mode or "preprocess").strip().lower()
+        if mode_norm not in ("preprocess", "train", "collect", "pipeline"):
+            self.status_message.emit(f"未知 mode: {mode}")
+            return
+        ds = (dataset_type or "resnet").strip().lower() or "resnet"
+        if ds not in ("resnet", "qwentrend"):
+            self.status_message.emit(f"未知 dataset_type: {dataset_type}")
+            return
+        if mode_norm in ("preprocess", "pipeline"):
+            raw = (raw_data_path or "").strip()
+            if not raw:
+                self.status_message.emit("请填写 raw-data-path（采集数据目录）")
+                return
+            if not os.path.isdir(raw):
+                self.status_message.emit(f"raw-data-path 不是目录: {raw}")
+                return
+        cfg = (config_name or "").strip()
+        if mode_norm == "train" and not cfg:
+            cfg = "reward_training"
+        if mode_norm == "collect" and not cfg:
+            cfg = "realworld_collect_dataset"
+        if mode_norm == "pipeline" and not cfg:
+            cfg = "reward_training"
+        if mode_norm in ("train", "pipeline") and cfg:
+            cfg_path = os.path.join(
+                root, "examples", "reward", "config", f"{cfg}.yaml"
+            )
+            if not os.path.isfile(cfg_path):
+                self.status_message.emit(f"配置不存在: {cfg_path}")
+                return
+        if mode_norm == "collect" and cfg:
+            cfg_path = os.path.join(
+                root, "examples", "reward", "config", f"{cfg}.yaml"
+            )
+            if not os.path.isfile(cfg_path):
+                self.status_message.emit(f"配置不存在: {cfg_path}")
+                return
+        os.makedirs(RLINF_REWARD_WORKFLOW_CACHE_DIR, exist_ok=True)
+
+        args = [
+            "--mode",
+            mode_norm,
+            "--dataset-type",
+            ds,
+            "--rlinf-root",
+            root,
+            "--python",
+            py,
+            "--num-samples",
+            str(int(num_samples)),
+            "--val-split",
+            str(val_split),
+            "--fail-success-ratio",
+            str(fail_success_ratio),
+            "--seed",
+            str(int(seed)),
+        ]
+        if cfg:
+            args.extend(["--config", cfg])
+        raw = (raw_data_path or "").strip()
+        if raw:
+            args.extend(["--raw-data-path", raw])
+        out = (output_dir or "").strip()
+        if out:
+            args.extend(["--output-dir", out])
+        if not keep_last_frame:
+            args.append("--no-keep-last-frame")
+        overrides = [str(x).strip() for x in hydra_overrides if str(x).strip()]
+        if overrides:
+            args.append("--")
+            args.extend(overrides)
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("PYTHONUNBUFFERED", "1")
+        qenv.insert("RLINF_ROOT", root)
+        qenv.insert("RLINF_PYTHON", py)
+        cuda = (cuda_devices or "").strip()
+        if cuda:
+            qenv.insert("CUDA_VISIBLE_DEVICES", cuda)
+
+        self._log_dir = ""
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(root)
+        proc.setProcessEnvironment(qenv)
+        proc.start("setsid", ["bash", script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(
+            f"$ bash run_reward_workflow.sh --mode {mode_norm} "
+            f"--dataset-type {ds}"
+            + (f" --config {cfg}" if cfg else "")
+        )
+        self.status_message.emit(
+            f"正在启动 Reward 工作流（{mode_norm}）…"
+        )
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 Reward 工作流")
+            return
+        self.status_message.emit("正在停止 Reward 工作流…")
+        if self._process is not None:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            QTimer.singleShot(4000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            self._process.waitForFinished(2000)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.kill()
+            else:
+                self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is None or self._process.state() == QProcess.NotRunning:
+            return
+        pid = int(self._process.processId())
+        if pid > 0:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[reward-workflow] log_dir="):
+                self._log_dir = text.split("=", 1)[-1].strip()
+                if self._log_dir:
+                    self.log_dir_ready.emit(self._log_dir)
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- Reward 工作流正常退出 ---")
+            self.status_message.emit("Reward 工作流已完成")
+        else:
+            self.log_line.emit(f"--- Reward 工作流退出 (code={exit_code}) ---")
+            self.status_message.emit(f"Reward 工作流异常退出 (code={exit_code})")
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 Reward 工作流进程")
+            self.status_message.emit("无法启动 Reward 工作流")
+            self.running_changed.emit(False)
+
+
+class RoboDojoOnlineRLLauncher(QObject):
+    """在 RoboDojo/RISE 中启动基于 RLinf 的在线强化学习（policy_online）。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    log_dir_ready = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._log_dir: str = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        mode: str,
+        config_name: str,
+        rise_root: str,
+        python_bin: str = "",
+        cuda_devices: str = "",
+        hydra_overrides: Sequence[str] = (),
+        auto_single_gpu: bool = True,
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("RoboDojo 在线 RL 正在运行")
+            return
+        script = ROBODOJO_ONLINE_RL_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        root = resolve_rise_root(rise_root)
+        py = (python_bin or "").strip() or resolve_rise_python(root)
+        cfg = (config_name or "").strip()
+        if not cfg:
+            self.status_message.emit("请选择 Hydra config")
+            return
+        cfg_path = os.path.join(
+            root,
+            "policy_and_value",
+            "policy_online",
+            "examples",
+            "embodiment",
+            "config",
+            f"{cfg}.yaml",
+        )
+        if not os.path.isfile(cfg_path):
+            self.status_message.emit(f"配置不存在: {cfg_path}")
+            return
+        mode_norm = (mode or "single").strip().lower()
+        if mode_norm in ("sync", "embodiment"):
+            mode_norm = "single"
+        if mode_norm in ("ray", "multinode"):
+            mode_norm = "multi"
+        if mode_norm not in ("single", "multi"):
+            self.status_message.emit(f"未知 mode: {mode}")
+            return
+        os.makedirs(ROBODOJO_ONLINE_RL_CACHE_DIR, exist_ok=True)
+
+        args = [
+            "--mode",
+            mode_norm,
+            "--config",
+            cfg,
+            "--rise-root",
+            root,
+            "--python",
+            py,
+        ]
+        if not auto_single_gpu:
+            args.append("--no-auto-single-gpu")
+        overrides = [str(x).strip() for x in hydra_overrides if str(x).strip()]
+        if overrides:
+            args.append("--")
+            args.extend(overrides)
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("PYTHONUNBUFFERED", "1")
+        qenv.insert("RISE_ROOT", root)
+        qenv.insert("RISE_PYTHON", py)
+        qenv.insert("MUJOCO_GL", qenv.value("MUJOCO_GL") or "egl")
+        qenv.insert("PYOPENGL_PLATFORM", qenv.value("PYOPENGL_PLATFORM") or "egl")
+        cuda = (cuda_devices or "").strip()
+        if cuda:
+            qenv.insert("CUDA_VISIBLE_DEVICES", cuda)
+
+        self._log_dir = ""
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(root)
+        proc.setProcessEnvironment(qenv)
+        proc.start("setsid", ["bash", script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(
+            f"$ bash run_robodojo_online_rl.sh --mode {mode_norm} --config {cfg}"
+        )
+        self.status_message.emit(
+            f"正在启动 RoboDojo 在线 RL（{mode_norm} / {cfg}）…"
+        )
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 RoboDojo 在线 RL")
+            return
+        self.status_message.emit("正在停止 RoboDojo 在线 RL…")
+        if self._process is not None:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            QTimer.singleShot(4000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            self._process.waitForFinished(2000)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.kill()
+            else:
+                self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is None or self._process.state() == QProcess.NotRunning:
+            return
+        pid = int(self._process.processId())
+        if pid > 0:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[robodojo-online-rl] log_dir="):
+                self._log_dir = text.split("=", 1)[-1].strip()
+                if self._log_dir:
+                    self.log_dir_ready.emit(self._log_dir)
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- RoboDojo 在线 RL 正常退出 ---")
+            self.status_message.emit("RoboDojo 在线 RL 已完成")
+        else:
+            self.log_line.emit(f"--- RoboDojo 在线 RL 退出 (code={exit_code}) ---")
+            self.status_message.emit(f"RoboDojo 在线 RL 异常退出 (code={exit_code})")
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 RoboDojo 在线 RL 进程")
+            self.status_message.emit("无法启动 RoboDojo 在线 RL")
+            self.running_changed.emit(False)
+
+
 class LingbotMapLauncher(QObject):
     """在独立进程跑 LingBot-Map demo.py（viser 交互式 3D 重建）。"""
 
@@ -18098,17 +18763,18 @@ class CameraTopicWindow(QMainWindow):
         bagel_call_row.addWidget(self.bagel_call_task_combo)
         bagel_call_row.addWidget(QLabel("steps"))
         self.bagel_num_timesteps_spin = QSpinBox()
-        self.bagel_num_timesteps_spin.setRange(10, 100)
-        self.bagel_num_timesteps_spin.setSingleStep(5)
+        self.bagel_num_timesteps_spin.setRange(1, 100)
+        self.bagel_num_timesteps_spin.setSingleStep(1)
         self.bagel_num_timesteps_spin.setValue(BAGEL_NUM_TIMESTEPS_DEFAULT)
         self.bagel_num_timesteps_spin.setFixedWidth(64)
         self.bagel_num_timesteps_spin.setToolTip(
-            "文生图 / 图像编辑的去噪步数 num_timesteps（默认 25，越大越慢越细）"
+            "文生图 / 图像编辑的去噪步数 num_timesteps（1–100，步长 1；默认 25）"
         )
         bagel_call_row.addWidget(self.bagel_num_timesteps_spin)
         bagel_call_row.addWidget(QLabel("尺寸"))
         self.bagel_image_size_combo = ImeSafeComboBox()
         self.bagel_image_size_combo.addItem("跟随输入", "input")
+        self.bagel_image_size_combo.addItem("224²", "224")
         self.bagel_image_size_combo.addItem("320² psi", "320")
         self.bagel_image_size_combo.addItem("512² 快", "512")
         self.bagel_image_size_combo.addItem("768²", "768")
@@ -18118,12 +18784,41 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_image_size_combo.addItem("9:16", "9:16")
         self.bagel_image_size_combo.addItem("4:3", "4:3")
         self.bagel_image_size_combo.addItem("3:4", "3:4")
+        self.bagel_image_size_combo.addItem("手动 W×H", "custom")
         self.bagel_image_size_combo.setCurrentIndex(0)  # 跟随输入
         self.bagel_image_size_combo.setToolTip(
             "输出分辨率。默认「跟随输入」：有输入图则用其大小；"
-            "纯文生图无输入时回退 512²。320² 与 psi-policy 训练图一致。"
+            "纯文生图无输入时回退 512²。224²/320² 适合小图；"
+            "「手动 W×H」可指定宽高（16 对齐，最大 1024）。"
         )
         bagel_call_row.addWidget(self.bagel_image_size_combo)
+        bagel_call_row.addWidget(QLabel("W"))
+        self.bagel_image_w_spin = HoverWheelSpinBox()
+        self.bagel_image_w_spin.setRange(16, 1024)
+        self.bagel_image_w_spin.setSingleStep(16)
+        self.bagel_image_w_spin.setValue(224)
+        self.bagel_image_w_spin.setFixedWidth(64)
+        self.bagel_image_w_spin.setToolTip(
+            "输出宽度（像素，按 16 对齐）。滚轮或箭头可调；改动后自动切到「手动 W×H」。"
+        )
+        bagel_call_row.addWidget(self.bagel_image_w_spin)
+        bagel_call_row.addWidget(QLabel("H"))
+        self.bagel_image_h_spin = HoverWheelSpinBox()
+        self.bagel_image_h_spin.setRange(16, 1024)
+        self.bagel_image_h_spin.setSingleStep(16)
+        self.bagel_image_h_spin.setValue(224)
+        self.bagel_image_h_spin.setFixedWidth(64)
+        self.bagel_image_h_spin.setToolTip(
+            "输出高度（像素，按 16 对齐）。滚轮或箭头可调；改动后自动切到「手动 W×H」。"
+        )
+        bagel_call_row.addWidget(self.bagel_image_h_spin)
+        self._bagel_wh_syncing = False
+        self.bagel_image_size_combo.currentIndexChanged.connect(
+            self._on_bagel_image_size_changed
+        )
+        self.bagel_image_w_spin.valueChanged.connect(self._on_bagel_image_wh_changed)
+        self.bagel_image_h_spin.valueChanged.connect(self._on_bagel_image_wh_changed)
+        self._on_bagel_image_size_changed()
         self.bagel_call_prompt_edit = ImeSafeLineEdit("")
         self.bagel_call_prompt_edit.setPlaceholderText("输入提示词后点「调用」")
         bagel_call_row.addWidget(self.bagel_call_prompt_edit, 1)
@@ -18146,6 +18841,36 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_call_btn.clicked.connect(self._on_bagel_call_clicked)
         bagel_call_row.addWidget(self.bagel_call_btn)
         bagel_outer.addLayout(bagel_call_row)
+
+        bagel_speed_row = QHBoxLayout()
+        bagel_speed_row.setSpacing(6)
+        bagel_speed_row.addWidget(QLabel("加速"))
+        self.bagel_fast_preset_btn = QPushButton("快速预设")
+        self.bagel_fast_preset_btn.setToolTip(
+            f"一键：steps={BAGEL_FAST_NUM_TIMESTEPS}、输出 {BAGEL_FAST_IMAGE_SIZE}²、"
+            f"cfg_interval={BAGEL_CFG_INTERVAL_DEFAULT}、开启 TaylorSeer"
+        )
+        self.bagel_fast_preset_btn.clicked.connect(self._on_bagel_fast_preset_clicked)
+        bagel_speed_row.addWidget(self.bagel_fast_preset_btn)
+        bagel_speed_row.addWidget(QLabel("cfg_interval"))
+        self.bagel_cfg_interval_spin = QDoubleSpinBox()
+        self.bagel_cfg_interval_spin.setRange(0.0, 1.0)
+        self.bagel_cfg_interval_spin.setSingleStep(0.1)
+        self.bagel_cfg_interval_spin.setDecimals(1)
+        self.bagel_cfg_interval_spin.setValue(BAGEL_CFG_INTERVAL_DEFAULT)
+        self.bagel_cfg_interval_spin.setFixedWidth(64)
+        self.bagel_cfg_interval_spin.setToolTip(
+            "CFG 起始比例：0=全程 CFG（慢），0.4=前 40% 跳过 CFG（更快，官方 T2I 常用）"
+        )
+        bagel_speed_row.addWidget(self.bagel_cfg_interval_spin)
+        self.bagel_taylorseer_check = QCheckBox("TaylorSeer")
+        self.bagel_taylorseer_check.setChecked(False)
+        self.bagel_taylorseer_check.setToolTip(
+            "开启后用 TaylorSeer 加速去噪（可能略损质量；需重启后的 serve_api 支持该字段）"
+        )
+        bagel_speed_row.addWidget(self.bagel_taylorseer_check)
+        bagel_speed_row.addStretch(1)
+        bagel_outer.addLayout(bagel_speed_row)
 
         bagel_hist_row = QHBoxLayout()
         bagel_hist_row.setSpacing(6)
@@ -18243,7 +18968,7 @@ class CameraTopicWindow(QMainWindow):
         )
         self.bagel_call_model_size_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         self.bagel_call_model_size_label.setToolTip(
-            "实际送进模型的条件图尺寸（编辑时经 VAE resize，最短边常被抬到 ≥512）"
+            "实际送进模型的条件图尺寸（保持原图比例；仅 16 对齐，最长边 ≤1024）"
         )
         bagel_meta_row.addWidget(self.bagel_call_model_size_label)
         self.bagel_call_latency_label = QLabel("调用耗时: —")
@@ -20058,10 +20783,472 @@ class CameraTopicWindow(QMainWindow):
         self._refresh_sim_rl_configs()
         self._on_sim_rl_preset_changed()
 
+        # --- Reward 训练工作流 ---
+        reward_wf_tab = QWidget()
+        reward_wf_tab.setObjectName("rewardWorkflowTab")
+        rwf_outer = QVBoxLayout(reward_wf_tab)
+        rwf_outer.setContentsMargins(8, 6, 8, 6)
+        rwf_outer.setSpacing(6)
+        rwf_hint = QLabel(
+            "RLinf 奖励模型工作流：真机采集 → 数据预处理（ResNet / QwenTrend）→ "
+            "train_reward_model.py 训练。评测请用「Reward评测」页。"
+            "pipeline 会先预处理再训练，并自动覆盖 data.train/val_data_paths。"
+        )
+        rwf_hint.setWordWrap(True)
+        rwf_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        rwf_outer.addWidget(rwf_hint)
+
+        rwf_path_row = QHBoxLayout()
+        rwf_path_row.setSpacing(6)
+        rwf_path_row.addWidget(QLabel("RLinf"))
+        self.reward_wf_root_edit = QLineEdit(
+            os.environ.get("RLINF_ROOT", RLINF_ROOT_DEFAULT)
+        )
+        self.reward_wf_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rwf_path_row.addWidget(self.reward_wf_root_edit, 1)
+        self.reward_wf_root_browse_btn = QPushButton("…")
+        self.reward_wf_root_browse_btn.setFixedWidth(28)
+        self.reward_wf_root_browse_btn.clicked.connect(self._on_reward_wf_root_browse)
+        rwf_path_row.addWidget(self.reward_wf_root_browse_btn)
+        rwf_path_row.addWidget(QLabel("Python"))
+        self.reward_wf_python_edit = QLineEdit(
+            resolve_rlinf_python(self.reward_wf_root_edit.text())
+        )
+        self.reward_wf_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rwf_path_row.addWidget(self.reward_wf_python_edit, 1)
+        rwf_outer.addLayout(rwf_path_row)
+
+        rwf_mode_row = QHBoxLayout()
+        rwf_mode_row.setSpacing(6)
+        rwf_mode_row.addWidget(QLabel("步骤"))
+        self.reward_wf_mode_combo = ImeSafeComboBox()
+        self.reward_wf_mode_combo.addItem("数据预处理", "preprocess")
+        self.reward_wf_mode_combo.addItem("训练", "train")
+        self.reward_wf_mode_combo.addItem("预处理→训练", "pipeline")
+        self.reward_wf_mode_combo.addItem("真机采集", "collect")
+        self.reward_wf_mode_combo.currentIndexChanged.connect(
+            self._on_reward_wf_mode_changed
+        )
+        rwf_mode_row.addWidget(self.reward_wf_mode_combo)
+        rwf_mode_row.addWidget(QLabel("数据集"))
+        self.reward_wf_dataset_combo = ImeSafeComboBox()
+        self.reward_wf_dataset_combo.addItem("ResNet (.pt)", "resnet")
+        self.reward_wf_dataset_combo.addItem("QwenTrend (.jsonl)", "qwentrend")
+        rwf_mode_row.addWidget(self.reward_wf_dataset_combo)
+        rwf_mode_row.addWidget(QLabel("GPU"))
+        self.reward_wf_cuda_edit = QLineEdit(
+            os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+        )
+        self.reward_wf_cuda_edit.setFixedWidth(72)
+        self.reward_wf_cuda_edit.setPlaceholderText("0")
+        self.reward_wf_cuda_edit.setToolTip("CUDA_VISIBLE_DEVICES，留空则用系统默认")
+        rwf_mode_row.addWidget(self.reward_wf_cuda_edit)
+        rwf_mode_row.addStretch(1)
+        rwf_outer.addLayout(rwf_mode_row)
+
+        self.reward_wf_stack = QStackedWidget()
+
+        # page 0: preprocess / pipeline 共用（pipeline 再叠训练栏）
+        rwf_prep_page = QWidget()
+        rwf_prep_lay = QVBoxLayout(rwf_prep_page)
+        rwf_prep_lay.setContentsMargins(0, 0, 0, 0)
+        rwf_prep_lay.setSpacing(6)
+        rwf_raw_row = QHBoxLayout()
+        rwf_raw_row.setSpacing(6)
+        rwf_raw_row.addWidget(QLabel("原始数据"))
+        self.reward_wf_raw_edit = QLineEdit()
+        self.reward_wf_raw_edit.setPlaceholderText(
+            "collected_data 目录（含 episode .pkl）"
+        )
+        self.reward_wf_raw_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rwf_raw_row.addWidget(self.reward_wf_raw_edit, 1)
+        self.reward_wf_raw_browse_btn = QPushButton("…")
+        self.reward_wf_raw_browse_btn.setFixedWidth(28)
+        self.reward_wf_raw_browse_btn.clicked.connect(self._on_reward_wf_raw_browse)
+        rwf_raw_row.addWidget(self.reward_wf_raw_browse_btn)
+        rwf_prep_lay.addLayout(rwf_raw_row)
+        rwf_out_row = QHBoxLayout()
+        rwf_out_row.setSpacing(6)
+        rwf_out_row.addWidget(QLabel("输出目录"))
+        self.reward_wf_out_edit = QLineEdit("logs/processed_reward_data")
+        self.reward_wf_out_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rwf_out_row.addWidget(self.reward_wf_out_edit, 1)
+        self.reward_wf_out_browse_btn = QPushButton("…")
+        self.reward_wf_out_browse_btn.setFixedWidth(28)
+        self.reward_wf_out_browse_btn.clicked.connect(self._on_reward_wf_out_browse)
+        rwf_out_row.addWidget(self.reward_wf_out_browse_btn)
+        rwf_prep_lay.addLayout(rwf_out_row)
+        rwf_samp_row = QHBoxLayout()
+        rwf_samp_row.setSpacing(6)
+        rwf_samp_row.addWidget(QLabel("每集采样"))
+        self.reward_wf_samples_spin = QSpinBox()
+        self.reward_wf_samples_spin.setRange(0, 512)
+        self.reward_wf_samples_spin.setValue(0)
+        self.reward_wf_samples_spin.setToolTip("0 = 使用全部帧")
+        rwf_samp_row.addWidget(self.reward_wf_samples_spin)
+        rwf_samp_row.addWidget(QLabel("val_split"))
+        self.reward_wf_val_spin = QDoubleSpinBox()
+        self.reward_wf_val_spin.setRange(0.0, 0.9)
+        self.reward_wf_val_spin.setSingleStep(0.05)
+        self.reward_wf_val_spin.setDecimals(2)
+        self.reward_wf_val_spin.setValue(0.20)
+        rwf_samp_row.addWidget(self.reward_wf_val_spin)
+        rwf_samp_row.addWidget(QLabel("fail:success"))
+        self.reward_wf_ratio_spin = QDoubleSpinBox()
+        self.reward_wf_ratio_spin.setRange(0.1, 20.0)
+        self.reward_wf_ratio_spin.setSingleStep(0.5)
+        self.reward_wf_ratio_spin.setDecimals(1)
+        self.reward_wf_ratio_spin.setValue(2.0)
+        rwf_samp_row.addWidget(self.reward_wf_ratio_spin)
+        rwf_samp_row.addWidget(QLabel("seed"))
+        self.reward_wf_seed_spin = QSpinBox()
+        self.reward_wf_seed_spin.setRange(0, 999999)
+        self.reward_wf_seed_spin.setValue(42)
+        rwf_samp_row.addWidget(self.reward_wf_seed_spin)
+        self.reward_wf_keep_last_check = QCheckBox("保留末帧")
+        self.reward_wf_keep_last_check.setChecked(True)
+        rwf_samp_row.addWidget(self.reward_wf_keep_last_check)
+        rwf_samp_row.addStretch(1)
+        rwf_prep_lay.addLayout(rwf_samp_row)
+        self.reward_wf_stack.addWidget(rwf_prep_page)
+
+        # page 1: train-only data paths（也可在 pipeline 时用 Hydra 覆盖）
+        rwf_train_page = QWidget()
+        rwf_train_lay = QVBoxLayout(rwf_train_page)
+        rwf_train_lay.setContentsMargins(0, 0, 0, 0)
+        rwf_train_lay.setSpacing(6)
+        rwf_train_pt_row = QHBoxLayout()
+        rwf_train_pt_row.setSpacing(6)
+        rwf_train_pt_row.addWidget(QLabel("train.pt"))
+        self.reward_wf_train_pt_edit = QLineEdit(
+            "logs/processed_reward_data/train.pt"
+        )
+        self.reward_wf_train_pt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rwf_train_pt_row.addWidget(self.reward_wf_train_pt_edit, 1)
+        self.reward_wf_train_pt_browse_btn = QPushButton("…")
+        self.reward_wf_train_pt_browse_btn.setFixedWidth(28)
+        self.reward_wf_train_pt_browse_btn.clicked.connect(
+            self._on_reward_wf_train_pt_browse
+        )
+        rwf_train_pt_row.addWidget(self.reward_wf_train_pt_browse_btn)
+        rwf_train_lay.addLayout(rwf_train_pt_row)
+        rwf_val_pt_row = QHBoxLayout()
+        rwf_val_pt_row.setSpacing(6)
+        rwf_val_pt_row.addWidget(QLabel("val.pt"))
+        self.reward_wf_val_pt_edit = QLineEdit(
+            "logs/processed_reward_data/val.pt"
+        )
+        self.reward_wf_val_pt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rwf_val_pt_row.addWidget(self.reward_wf_val_pt_edit, 1)
+        self.reward_wf_val_pt_browse_btn = QPushButton("…")
+        self.reward_wf_val_pt_browse_btn.setFixedWidth(28)
+        self.reward_wf_val_pt_browse_btn.clicked.connect(
+            self._on_reward_wf_val_pt_browse
+        )
+        rwf_val_pt_row.addWidget(self.reward_wf_val_pt_browse_btn)
+        rwf_train_lay.addLayout(rwf_val_pt_row)
+        self.reward_wf_stack.addWidget(rwf_train_page)
+
+        # page 2: collect hint
+        rwf_collect_page = QWidget()
+        rwf_collect_lay = QVBoxLayout(rwf_collect_page)
+        rwf_collect_lay.setContentsMargins(0, 0, 0, 0)
+        rwf_collect_hint = QLabel(
+            "真机采集需 Franka + SpaceMouse，并在 config 中改好 ROBOT_IP / "
+            "TARGET_EE_POSE。日志目录下会生成 collected_data。"
+        )
+        rwf_collect_hint.setWordWrap(True)
+        rwf_collect_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        rwf_collect_lay.addWidget(rwf_collect_hint)
+        rwf_collect_lay.addStretch(1)
+        self.reward_wf_stack.addWidget(rwf_collect_page)
+
+        rwf_outer.addWidget(self.reward_wf_stack)
+
+        rwf_cfg_row = QHBoxLayout()
+        rwf_cfg_row.setSpacing(6)
+        rwf_cfg_row.addWidget(QLabel("config"))
+        self.reward_wf_config_combo = ImeSafeComboBox()
+        self.reward_wf_config_combo.setEditable(True)
+        self.reward_wf_config_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.reward_wf_config_combo.setMinimumWidth(220)
+        self.reward_wf_config_combo.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rwf_cfg_row.addWidget(self.reward_wf_config_combo, 1)
+        self.reward_wf_refresh_btn = QPushButton("刷新")
+        self.reward_wf_refresh_btn.setToolTip("重新扫描 examples/reward/config")
+        self.reward_wf_refresh_btn.clicked.connect(self._refresh_reward_wf_configs)
+        rwf_cfg_row.addWidget(self.reward_wf_refresh_btn)
+        rwf_outer.addLayout(rwf_cfg_row)
+
+        rwf_ov_row = QHBoxLayout()
+        rwf_ov_row.setSpacing(6)
+        rwf_ov_row.addWidget(QLabel("Hydra"))
+        self.reward_wf_overrides_edit = QLineEdit()
+        self.reward_wf_overrides_edit.setPlaceholderText(
+            "可选 Hydra 覆盖。例: actor.optim.lr=1e-4 runner.max_epochs=200"
+        )
+        self.reward_wf_overrides_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rwf_ov_row.addWidget(self.reward_wf_overrides_edit, 1)
+        rwf_outer.addLayout(rwf_ov_row)
+
+        rwf_run_row = QHBoxLayout()
+        rwf_run_row.setSpacing(6)
+        self.reward_wf_start_btn = QPushButton("启动")
+        self.reward_wf_start_btn.setToolTip("启动当前步骤的 Reward 工作流")
+        self.reward_wf_start_btn.clicked.connect(self._on_reward_wf_start_clicked)
+        rwf_run_row.addWidget(self.reward_wf_start_btn)
+        self.reward_wf_stop_btn = QPushButton("停止")
+        self.reward_wf_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.reward_wf_stop_btn.setEnabled(False)
+        self.reward_wf_stop_btn.clicked.connect(self._on_reward_wf_stop_clicked)
+        rwf_run_row.addWidget(self.reward_wf_stop_btn)
+        self.reward_wf_status_label = QLabel("空闲")
+        self.reward_wf_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rwf_run_row.addWidget(self.reward_wf_status_label, 1)
+        rwf_outer.addLayout(rwf_run_row)
+
+        rwf_log_row = QHBoxLayout()
+        rwf_log_row.setSpacing(6)
+        rwf_log_row.addWidget(QLabel("日志目录"))
+        self.reward_wf_log_dir_edit = QLineEdit()
+        self.reward_wf_log_dir_edit.setReadOnly(True)
+        self.reward_wf_log_dir_edit.setPlaceholderText(
+            "训练/采集启动后显示 runner.logger.log_path"
+        )
+        self.reward_wf_log_dir_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rwf_log_row.addWidget(self.reward_wf_log_dir_edit, 1)
+        self.reward_wf_open_log_btn = QPushButton("打开")
+        self.reward_wf_open_log_btn.setEnabled(False)
+        self.reward_wf_open_log_btn.clicked.connect(self._on_reward_wf_open_log_clicked)
+        rwf_log_row.addWidget(self.reward_wf_open_log_btn)
+        rwf_outer.addLayout(rwf_log_row)
+
+        self.reward_wf_log_edit = QTextEdit()
+        self.reward_wf_log_edit.setReadOnly(True)
+        self.reward_wf_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.reward_wf_log_edit.setPlaceholderText("Reward 工作流日志…")
+        self.reward_wf_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        rwf_outer.addWidget(self.reward_wf_log_edit, 1)
+
+        self._reward_wf_launcher = RewardWorkflowLauncher(self)
+        self._reward_wf_launcher.log_line.connect(self._append_reward_wf_log)
+        self._reward_wf_launcher.status_message.connect(self._on_reward_wf_status)
+        self._reward_wf_launcher.running_changed.connect(self._update_reward_wf_ui)
+        self._reward_wf_launcher.log_dir_ready.connect(self._on_reward_wf_log_dir)
+        self._on_reward_wf_mode_changed()
+        self._refresh_reward_wf_configs()
+
+        # --- RoboDojo / RISE 在线强化学习（RLinf policy_online）---
+        dojo_rl_tab = QWidget()
+        dojo_rl_tab.setObjectName("robodojoOnlineRlTab")
+        dojo_rl_outer = QVBoxLayout(dojo_rl_tab)
+        dojo_rl_outer.setContentsMargins(8, 6, 8, 6)
+        dojo_rl_outer.setSpacing(6)
+        dojo_rl_hint = QLabel(
+            "RoboDojo · RISE 在线强化学习（基于 RLinf policy_online）："
+            "在想象环境中用动力学 + 奖励模型做 policy improvement。"
+            "默认 config=rl_release；开训前请填好 rollout.model_dir 与 "
+            "reward_model_ckpt。单卡会自动压 placement 到 0-0。"
+            "详见 RISE docs/online_training.md。"
+        )
+        dojo_rl_hint.setWordWrap(True)
+        dojo_rl_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        dojo_rl_outer.addWidget(dojo_rl_hint)
+
+        drl_path_row = QHBoxLayout()
+        drl_path_row.setSpacing(6)
+        drl_path_row.addWidget(QLabel("RISE"))
+        self.dojo_rl_root_edit = QLineEdit(
+            os.environ.get("RISE_ROOT", RISE_ROOT_DEFAULT)
+        )
+        self.dojo_rl_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        drl_path_row.addWidget(self.dojo_rl_root_edit, 1)
+        self.dojo_rl_root_browse_btn = QPushButton("…")
+        self.dojo_rl_root_browse_btn.setFixedWidth(28)
+        self.dojo_rl_root_browse_btn.clicked.connect(self._on_dojo_rl_root_browse)
+        drl_path_row.addWidget(self.dojo_rl_root_browse_btn)
+        drl_path_row.addWidget(QLabel("Python"))
+        self.dojo_rl_python_edit = QLineEdit(
+            resolve_rise_python(self.dojo_rl_root_edit.text())
+        )
+        self.dojo_rl_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        drl_path_row.addWidget(self.dojo_rl_python_edit, 1)
+        dojo_rl_outer.addLayout(drl_path_row)
+
+        drl_mode_row = QHBoxLayout()
+        drl_mode_row.setSpacing(6)
+        drl_mode_row.addWidget(QLabel("模式"))
+        self.dojo_rl_mode_combo = ImeSafeComboBox()
+        self.dojo_rl_mode_combo.addItem("单机", "single")
+        self.dojo_rl_mode_combo.addItem("多机 Ray", "multi")
+        drl_mode_row.addWidget(self.dojo_rl_mode_combo)
+        drl_mode_row.addWidget(QLabel("config"))
+        self.dojo_rl_config_combo = ImeSafeComboBox()
+        self.dojo_rl_config_combo.setEditable(True)
+        self.dojo_rl_config_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.dojo_rl_config_combo.setMinimumWidth(180)
+        self.dojo_rl_config_combo.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        drl_mode_row.addWidget(self.dojo_rl_config_combo, 1)
+        self.dojo_rl_refresh_btn = QPushButton("刷新")
+        self.dojo_rl_refresh_btn.setToolTip(
+            "重新扫描 policy_online/examples/embodiment/config"
+        )
+        self.dojo_rl_refresh_btn.clicked.connect(self._refresh_dojo_rl_configs)
+        drl_mode_row.addWidget(self.dojo_rl_refresh_btn)
+        drl_mode_row.addWidget(QLabel("GPU"))
+        self.dojo_rl_cuda_edit = QLineEdit(
+            os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+        )
+        self.dojo_rl_cuda_edit.setFixedWidth(72)
+        self.dojo_rl_cuda_edit.setPlaceholderText("0")
+        self.dojo_rl_cuda_edit.setToolTip("CUDA_VISIBLE_DEVICES，留空则用系统默认")
+        drl_mode_row.addWidget(self.dojo_rl_cuda_edit)
+        self.dojo_rl_auto_gpu_check = QCheckBox("单卡自适应")
+        self.dojo_rl_auto_gpu_check.setChecked(True)
+        self.dojo_rl_auto_gpu_check.setToolTip(
+            "可见 GPU=1 时自动追加 placement=0-0 并缩小 batch"
+        )
+        drl_mode_row.addWidget(self.dojo_rl_auto_gpu_check)
+        dojo_rl_outer.addLayout(drl_mode_row)
+
+        drl_ckpt_row = QHBoxLayout()
+        drl_ckpt_row.setSpacing(6)
+        drl_ckpt_row.addWidget(QLabel("策略 ckpt"))
+        _default_policy_ckpt = resolve_rise_policy_ckpt()
+        self.dojo_rl_model_dir_edit = QLineEdit(_default_policy_ckpt)
+        self.dojo_rl_model_dir_edit.setPlaceholderText(
+            "rollout.model_dir（IL 预训练权重目录，需含 model.safetensors）"
+        )
+        self.dojo_rl_model_dir_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.dojo_rl_model_dir_edit.setToolTip(
+            "默认扫描本机 pi05_droid_jointpos_polaris 等目录；"
+            "也可设环境变量 RISE_POLICY_CKPT"
+        )
+        drl_ckpt_row.addWidget(self.dojo_rl_model_dir_edit, 1)
+        self.dojo_rl_model_browse_btn = QPushButton("…")
+        self.dojo_rl_model_browse_btn.setFixedWidth(28)
+        self.dojo_rl_model_browse_btn.clicked.connect(self._on_dojo_rl_model_browse)
+        drl_ckpt_row.addWidget(self.dojo_rl_model_browse_btn)
+        dojo_rl_outer.addLayout(drl_ckpt_row)
+
+        drl_rew_row = QHBoxLayout()
+        drl_rew_row.setSpacing(6)
+        drl_rew_row.addWidget(QLabel("奖励 ckpt"))
+        _default_reward_ckpt = resolve_rise_reward_ckpt(
+            policy_ckpt=_default_policy_ckpt
+        )
+        self.dojo_rl_reward_ckpt_edit = QLineEdit(_default_reward_ckpt)
+        self.dojo_rl_reward_ckpt_edit.setPlaceholderText(
+            "actor.model.openpi.reward_model_ckpt（无独立 value 时回退策略 ckpt）"
+        )
+        self.dojo_rl_reward_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.dojo_rl_reward_ckpt_edit.setToolTip(
+            "优先独立 value_release；本机未找到时回退到策略 ckpt。"
+            "环境变量 RISE_REWARD_CKPT 可覆盖"
+        )
+        drl_rew_row.addWidget(self.dojo_rl_reward_ckpt_edit, 1)
+        self.dojo_rl_reward_browse_btn = QPushButton("…")
+        self.dojo_rl_reward_browse_btn.setFixedWidth(28)
+        self.dojo_rl_reward_browse_btn.clicked.connect(self._on_dojo_rl_reward_browse)
+        drl_rew_row.addWidget(self.dojo_rl_reward_browse_btn)
+        dojo_rl_outer.addLayout(drl_rew_row)
+
+        drl_resume_row = QHBoxLayout()
+        drl_resume_row.setSpacing(6)
+        drl_resume_row.addWidget(QLabel("resume"))
+        self.dojo_rl_resume_edit = QLineEdit()
+        self.dojo_rl_resume_edit.setPlaceholderText(
+            "可选 runner.resume_dir（断点续训）"
+        )
+        self.dojo_rl_resume_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        drl_resume_row.addWidget(self.dojo_rl_resume_edit, 1)
+        self.dojo_rl_resume_browse_btn = QPushButton("…")
+        self.dojo_rl_resume_browse_btn.setFixedWidth(28)
+        self.dojo_rl_resume_browse_btn.clicked.connect(self._on_dojo_rl_resume_browse)
+        drl_resume_row.addWidget(self.dojo_rl_resume_browse_btn)
+        dojo_rl_outer.addLayout(drl_resume_row)
+
+        drl_ov_row = QHBoxLayout()
+        drl_ov_row.setSpacing(6)
+        drl_ov_row.addWidget(QLabel("Hydra"))
+        self.dojo_rl_overrides_edit = QLineEdit()
+        self.dojo_rl_overrides_edit.setPlaceholderText(
+            "可选覆盖。例: actor.model.openpi.use_torch_compile=False "
+            "algorithm.num_group_envs=8"
+        )
+        self.dojo_rl_overrides_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        drl_ov_row.addWidget(self.dojo_rl_overrides_edit, 1)
+        dojo_rl_outer.addLayout(drl_ov_row)
+
+        drl_run_row = QHBoxLayout()
+        drl_run_row.setSpacing(6)
+        self.dojo_rl_start_btn = QPushButton("启动训练")
+        self.dojo_rl_start_btn.setToolTip("启动 RoboDojo/RISE 在线 RL")
+        self.dojo_rl_start_btn.clicked.connect(self._on_dojo_rl_start_clicked)
+        drl_run_row.addWidget(self.dojo_rl_start_btn)
+        self.dojo_rl_stop_btn = QPushButton("停止")
+        self.dojo_rl_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.dojo_rl_stop_btn.setEnabled(False)
+        self.dojo_rl_stop_btn.clicked.connect(self._on_dojo_rl_stop_clicked)
+        drl_run_row.addWidget(self.dojo_rl_stop_btn)
+        self.dojo_rl_status_label = QLabel("空闲")
+        self.dojo_rl_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        drl_run_row.addWidget(self.dojo_rl_status_label, 1)
+        dojo_rl_outer.addLayout(drl_run_row)
+
+        drl_log_row = QHBoxLayout()
+        drl_log_row.setSpacing(6)
+        drl_log_row.addWidget(QLabel("日志目录"))
+        self.dojo_rl_log_dir_edit = QLineEdit()
+        self.dojo_rl_log_dir_edit.setReadOnly(True)
+        self.dojo_rl_log_dir_edit.setPlaceholderText(
+            "启动后显示 runner.logger.log_path"
+        )
+        self.dojo_rl_log_dir_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        drl_log_row.addWidget(self.dojo_rl_log_dir_edit, 1)
+        self.dojo_rl_open_log_btn = QPushButton("打开")
+        self.dojo_rl_open_log_btn.setEnabled(False)
+        self.dojo_rl_open_log_btn.clicked.connect(self._on_dojo_rl_open_log_clicked)
+        drl_log_row.addWidget(self.dojo_rl_open_log_btn)
+        dojo_rl_outer.addLayout(drl_log_row)
+
+        self.dojo_rl_log_edit = QTextEdit()
+        self.dojo_rl_log_edit.setReadOnly(True)
+        self.dojo_rl_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.dojo_rl_log_edit.setPlaceholderText("RoboDojo 在线 RL 训练日志…")
+        self.dojo_rl_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        dojo_rl_outer.addWidget(self.dojo_rl_log_edit, 1)
+
+        self._dojo_rl_launcher = RoboDojoOnlineRLLauncher(self)
+        self._dojo_rl_launcher.log_line.connect(self._append_dojo_rl_log)
+        self._dojo_rl_launcher.status_message.connect(self._on_dojo_rl_status)
+        self._dojo_rl_launcher.running_changed.connect(self._update_dojo_rl_ui)
+        self._dojo_rl_launcher.log_dir_ready.connect(self._on_dojo_rl_log_dir)
+        self._refresh_dojo_rl_configs(prefer="rl_release")
+        if _default_policy_ckpt:
+            self._append_dojo_rl_log(f"[info] 预填策略 ckpt: {_default_policy_ckpt}")
+        if _default_reward_ckpt:
+            same = (
+                os.path.abspath(_default_reward_ckpt)
+                == os.path.abspath(_default_policy_ckpt or "")
+            )
+            note = "（与策略相同，本机无独立 value ckpt）" if same else ""
+            self._append_dojo_rl_log(
+                f"[info] 预填奖励 ckpt: {_default_reward_ckpt}{note}"
+            )
+
         control_tabs.addTab(sim_tab, "仿真评测")
         control_tabs.addTab(real_tab, "真机评测")
         control_tabs.addTab(reward_tab, "Reward评测")
+        control_tabs.addTab(reward_wf_tab, "Reward训练")
         control_tabs.addTab(sim_rl_tab, "仿真在线强化学习")
+        control_tabs.addTab(dojo_rl_tab, "RoboDojo在线RL")
         control_tabs.addTab(ctx_tab, "ICL")
         # sub task / sub image 挂在全部 tab 最后，见下方 addTab
 
@@ -21670,15 +22857,64 @@ class CameraTopicWindow(QMainWindow):
         if not self._bagel_api_launcher.is_running():
             self._bagel_api_ready_poll_timer.stop()
             return
+        host = getattr(self._bagel_api_launcher, "_adopt_host", None) or (
+            self.bagel_host_edit.text().strip() or BAGEL_SERVER_HOST_DEFAULT
+        )
+        port = int(
+            getattr(self._bagel_api_launcher, "_adopt_port", 0)
+            or self.bagel_api_port_spin.value()
+        )
+        # 必须确认是 Bagel serve_api，避免其它服务 /health 误判就绪
+        body = bagel_probe_api_health(host, port, timeout_s=1.5)
+        if body is None:
+            return
         url = self._bagel_api_launcher.current_url().rstrip("/")
         if not url:
+            url = bagel_app_url(host, port).rstrip("/")
+        self._bagel_api_ready_poll_timer.stop()
+        if not self._bagel_api_launcher._ready_emitted:
+            self._bagel_api_launcher._ready_emitted = True
+            self._bagel_api_launcher.ready_url.emit(url + "/")
+
+    def _on_bagel_image_size_changed(self, *_args: object) -> None:
+        """尺寸预设变化时同步 W/H 显示；W/H 始终可调。"""
+        if not hasattr(self, "bagel_image_w_spin"):
             return
-        ok, body, _err = _http_get_json(f"{url}/health", timeout_s=1.5)
-        if ok and isinstance(body, dict) and body.get("ok"):
-            self._bagel_api_ready_poll_timer.stop()
-            if not self._bagel_api_launcher._ready_emitted:
-                self._bagel_api_launcher._ready_emitted = True
-                self._bagel_api_launcher.ready_url.emit(url + "/")
+        ratio = str(self.bagel_image_size_combo.currentData() or "")
+        if ratio.isdigit():
+            side = max(16, int(ratio))
+            self._bagel_wh_syncing = True
+            try:
+                self.bagel_image_w_spin.setValue(side)
+                self.bagel_image_h_spin.setValue(side)
+            finally:
+                self._bagel_wh_syncing = False
+        self.bagel_image_w_spin.setEnabled(True)
+        self.bagel_image_h_spin.setEnabled(True)
+
+    def _on_bagel_image_wh_changed(self, *_args: object) -> None:
+        """用户改 W/H 时自动切到「手动 W×H」。"""
+        if getattr(self, "_bagel_wh_syncing", False):
+            return
+        idx = self.bagel_image_size_combo.findData("custom")
+        if idx < 0:
+            return
+        if self.bagel_image_size_combo.currentIndex() != idx:
+            self.bagel_image_size_combo.blockSignals(True)
+            self.bagel_image_size_combo.setCurrentIndex(idx)
+            self.bagel_image_size_combo.blockSignals(False)
+
+    def _bagel_selected_image_size(self) -> Tuple[str, int, int]:
+        """返回 (image_ratio, width, height)；手动模式时 width/height > 0。"""
+        ratio = str(
+            self.bagel_image_size_combo.currentData() or BAGEL_IMAGE_SIZE_DEFAULT
+        )
+        width = 0
+        height = 0
+        if ratio == "custom":
+            width = int(self.bagel_image_w_spin.value())
+            height = int(self.bagel_image_h_spin.value())
+        return ratio, width, height
 
     def _on_bagel_call_pick_clicked(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
@@ -21770,6 +23006,25 @@ class CameraTopicWindow(QMainWindow):
         self._append_bagel_log(f"[import] {msg}")
         self.status_bar.showMessage(msg)
 
+    def _on_bagel_fast_preset_clicked(self) -> None:
+        """一键加速：小分辨率 + 少步数 + cfg_interval + TaylorSeer。"""
+        self.bagel_num_timesteps_spin.setValue(BAGEL_FAST_NUM_TIMESTEPS)
+        idx = self.bagel_image_size_combo.findData(BAGEL_FAST_IMAGE_SIZE)
+        if idx >= 0:
+            self.bagel_image_size_combo.setCurrentIndex(idx)
+        if hasattr(self, "bagel_cfg_interval_spin"):
+            self.bagel_cfg_interval_spin.setValue(BAGEL_CFG_INTERVAL_DEFAULT)
+        if hasattr(self, "bagel_taylorseer_check"):
+            self.bagel_taylorseer_check.setChecked(True)
+        self._append_bagel_log(
+            f"[preset] 快速: steps={BAGEL_FAST_NUM_TIMESTEPS}  "
+            f"size={BAGEL_FAST_IMAGE_SIZE}  "
+            f"cfg_interval={BAGEL_CFG_INTERVAL_DEFAULT}  TaylorSeer=on"
+        )
+        self.status_bar.showMessage(
+            f"已应用快速预设: {BAGEL_FAST_IMAGE_SIZE}² · steps={BAGEL_FAST_NUM_TIMESTEPS}"
+        )
+
     def _on_bagel_call_clicked(self) -> None:
         if self._bagel_call_busy:
             return
@@ -21793,14 +23048,28 @@ class CameraTopicWindow(QMainWindow):
                 return
         api_base = self._bagel_api_launcher.api_base()
         steps = int(self.bagel_num_timesteps_spin.value())
-        image_ratio = str(
-            self.bagel_image_size_combo.currentData() or BAGEL_IMAGE_SIZE_DEFAULT
+        image_ratio, image_width, image_height = self._bagel_selected_image_size()
+        cfg_interval = (
+            float(self.bagel_cfg_interval_spin.value())
+            if hasattr(self, "bagel_cfg_interval_spin")
+            else BAGEL_CFG_INTERVAL_DEFAULT
+        )
+        enable_taylorseer = bool(
+            hasattr(self, "bagel_taylorseer_check")
+            and self.bagel_taylorseer_check.isChecked()
+        )
+        size_txt = (
+            f"{image_width}x{image_height}"
+            if image_ratio == "custom" and image_width > 0 and image_height > 0
+            else image_ratio
         )
         self._bagel_call_busy = True
         self.bagel_call_btn.setEnabled(False)
         self.bagel_call_btn.setText("调用中…")
         self._append_bagel_log(
-            f"[call] {task}: size={image_ratio}  num_timesteps={steps}  {prompt[:80]}"
+            f"[call] {task}: size={size_txt}  steps={steps}  "
+            f"cfg_interval={cfg_interval}  taylor={int(enable_taylorseer)}  "
+            f"{prompt[:80]}"
         )
         img_copy = None if image_bgr is None else np.asarray(image_bgr).copy()
         input_image_path = str(self._bagel_call_image_path or "")
@@ -21814,6 +23083,10 @@ class CameraTopicWindow(QMainWindow):
                     task=task,
                     num_timesteps=steps,
                     image_ratio=image_ratio,
+                    image_width=image_width,
+                    image_height=image_height,
+                    cfg_interval=cfg_interval,
+                    enable_taylorseer=enable_taylorseer,
                 )
                 payload_out: Dict[str, object] = {
                     "ok": True,
@@ -21822,7 +23095,11 @@ class CameraTopicWindow(QMainWindow):
                     "task": task,
                     "prompt": prompt,
                     "image_ratio": image_ratio,
+                    "image_width": image_width,
+                    "image_height": image_height,
                     "num_timesteps": steps,
+                    "cfg_interval": cfg_interval,
+                    "enable_taylorseer": enable_taylorseer,
                     "input_image": input_image_path,
                 }
                 payload_out.update(meta)
@@ -21835,7 +23112,11 @@ class CameraTopicWindow(QMainWindow):
                         "task": task,
                         "prompt": prompt,
                         "image_ratio": image_ratio,
+                        "image_width": image_width,
+                        "image_height": image_height,
                         "num_timesteps": steps,
+                        "cfg_interval": cfg_interval,
+                        "enable_taylorseer": enable_taylorseer,
                         "input_image": input_image_path,
                     }
                 )
@@ -21877,6 +23158,8 @@ class CameraTopicWindow(QMainWindow):
                     task=str(data.get("task") or ""),
                     prompt=str(data.get("prompt") or ""),
                     image_ratio=str(data.get("image_ratio") or ""),
+                    image_width=int(data.get("image_width") or 0),
+                    image_height=int(data.get("image_height") or 0),
                     num_timesteps=int(data.get("num_timesteps") or 0),
                     input_image=str(
                         data.get("input_image") or self._bagel_call_image_path or ""
@@ -21940,6 +23223,8 @@ class CameraTopicWindow(QMainWindow):
                 task=str(data.get("task") or ""),
                 prompt=str(data.get("prompt") or ""),
                 image_ratio=str(data.get("image_ratio") or ""),
+                image_width=int(data.get("image_width") or 0),
+                image_height=int(data.get("image_height") or 0),
                 num_timesteps=int(data.get("num_timesteps") or 0),
                 input_image=str(data.get("input_image") or self._bagel_call_image_path or ""),
                 output_image=path,
@@ -22159,6 +23444,17 @@ class CameraTopicWindow(QMainWindow):
             ridx = self.bagel_image_size_combo.findData(ratio)
             if ridx >= 0:
                 self.bagel_image_size_combo.setCurrentIndex(ridx)
+        try:
+            iw = int(turn.get("image_width") or 0)
+            ih = int(turn.get("image_height") or 0)
+        except (TypeError, ValueError):
+            iw, ih = 0, 0
+        if ratio == "custom" and iw > 0 and ih > 0:
+            if hasattr(self, "bagel_image_w_spin"):
+                self.bagel_image_w_spin.setValue(iw)
+            if hasattr(self, "bagel_image_h_spin"):
+                self.bagel_image_h_spin.setValue(ih)
+        self._on_bagel_image_size_changed()
         steps = turn.get("num_timesteps")
         try:
             if steps is not None and int(steps) > 0:
@@ -22220,12 +23516,16 @@ class CameraTopicWindow(QMainWindow):
         ok: bool,
         error: str,
         autosave: bool = True,
+        image_width: int = 0,
+        image_height: int = 0,
     ) -> None:
         turn: Dict[str, object] = {
             "ts": _utc_now_iso(),
             "task": task,
             "prompt": prompt,
             "image_ratio": image_ratio,
+            "image_width": int(image_width or 0),
+            "image_height": int(image_height or 0),
             "num_timesteps": int(num_timesteps or 0),
             "input_image": input_image,
             "output_image": output_image,
@@ -24487,8 +25787,12 @@ class CameraTopicWindow(QMainWindow):
             self._lingbot_depth_launcher.shutdown()
         if getattr(self, "_reward_launcher", None) is not None:
             self._reward_launcher.shutdown()
+        if getattr(self, "_reward_wf_launcher", None) is not None:
+            self._reward_wf_launcher.shutdown()
         if getattr(self, "_sim_rl_launcher", None) is not None:
             self._sim_rl_launcher.shutdown()
+        if getattr(self, "_dojo_rl_launcher", None) is not None:
+            self._dojo_rl_launcher.shutdown()
         if getattr(self, "_lingbot_map_launcher", None) is not None:
             self._lingbot_map_launcher.shutdown()
         if getattr(self, "_lingbot_video_launcher", None) is not None:
@@ -26141,6 +27445,393 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_sim_rl_open_log_clicked(self) -> None:
         path = self.sim_rl_log_dir_edit.text().strip()
+        if path and os.path.isdir(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _append_reward_wf_log(self, line: str) -> None:
+        if not hasattr(self, "reward_wf_log_edit"):
+            return
+        self.reward_wf_log_edit.append(line)
+        bar = self.reward_wf_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_reward_wf_status(self, msg: str) -> None:
+        if hasattr(self, "reward_wf_status_label"):
+            self.reward_wf_status_label.setText(msg or "空闲")
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.showMessage(msg)
+
+    def _update_reward_wf_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_reward_wf_launcher", None)
+            and self._reward_wf_launcher.is_running()
+        )
+        if hasattr(self, "reward_wf_start_btn"):
+            self.reward_wf_start_btn.setEnabled(not running)
+        if hasattr(self, "reward_wf_stop_btn"):
+            self.reward_wf_stop_btn.setEnabled(running)
+        for wname in (
+            "reward_wf_mode_combo",
+            "reward_wf_dataset_combo",
+            "reward_wf_config_combo",
+            "reward_wf_root_edit",
+            "reward_wf_python_edit",
+            "reward_wf_cuda_edit",
+            "reward_wf_overrides_edit",
+            "reward_wf_refresh_btn",
+            "reward_wf_raw_edit",
+            "reward_wf_out_edit",
+            "reward_wf_train_pt_edit",
+            "reward_wf_val_pt_edit",
+            "reward_wf_samples_spin",
+            "reward_wf_val_spin",
+            "reward_wf_ratio_spin",
+            "reward_wf_seed_spin",
+            "reward_wf_keep_last_check",
+            "reward_wf_root_browse_btn",
+            "reward_wf_raw_browse_btn",
+            "reward_wf_out_browse_btn",
+            "reward_wf_train_pt_browse_btn",
+            "reward_wf_val_pt_browse_btn",
+        ):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(not running)
+
+    def _on_reward_wf_log_dir(self, path: str) -> None:
+        if hasattr(self, "reward_wf_log_dir_edit"):
+            self.reward_wf_log_dir_edit.setText(path)
+        if hasattr(self, "reward_wf_open_log_btn"):
+            self.reward_wf_open_log_btn.setEnabled(bool(path) and os.path.isdir(path))
+
+    def _on_reward_wf_root_browse(self) -> None:
+        cur = self.reward_wf_root_edit.text().strip() or RLINF_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 RLinf 仓库", cur)
+        if selected:
+            self.reward_wf_root_edit.setText(selected)
+            self.reward_wf_python_edit.setText(resolve_rlinf_python(selected))
+            self._refresh_reward_wf_configs()
+
+    def _on_reward_wf_raw_browse(self) -> None:
+        cur = self.reward_wf_raw_edit.text().strip() or os.getcwd()
+        selected = QFileDialog.getExistingDirectory(self, "选择原始采集数据目录", cur)
+        if selected:
+            self.reward_wf_raw_edit.setText(selected)
+
+    def _on_reward_wf_out_browse(self) -> None:
+        cur = self.reward_wf_out_edit.text().strip() or os.getcwd()
+        selected = QFileDialog.getExistingDirectory(self, "选择预处理输出目录", cur)
+        if selected:
+            self.reward_wf_out_edit.setText(selected)
+
+    def _on_reward_wf_train_pt_browse(self) -> None:
+        cur = self.reward_wf_train_pt_edit.text().strip() or os.getcwd()
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 train 数据集",
+            cur,
+            "Datasets (*.pt *.jsonl);;All (*)",
+        )
+        if path:
+            self.reward_wf_train_pt_edit.setText(path)
+
+    def _on_reward_wf_val_pt_browse(self) -> None:
+        cur = self.reward_wf_val_pt_edit.text().strip() or os.getcwd()
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 val 数据集",
+            cur,
+            "Datasets (*.pt *.jsonl);;All (*)",
+        )
+        if path:
+            self.reward_wf_val_pt_edit.setText(path)
+
+    def _on_reward_wf_mode_changed(self, *_args) -> None:
+        if not hasattr(self, "reward_wf_stack"):
+            return
+        mode = str(self.reward_wf_mode_combo.currentData() or "preprocess")
+        if mode in ("preprocess", "pipeline"):
+            self.reward_wf_stack.setCurrentIndex(0)
+        elif mode == "train":
+            self.reward_wf_stack.setCurrentIndex(1)
+        else:
+            self.reward_wf_stack.setCurrentIndex(2)
+        self._refresh_reward_wf_configs()
+
+    def _refresh_reward_wf_configs(self, prefer: Optional[str] = None) -> None:
+        if not hasattr(self, "reward_wf_config_combo"):
+            return
+        root = self.reward_wf_root_edit.text().strip()
+        mode = str(self.reward_wf_mode_combo.currentData() or "preprocess")
+        kind = "collect" if mode == "collect" else "train"
+        names = list_reward_workflow_configs(root, kind=kind)
+        if mode == "preprocess":
+            # 预处理不依赖 hydra config，仍展示训练 config 便于 pipeline 切换
+            names = list_reward_workflow_configs(root, kind="train") or [
+                "reward_training"
+            ]
+        current = prefer or self.reward_wf_config_combo.currentText().strip()
+        if not current:
+            current = (
+                "realworld_collect_dataset"
+                if mode == "collect"
+                else "reward_training"
+            )
+        self.reward_wf_config_combo.blockSignals(True)
+        self.reward_wf_config_combo.clear()
+        for name in names:
+            self.reward_wf_config_combo.addItem(name, name)
+        if not names:
+            self.reward_wf_config_combo.addItem(current, current)
+        idx = self.reward_wf_config_combo.findData(current)
+        if idx < 0:
+            idx = self.reward_wf_config_combo.findText(current)
+        if idx >= 0:
+            self.reward_wf_config_combo.setCurrentIndex(idx)
+        else:
+            self.reward_wf_config_combo.setEditText(current)
+        self.reward_wf_config_combo.blockSignals(False)
+
+    def _on_reward_wf_start_clicked(self) -> None:
+        if self._reward_wf_launcher.is_running():
+            self._on_reward_wf_status("Reward 工作流正在运行")
+            return
+        mode = str(self.reward_wf_mode_combo.currentData() or "preprocess")
+        ds = str(self.reward_wf_dataset_combo.currentData() or "resnet")
+        cfg = (
+            str(self.reward_wf_config_combo.currentData() or "").strip()
+            or self.reward_wf_config_combo.currentText().strip()
+        )
+        overrides_raw = self.reward_wf_overrides_edit.text().strip()
+        user_overrides = shlex.split(overrides_raw) if overrides_raw else []
+        overrides = list(user_overrides)
+        if mode == "train":
+            train_pt = self.reward_wf_train_pt_edit.text().strip()
+            val_pt = self.reward_wf_val_pt_edit.text().strip()
+            if train_pt:
+                overrides.append(f"data.train_data_paths={train_pt}")
+            if val_pt:
+                overrides.append(f"data.val_data_paths={val_pt}")
+        self.reward_wf_log_edit.clear()
+        self.reward_wf_log_dir_edit.clear()
+        self.reward_wf_open_log_btn.setEnabled(False)
+        self._reward_wf_launcher.start(
+            mode=mode,
+            rlinf_root=self.reward_wf_root_edit.text().strip(),
+            python_bin=self.reward_wf_python_edit.text().strip(),
+            config_name=cfg,
+            dataset_type=ds,
+            raw_data_path=self.reward_wf_raw_edit.text().strip(),
+            output_dir=self.reward_wf_out_edit.text().strip(),
+            num_samples=int(self.reward_wf_samples_spin.value()),
+            val_split=float(self.reward_wf_val_spin.value()),
+            fail_success_ratio=float(self.reward_wf_ratio_spin.value()),
+            seed=int(self.reward_wf_seed_spin.value()),
+            keep_last_frame=bool(self.reward_wf_keep_last_check.isChecked()),
+            cuda_devices=self.reward_wf_cuda_edit.text().strip(),
+            hydra_overrides=overrides,
+        )
+        self._update_reward_wf_ui()
+
+    def _on_reward_wf_stop_clicked(self) -> None:
+        self._append_reward_wf_log("--- 用户停止 Reward 工作流 ---")
+        self._reward_wf_launcher.stop()
+        self._update_reward_wf_ui()
+
+    def _on_reward_wf_open_log_clicked(self) -> None:
+        path = self.reward_wf_log_dir_edit.text().strip()
+        if path and os.path.isdir(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _append_dojo_rl_log(self, line: str) -> None:
+        if not hasattr(self, "dojo_rl_log_edit"):
+            return
+        self.dojo_rl_log_edit.append(line)
+        bar = self.dojo_rl_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_dojo_rl_status(self, msg: str) -> None:
+        if hasattr(self, "dojo_rl_status_label"):
+            self.dojo_rl_status_label.setText(msg or "空闲")
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.showMessage(msg)
+
+    def _update_dojo_rl_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_dojo_rl_launcher", None)
+            and self._dojo_rl_launcher.is_running()
+        )
+        if hasattr(self, "dojo_rl_start_btn"):
+            self.dojo_rl_start_btn.setEnabled(not running)
+        if hasattr(self, "dojo_rl_stop_btn"):
+            self.dojo_rl_stop_btn.setEnabled(running)
+        for wname in (
+            "dojo_rl_mode_combo",
+            "dojo_rl_config_combo",
+            "dojo_rl_root_edit",
+            "dojo_rl_python_edit",
+            "dojo_rl_cuda_edit",
+            "dojo_rl_overrides_edit",
+            "dojo_rl_model_dir_edit",
+            "dojo_rl_reward_ckpt_edit",
+            "dojo_rl_resume_edit",
+            "dojo_rl_refresh_btn",
+            "dojo_rl_auto_gpu_check",
+            "dojo_rl_root_browse_btn",
+            "dojo_rl_model_browse_btn",
+            "dojo_rl_reward_browse_btn",
+            "dojo_rl_resume_browse_btn",
+        ):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(not running)
+
+    def _on_dojo_rl_log_dir(self, path: str) -> None:
+        if hasattr(self, "dojo_rl_log_dir_edit"):
+            self.dojo_rl_log_dir_edit.setText(path)
+        if hasattr(self, "dojo_rl_open_log_btn"):
+            self.dojo_rl_open_log_btn.setEnabled(bool(path) and os.path.isdir(path))
+
+    def _on_dojo_rl_root_browse(self) -> None:
+        cur = self.dojo_rl_root_edit.text().strip() or RISE_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 RISE 仓库根目录", cur)
+        if selected:
+            self.dojo_rl_root_edit.setText(selected)
+            self.dojo_rl_python_edit.setText(resolve_rise_python(selected))
+            self._refresh_dojo_rl_configs()
+
+    def _on_dojo_rl_model_browse(self) -> None:
+        cur = self.dojo_rl_model_dir_edit.text().strip() or os.getcwd()
+        selected = QFileDialog.getExistingDirectory(self, "选择策略 ckpt 目录", cur)
+        if selected:
+            self.dojo_rl_model_dir_edit.setText(selected)
+
+    def _on_dojo_rl_reward_browse(self) -> None:
+        cur = self.dojo_rl_reward_ckpt_edit.text().strip() or os.getcwd()
+        selected = QFileDialog.getExistingDirectory(self, "选择奖励模型 ckpt 目录", cur)
+        if selected:
+            self.dojo_rl_reward_ckpt_edit.setText(selected)
+
+    def _on_dojo_rl_resume_browse(self) -> None:
+        cur = self.dojo_rl_resume_edit.text().strip() or os.getcwd()
+        selected = QFileDialog.getExistingDirectory(self, "选择 resume 目录", cur)
+        if selected:
+            self.dojo_rl_resume_edit.setText(selected)
+
+    def _refresh_dojo_rl_configs(self, prefer: Optional[str] = None) -> None:
+        if not hasattr(self, "dojo_rl_config_combo"):
+            return
+        root = self.dojo_rl_root_edit.text().strip()
+        names = list_robodojo_online_rl_configs(root)
+        current = prefer or self.dojo_rl_config_combo.currentText().strip() or "rl_release"
+        self.dojo_rl_config_combo.blockSignals(True)
+        self.dojo_rl_config_combo.clear()
+        for name in names:
+            self.dojo_rl_config_combo.addItem(name, name)
+        if not names:
+            self.dojo_rl_config_combo.addItem("rl_release", "rl_release")
+        idx = self.dojo_rl_config_combo.findData(current)
+        if idx < 0:
+            idx = self.dojo_rl_config_combo.findText(current)
+        if idx >= 0:
+            self.dojo_rl_config_combo.setCurrentIndex(idx)
+        else:
+            self.dojo_rl_config_combo.setEditText(current)
+        self.dojo_rl_config_combo.blockSignals(False)
+
+    def _on_dojo_rl_start_clicked(self) -> None:
+        if self._dojo_rl_launcher.is_running():
+            self._on_dojo_rl_status("RoboDojo 在线 RL 正在运行")
+            return
+        mode = str(self.dojo_rl_mode_combo.currentData() or "single")
+        cfg = (
+            str(self.dojo_rl_config_combo.currentData() or "").strip()
+            or self.dojo_rl_config_combo.currentText().strip()
+        )
+        if not cfg:
+            self._append_dojo_rl_log("[ERROR] 请选择 config")
+            self._on_dojo_rl_status("请选择 config")
+            return
+        overrides_raw = self.dojo_rl_overrides_edit.text().strip()
+        overrides = shlex.split(overrides_raw) if overrides_raw else []
+        model_dir = self.dojo_rl_model_dir_edit.text().strip()
+        reward_ckpt = self.dojo_rl_reward_ckpt_edit.text().strip()
+        resume_dir = self.dojo_rl_resume_edit.text().strip()
+        if not model_dir:
+            self._append_dojo_rl_log(
+                "[ERROR] 请填写策略 ckpt（rollout.model_dir），"
+                "config 默认 path/to/policy/ckpt/steps 无法加载"
+            )
+            self._on_dojo_rl_status("缺少策略 ckpt")
+            return
+        if not os.path.isdir(os.path.expanduser(model_dir)):
+            self._append_dojo_rl_log(f"[ERROR] 策略 ckpt 目录不存在: {model_dir}")
+            self._on_dojo_rl_status("策略 ckpt 无效")
+            return
+        if not reward_ckpt:
+            self._append_dojo_rl_log(
+                "[WARN] 未填奖励 ckpt；若 config 仍是 path/to/reward/... "
+                "加载奖励模型时会失败"
+            )
+        elif not os.path.isdir(os.path.expanduser(reward_ckpt)):
+            self._append_dojo_rl_log(f"[ERROR] 奖励 ckpt 目录不存在: {reward_ckpt}")
+            self._on_dojo_rl_status("奖励 ckpt 无效")
+            return
+        elif not is_rise_openpi_ckpt_dir(reward_ckpt):
+            self._append_dojo_rl_log(
+                f"[ERROR] 奖励 ckpt 目录缺少 model.safetensors: {reward_ckpt}"
+            )
+            self._on_dojo_rl_status("奖励 ckpt 无效")
+            return
+        elif os.path.abspath(os.path.expanduser(reward_ckpt)) == os.path.abspath(
+            os.path.expanduser(model_dir)
+        ):
+            self._append_dojo_rl_log(
+                "[info] 奖励 ckpt 与策略相同（本机无独立 value_release；"
+                "value head 可能随机初始化）"
+            )
+        if not is_rise_openpi_ckpt_dir(model_dir):
+            self._append_dojo_rl_log(
+                f"[ERROR] 策略 ckpt 目录缺少 model.safetensors: {model_dir}"
+            )
+            self._on_dojo_rl_status("策略 ckpt 无效")
+            return
+        if model_dir:
+            overrides.append(f"rollout.model_dir={model_dir}")
+        if reward_ckpt:
+            overrides.append(
+                f"actor.model.openpi.reward_model_ckpt={reward_ckpt}"
+            )
+        if resume_dir:
+            overrides.append(f"runner.resume_dir={resume_dir}")
+        cuda_devices = self.dojo_rl_cuda_edit.text().strip()
+        auto_single = bool(self.dojo_rl_auto_gpu_check.isChecked())
+        self.dojo_rl_log_edit.clear()
+        self.dojo_rl_log_dir_edit.clear()
+        self.dojo_rl_open_log_btn.setEnabled(False)
+        n_gpu = count_visible_cuda_devices(cuda_devices)
+        if auto_single and n_gpu == 1:
+            self._append_dojo_rl_log(
+                "[info] 检测到单卡，脚本将自动追加 placement/batch 覆盖"
+            )
+        self._dojo_rl_launcher.start(
+            mode=mode,
+            config_name=cfg,
+            rise_root=self.dojo_rl_root_edit.text().strip(),
+            python_bin=self.dojo_rl_python_edit.text().strip(),
+            cuda_devices=cuda_devices,
+            hydra_overrides=overrides,
+            auto_single_gpu=auto_single,
+        )
+        self._update_dojo_rl_ui()
+
+    def _on_dojo_rl_stop_clicked(self) -> None:
+        self._append_dojo_rl_log("--- 用户停止 RoboDojo 在线 RL ---")
+        self._dojo_rl_launcher.stop()
+        self._update_dojo_rl_ui()
+
+    def _on_dojo_rl_open_log_clicked(self) -> None:
+        path = self.dojo_rl_log_dir_edit.text().strip()
         if path and os.path.isdir(path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
