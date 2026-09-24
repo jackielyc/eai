@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 在 RoboDojo / RISE 中跑基于 RLinf 的在线强化学习（policy_online）。
-# 由 eai viewer「RoboDojo在线RL」页调用；也可手动：
+# 由 eai viewer「仿真强化学习训练」页调用；也可手动：
 #   bash run_robodojo_online_rl.sh --config rl_release
 #   bash run_robodojo_online_rl.sh --mode multi --config rl_release
 set -euo pipefail
@@ -122,13 +122,15 @@ if [[ ! -d "${DYNAMICS_ROOT}/dynamics_model" ]]; then
   exit 1
 fi
 export OPENPI_VALUE_SRC DYNAMICS_ROOT
-export PYTHONPATH="${ONLINE_ROOT}:${OPENPI_VALUE_SRC}:${DYNAMICS_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+# dynamics_model 包本身也要在 path 上：custom_pipeline 等文件用 from utils.* 顶层导入
+DYNAMICS_PKG="${DYNAMICS_ROOT}/dynamics_model"
+export PYTHONPATH="${ONLINE_ROOT}:${OPENPI_VALUE_SRC}:${DYNAMICS_ROOT}:${DYNAMICS_PKG}${PYTHONPATH:+:${PYTHONPATH}}"
 # Ray dashboard 默认 8888 常被占用，换端口避免 ERROR 刷屏
 export RAY_DASHBOARD_PORT="${RAY_DASHBOARD_PORT:-8265}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
 export NVIDIA_DRIVER_CAPABILITIES="${NVIDIA_DRIVER_CAPABILITIES:-compute,utility,graphics}"
-export CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-1}"
+export CUDA_LAUNCH_BLOCKING="${CUDA_LAUNCH_BLOCKING:-0}"
 export HYDRA_FULL_ERROR=1
 export PYTHONUNBUFFERED=1
 export PYTHONNOUSERSITE=1
@@ -150,6 +152,13 @@ _require_dynamics_assets() {
     echo "错误: 缺少 LTX text_encoder: ${RISE_DYNAMICS_BACKBONE}/text_encoder/" >&2
     ok=0
   fi
+  local shard
+  for shard in 1 2 3 4; do
+    if [[ ! -f "${RISE_DYNAMICS_BACKBONE}/text_encoder/model-0000${shard}-of-00004.safetensors" ]]; then
+      echo "错误: 缺少 LTX text_encoder shard ${shard}: ${RISE_DYNAMICS_BACKBONE}/text_encoder/model-0000${shard}-of-00004.safetensors" >&2
+      ok=0
+    fi
+  done
   if [[ ! -f "${RISE_DYNAMICS_BACKBONE}/vae/config.json" ]]; then
     echo "错误: 缺少 LTX vae: ${RISE_DYNAMICS_BACKBONE}/vae/" >&2
     ok=0
@@ -183,6 +192,20 @@ if ! python -c "import tqdm_loggable, flax, openpi_value.shared.download" >/dev/
   echo "错误: RLinf 环境缺少 openpi_value 依赖（如 tqdm_loggable / flax）。" >&2
   echo "请先运行: bash ${SCRIPT_DIR}/scripts/setup_robodojo_online_rl_deps.sh ${PY}" >&2
   exit 1
+fi
+
+# Paligemma tokenizer：openpi 会从 gs:// 拉取，无 gcsfs 时用 HTTPS 预置到缓存
+_PALIGEMMA_CACHE="${OPENPI_DATA_HOME:-${HOME}/.cache/openpi}/big_vision/paligemma_tokenizer.model"
+_PALIGEMMA_CACHE="$(python -c "import os,pathlib; print(pathlib.Path(os.path.expanduser('${_PALIGEMMA_CACHE}')).resolve())")"
+if [[ ! -f "${_PALIGEMMA_CACHE}" ]]; then
+  echo "[robodojo-online-rl] fetching paligemma_tokenizer.model -> ${_PALIGEMMA_CACHE}"
+  mkdir -p "$(dirname "${_PALIGEMMA_CACHE}")"
+  if ! curl -L --fail --retry 3 -o "${_PALIGEMMA_CACHE}.partial" \
+      "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model"; then
+    echo "错误: 无法下载 paligemma_tokenizer.model。也可: pip install gcsfs" >&2
+    exit 1
+  fi
+  mv "${_PALIGEMMA_CACHE}.partial" "${_PALIGEMMA_CACHE}"
 fi
 
 _has_override_key() {
@@ -219,6 +242,37 @@ if [[ "${NEED_DYNAMICS}" == "1" ]]; then
     echo "[robodojo-online-rl] dynamics_model_config=${RISE_DYNAMICS_INFER}"
   fi
 fi
+
+# Policy_offline_release 默认 asset_id=sample_dataset；OpenPI ckpt 常见为 assets/droid。
+# 若 ckpt 缺 sample_dataset 但有其它 norm_stats，自动建同名 symlink。
+_ensure_norm_stats_alias() {
+  local ckpt="" item
+  for item in "${EXTRA_OVERRIDES[@]+"${EXTRA_OVERRIDES[@]}"}"; do
+    case "${item}" in
+      rollout.model_dir=*) ckpt="${item#rollout.model_dir=}" ;;
+      actor.checkpoint_load_path=*) ckpt="${item#actor.checkpoint_load_path=}" ;;
+    esac
+  done
+  [[ -z "${ckpt}" ]] && return 0
+  local assets="${ckpt}/assets"
+  [[ -d "${assets}" ]] || return 0
+  if [[ -f "${assets}/sample_dataset/norm_stats.json" ]]; then
+    return 0
+  fi
+  local cand
+  for cand in droid "${assets}"/*/norm_stats.json; do
+    if [[ "${cand}" == */norm_stats.json ]]; then
+      cand="$(basename "$(dirname "${cand}")")"
+    fi
+    if [[ -f "${assets}/${cand}/norm_stats.json" ]]; then
+      ln -sfn "${cand}" "${assets}/sample_dataset"
+      echo "[robodojo-online-rl] norm_stats alias: assets/sample_dataset -> ${cand}"
+      return 0
+    fi
+  done
+  echo "警告: ${assets} 下未找到 norm_stats.json（期望 sample_dataset 或 droid）" >&2
+}
+_ensure_norm_stats_alias
 
 NUM_GPU=0
 if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then

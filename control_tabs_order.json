@@ -1,5 +1,13 @@
 {
   "order": [
+    "Astra",
+    "sub task",
+    "sub image",
+    "Reward评测",
+    "Reward训练",
+    "仿真强化学习训练",
+    "MuJoCo",
+    "仿真评测",
     "大脑",
     "回放",
     "分割",
@@ -12,16 +20,9 @@
     "训练",
     "手臂/手",
     "手骨架遥控",
-    "仿真评测",
     "真机评测",
     "ICL",
     "数据集",
-    "HumanEgo",
-    "Astra",
-    "sub task",
-    "sub image",
-    "Reward评测",
-    "Reward训练",
-    "RoboDojo在线RL"
+    "HumanEgo"
   ]
 }

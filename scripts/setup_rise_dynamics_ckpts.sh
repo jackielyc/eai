@@ -28,16 +28,47 @@ mkdir -p "${BACKBONE}" "${PRETRAINED}"
 export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 
 echo "[setup] backbone -> ${BACKBONE}"
-"${HF}" download Lightricks/LTX-Video \
-  --include "tokenizer/*" "text_encoder/*" "vae/*" \
-  --local-dir "${BACKBONE}"
+for i in 1 2 3 4 5 6 7 8; do
+  echo "[setup] LTX attempt ${i}"
+  if "${HF}" download Lightricks/LTX-Video \
+      --include "tokenizer/*" "text_encoder/*" "vae/*" \
+      --local-dir "${BACKBONE}"; then
+    break
+  fi
+  echo "[setup] LTX download interrupted, retrying..." >&2
+  sleep 5
+done
+# Ensure all 4 text_encoder shards exist (resume single files if needed)
+PY="${PY:-/home/psibot/miniconda3/envs/RLinf/bin/python}"
+for shard in 1 2 3 4; do
+  f="${BACKBONE}/text_encoder/model-0000${shard}-of-00004.safetensors"
+  if [[ ! -f "${f}" ]]; then
+    echo "[setup] resume missing shard ${shard}"
+    "${PY}" - <<PY
+from huggingface_hub import hf_hub_download
+hf_hub_download(
+    repo_id="Lightricks/LTX-Video",
+    filename="text_encoder/model-0000${shard}-of-00004.safetensors",
+    local_dir="${BACKBONE}",
+    resume_download=True,
+)
+PY
+  fi
+done
 
 echo "[setup] pretrained dynamics -> ${PRETRAINED}"
 TMP="${ROOT}/pretrained_tmp"
-rm -rf "${TMP}"
-"${HF}" download OpenDriveLab-org/RISE_Assets \
-  --include "dynamics_model/pretrained/*" \
-  --local-dir "${TMP}"
+for i in 1 2 3 4 5 6 7 8; do
+  echo "[setup] RISE_Assets attempt ${i}"
+  rm -rf "${TMP}"
+  if "${HF}" download OpenDriveLab-org/RISE_Assets \
+      --include "dynamics_model/pretrained/*" \
+      --local-dir "${TMP}"; then
+    break
+  fi
+  echo "[setup] RISE_Assets download interrupted, retrying..." >&2
+  sleep 5
+done
 if [[ -f "${TMP}/dynamics_model/pretrained/diffusion_pytorch_model.safetensors" ]]; then
   mv "${TMP}/dynamics_model/pretrained/"* "${PRETRAINED}/"
 fi

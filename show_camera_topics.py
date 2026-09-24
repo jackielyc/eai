@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测 / 真机评测 / Reward评测 / Reward训练 / 仿真在线强化学习 / RoboDojo在线RL / ICL / Astra / HumanEgo / 数据集 / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / ICL / Astra / HumanEgo / 数据集 / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -923,6 +923,9 @@ def resolve_fp_mesh_path() -> str:
 
 FP_MESH_DEFAULT = resolve_fp_mesh_path()
 EAI_DIR = os.path.dirname(os.path.abspath(__file__))
+PSI_R1_MODEL_XML = os.path.join(
+    os.path.dirname(EAI_DIR), "psi_r1_ruiyan", "urdf", "model.xml"
+)
 LINGBOT_VISION_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/lingbot-vision"
 )
@@ -980,41 +983,6 @@ def resolve_rlinf_python(repo: str = "") -> str:
         if os.path.isfile(path):
             return os.path.abspath(path)
     return "python3"
-
-
-def list_sim_online_rl_configs(
-    rlinf_root: str = "",
-    *,
-    mode: str = "",
-) -> List[str]:
-    """扫描 examples/embodiment/config 下可用于仿真在线 RL 的 yaml 名。"""
-    root = resolve_rlinf_root(rlinf_root)
-    cfg_dir = os.path.join(root, "examples", "embodiment", "config")
-    if not os.path.isdir(cfg_dir):
-        return []
-    mode_key = (mode or "").strip().lower()
-    names: List[str] = []
-    try:
-        for fname in os.listdir(cfg_dir):
-            if not fname.endswith(".yaml"):
-                continue
-            stem = fname[: -len(".yaml")]
-            # 跳过真机 / 采集 / 评测专用
-            low = stem.lower()
-            if low.startswith("realworld_") or low.endswith("_eval"):
-                continue
-            if "collect_data" in low or low.startswith("realworld_collect"):
-                continue
-            if mode_key == "async":
-                if "async" not in low:
-                    continue
-            elif mode_key == "sync":
-                if "async" in low:
-                    continue
-            names.append(stem)
-    except OSError:
-        return []
-    return sorted(names)
 
 
 def list_reward_workflow_configs(
@@ -1122,6 +1090,141 @@ def list_robodojo_online_rl_configs(rise_root: str = "") -> List[str]:
     return sorted(names)
 
 
+def resolve_mujoco_root(path: str = "") -> str:
+    raw = (path or "").strip() or os.environ.get("MUJOCO_ROOT", "") or MUJOCO_ROOT_DEFAULT
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def resolve_mujoco_python(repo: str = "") -> str:
+    for env_key in ("MUJOCO_PYTHON", "PYTHON"):
+        env = (os.environ.get(env_key) or "").strip()
+        if env and os.path.isfile(env):
+            return os.path.abspath(env)
+    candidates = list(MUJOCO_PYTHON_CANDIDATES)
+    root = resolve_mujoco_root(repo)
+    candidates.extend(
+        [
+            os.path.join(root, ".venv", "bin", "python"),
+            os.path.join(root, "venv", "bin", "python"),
+        ]
+    )
+    # Prefer interpreters that already have mujoco installed.
+    for path in candidates:
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            import subprocess
+
+            r = subprocess.run(
+                [path, "-c", "import mujoco"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+            )
+            if r.returncode == 0:
+                return os.path.abspath(path)
+        except Exception:
+            continue
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return os.path.abspath(path)
+    return "python3"
+
+
+def list_eai_mujoco_model_xmls() -> List[str]:
+    """eai 仓库本地 MJCF（绝对路径），优先 psi_r1 / assets。"""
+    out: List[str] = []
+    candidates = (
+        PSI_R1_MODEL_XML,
+    )
+    for path in candidates:
+        if os.path.isfile(path):
+            out.append(os.path.abspath(path))
+    # Other MuJoCo MJCF under assets (skip ROS package.xml etc.)
+    assets_dir = os.path.join(EAI_DIR, "assets")
+    if os.path.isdir(assets_dir):
+        try:
+            for dirpath, dirnames, filenames in os.walk(assets_dir):
+                # skip bulky unrelated trees
+                dirnames[:] = [
+                    d
+                    for d in dirnames
+                    if d not in {".git", "__pycache__", "meshes"}
+                ]
+                for fname in filenames:
+                    if not fname.endswith(".xml"):
+                        continue
+                    if fname in {"package.xml", "CMakeLists.xml"}:
+                        continue
+                    full = os.path.abspath(os.path.join(dirpath, fname))
+                    if full in out:
+                        continue
+                    try:
+                        with open(full, "r", encoding="utf-8", errors="ignore") as fh:
+                            head = fh.read(256)
+                        if "<mujoco" not in head.lower():
+                            continue
+                    except OSError:
+                        continue
+                    out.append(full)
+        except OSError:
+            pass
+    return out
+
+
+def list_mujoco_model_xmls(mujoco_root: str = "", *, limit: int = 400) -> List[str]:
+    """扫描 eai 本地 + mujoco/model 下 *.xml。
+
+    eai 本地模型返回绝对路径；官方示例返回相对 model/ 的路径。
+    """
+    root = resolve_mujoco_root(mujoco_root)
+    model_dir = os.path.join(root, "model")
+    out: List[str] = []
+    # Local project models first (selectable in UI).
+    for path in list_eai_mujoco_model_xmls():
+        out.append(path)
+        if len(out) >= int(limit):
+            return out
+    if os.path.isdir(model_dir):
+        try:
+            for dirpath, _dirnames, filenames in os.walk(model_dir):
+                for fname in filenames:
+                    if not fname.endswith(".xml"):
+                        continue
+                    full = os.path.join(dirpath, fname)
+                    rel = os.path.relpath(full, model_dir).replace(os.sep, "/")
+                    out.append(rel)
+                    if len(out) >= int(limit):
+                        break
+                if len(out) >= int(limit):
+                    break
+        except OSError:
+            pass
+    preferred = (
+        PSI_R1_MODEL_XML,
+        "humanoid/humanoid.xml",
+        "welcome/welcome.xml",
+        "car/car.xml",
+        "cube/cube_3x3x3.xml",
+        "mug/mug.xml",
+    )
+    preferred_norm = [os.path.abspath(p) if os.path.isabs(p) else p for p in preferred]
+
+    def _rank_key(p: str):
+        abs_p = os.path.abspath(p) if os.path.isabs(p) else p
+        try:
+            pref_i = preferred_norm.index(abs_p)
+        except ValueError:
+            try:
+                pref_i = preferred_norm.index(p)
+            except ValueError:
+                pref_i = 999
+        return (0 if os.path.isabs(p) else 1, pref_i, p.count("/"), p.lower())
+
+    return sorted(out, key=_rank_key)
+
+
+
 def count_visible_cuda_devices(cuda_devices: str = "") -> int:
     """根据 CUDA_VISIBLE_DEVICES / nvidia-smi 估计可见 GPU 数。"""
     raw = (cuda_devices or "").strip()
@@ -1147,99 +1250,6 @@ def count_visible_cuda_devices(cuda_devices: str = "") -> int:
         return len([ln for ln in out.splitlines() if ln.strip()])
     except Exception:
         return 0
-
-
-def default_sim_online_rl_single_gpu_overrides() -> List[str]:
-    """单卡机器上覆盖官方多卡 placement / 大批次，避免 rank 断言失败。
-
-    quickstart 等配置用合并键 ``actor,env,rollout``，不能直接改
-    ``cluster.component_placement.actor``；需先 ``~`` 删掉再 ``+`` 写入分键。
-    """
-    return [
-        "~cluster.component_placement",
-        "+cluster.component_placement.actor=0-0",
-        "+cluster.component_placement.env=0-0",
-        "+cluster.component_placement.rollout=0-0",
-        "env.train.total_num_envs=8",
-        "env.eval.total_num_envs=4",
-        "actor.micro_batch_size=1",
-        "actor.global_batch_size=40",
-        "actor.enable_offload=True",
-        "rollout.enable_offload=True",
-        "++env.train.enable_offload=True",
-    ]
-
-
-def default_openvlaoft_model_overrides() -> List[str]:
-    """若本地已有 OpenVLA-OFT 权重，返回 Hydra model_path / lora_path 覆盖。"""
-    model_dir = os.path.join(
-        RLINF_SIM_ONLINE_RL_CACHE_DIR,
-        "models",
-        "Openvla-oft-SFT-libero10-trajall",
-    )
-    lora_dir = os.path.join(
-        RLINF_SIM_ONLINE_RL_CACHE_DIR, "models", "oft-sft", "lora_004000"
-    )
-    out: List[str] = []
-    if os.path.isdir(model_dir) and (
-        os.path.isfile(os.path.join(model_dir, "config.json"))
-        or os.path.isfile(os.path.join(model_dir, "model.safetensors.index.json"))
-    ):
-        out.append(f"actor.model.model_path={model_dir}")
-        out.append(f"rollout.model.model_path={model_dir}")
-    if os.path.isdir(lora_dir):
-        out.append(f"actor.model.lora_path={lora_dir}")
-    return out
-
-
-def merge_sim_online_rl_overrides(
-    user_overrides: Sequence[str],
-    *,
-    cuda_devices: str = "",
-    auto_single_gpu: bool = True,
-    config_name: str = "",
-) -> List[str]:
-    """合并用户 Hydra overrides；单卡时自动补 placement（用户已写同名 key 则不覆盖）。"""
-    merged: List[str] = [str(x).strip() for x in user_overrides if str(x).strip()]
-
-    def _override_key(item: str) -> str:
-        text = item.strip()
-        if text.startswith("~"):
-            return text[1:]
-        if "=" in text:
-            return text.split("=", 1)[0].lstrip("+~")
-        return text.lstrip("+~")
-
-    existing_keys = {_override_key(item) for item in merged}
-
-    # OpenVLA-OFT：自动填本地已下载权重
-    cfg = (config_name or "").lower()
-    if "openvlaoft" in cfg or "openvla_oft" in cfg:
-        for item in default_openvlaoft_model_overrides():
-            key = _override_key(item)
-            if key not in existing_keys:
-                merged.append(item)
-                existing_keys.add(key)
-
-    if not auto_single_gpu:
-        return merged
-    n_gpu = count_visible_cuda_devices(cuda_devices)
-    if n_gpu != 1:
-        return merged
-
-    placement_touched = any(
-        k == "cluster.component_placement"
-        or k.startswith("cluster.component_placement.")
-        for k in existing_keys
-    )
-    for item in default_sim_online_rl_single_gpu_overrides():
-        key = _override_key(item)
-        if key.startswith("cluster.component_placement") and placement_touched:
-            continue
-        if key not in existing_keys:
-            merged.append(item)
-            existing_keys.add(key)
-    return merged
 
 
 def astra_url_prefers_external_browser(url: str) -> bool:
@@ -1315,27 +1325,46 @@ RLINF_RUN_SCRIPT = os.path.join(EAI_DIR, "run_reward_model.sh")
 RLINF_REWARD_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "reward_model")
 RLINF_REWARD_WORKFLOW_SCRIPT = os.path.join(EAI_DIR, "run_reward_workflow.sh")
 RLINF_REWARD_WORKFLOW_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "reward_workflow")
-RLINF_SIM_ONLINE_RL_SCRIPT = os.path.join(EAI_DIR, "run_sim_online_rl.sh")
-RLINF_SIM_ONLINE_RL_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "sim_online_rl")
 ROBODOJO_ONLINE_RL_SCRIPT = os.path.join(EAI_DIR, "run_robodojo_online_rl.sh")
 ROBODOJO_ONLINE_RL_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "robodojo_online_rl")
-# 常用仿真在线 RL 预设：(显示名, mode sync|async, config_name, robot_platform)
-SIM_ONLINE_RL_PRESETS: Tuple[Tuple[str, str, str, str], ...] = (
-    (
-        "同步 PPO · ManiSkill OpenVLA-OFT（单卡 quickstart）",
-        "sync",
-        "maniskill_ppo_openvlaoft_quickstart",
-        "LIBERO",
-    ),
-    ("同步 PPO · ManiSkill OpenPI", "sync", "maniskill_ppo_openpi", "LIBERO"),
-    ("同步 PPO · ManiSkill + ResNet Reward", "sync", "maniskill_ppo_mlp_resnet_reward", "LIBERO"),
-    ("同步 PPO · ManiSkill + QwenTrend Reward", "sync", "maniskill_ppo_mlp_qwentrend_reward", "LIBERO"),
-    ("同步 PPO · LIBERO Spatial OpenPI", "sync", "libero_spatial_ppo_openpi", "LIBERO"),
-    ("同步 PPO · ManiSkill OpenVLA-OFT（8 卡）", "sync", "maniskill_ppo_openvlaoft", "LIBERO"),
-    ("异步 PPO · ManiSkill OpenVLA", "async", "maniskill_async_ppo_openvla", "LIBERO"),
-    ("异步 PPO · ManiSkill OpenPI", "async", "maniskill_async_ppo_openpi", "LIBERO"),
-    ("异步 PPO · LIBERO Spatial OpenPI", "async", "libero_spatial_async_ppo_openpi", "LIBERO"),
-    ("异步 SAC · ManiSkill MLP", "async", "maniskill_sac_mlp_async", "LIBERO"),
+MUJOCO_VIEWER_SCRIPT = os.path.join(EAI_DIR, "run_mujoco_viewer.sh")
+MUJOCO_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/mujoco"
+)
+MOLMOSPACES_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/molmospaces"
+)
+MOLMOSPACES_PYTHON_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/molmospaces/bin/python"
+)
+# (label, recipe_id) — recipe_id used by launcher
+MOLMOSPACES_RUN_RECIPES: Tuple[Tuple[str, str], ...] = (
+    ("快速演示 --viewer", "quick_viewer"),
+    ("安装/更新依赖", "install_deps"),
+    ("打开仓库目录", "open_dir"),
+    ("在终端打开", "open_terminal"),
+)
+MOLMOSPACES_RESOURCES_MIN = "0.0.3a2"
+MUJOCO_PYTHON_CANDIDATES: Tuple[str, ...] = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/molmospaces/bin/python",
+    "/home/psibot/miniconda3/envs/molmospaces/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/IsaacLab-Arena/bin/python",
+    "/home/psibot/miniconda3/envs/IsaacLab-Arena/bin/python",
+    "/home/psibot/miniconda3/envs/mujoco/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/mujoco/bin/python",
+    "/home/psibot/miniconda3/envs/eai/bin/python",
+    "/home/psibot/miniconda3/bin/python",
+    "/usr/bin/python3",
+)
+MUJOCO_MODEL_PRESETS: Tuple[str, ...] = (
+    PSI_R1_MODEL_XML,
+    "humanoid/humanoid.xml",
+    "welcome/welcome.xml",
+    "car/car.xml",
+    "cube/cube_3x3x3.xml",
+    "mug/mug.xml",
+    "hammock/hammock.xml",
+    "tendon_arm/arm26.xml",
 )
 RLINF_TELEOP_SCRIPT = os.path.join(
     RLINF_ROOT_DEFAULT, "examples", "reward", "run_realworld_teleop.sh"
@@ -1366,8 +1395,7 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "真机评测",
     "Reward评测",
     "Reward训练",
-    "仿真在线强化学习",
-    "RoboDojo在线RL",
+    "仿真强化学习训练",
     "ICL",
     "Astra",
     "HumanEgo",
@@ -1436,18 +1464,23 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "reward_workflow": "Reward训练",
     "rm_train": "Reward训练",
     "Reward训练": "Reward训练",
-    "sim_online_rl": "仿真在线强化学习",
-    "online_rl": "仿真在线强化学习",
-    "sim_rl": "仿真在线强化学习",
-    "rlinf_online": "仿真在线强化学习",
-    "仿真在线强化学习": "仿真在线强化学习",
-    "robodojo_rl": "RoboDojo在线RL",
-    "robodojo_online": "RoboDojo在线RL",
-    "robodojo_online_rl": "RoboDojo在线RL",
-    "rise_online": "RoboDojo在线RL",
-    "rise_rl": "RoboDojo在线RL",
-    "dojo_rl": "RoboDojo在线RL",
-    "RoboDojo在线RL": "RoboDojo在线RL",
+    "sim_rl_train": "仿真强化学习训练",
+    "sim_online_rl_train": "仿真强化学习训练",
+    "仿真强化学习训练": "仿真强化学习训练",
+    "robodojo_rl": "仿真强化学习训练",
+    "robodojo_online": "仿真强化学习训练",
+    "robodojo_online_rl": "仿真强化学习训练",
+    "rise_online": "仿真强化学习训练",
+    "rise_rl": "仿真强化学习训练",
+    "dojo_rl": "仿真强化学习训练",
+    "RoboDojo在线RL": "仿真强化学习训练",
+    "mujoco": "仿真评测",
+    "MuJoCo": "仿真评测",
+    "mj": "仿真评测",
+    "simulate": "仿真评测",
+    "molmospaces": "仿真评测",
+    "MolmoSpaces": "仿真评测",
+    "spaces": "仿真评测",
     "ctx": "ICL",
     "context": "ICL",
     "icl": "ICL",
@@ -15180,6 +15213,17 @@ class RoboDojoEvalLauncher(QObject):
             exports.append(f"export ISAAC_CAM_BRIDGE_DIR={shlex.quote(bridge_dir)}")
             exports.append(f"export EAI_DIR={shlex.quote(EAI_DIR)}")
 
+        # GUI on TurboVNC: VirtualGL → NVIDIA (else Mesa llvmpipe for viewport).
+        if self._use_gui:
+            exports.extend(
+                [
+                    "export ROBODOJO_USE_VGL=${ROBODOJO_USE_VGL:-1}",
+                    "export ROBODOJO_VGL_DEVICE=${ROBODOJO_VGL_DEVICE:-egl}",
+                    "export ROBODOJO_ISAAC_HEADLESS=0",
+                    "export __GLX_VENDOR_LIBRARY_NAME=nvidia",
+                    "export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json",
+                ]
+            )
         starvla_ckpt_note = ""
         if is_starvla:
             variant = resolve_starvla_hf_variant(ckpt)
@@ -15325,6 +15369,15 @@ class RoboDojoEvalLauncher(QObject):
             qenv.remove("ROBODOJO_SKIP_POLICY_SERVER")
             qenv.remove("ROBODOJO_FORCE_PROTOCOL")
         qenv.insert("EVAL_NUM", eval_num)
+        if self._use_gui:
+            qenv.insert("ROBODOJO_USE_VGL", qenv.value("ROBODOJO_USE_VGL") or "1")
+            qenv.insert("ROBODOJO_VGL_DEVICE", qenv.value("ROBODOJO_VGL_DEVICE") or "egl")
+            qenv.insert("ROBODOJO_ISAAC_HEADLESS", "0")
+            qenv.insert("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+            if not (qenv.value("VK_ICD_FILENAMES") or "").strip():
+                qenv.insert(
+                    "VK_ICD_FILENAMES", "/etc/vulkan/icd.d/nvidia_icd.json"
+                )
         conda_bin = os.path.join(conda_base, "bin")
         path_now = qenv.value("PATH", "")
         if conda_bin not in path_now.split(":"):
@@ -15352,6 +15405,12 @@ class RoboDojoEvalLauncher(QObject):
             f"policy={policy_label} ckpt={ckpt} action={action_type} "
             f"EVAL_NUM={eval_num} bridge={bridge_dir or '(unset)'}"
         )
+        if self._use_gui:
+            self.log_line.emit(
+                "  OpenGL: VirtualGL→NVIDIA "
+                f"(ROBODOJO_USE_VGL={qenv.value('ROBODOJO_USE_VGL') or '1'}, "
+                f"device={qenv.value('ROBODOJO_VGL_DEVICE') or 'egl'})"
+            )
         if skip_policy:
             self.log_line.emit(
                 "  策略=无：仅启评测；Isaac 使用进程内零动作，不会连接 WebSocket 策略服务"
@@ -16271,198 +16330,6 @@ class RewardModelLauncher(QObject):
             self.running_changed.emit(False)
 
 
-class SimOnlineRLLauncher(QObject):
-    """启动 RLinf 仿真在线强化学习（sync PPO/GRPO 或 async PPO/SAC）。"""
-
-    log_line = pyqtSignal(str)
-    status_message = pyqtSignal(str)
-    running_changed = pyqtSignal(bool)
-    log_dir_ready = pyqtSignal(str)
-
-    def __init__(self, parent: Optional[QObject] = None) -> None:
-        super().__init__(parent)
-        self._process: Optional[QProcess] = None
-        self._log_dir: str = ""
-
-    def is_running(self) -> bool:
-        return self._process is not None and self._process.state() in (
-            QProcess.Starting,
-            QProcess.Running,
-        )
-
-    def start(
-        self,
-        *,
-        mode: str,
-        config_name: str,
-        rlinf_root: str,
-        python_bin: str = "",
-        robot_platform: str = "LIBERO",
-        cuda_devices: str = "",
-        hydra_overrides: Sequence[str] = (),
-    ) -> None:
-        if self.is_running():
-            self.status_message.emit("仿真在线 RL 正在运行")
-            return
-        script = RLINF_SIM_ONLINE_RL_SCRIPT
-        if not os.path.isfile(script):
-            self.status_message.emit(f"未找到脚本: {script}")
-            return
-        root = resolve_rlinf_root(rlinf_root)
-        py = (python_bin or "").strip() or resolve_rlinf_python(root)
-        cfg = (config_name or "").strip()
-        if not cfg:
-            self.status_message.emit("请选择 Hydra config")
-            return
-        cfg_path = os.path.join(root, "examples", "embodiment", "config", f"{cfg}.yaml")
-        if not os.path.isfile(cfg_path):
-            self.status_message.emit(f"配置不存在: {cfg_path}")
-            return
-        mode_norm = (mode or "sync").strip().lower()
-        if mode_norm not in ("sync", "async"):
-            self.status_message.emit(f"未知 mode: {mode}")
-            return
-        platform = (robot_platform or "LIBERO").strip() or "LIBERO"
-        os.makedirs(RLINF_SIM_ONLINE_RL_CACHE_DIR, exist_ok=True)
-
-        args = [
-            "--mode",
-            mode_norm,
-            "--config",
-            cfg,
-            "--robot-platform",
-            platform,
-            "--rlinf-root",
-            root,
-            "--python",
-            py,
-        ]
-        overrides = [str(x).strip() for x in hydra_overrides if str(x).strip()]
-        if overrides:
-            args.append("--")
-            args.extend(overrides)
-
-        qenv = QProcessEnvironment.systemEnvironment()
-        qenv.remove("PYTHONPATH")
-        qenv.remove("PYTHONHOME")
-        qenv.insert("PYTHONNOUSERSITE", "1")
-        qenv.insert("PYTHONUNBUFFERED", "1")
-        qenv.insert("RLINF_ROOT", root)
-        qenv.insert("RLINF_PYTHON", py)
-        qenv.insert("ROBOT_PLATFORM", platform)
-        qenv.insert("MUJOCO_GL", qenv.value("MUJOCO_GL") or "egl")
-        qenv.insert("PYOPENGL_PLATFORM", qenv.value("PYOPENGL_PLATFORM") or "egl")
-        cuda = (cuda_devices or "").strip()
-        if cuda:
-            qenv.insert("CUDA_VISIBLE_DEVICES", cuda)
-
-        self._log_dir = ""
-        proc = QProcess(self)
-        proc.setProcessChannelMode(QProcess.MergedChannels)
-        proc.readyReadStandardOutput.connect(self._on_process_output)
-        proc.finished.connect(self._on_process_finished)
-        proc.errorOccurred.connect(self._on_process_error)
-        proc.setWorkingDirectory(root)
-        proc.setProcessEnvironment(qenv)
-        # setsid：便于停止时杀掉整个训练进程组（含可能的 Ray 子进程）
-        proc.start("setsid", ["bash", script, *args])
-        self._process = proc
-        self.running_changed.emit(True)
-        self.log_line.emit(
-            f"$ bash run_sim_online_rl.sh --mode {mode_norm} --config {cfg} "
-            f"--robot-platform {platform}"
-        )
-        if overrides:
-            self.log_line.emit(f"  overrides: {' '.join(overrides)}")
-        self.status_message.emit(
-            f"正在启动仿真在线 RL（{mode_norm} / {cfg}）…"
-        )
-
-    def stop(self) -> None:
-        if not self.is_running():
-            self.status_message.emit("当前没有运行中的仿真在线 RL")
-            return
-        self.status_message.emit("正在停止仿真在线 RL…")
-        if self._process is not None:
-            pid = int(self._process.processId())
-            if pid > 0:
-                try:
-                    os.killpg(pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError, OSError):
-                    self._process.terminate()
-            else:
-                self._process.terminate()
-            QTimer.singleShot(4000, self._force_kill)
-
-    def shutdown(self) -> None:
-        if self._process is not None and self._process.state() != QProcess.NotRunning:
-            pid = int(self._process.processId())
-            if pid > 0:
-                try:
-                    os.killpg(pid, signal.SIGTERM)
-                except (ProcessLookupError, PermissionError, OSError):
-                    self._process.terminate()
-            else:
-                self._process.terminate()
-            self._process.waitForFinished(2000)
-        if self._process is not None and self._process.state() != QProcess.NotRunning:
-            pid = int(self._process.processId())
-            if pid > 0:
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
-                    self._process.kill()
-            else:
-                self._process.kill()
-            self._process.waitForFinished(800)
-        self._process = None
-        self.running_changed.emit(False)
-
-    def _force_kill(self) -> None:
-        if self._process is None or self._process.state() == QProcess.NotRunning:
-            return
-        pid = int(self._process.processId())
-        if pid > 0:
-            try:
-                os.killpg(pid, signal.SIGKILL)
-                return
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-        self._process.kill()
-
-    def _on_process_output(self) -> None:
-        if self._process is None:
-            return
-        data = bytes(self._process.readAllStandardOutput()).decode(
-            "utf-8", errors="replace"
-        )
-        for line in data.splitlines():
-            text = line.rstrip()
-            if not text:
-                continue
-            if text.startswith("[sim-online-rl] log_dir="):
-                self._log_dir = text.split("=", 1)[-1].strip()
-                if self._log_dir:
-                    self.log_dir_ready.emit(self._log_dir)
-            self.log_line.emit(text)
-
-    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
-        self.running_changed.emit(False)
-        if exit_code == 0:
-            self.log_line.emit("--- 仿真在线 RL 正常退出 ---")
-            self.status_message.emit("仿真在线 RL 已完成")
-        else:
-            self.log_line.emit(f"--- 仿真在线 RL 退出 (code={exit_code}) ---")
-            self.status_message.emit(f"仿真在线 RL 异常退出 (code={exit_code})")
-        self._process = None
-
-    def _on_process_error(self, error: QProcess.ProcessError) -> None:
-        if error == QProcess.FailedToStart:
-            self.log_line.emit("[ERROR] 无法启动仿真在线 RL 进程")
-            self.status_message.emit("无法启动仿真在线 RL")
-            self.running_changed.emit(False)
-
-
 class RewardWorkflowLauncher(QObject):
     """启动 RLinf 奖励模型工作流（采集 / 预处理 / 训练 / 预处理→训练）。"""
 
@@ -16728,7 +16595,7 @@ class RoboDojoOnlineRLLauncher(QObject):
         auto_single_gpu: bool = True,
     ) -> None:
         if self.is_running():
-            self.status_message.emit("RoboDojo 在线 RL 正在运行")
+            self.status_message.emit("仿真强化学习训练 正在运行")
             return
         script = ROBODOJO_ONLINE_RL_SCRIPT
         if not os.path.isfile(script):
@@ -16807,14 +16674,14 @@ class RoboDojoOnlineRLLauncher(QObject):
             f"$ bash run_robodojo_online_rl.sh --mode {mode_norm} --config {cfg}"
         )
         self.status_message.emit(
-            f"正在启动 RoboDojo 在线 RL（{mode_norm} / {cfg}）…"
+            f"正在启动 仿真强化学习训练（{mode_norm} / {cfg}）…"
         )
 
     def stop(self) -> None:
         if not self.is_running():
-            self.status_message.emit("当前没有运行中的 RoboDojo 在线 RL")
+            self.status_message.emit("当前没有运行中的 仿真强化学习训练")
             return
-        self.status_message.emit("正在停止 RoboDojo 在线 RL…")
+        self.status_message.emit("正在停止 仿真强化学习训练…")
         if self._process is not None:
             pid = int(self._process.processId())
             if pid > 0:
@@ -16881,17 +16748,240 @@ class RoboDojoOnlineRLLauncher(QObject):
     def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
         self.running_changed.emit(False)
         if exit_code == 0:
-            self.log_line.emit("--- RoboDojo 在线 RL 正常退出 ---")
-            self.status_message.emit("RoboDojo 在线 RL 已完成")
+            self.log_line.emit("--- 仿真强化学习训练 正常退出 ---")
+            self.status_message.emit("仿真强化学习训练 已完成")
         else:
-            self.log_line.emit(f"--- RoboDojo 在线 RL 退出 (code={exit_code}) ---")
-            self.status_message.emit(f"RoboDojo 在线 RL 异常退出 (code={exit_code})")
+            self.log_line.emit(f"--- 仿真强化学习训练 退出 (code={exit_code}) ---")
+            self.status_message.emit(f"仿真强化学习训练 异常退出 (code={exit_code})")
         self._process = None
 
     def _on_process_error(self, error: QProcess.ProcessError) -> None:
         if error == QProcess.FailedToStart:
-            self.log_line.emit("[ERROR] 无法启动 RoboDojo 在线 RL 进程")
-            self.status_message.emit("无法启动 RoboDojo 在线 RL")
+            self.log_line.emit("[ERROR] 无法启动 仿真强化学习训练 进程")
+            self.status_message.emit("无法启动 仿真强化学习训练")
+            self.running_changed.emit(False)
+
+
+
+class MuJoCoViewerLauncher(QObject):
+    """启动 MuJoCo 交互式图形界面（viewer / simulate）。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._label = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        mjcf_path: str,
+        mujoco_root: str = "",
+        python_bin: str = "",
+        mode: str = "auto",
+        install: bool = False,
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("MuJoCo 正在运行")
+            return
+        script = MUJOCO_VIEWER_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        root = resolve_mujoco_root(mujoco_root)
+        py = (python_bin or "").strip() or resolve_mujoco_python(root)
+        mode_norm = (mode or "auto").strip().lower() or "auto"
+        if mode_norm not in ("auto", "python", "simulate", "egl"):
+            self.status_message.emit(f"未知 mode: {mode}")
+            return
+
+        args: List[str] = [
+            "--mujoco-root",
+            root,
+            "--python",
+            py,
+            "--mode",
+            mode_norm,
+        ]
+        if install:
+            args.append("--install")
+            self._label = "install mujoco"
+        else:
+            mjcf = os.path.abspath(os.path.expanduser((mjcf_path or "").strip()))
+            if not mjcf:
+                self.status_message.emit("请选择 MJCF 模型")
+                return
+            if not os.path.isfile(mjcf):
+                self.status_message.emit(f"模型不存在: {mjcf}")
+                return
+            args.extend(["--mjcf", mjcf])
+            self._label = os.path.basename(mjcf)
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.insert("PYTHONUNBUFFERED", "1")
+        qenv.insert("MUJOCO_ROOT", root)
+        qenv.insert("MUJOCO_PYTHON", py)
+        # Prefer VirtualGL → NVIDIA for interactive viewer (TurboVNC has no GPU GLX).
+        if mode_norm != "egl":
+            qenv.insert("MUJOCO_GL", "glfw")
+            qenv.insert("MUJOCO_USE_VGL", qenv.value("MUJOCO_USE_VGL") or "1")
+            qenv.insert("MUJOCO_VGL_DEVICE", qenv.value("MUJOCO_VGL_DEVICE") or "egl")
+        else:
+            qenv.insert("MUJOCO_GL", qenv.value("MUJOCO_GL") or "egl")
+        # GUI 需要显示；保留宿主 DISPLAY / XAUTHORITY
+        if not (qenv.value("DISPLAY") or "").strip():
+            self.log_line.emit(
+                "[warn] DISPLAY 为空，图形窗口可能无法弹出（本机桌面/X11 转发）"
+            )
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(root if os.path.isdir(root) else EAI_DIR)
+        proc.setProcessEnvironment(qenv)
+        proc.start("setsid", ["bash", script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit(f"$ bash run_mujoco_viewer.sh {' '.join(args)}")
+        if install:
+            self.status_message.emit("正在安装 mujoco…")
+        else:
+            self.status_message.emit(f"正在启动 MuJoCo: {self._label}")
+
+    def start_cwd_command(
+        self,
+        *,
+        cwd: str,
+        argv: List[str],
+        label: str = "",
+        env_extra: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """在指定目录启动通用命令（如 MolmoSpaces）。"""
+        if self.is_running():
+            self.status_message.emit("MuJoCo / MolmoSpaces 正在运行")
+            return
+        work = os.path.abspath(os.path.expanduser((cwd or "").strip()))
+        if not os.path.isdir(work):
+            self.status_message.emit(f"目录不存在: {work}")
+            return
+        if not argv:
+            self.status_message.emit("命令为空")
+            return
+        self._label = (label or argv[0] or "cmd").strip() or "cmd"
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.insert("PYTHONUNBUFFERED", "1")
+        if env_extra:
+            for k, v in env_extra.items():
+                if v is not None:
+                    qenv.insert(str(k), str(v))
+        if not (qenv.value("DISPLAY") or "").strip():
+            self.log_line.emit(
+                "[warn] DISPLAY 为空，图形窗口可能无法弹出（本机桌面/X11 转发）"
+            )
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(work)
+        proc.setProcessEnvironment(qenv)
+        # setsid so stop() can kill the whole process group
+        proc.start("setsid", list(argv))
+        self._process = proc
+        self.running_changed.emit(True)
+        shown = " ".join(shlex.quote(a) for a in argv)
+        self.log_line.emit(f"$ (cd {shlex.quote(work)} && {shown})")
+        self.status_message.emit(f"正在启动: {self._label}")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 MuJoCo")
+            return
+        self.status_message.emit("正在停止 MuJoCo…")
+        if self._process is not None:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            QTimer.singleShot(3000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            self._process.waitForFinished(1500)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.kill()
+            else:
+                self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is None or self._process.state() == QProcess.NotRunning:
+            return
+        pid = int(self._process.processId())
+        if pid > 0:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if text:
+                self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        label = self._label or "MuJoCo"
+        if exit_code == 0:
+            self.log_line.emit(f"--- MuJoCo 正常退出 ({label}) ---")
+            self.status_message.emit(f"MuJoCo 已退出: {label}")
+        else:
+            self.log_line.emit(f"--- MuJoCo 退出 (code={exit_code}, {label}) ---")
+            self.status_message.emit(f"MuJoCo 异常退出 (code={exit_code})")
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 MuJoCo 进程")
+            self.status_message.emit("无法启动 MuJoCo")
             self.running_changed.emit(False)
 
 
@@ -19365,6 +19455,39 @@ class CameraTopicWindow(QMainWindow):
         sim_outer.setContentsMargins(8, 6, 8, 6)
         sim_outer.setSpacing(6)
 
+        self.sim_hint_label = QLabel("")
+        self.sim_hint_label.setWordWrap(True)
+        self.sim_hint_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        sim_outer.addWidget(self.sim_hint_label)
+
+        sim_backend_row = QHBoxLayout()
+        sim_backend_row.setSpacing(12)
+        sim_backend_row.addWidget(QLabel("仿真后端"))
+        self.sim_backend_isaac_radio = QRadioButton("Isaac / RoboDojo")
+        self.sim_backend_mujoco_radio = QRadioButton("MuJoCo")
+        self.sim_backend_spaces_radio = QRadioButton("MolmoSpaces")
+        self.sim_backend_isaac_radio.setChecked(True)
+        self._sim_backend_group = QButtonGroup(self)
+        self._sim_backend_group.addButton(self.sim_backend_isaac_radio, 0)
+        self._sim_backend_group.addButton(self.sim_backend_mujoco_radio, 1)
+        self._sim_backend_group.addButton(self.sim_backend_spaces_radio, 2)
+        self.sim_backend_isaac_radio.toggled.connect(self._on_sim_backend_changed)
+        self.sim_backend_mujoco_radio.toggled.connect(self._on_sim_backend_changed)
+        self.sim_backend_spaces_radio.toggled.connect(self._on_sim_backend_changed)
+        sim_backend_row.addWidget(self.sim_backend_isaac_radio)
+        sim_backend_row.addWidget(self.sim_backend_mujoco_radio)
+        sim_backend_row.addWidget(self.sim_backend_spaces_radio)
+        sim_backend_row.addStretch(1)
+        sim_outer.addLayout(sim_backend_row)
+
+        self.sim_backend_stack = QStackedWidget()
+
+        # --- page 0: Isaac / RoboDojo ---
+        isaac_page = QWidget()
+        isaac_outer = QVBoxLayout(isaac_page)
+        isaac_outer.setContentsMargins(0, 0, 0, 0)
+        isaac_outer.setSpacing(6)
+
         sim_hint = QLabel(
             "启动 RoboDojo 评测后，相关进程（Isaac / 策略 / 相机桥）会常驻运行，"
             "直到点击「停止评测」。同时自动开图像预览：左腕 / 头部 / 右腕"
@@ -19372,7 +19495,7 @@ class CameraTopicWindow(QMainWindow):
         )
         sim_hint.setWordWrap(True)
         sim_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        sim_outer.addWidget(sim_hint)
+        isaac_outer.addWidget(sim_hint)
 
         sim_dir_row = QHBoxLayout()
         sim_dir_row.setSpacing(6)
@@ -19389,7 +19512,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_bridge_browse_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_bridge_browse_btn.clicked.connect(self._on_sim_bridge_browse_clicked)
         sim_dir_row.addWidget(self.sim_bridge_browse_btn)
-        sim_outer.addLayout(sim_dir_row)
+        isaac_outer.addLayout(sim_dir_row)
 
         sim_ctrl_row = QHBoxLayout()
         sim_ctrl_row.setSpacing(6)
@@ -19424,13 +19547,13 @@ class CameraTopicWindow(QMainWindow):
         self.sim_clear_log_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_clear_log_btn.clicked.connect(self._on_sim_clear_log_clicked)
         sim_ctrl_row.addWidget(self.sim_clear_log_btn)
-        sim_outer.addLayout(sim_ctrl_row)
+        isaac_outer.addLayout(sim_ctrl_row)
 
         self.sim_frame_status_label = QLabel("")
         self.sim_frame_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.sim_frame_status_label.setWordWrap(True)
         self.sim_frame_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        sim_outer.addWidget(self.sim_frame_status_label)
+        isaac_outer.addWidget(self.sim_frame_status_label)
 
         self.sim_log_edit = QTextEdit()
         self.sim_log_edit.setReadOnly(True)
@@ -19442,11 +19565,11 @@ class CameraTopicWindow(QMainWindow):
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        sim_outer.addWidget(self.sim_log_edit)
+        isaac_outer.addWidget(self.sim_log_edit)
 
         sim_run_sep = QLabel("启动 RoboDojo 评测")
         sim_run_sep.setStyleSheet(f"color: {UI_TEXT_PRIMARY}; font-weight: bold;")
-        sim_outer.addWidget(sim_run_sep)
+        isaac_outer.addWidget(sim_run_sep)
 
         sim_run_row = QHBoxLayout()
         sim_run_row.setSpacing(6)
@@ -19501,12 +19624,12 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_action_combo.addItem("joint", "joint")
         sim_run_row.addWidget(self.sim_eval_action_combo)
         self.sim_eval_use_gui_check = QCheckBox("仿真界面")
-        self.sim_eval_use_gui_check.setChecked(False)
+        self.sim_eval_use_gui_check.setChecked(True)
         self.sim_eval_use_gui_check.setFocusPolicy(Qt.NoFocus)
         self.sim_eval_use_gui_check.setToolTip(
             "勾选：Isaac Sim GUI（starVLA→run_gui_starvla_pi_v3.sh，其它→run_gui_eval.sh）。\n"
-            "不勾选：headless（starVLA→eval_hf_robodojo.sh + STARVLA_CKPT_PATH，"
-            "其它→robodojo.sh eval；eval_policy 带 --headless，不弹仿真窗口）。"
+            "默认 VirtualGL→NVIDIA 硬件加速视口（ROBODOJO_USE_VGL=1）。\n"
+            "不勾选：headless（无 Isaac 窗口；相机预览仍可通过桥接看到）。"
         )
         sim_run_row.addWidget(self.sim_eval_use_gui_check)
         self.sim_eval_run_status = QLabel("评测: 空闲")
@@ -19535,11 +19658,11 @@ class CameraTopicWindow(QMainWindow):
         )
         self.sim_eval_stop_run_btn.clicked.connect(self._on_sim_eval_stop_run_clicked)
         sim_run_row.addWidget(self.sim_eval_stop_run_btn)
-        sim_outer.addLayout(sim_run_row)
+        isaac_outer.addLayout(sim_run_row)
 
         sim_eval_sep = QLabel("评测结果（RoboDojo）")
         sim_eval_sep.setStyleSheet(f"color: {UI_TEXT_PRIMARY}; font-weight: bold;")
-        sim_outer.addWidget(sim_eval_sep)
+        isaac_outer.addWidget(sim_eval_sep)
 
         sim_eval_root_row = QHBoxLayout()
         sim_eval_root_row.setSpacing(6)
@@ -19558,7 +19681,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_refresh_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_eval_refresh_btn.clicked.connect(self._refresh_sim_eval_tree)
         sim_eval_root_row.addWidget(self.sim_eval_refresh_btn)
-        sim_outer.addLayout(sim_eval_root_row)
+        isaac_outer.addLayout(sim_eval_root_row)
 
         sim_eval_filter_row = QHBoxLayout()
         sim_eval_filter_row.setSpacing(6)
@@ -19589,7 +19712,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_open_video_btn.setToolTip("窗口内播放选中 mp4（双击列表项亦可）")
         self.sim_eval_open_video_btn.clicked.connect(self._on_sim_eval_open_video_clicked)
         sim_eval_filter_row.addWidget(self.sim_eval_open_video_btn)
-        sim_outer.addLayout(sim_eval_filter_row)
+        isaac_outer.addLayout(sim_eval_filter_row)
 
         sim_eval_split = QSplitter(Qt.Horizontal)
         self.sim_eval_tree = QTreeWidget()
@@ -19631,7 +19754,7 @@ class CameraTopicWindow(QMainWindow):
         sim_eval_split.addWidget(sim_eval_right)
         sim_eval_split.setStretchFactor(0, 2)
         sim_eval_split.setStretchFactor(1, 3)
-        sim_outer.addWidget(sim_eval_split, 1)
+        isaac_outer.addWidget(sim_eval_split, 1)
 
         self._sim_bridge_launcher = IsaacCamBridgeLauncher(self)
         self._sim_bridge_launcher.log_line.connect(self._append_sim_log)
@@ -19656,6 +19779,162 @@ class CameraTopicWindow(QMainWindow):
         self._refresh_sim_frame_status()
         self._refresh_sim_eval_tree()
         self._on_sim_eval_policy_changed()
+        self.sim_backend_stack.addWidget(isaac_page)
+
+        # --- page 1: MuJoCo ---
+        mj_page = QWidget()
+        mj_page_l = QVBoxLayout(mj_page)
+        mj_page_l.setContentsMargins(0, 0, 0, 0)
+        mj_page_l.setSpacing(6)
+        mj_path_row = QHBoxLayout()
+        mj_path_row.setSpacing(6)
+        mj_path_row.addWidget(QLabel("MuJoCo"))
+        self.mujoco_root_edit = QLineEdit(
+            os.environ.get("MUJOCO_ROOT", MUJOCO_ROOT_DEFAULT)
+        )
+        self.mujoco_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        mj_path_row.addWidget(self.mujoco_root_edit, 1)
+        self.mujoco_root_browse_btn = QPushButton("…")
+        self.mujoco_root_browse_btn.setFixedWidth(28)
+        self.mujoco_root_browse_btn.clicked.connect(self._on_mujoco_root_browse)
+        mj_path_row.addWidget(self.mujoco_root_browse_btn)
+        mj_path_row.addWidget(QLabel("Python"))
+        self.mujoco_python_edit = QLineEdit(
+            resolve_mujoco_python(self.mujoco_root_edit.text())
+        )
+        self.mujoco_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        mj_path_row.addWidget(self.mujoco_python_edit, 1)
+        self.mujoco_install_btn = QPushButton("安装 mujoco")
+        self.mujoco_install_btn.setToolTip("pip install -U mujoco（使用上方 Python）")
+        self.mujoco_install_btn.clicked.connect(self._on_mujoco_install_clicked)
+        mj_path_row.addWidget(self.mujoco_install_btn)
+        mj_page_l.addLayout(mj_path_row)
+
+        mj_model_row = QHBoxLayout()
+        mj_model_row.setSpacing(6)
+        mj_model_row.addWidget(QLabel("模型"))
+        self.mujoco_model_combo = ImeSafeComboBox()
+        self.mujoco_model_combo.setEditable(True)
+        self.mujoco_model_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.mujoco_model_combo.setMinimumWidth(260)
+        self.mujoco_model_combo.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.mujoco_model_combo.setToolTip(
+            "eai/assets 本地模型（绝对路径）或相对 mujoco/model/ 的官方示例"
+        )
+        mj_model_row.addWidget(self.mujoco_model_combo, 1)
+        self.mujoco_refresh_btn = QPushButton("刷新")
+        self.mujoco_refresh_btn.setToolTip("重新扫描 eai/assets 与 mujoco/model/**/*.xml")
+        self.mujoco_refresh_btn.clicked.connect(self._refresh_mujoco_models)
+        mj_model_row.addWidget(self.mujoco_refresh_btn)
+        self.mujoco_mjcf_browse_btn = QPushButton("浏览…")
+        self.mujoco_mjcf_browse_btn.clicked.connect(self._on_mujoco_mjcf_browse)
+        mj_model_row.addWidget(self.mujoco_mjcf_browse_btn)
+        mj_model_row.addWidget(QLabel("模式"))
+        self.mujoco_mode_combo = ImeSafeComboBox()
+        self.mujoco_mode_combo.addItem("自动(VGL/NVIDIA)", "auto")
+        self.mujoco_mode_combo.addItem("Python viewer (VGL)", "python")
+        self.mujoco_mode_combo.addItem("simulate", "simulate")
+        self.mujoco_mode_combo.addItem("EGL 回退", "egl")
+        self.mujoco_mode_combo.setToolTip(
+            "默认 VirtualGL→NVIDIA 硬件加速；无 GLX 时 auto 才走 EGL+Tk"
+        )
+        mj_model_row.addWidget(self.mujoco_mode_combo)
+        mj_page_l.addLayout(mj_model_row)
+        mj_page_l.addStretch(1)
+        self.sim_backend_stack.addWidget(mj_page)
+
+        # --- page 2: MolmoSpaces ---
+        sp_page = QWidget()
+        sp_page_l = QVBoxLayout(sp_page)
+        sp_page_l.setContentsMargins(0, 0, 0, 0)
+        sp_page_l.setSpacing(6)
+        mj_spaces_row = QHBoxLayout()
+        mj_spaces_row.setSpacing(6)
+        mj_spaces_row.addWidget(QLabel("仓库"))
+        self.molmospaces_root_edit = QLineEdit(
+            os.environ.get("MOLMOSPACES_ROOT", MOLMOSPACES_ROOT_DEFAULT)
+        )
+        self.molmospaces_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.molmospaces_root_edit.setToolTip(
+            "MolmoSpaces 仓库路径（默认 "
+            f"{MOLMOSPACES_ROOT_DEFAULT}）"
+        )
+        mj_spaces_row.addWidget(self.molmospaces_root_edit, 1)
+        self.molmospaces_root_browse_btn = QPushButton("…")
+        self.molmospaces_root_browse_btn.setFixedWidth(28)
+        self.molmospaces_root_browse_btn.clicked.connect(
+            self._on_molmospaces_root_browse
+        )
+        mj_spaces_row.addWidget(self.molmospaces_root_browse_btn)
+        mj_spaces_row.addWidget(QLabel("动作"))
+        self.molmospaces_recipe_combo = ImeSafeComboBox()
+        for label, recipe_id in MOLMOSPACES_RUN_RECIPES:
+            self.molmospaces_recipe_combo.addItem(label, recipe_id)
+        self.molmospaces_recipe_combo.setToolTip(
+            "快速演示: VirtualGL→NVIDIA；无 GLX 时 EGL+Tk 回退"
+        )
+        mj_spaces_row.addWidget(self.molmospaces_recipe_combo)
+        sp_page_l.addLayout(mj_spaces_row)
+        sp_hint = QLabel(
+            "使用 molmospaces conda 环境；与 Isaac 评测 / MuJoCo viewer 互斥。"
+        )
+        sp_hint.setWordWrap(True)
+        sp_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        sp_page_l.addWidget(sp_hint)
+        sp_page_l.addStretch(1)
+        self.sim_backend_stack.addWidget(sp_page)
+
+        sim_outer.addWidget(self.sim_backend_stack, 1)
+
+        # Shared MuJoCo / MolmoSpaces run controls (hidden on Isaac backend)
+        self.mujoco_run_row_widget = QWidget()
+        mj_run_row = QHBoxLayout(self.mujoco_run_row_widget)
+        mj_run_row.setContentsMargins(0, 0, 0, 0)
+        mj_run_row.setSpacing(6)
+        self.mujoco_start_btn = QPushButton("启动 MuJoCo")
+        self.mujoco_start_btn.setToolTip("启动当前所选后端（MuJoCo 或 MolmoSpaces）")
+        self.mujoco_start_btn.clicked.connect(self._on_mujoco_unified_start_clicked)
+        mj_run_row.addWidget(self.mujoco_start_btn)
+        self.mujoco_stop_btn = QPushButton("停止")
+        self.mujoco_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.mujoco_stop_btn.setEnabled(False)
+        self.mujoco_stop_btn.clicked.connect(self._on_mujoco_stop_clicked)
+        mj_run_row.addWidget(self.mujoco_stop_btn)
+        self.mujoco_open_model_btn = QPushButton("打开模型目录")
+        self.mujoco_open_model_btn.setToolTip(
+            "MuJoCo：打开 model/；MolmoSpaces：打开仓库根目录"
+        )
+        self.mujoco_open_model_btn.clicked.connect(self._on_mujoco_open_selected_dir)
+        mj_run_row.addWidget(self.mujoco_open_model_btn)
+        self.mujoco_status_label = QLabel("空闲 · MuJoCo")
+        self.mujoco_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        mj_run_row.addWidget(self.mujoco_status_label, 1)
+        sim_outer.addWidget(self.mujoco_run_row_widget)
+
+        self.mujoco_log_edit = QTextEdit()
+        self.mujoco_log_edit.setReadOnly(True)
+        self.mujoco_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.mujoco_log_edit.setMinimumHeight(80)
+        self.mujoco_log_edit.setMaximumHeight(160)
+        self.mujoco_log_edit.setPlaceholderText("MuJoCo / MolmoSpaces 日志…")
+        self.mujoco_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        sim_outer.addWidget(self.mujoco_log_edit)
+
+        self._mujoco_launcher = MuJoCoViewerLauncher(self)
+        self._mujoco_launcher.log_line.connect(self._append_mujoco_log)
+        self._mujoco_launcher.status_message.connect(self._on_mujoco_status)
+        self._mujoco_launcher.running_changed.connect(self._update_mujoco_ui)
+        self._mujoco_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
+        self._sim_eval_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
+        self._sim_bridge_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
+        self._refresh_mujoco_models(
+            prefer=PSI_R1_MODEL_XML
+        )
+        self._on_sim_backend_changed()
+
         # 稍后 addTab：仿真评测 / 真机评测 放在末尾
 
         real_tab = QWidget()
@@ -20637,152 +20916,6 @@ class CameraTopicWindow(QMainWindow):
         self._on_reward_mode_changed()
         self._refresh_reward_topic_combo()
 
-        # --- 仿真在线强化学习 ---
-        sim_rl_tab = QWidget()
-        sim_rl_tab.setObjectName("simOnlineRlTab")
-        sim_rl_outer = QVBoxLayout(sim_rl_tab)
-        sim_rl_outer.setContentsMargins(8, 6, 8, 6)
-        sim_rl_outer.setSpacing(6)
-        sim_rl_hint = QLabel(
-            "RLinf 仿真在线强化学习：在 ManiSkill / LIBERO 等模拟器中边交互边更新策略。"
-            "同步模式走 train_embodied_agent.py（PPO/GRPO）；异步模式走 train_async.py"
-            "（Async PPO / SAC）。本机单卡时会自动把 placement 压到 0-0 并缩小 batch；"
-            "官方 8 卡 config（如 maniskill_ppo_openvlaoft）请改用 quickstart 或自行覆盖。"
-            "开训前请填好 config 内 model_path 权重。"
-        )
-        sim_rl_hint.setWordWrap(True)
-        sim_rl_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        sim_rl_outer.addWidget(sim_rl_hint)
-
-        srl_path_row = QHBoxLayout()
-        srl_path_row.setSpacing(6)
-        srl_path_row.addWidget(QLabel("RLinf"))
-        self.sim_rl_root_edit = QLineEdit(
-            os.environ.get("RLINF_ROOT", RLINF_ROOT_DEFAULT)
-        )
-        self.sim_rl_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        srl_path_row.addWidget(self.sim_rl_root_edit, 1)
-        self.sim_rl_root_browse_btn = QPushButton("…")
-        self.sim_rl_root_browse_btn.setFixedWidth(28)
-        self.sim_rl_root_browse_btn.clicked.connect(self._on_sim_rl_root_browse)
-        srl_path_row.addWidget(self.sim_rl_root_browse_btn)
-        srl_path_row.addWidget(QLabel("Python"))
-        self.sim_rl_python_edit = QLineEdit(
-            resolve_rlinf_python(self.sim_rl_root_edit.text())
-        )
-        self.sim_rl_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        srl_path_row.addWidget(self.sim_rl_python_edit, 1)
-        sim_rl_outer.addLayout(srl_path_row)
-
-        srl_mode_row = QHBoxLayout()
-        srl_mode_row.setSpacing(6)
-        srl_mode_row.addWidget(QLabel("模式"))
-        self.sim_rl_mode_combo = ImeSafeComboBox()
-        self.sim_rl_mode_combo.addItem("同步 (PPO/GRPO)", "sync")
-        self.sim_rl_mode_combo.addItem("异步 (Async PPO/SAC)", "async")
-        self.sim_rl_mode_combo.currentIndexChanged.connect(self._on_sim_rl_mode_changed)
-        srl_mode_row.addWidget(self.sim_rl_mode_combo)
-        srl_mode_row.addWidget(QLabel("平台"))
-        self.sim_rl_platform_combo = ImeSafeComboBox()
-        for plat in ("LIBERO", "ALOHA", "BRIDGE"):
-            self.sim_rl_platform_combo.addItem(plat, plat)
-        srl_mode_row.addWidget(self.sim_rl_platform_combo)
-        srl_mode_row.addWidget(QLabel("GPU"))
-        self.sim_rl_cuda_edit = QLineEdit(
-            os.environ.get("CUDA_VISIBLE_DEVICES", "0")
-        )
-        self.sim_rl_cuda_edit.setFixedWidth(72)
-        self.sim_rl_cuda_edit.setPlaceholderText("0")
-        self.sim_rl_cuda_edit.setToolTip("CUDA_VISIBLE_DEVICES，留空则用系统默认")
-        srl_mode_row.addWidget(self.sim_rl_cuda_edit)
-        srl_mode_row.addStretch(1)
-        sim_rl_outer.addLayout(srl_mode_row)
-
-        srl_cfg_row = QHBoxLayout()
-        srl_cfg_row.setSpacing(6)
-        srl_cfg_row.addWidget(QLabel("预设"))
-        self.sim_rl_preset_combo = ImeSafeComboBox()
-        for label, mode, cfg, plat in SIM_ONLINE_RL_PRESETS:
-            self.sim_rl_preset_combo.addItem(
-                label, {"mode": mode, "config": cfg, "platform": plat}
-            )
-        self.sim_rl_preset_combo.currentIndexChanged.connect(
-            self._on_sim_rl_preset_changed
-        )
-        srl_cfg_row.addWidget(self.sim_rl_preset_combo, 1)
-        srl_cfg_row.addWidget(QLabel("config"))
-        self.sim_rl_config_combo = ImeSafeComboBox()
-        self.sim_rl_config_combo.setEditable(True)
-        self.sim_rl_config_combo.setInsertPolicy(QComboBox.NoInsert)
-        self.sim_rl_config_combo.setMinimumWidth(260)
-        self.sim_rl_config_combo.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        srl_cfg_row.addWidget(self.sim_rl_config_combo, 1)
-        self.sim_rl_refresh_btn = QPushButton("刷新")
-        self.sim_rl_refresh_btn.setToolTip("重新扫描 examples/embodiment/config")
-        self.sim_rl_refresh_btn.clicked.connect(self._refresh_sim_rl_configs)
-        srl_cfg_row.addWidget(self.sim_rl_refresh_btn)
-        sim_rl_outer.addLayout(srl_cfg_row)
-
-        srl_ov_row = QHBoxLayout()
-        srl_ov_row.setSpacing(6)
-        srl_ov_row.addWidget(QLabel("Hydra"))
-        self.sim_rl_overrides_edit = QLineEdit()
-        self.sim_rl_overrides_edit.setPlaceholderText(
-            "可选 Hydra 覆盖；单卡会自动追加 placement=0-0。例: "
-            "actor.model.model_path=/path/to/ckpt env.train.total_num_envs=4"
-        )
-        self.sim_rl_overrides_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        srl_ov_row.addWidget(self.sim_rl_overrides_edit, 1)
-        sim_rl_outer.addLayout(srl_ov_row)
-
-        srl_run_row = QHBoxLayout()
-        srl_run_row.setSpacing(6)
-        self.sim_rl_start_btn = QPushButton("启动训练")
-        self.sim_rl_start_btn.setToolTip("启动 RLinf 仿真在线强化学习")
-        self.sim_rl_start_btn.clicked.connect(self._on_sim_rl_start_clicked)
-        srl_run_row.addWidget(self.sim_rl_start_btn)
-        self.sim_rl_stop_btn = QPushButton("停止")
-        self.sim_rl_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
-        self.sim_rl_stop_btn.setEnabled(False)
-        self.sim_rl_stop_btn.clicked.connect(self._on_sim_rl_stop_clicked)
-        srl_run_row.addWidget(self.sim_rl_stop_btn)
-        self.sim_rl_status_label = QLabel("空闲")
-        self.sim_rl_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        srl_run_row.addWidget(self.sim_rl_status_label, 1)
-        sim_rl_outer.addLayout(srl_run_row)
-
-        srl_log_row = QHBoxLayout()
-        srl_log_row.setSpacing(6)
-        srl_log_row.addWidget(QLabel("日志目录"))
-        self.sim_rl_log_dir_edit = QLineEdit()
-        self.sim_rl_log_dir_edit.setReadOnly(True)
-        self.sim_rl_log_dir_edit.setPlaceholderText("启动后显示 runner.logger.log_path")
-        self.sim_rl_log_dir_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        srl_log_row.addWidget(self.sim_rl_log_dir_edit, 1)
-        self.sim_rl_open_log_btn = QPushButton("打开")
-        self.sim_rl_open_log_btn.setEnabled(False)
-        self.sim_rl_open_log_btn.clicked.connect(self._on_sim_rl_open_log_clicked)
-        srl_log_row.addWidget(self.sim_rl_open_log_btn)
-        sim_rl_outer.addLayout(srl_log_row)
-
-        self.sim_rl_log_edit = QTextEdit()
-        self.sim_rl_log_edit.setReadOnly(True)
-        self.sim_rl_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.sim_rl_log_edit.setPlaceholderText("仿真在线 RL 训练日志…")
-        self.sim_rl_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
-        )
-        sim_rl_outer.addWidget(self.sim_rl_log_edit, 1)
-
-        self._sim_rl_launcher = SimOnlineRLLauncher(self)
-        self._sim_rl_launcher.log_line.connect(self._append_sim_rl_log)
-        self._sim_rl_launcher.status_message.connect(self._on_sim_rl_status)
-        self._sim_rl_launcher.running_changed.connect(self._update_sim_rl_ui)
-        self._sim_rl_launcher.log_dir_ready.connect(self._on_sim_rl_log_dir)
-        self._refresh_sim_rl_configs()
-        self._on_sim_rl_preset_changed()
-
         # --- Reward 训练工作流 ---
         reward_wf_tab = QWidget()
         reward_wf_tab.setObjectName("rewardWorkflowTab")
@@ -21186,7 +21319,7 @@ class CameraTopicWindow(QMainWindow):
         drl_run_row = QHBoxLayout()
         drl_run_row.setSpacing(6)
         self.dojo_rl_start_btn = QPushButton("启动训练")
-        self.dojo_rl_start_btn.setToolTip("启动 RoboDojo/RISE 在线 RL")
+        self.dojo_rl_start_btn.setToolTip("启动 仿真强化学习训练")
         self.dojo_rl_start_btn.clicked.connect(self._on_dojo_rl_start_clicked)
         drl_run_row.addWidget(self.dojo_rl_start_btn)
         self.dojo_rl_stop_btn = QPushButton("停止")
@@ -21218,7 +21351,7 @@ class CameraTopicWindow(QMainWindow):
         self.dojo_rl_log_edit = QTextEdit()
         self.dojo_rl_log_edit.setReadOnly(True)
         self.dojo_rl_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.dojo_rl_log_edit.setPlaceholderText("RoboDojo 在线 RL 训练日志…")
+        self.dojo_rl_log_edit.setPlaceholderText("仿真强化学习训练 训练日志…")
         self.dojo_rl_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
@@ -21243,12 +21376,12 @@ class CameraTopicWindow(QMainWindow):
                 f"[info] 预填奖励 ckpt: {_default_reward_ckpt}{note}"
             )
 
+
         control_tabs.addTab(sim_tab, "仿真评测")
         control_tabs.addTab(real_tab, "真机评测")
         control_tabs.addTab(reward_tab, "Reward评测")
         control_tabs.addTab(reward_wf_tab, "Reward训练")
-        control_tabs.addTab(sim_rl_tab, "仿真在线强化学习")
-        control_tabs.addTab(dojo_rl_tab, "RoboDojo在线RL")
+        control_tabs.addTab(dojo_rl_tab, "仿真强化学习训练")
         control_tabs.addTab(ctx_tab, "ICL")
         # sub task / sub image 挂在全部 tab 最后，见下方 addTab
 
@@ -23731,6 +23864,12 @@ class CameraTopicWindow(QMainWindow):
         )
 
     def _on_sim_bridge_start_clicked(self) -> None:
+        if getattr(self, "_mujoco_launcher", None) and self._mujoco_launcher.is_running():
+            self._append_sim_log("MuJoCo / MolmoSpaces 正在运行，请先停止后再启动相机桥")
+            return
+        if self._sim_backend_id() != "isaac":
+            self._append_sim_log("相机桥仅用于 Isaac 后端")
+            return
         self._sim_bridge_launcher.start(
             self.sim_bridge_dir_edit.text(),
             hz=float(self.sim_bridge_hz_spin.value()),
@@ -23793,7 +23932,7 @@ class CameraTopicWindow(QMainWindow):
             self.sim_eval_start_btn.setText("切换任务")
             self.sim_eval_start_btn.setEnabled(True)
             self.sim_eval_task_combo.setEnabled(True)
-            if not self._sim_npy_preview_timer.isActive():
+            if self._sim_backend_id() == "isaac" and not self._sim_npy_preview_timer.isActive():
                 self._sim_npy_preview_timer.start()
             self._update_enable_status_ui()
             self._update_arm_move_btns_ui()
@@ -23812,7 +23951,12 @@ class CameraTopicWindow(QMainWindow):
             self._update_enable_status_ui()
             self._update_arm_move_btns_ui()
             # 评测未跑时，若相机桥仍在或共享帧仍在，继续预览；否则停
-            if self._sim_bridge_launcher.is_running():
+            # 仅 Isaac 后端订阅/轮询共享帧，避免 MuJoCo/MolmoSpaces 假预览。
+            if self._sim_backend_id() != "isaac":
+                self._sim_npy_preview_timer.stop()
+                self._sim_preview_retry_timer.stop()
+                self._sim_preview_retry_left = 0
+            elif self._sim_bridge_launcher.is_running():
                 if not self._sim_npy_preview_timer.isActive():
                     self._sim_npy_preview_timer.start()
             else:
@@ -23872,6 +24016,8 @@ class CameraTopicWindow(QMainWindow):
 
     def _activate_sim_camera_preview(self, force: bool = True) -> None:
         """展开图像预览并订阅左腕 / 头部 / 右腕彩色+深度（含 .npy 直读兜底）。"""
+        if self._sim_backend_id() != "isaac":
+            return
         self._ensure_workspace_expanded()
         if force:
             for topic in SIM_PREVIEW_ALL_TOPICS:
@@ -23928,6 +24074,8 @@ class CameraTopicWindow(QMainWindow):
 
     def _maybe_resume_sim_npy_preview(self) -> None:
         """UI 重启后：若共享帧仍在，自动恢复预览（不依赖本窗口是否拥有评测进程）。"""
+        if self._sim_backend_id() != "isaac":
+            return
         age = self._sim_bridge_newest_age_s()
         if age is None:
             return
@@ -23943,6 +24091,10 @@ class CameraTopicWindow(QMainWindow):
 
     def _retry_enable_sim_preview_topics(self) -> None:
         """topic 列表稍后才发现时，补勾尚未被用户取消的彩色+深度相机。"""
+        if self._sim_backend_id() != "isaac":
+            self._sim_preview_retry_timer.stop()
+            self._sim_preview_retry_left = 0
+            return
         if self._sim_preview_retry_left <= 0 or not (
             self._sim_eval_launcher.is_running()
             or self._sim_bridge_newest_age_s() is not None
@@ -23974,6 +24126,8 @@ class CameraTopicWindow(QMainWindow):
 
     def _poll_sim_npy_preview(self) -> None:
         """直读 ISAAC_CAM_BRIDGE_DIR 下 RGB / depth .npy，刷新图像预览（不依赖 ROS）。"""
+        if self._sim_backend_id() != "isaac":
+            return
         owned = (
             self._sim_eval_launcher.is_running()
             or self._sim_bridge_launcher.is_running()
@@ -24079,6 +24233,12 @@ class CameraTopicWindow(QMainWindow):
             )
 
     def _on_sim_eval_start_clicked(self) -> None:
+        if getattr(self, "_mujoco_launcher", None) and self._mujoco_launcher.is_running():
+            self._append_sim_log("MuJoCo / MolmoSpaces 正在运行，请先停止后再启动 Isaac 评测")
+            return
+        if self._sim_backend_id() != "isaac":
+            self._append_sim_log("请先将仿真后端切换为「Isaac / RoboDojo」")
+            return
         task = str(
             self.sim_eval_task_combo.currentData()
             or self.sim_eval_task_combo.currentText()
@@ -25789,10 +25949,10 @@ class CameraTopicWindow(QMainWindow):
             self._reward_launcher.shutdown()
         if getattr(self, "_reward_wf_launcher", None) is not None:
             self._reward_wf_launcher.shutdown()
-        if getattr(self, "_sim_rl_launcher", None) is not None:
-            self._sim_rl_launcher.shutdown()
         if getattr(self, "_dojo_rl_launcher", None) is not None:
             self._dojo_rl_launcher.shutdown()
+        if getattr(self, "_mujoco_launcher", None) is not None:
+            self._mujoco_launcher.shutdown()
         if getattr(self, "_lingbot_map_launcher", None) is not None:
             self._lingbot_map_launcher.shutdown()
         if getattr(self, "_lingbot_video_launcher", None) is not None:
@@ -27296,158 +27456,6 @@ class CameraTopicWindow(QMainWindow):
         elif mode == "teleop":
             self._append_reward_log("teleop 进程正常结束")
 
-    def _append_sim_rl_log(self, line: str) -> None:
-        if not hasattr(self, "sim_rl_log_edit"):
-            return
-        self.sim_rl_log_edit.append(line)
-        bar = self.sim_rl_log_edit.verticalScrollBar()
-        bar.setValue(bar.maximum())
-
-    def _on_sim_rl_status(self, msg: str) -> None:
-        if hasattr(self, "sim_rl_status_label"):
-            self.sim_rl_status_label.setText(msg or "空闲")
-        if hasattr(self, "status_bar") and self.status_bar is not None:
-            self.status_bar.showMessage(msg)
-
-    def _update_sim_rl_ui(self, *_args) -> None:
-        running = bool(
-            getattr(self, "_sim_rl_launcher", None)
-            and self._sim_rl_launcher.is_running()
-        )
-        if hasattr(self, "sim_rl_start_btn"):
-            self.sim_rl_start_btn.setEnabled(not running)
-        if hasattr(self, "sim_rl_stop_btn"):
-            self.sim_rl_stop_btn.setEnabled(running)
-        for wname in (
-            "sim_rl_mode_combo",
-            "sim_rl_preset_combo",
-            "sim_rl_config_combo",
-            "sim_rl_platform_combo",
-            "sim_rl_root_edit",
-            "sim_rl_python_edit",
-            "sim_rl_cuda_edit",
-            "sim_rl_overrides_edit",
-            "sim_rl_refresh_btn",
-        ):
-            w = getattr(self, wname, None)
-            if w is not None:
-                w.setEnabled(not running)
-
-    def _on_sim_rl_log_dir(self, path: str) -> None:
-        if hasattr(self, "sim_rl_log_dir_edit"):
-            self.sim_rl_log_dir_edit.setText(path)
-        if hasattr(self, "sim_rl_open_log_btn"):
-            self.sim_rl_open_log_btn.setEnabled(bool(path) and os.path.isdir(path))
-
-    def _on_sim_rl_root_browse(self) -> None:
-        cur = self.sim_rl_root_edit.text().strip() or RLINF_ROOT_DEFAULT
-        selected = QFileDialog.getExistingDirectory(self, "选择 RLinf 仓库", cur)
-        if selected:
-            self.sim_rl_root_edit.setText(selected)
-            self.sim_rl_python_edit.setText(resolve_rlinf_python(selected))
-            self._refresh_sim_rl_configs()
-
-    def _on_sim_rl_mode_changed(self, *_args) -> None:
-        self._refresh_sim_rl_configs()
-
-    def _on_sim_rl_preset_changed(self, *_args) -> None:
-        data = self.sim_rl_preset_combo.currentData()
-        if not isinstance(data, dict):
-            return
-        mode = str(data.get("mode") or "sync")
-        cfg = str(data.get("config") or "")
-        plat = str(data.get("platform") or "LIBERO")
-        midx = self.sim_rl_mode_combo.findData(mode)
-        if midx >= 0:
-            self.sim_rl_mode_combo.blockSignals(True)
-            self.sim_rl_mode_combo.setCurrentIndex(midx)
-            self.sim_rl_mode_combo.blockSignals(False)
-        pidx = self.sim_rl_platform_combo.findData(plat)
-        if pidx >= 0:
-            self.sim_rl_platform_combo.setCurrentIndex(pidx)
-        self._refresh_sim_rl_configs(prefer=cfg)
-
-    def _refresh_sim_rl_configs(self, prefer: Optional[str] = None) -> None:
-        if not hasattr(self, "sim_rl_config_combo"):
-            return
-        root = self.sim_rl_root_edit.text().strip()
-        mode = str(self.sim_rl_mode_combo.currentData() or "sync")
-        names = list_sim_online_rl_configs(root, mode=mode)
-        current = prefer or self.sim_rl_config_combo.currentText().strip()
-        self.sim_rl_config_combo.blockSignals(True)
-        self.sim_rl_config_combo.clear()
-        for name in names:
-            self.sim_rl_config_combo.addItem(name, name)
-        if current:
-            idx = self.sim_rl_config_combo.findData(current)
-            if idx < 0:
-                idx = self.sim_rl_config_combo.findText(current)
-            if idx >= 0:
-                self.sim_rl_config_combo.setCurrentIndex(idx)
-            else:
-                self.sim_rl_config_combo.setEditText(current)
-        self.sim_rl_config_combo.blockSignals(False)
-        if hasattr(self, "sim_rl_log_edit"):
-            self._append_sim_rl_log(
-                f"已扫描 {len(names)} 个 {mode} 配置（{resolve_rlinf_root(root)}）"
-            )
-
-    def _on_sim_rl_start_clicked(self) -> None:
-        if self._sim_rl_launcher.is_running():
-            self._on_sim_rl_status("仿真在线 RL 正在运行")
-            return
-        mode = str(self.sim_rl_mode_combo.currentData() or "sync")
-        cfg = (
-            str(self.sim_rl_config_combo.currentData() or "").strip()
-            or self.sim_rl_config_combo.currentText().strip()
-        )
-        if not cfg:
-            self._append_sim_rl_log("[ERROR] 请选择 config")
-            self._on_sim_rl_status("请选择 config")
-            return
-        overrides_raw = self.sim_rl_overrides_edit.text().strip()
-        user_overrides = shlex.split(overrides_raw) if overrides_raw else []
-        cuda_devices = self.sim_rl_cuda_edit.text().strip()
-        overrides = merge_sim_online_rl_overrides(
-            user_overrides,
-            cuda_devices=cuda_devices,
-            auto_single_gpu=True,
-            config_name=cfg,
-        )
-        n_gpu = count_visible_cuda_devices(cuda_devices)
-        self.sim_rl_log_edit.clear()
-        self.sim_rl_log_dir_edit.clear()
-        self.sim_rl_open_log_btn.setEnabled(False)
-        if n_gpu == 1 and len(overrides) > len(user_overrides):
-            self._append_sim_rl_log(
-                f"[info] 检测到单卡，已自动追加 {len(overrides) - len(user_overrides)} "
-                "条 placement/batch 覆盖（可用 Hydra 栏手动改）"
-            )
-            for item in overrides[len(user_overrides) :]:
-                self._append_sim_rl_log(f"  + {item}")
-        elif n_gpu > 1:
-            self._append_sim_rl_log(f"[info] 可见 GPU 数={n_gpu}，使用 config 原始 placement")
-        self._sim_rl_launcher.start(
-            mode=mode,
-            config_name=cfg,
-            rlinf_root=self.sim_rl_root_edit.text().strip(),
-            python_bin=self.sim_rl_python_edit.text().strip(),
-            robot_platform=str(self.sim_rl_platform_combo.currentData() or "LIBERO"),
-            cuda_devices=cuda_devices,
-            hydra_overrides=overrides,
-        )
-        self._update_sim_rl_ui()
-
-    def _on_sim_rl_stop_clicked(self) -> None:
-        self._append_sim_rl_log("--- 用户停止仿真在线 RL ---")
-        self._sim_rl_launcher.stop()
-        self._update_sim_rl_ui()
-
-    def _on_sim_rl_open_log_clicked(self) -> None:
-        path = self.sim_rl_log_dir_edit.text().strip()
-        if path and os.path.isdir(path):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
-
     def _append_reward_wf_log(self, line: str) -> None:
         if not hasattr(self, "reward_wf_log_edit"):
             return
@@ -27643,6 +27651,663 @@ class CameraTopicWindow(QMainWindow):
         if path and os.path.isdir(path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
+
+    def _append_mujoco_log(self, line: str) -> None:
+        if not hasattr(self, "mujoco_log_edit"):
+            return
+        self.mujoco_log_edit.append(line)
+        bar = self.mujoco_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_mujoco_status(self, msg: str) -> None:
+        if hasattr(self, "mujoco_status_label"):
+            text = msg or "空闲"
+            if text in ("空闲", ""):
+                backend = self._sim_backend_id()
+                if backend == "mujoco":
+                    text = "空闲 · MuJoCo"
+                elif backend == "molmospaces":
+                    text = "空闲 · MolmoSpaces"
+            self.mujoco_status_label.setText(text)
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.showMessage(msg)
+
+    def _sim_backend_id(self) -> str:
+        """Return isaac | mujoco | molmospaces."""
+        if getattr(self, "sim_backend_spaces_radio", None) is not None and self.sim_backend_spaces_radio.isChecked():
+            return "molmospaces"
+        if getattr(self, "sim_backend_mujoco_radio", None) is not None and self.sim_backend_mujoco_radio.isChecked():
+            return "mujoco"
+        return "isaac"
+
+    def _mujoco_backend_is_mujoco(self) -> bool:
+        # Kept for callers that branch MuJoCo vs MolmoSpaces within viewer backends.
+        return self._sim_backend_id() != "molmospaces"
+
+    def _on_sim_backend_changed(self, *_args) -> None:
+        backend = self._sim_backend_id()
+        idx = {"isaac": 0, "mujoco": 1, "molmospaces": 2}.get(backend, 0)
+        if hasattr(self, "sim_backend_stack"):
+            self.sim_backend_stack.setCurrentIndex(idx)
+        hints = {
+            "isaac": (
+                "Isaac / RoboDojo：启动评测后进程常驻，直到「停止评测」。"
+                "图像预览：左腕 / 头部 / 右腕（共享目录 .npy → /camera/*）。"
+            ),
+            "mujoco": (
+                "MuJoCo：本地 MJCF 交互 viewer（默认 VirtualGL→NVIDIA）。"
+                "与 Isaac 评测互斥；不接 /camera/* 预览。"
+            ),
+            "molmospaces": (
+                "MolmoSpaces：仓库快速演示（VirtualGL→NVIDIA / EGL+Tk 回退）。"
+                "与 Isaac 评测互斥；不接 /camera/* 预览。"
+            ),
+        }
+        if hasattr(self, "sim_hint_label"):
+            self.sim_hint_label.setText(hints.get(backend, ""))
+        show_mj = backend in ("mujoco", "molmospaces")
+        if hasattr(self, "mujoco_run_row_widget"):
+            self.mujoco_run_row_widget.setVisible(show_mj)
+        if hasattr(self, "mujoco_log_edit"):
+            self.mujoco_log_edit.setVisible(show_mj)
+        if hasattr(self, "mujoco_start_btn"):
+            self.mujoco_start_btn.setText(
+                "启动 MuJoCo" if backend == "mujoco" else "启动 MolmoSpaces"
+            )
+        if hasattr(self, "mujoco_open_model_btn"):
+            self.mujoco_open_model_btn.setText(
+                "打开模型目录" if backend == "mujoco" else "打开仓库目录"
+            )
+        if hasattr(self, "mujoco_status_label") and not (
+            getattr(self, "_mujoco_launcher", None)
+            and self._mujoco_launcher.is_running()
+        ):
+            if backend == "mujoco":
+                self.mujoco_status_label.setText("空闲 · MuJoCo")
+            elif backend == "molmospaces":
+                self.mujoco_status_label.setText("空闲 · MolmoSpaces")
+        if backend != "isaac":
+            # Stop Isaac-only preview timers / forced topic subscribe while on other backends.
+            if getattr(self, "_sim_npy_preview_timer", None) is not None:
+                self._sim_npy_preview_timer.stop()
+            if getattr(self, "_sim_preview_retry_timer", None) is not None:
+                self._sim_preview_retry_timer.stop()
+            if hasattr(self, "sim_frame_status_label"):
+                self.sim_frame_status_label.setText(
+                    "当前后端非 Isaac：相机预览请切回「Isaac / RoboDojo」并启动评测/相机桥。"
+                )
+        elif hasattr(self, "_refresh_sim_frame_status"):
+            try:
+                self._refresh_sim_frame_status()
+            except Exception:
+                pass
+        self._update_mujoco_ui()
+        self._update_sim_backend_mutex_ui()
+
+    def _on_mujoco_backend_changed(self, *_args) -> None:
+        # Backward-compatible alias: top-level sim backend radios drive the stack.
+        self._on_sim_backend_changed()
+
+    def _update_sim_backend_mutex_ui(self, *_args) -> None:
+        """Cross-disable Isaac vs MuJoCo/MolmoSpaces while either side is running."""
+        mj_running = bool(
+            getattr(self, "_mujoco_launcher", None)
+            and self._mujoco_launcher.is_running()
+        )
+        isaac_running = bool(
+            (
+                getattr(self, "_sim_eval_launcher", None)
+                and self._sim_eval_launcher.is_running()
+            )
+            or (
+                getattr(self, "_sim_bridge_launcher", None)
+                and self._sim_bridge_launcher.is_running()
+            )
+        )
+        for wname in (
+            "sim_backend_isaac_radio",
+            "sim_backend_mujoco_radio",
+            "sim_backend_spaces_radio",
+        ):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(not mj_running and not isaac_running)
+
+        backend = self._sim_backend_id()
+        if hasattr(self, "mujoco_start_btn"):
+            self.mujoco_start_btn.setEnabled(
+                (not mj_running)
+                and (not isaac_running)
+                and backend in ("mujoco", "molmospaces")
+            )
+
+        if mj_running:
+            if hasattr(self, "sim_eval_start_btn"):
+                self.sim_eval_start_btn.setEnabled(False)
+            if hasattr(self, "sim_bridge_start_btn"):
+                self.sim_bridge_start_btn.setEnabled(False)
+            return
+
+        # Isaac side idle/running state restored by its own UI updaters.
+        if hasattr(self, "_update_sim_eval_run_ui"):
+            try:
+                self._update_sim_eval_run_ui()
+            except Exception:
+                pass
+        if hasattr(self, "_update_sim_bridge_ui"):
+            try:
+                self._update_sim_bridge_ui()
+            except Exception:
+                pass
+
+    def _update_mujoco_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_mujoco_launcher", None)
+            and self._mujoco_launcher.is_running()
+        )
+        backend = self._sim_backend_id()
+        if hasattr(self, "mujoco_start_btn"):
+            self.mujoco_start_btn.setEnabled(
+                (not running) and backend in ("mujoco", "molmospaces")
+            )
+        if hasattr(self, "mujoco_stop_btn"):
+            self.mujoco_stop_btn.setEnabled(running)
+        if hasattr(self, "mujoco_install_btn"):
+            self.mujoco_install_btn.setEnabled(
+                (not running) and backend == "mujoco"
+            )
+        for wname in (
+            "mujoco_root_edit",
+            "mujoco_python_edit",
+            "mujoco_model_combo",
+            "mujoco_mode_combo",
+            "mujoco_refresh_btn",
+            "mujoco_mjcf_browse_btn",
+            "mujoco_root_browse_btn",
+            "molmospaces_root_edit",
+            "molmospaces_root_browse_btn",
+            "molmospaces_recipe_combo",
+            "mujoco_open_model_btn",
+        ):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(not running)
+        self._update_sim_backend_mutex_ui()
+
+    def _on_mujoco_unified_start_clicked(self) -> None:
+        if self._sim_backend_id() == "molmospaces":
+            self._on_molmospaces_run_clicked()
+        else:
+            self._on_mujoco_start_clicked()
+
+    def _on_mujoco_open_selected_dir(self) -> None:
+        if self._sim_backend_id() == "molmospaces":
+            root = self._resolve_molmospaces_root()
+            if os.path.isdir(root):
+                QDesktopServices.openUrl(QUrl.fromLocalFile(root))
+                self._append_mujoco_log(f"已打开目录: {root}")
+            else:
+                self._on_mujoco_status(f"目录不存在: {root}")
+        else:
+            self._on_mujoco_open_model_dir()
+
+    def _resolve_mujoco_mjcf_path(self) -> str:
+        raw = (
+            str(self.mujoco_model_combo.currentData() or "").strip()
+            or self.mujoco_model_combo.currentText().strip()
+        )
+        if not raw:
+            return ""
+        # Combo may show a short label; prefer stored userData path.
+        if os.path.isabs(raw) or os.path.isfile(os.path.expanduser(raw)):
+            return os.path.abspath(os.path.expanduser(raw))
+        # Relative to eai repo, or an absolute path (e.g. PSI_R1_MODEL_XML)
+        eai_cand = os.path.join(EAI_DIR, raw)
+        if os.path.isfile(eai_cand):
+            return os.path.abspath(eai_cand)
+        root = resolve_mujoco_root(self.mujoco_root_edit.text())
+        cand = os.path.join(root, "model", raw)
+        if os.path.isfile(cand):
+            return cand
+        cand2 = os.path.join(root, raw)
+        if os.path.isfile(cand2):
+            return cand2
+        return os.path.abspath(os.path.expanduser(raw))
+
+    def _mujoco_model_label(self, path: str) -> str:
+        """Short combo label; keep absolute path in userData."""
+        abs_path = os.path.abspath(path) if os.path.isabs(path) else path
+        urdf_model = os.path.abspath(PSI_R1_MODEL_XML)
+        if abs_path == urdf_model:
+            return "psi_r1_ruiyan/urdf/model.xml  (psi_r1)"
+        if os.path.isabs(path) and path.startswith(EAI_DIR + os.sep):
+            return "eai/" + os.path.relpath(path, EAI_DIR).replace(os.sep, "/")
+        return path
+
+    def _refresh_mujoco_models(self, prefer: Optional[str] = None) -> None:
+        if not hasattr(self, "mujoco_model_combo"):
+            return
+        root = self.mujoco_root_edit.text().strip()
+        names = list_mujoco_model_xmls(root)
+        prefer_abs = (
+            os.path.abspath(prefer)
+            if prefer and (os.path.isabs(prefer) or os.path.isfile(prefer))
+            else prefer
+        )
+        current = prefer_abs or self.mujoco_model_combo.currentData() or ""
+        if not current:
+            current = self.mujoco_model_combo.currentText().strip()
+        if not current:
+            for p in MUJOCO_MODEL_PRESETS:
+                p_abs = os.path.abspath(p) if os.path.isabs(p) else p
+                if p_abs in names or p in names:
+                    current = p_abs if p_abs in names else p
+                    break
+            if not current and names:
+                current = names[0]
+        self.mujoco_model_combo.blockSignals(True)
+        self.mujoco_model_combo.clear()
+        for name in names:
+            self.mujoco_model_combo.addItem(self._mujoco_model_label(name), name)
+        if current:
+            idx = self.mujoco_model_combo.findData(current)
+            if idx < 0:
+                idx = self.mujoco_model_combo.findData(os.path.abspath(current))
+            if idx < 0:
+                idx = self.mujoco_model_combo.findText(current)
+            if idx >= 0:
+                self.mujoco_model_combo.setCurrentIndex(idx)
+            else:
+                self.mujoco_model_combo.setEditText(str(current))
+        self.mujoco_model_combo.blockSignals(False)
+        n_local = sum(1 for n in names if os.path.isabs(n))
+        self._append_mujoco_log(
+            f"已扫描 {len(names)} 个模型（eai 本地 {n_local} + "
+            f"{resolve_mujoco_root(root)}/model）"
+        )
+
+    def _on_mujoco_root_browse(self) -> None:
+        cur = self.mujoco_root_edit.text().strip() or MUJOCO_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 MuJoCo 仓库", cur)
+        if selected:
+            self.mujoco_root_edit.setText(selected)
+            self.mujoco_python_edit.setText(resolve_mujoco_python(selected))
+            self._refresh_mujoco_models()
+
+    def _on_mujoco_mjcf_browse(self) -> None:
+        assets_dir = os.path.join(EAI_DIR, "assets")
+        root = resolve_mujoco_root(self.mujoco_root_edit.text())
+        if os.path.isdir(assets_dir):
+            start = assets_dir
+        else:
+            start = (
+                os.path.join(root, "model")
+                if os.path.isdir(os.path.join(root, "model"))
+                else root
+            )
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 MJCF / XML",
+            start,
+            "MuJoCo MJCF (*.xml);;All (*)",
+        )
+        if selected:
+            label = self._mujoco_model_label(selected)
+            idx = self.mujoco_model_combo.findData(os.path.abspath(selected))
+            if idx < 0:
+                self.mujoco_model_combo.addItem(label, os.path.abspath(selected))
+                idx = self.mujoco_model_combo.findData(os.path.abspath(selected))
+            if idx >= 0:
+                self.mujoco_model_combo.setCurrentIndex(idx)
+            else:
+                self.mujoco_model_combo.setEditText(selected)
+
+    def _on_mujoco_open_model_dir(self) -> None:
+        root = resolve_mujoco_root(self.mujoco_root_edit.text())
+        model_dir = os.path.join(root, "model")
+        path = model_dir if os.path.isdir(model_dir) else root
+        if os.path.isdir(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _resolve_molmospaces_root(self) -> str:
+        raw = ""
+        if hasattr(self, "molmospaces_root_edit"):
+            raw = self.molmospaces_root_edit.text().strip()
+        raw = raw or os.environ.get("MOLMOSPACES_ROOT", "") or MOLMOSPACES_ROOT_DEFAULT
+        return os.path.abspath(os.path.expanduser(raw))
+
+    def _resolve_molmospaces_python(self) -> str:
+        # Prefer MuJoCo tab Python if it looks like molmospaces env; else default.
+        tab_py = ""
+        if hasattr(self, "mujoco_python_edit"):
+            tab_py = self.mujoco_python_edit.text().strip()
+        for cand in (
+            tab_py,
+            os.environ.get("MOLMOSPACES_PYTHON", ""),
+            MOLMOSPACES_PYTHON_DEFAULT,
+            resolve_mujoco_python(),
+        ):
+            c = (cand or "").strip()
+            if c and os.path.isfile(c):
+                return os.path.abspath(c)
+        return "python3"
+
+    def _on_molmospaces_root_browse(self) -> None:
+        cur = self._resolve_molmospaces_root()
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 MolmoSpaces 仓库", cur
+        )
+        if selected and hasattr(self, "molmospaces_root_edit"):
+            self.molmospaces_root_edit.setText(selected)
+
+    def _repair_molmospaces_cache_manifest(self) -> List[str]:
+        """Fix cache dirs missing from MolmoSpaces manifest.
+
+        - Non-empty/complete orphans → register in manifest
+        - Tiny/incomplete remnants → delete so setup can re-download
+        """
+        cache = os.path.expanduser("~/.cache/molmo-spaces-resources")
+        manifest_path = os.path.join(
+            cache, "mjthor_data_type_to_source_to_versions.json"
+        )
+        if not os.path.isfile(manifest_path):
+            return []
+        try:
+            import json
+
+            with open(manifest_path, "r", encoding="utf-8") as fh:
+                manifest = json.load(fh)
+        except Exception as exc:
+            return [f"无法读取 manifest: {exc}"]
+
+        notes: List[str] = []
+        for data_type in ("robots", "scenes", "objects", "grasps", "materials"):
+            type_dir = os.path.join(cache, data_type)
+            if not os.path.isdir(type_dir):
+                continue
+            manifest.setdefault(data_type, {})
+            try:
+                sources = os.listdir(type_dir)
+            except OSError:
+                continue
+            for source in sources:
+                source_dir = os.path.join(type_dir, source)
+                if not os.path.isdir(source_dir):
+                    continue
+                recorded = set(manifest[data_type].setdefault(source, []) or [])
+                try:
+                    versions = os.listdir(source_dir)
+                except OSError:
+                    continue
+                for ver in versions:
+                    ver_dir = os.path.join(source_dir, ver)
+                    if not os.path.isdir(ver_dir) or ver in recorded:
+                        continue
+                    try:
+                        names = set(os.listdir(ver_dir))
+                        size = 0
+                        for root_d, _dirs, files in os.walk(ver_dir):
+                            for fn in files:
+                                try:
+                                    size += os.path.getsize(os.path.join(root_d, fn))
+                                except OSError:
+                                    pass
+                    except OSError:
+                        names, size = set(), 0
+                    looks_ok = size > 1_000_000 and (
+                        "assets" in names
+                        or "mjthor_resources_combined_meta.json.gz" in names
+                        or any(
+                            n.endswith(".xml") or n.endswith(".urdf") for n in names
+                        )
+                    )
+                    if looks_ok:
+                        manifest[data_type][source].append(ver)
+                        manifest[data_type][source] = sorted(
+                            set(manifest[data_type][source])
+                        )
+                        notes.append(f"register {data_type}/{source}/{ver}")
+                    else:
+                        try:
+                            shutil.rmtree(ver_dir, ignore_errors=True)
+                            notes.append(f"remove {data_type}/{source}/{ver}")
+                        except Exception as exc:
+                            notes.append(
+                                f"remove-failed {data_type}/{source}/{ver}: {exc}"
+                            )
+
+        if not notes:
+            return []
+        try:
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh, indent=2)
+                fh.write("\n")
+        except Exception as exc:
+            return [f"无法写入 manifest: {exc}"]
+        return notes
+
+    def _check_molmospaces_resources(self, py: str) -> Tuple[bool, str]:
+        """Return (ok, message). Requires molmospaces-resources >= MOLMOSPACES_RESOURCES_MIN."""
+        code = (
+            "from importlib.metadata import version\n"
+            "from packaging.version import Version\n"
+            f"min_v = {MOLMOSPACES_RESOURCES_MIN!r}\n"
+            "try:\n"
+            "    v = version('molmospaces-resources')\n"
+            "except Exception as e:\n"
+            "    print('MISSING:' + str(e)); raise SystemExit(2)\n"
+            "print(v)\n"
+            "raise SystemExit(0 if Version(v) >= Version(min_v) else 3)\n"
+        )
+        try:
+            import subprocess
+
+            r = subprocess.run(
+                [py, "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except Exception as exc:
+            return False, f"无法检测 molmospaces-resources: {exc}"
+        ver = (r.stdout or "").strip().splitlines()[-1] if r.stdout else "?"
+        if r.returncode == 0:
+            return True, ver
+        if r.returncode == 2:
+            return False, "未安装 molmospaces-resources"
+        if r.returncode == 3:
+            return (
+                False,
+                f"molmospaces-resources={ver} < 需要 {MOLMOSPACES_RESOURCES_MIN}",
+            )
+        err = (r.stderr or r.stdout or "").strip()
+        return False, err or f"检测失败 code={r.returncode}"
+
+    def _on_molmospaces_run_clicked(self) -> None:
+        if (
+            self._sim_eval_launcher.is_running()
+            or self._sim_bridge_launcher.is_running()
+        ):
+            self._on_mujoco_status("Isaac 评测/相机桥正在运行，请先停止")
+            return
+        if self._sim_backend_id() != "molmospaces":
+            self._on_mujoco_status("请先将仿真后端切换为 MolmoSpaces")
+            return
+        root = self._resolve_molmospaces_root()
+        recipe = "quick_viewer"
+        if hasattr(self, "molmospaces_recipe_combo"):
+            recipe = str(self.molmospaces_recipe_combo.currentData() or "quick_viewer")
+        if not os.path.isdir(root):
+            self._on_mujoco_status(f"MolmoSpaces 目录不存在: {root}")
+            return
+        if recipe == "open_dir":
+            QDesktopServices.openUrl(QUrl.fromLocalFile(root))
+            self._append_mujoco_log(f"已打开目录: {root}")
+            return
+        if recipe == "open_terminal":
+            for term, args in (
+                ("xfce4-terminal", ["--working-directory", root]),
+                ("x-terminal-emulator", []),
+                ("gnome-terminal", [f"--working-directory={root}"]),
+                ("xterm", ["-e", f"cd {shlex.quote(root)}; exec $SHELL"]),
+            ):
+                if shutil.which(term):
+                    if term == "x-terminal-emulator":
+                        ok = QProcess.startDetached(
+                            term,
+                            ["-e", f"bash -lc 'cd {shlex.quote(root)}; exec bash'"],
+                        )
+                    else:
+                        ok = QProcess.startDetached(term, args)
+                    if ok:
+                        self._append_mujoco_log(f"已打开终端 ({term}): {root}")
+                        return
+            self._on_mujoco_status("未找到可用终端模拟器")
+            return
+
+        if self._mujoco_launcher.is_running():
+            self._on_mujoco_status("MuJoCo / MolmoSpaces 正在运行，请先停止")
+            return
+
+        py = self._resolve_molmospaces_python()
+        if recipe == "install_deps":
+            self.mujoco_log_edit.clear()
+            self._append_mujoco_log(
+                f"[molmospaces] 安装依赖: molmospaces-resources=={MOLMOSPACES_RESOURCES_MIN}"
+            )
+            self._mujoco_launcher.start_cwd_command(
+                cwd=root,
+                argv=[
+                    py,
+                    "-m",
+                    "pip",
+                    "install",
+                    "-U",
+                    f"molmospaces-resources=={MOLMOSPACES_RESOURCES_MIN}",
+                ],
+                label="molmospaces install_deps",
+                env_extra={"PYTHONUNBUFFERED": "1"},
+            )
+            self._update_mujoco_ui()
+            return
+
+        pipeline = os.path.join(root, "scripts", "datagen", "run_pipeline.py")
+        repaired: List[str] = []
+        if recipe == "quick_viewer":
+            if not os.path.isfile(pipeline):
+                self._on_mujoco_status(f"未找到: {pipeline}")
+                return
+            repaired = self._repair_molmospaces_cache_manifest()
+            ok, msg = self._check_molmospaces_resources(py)
+            if not ok:
+                self._append_mujoco_log(f"[molmospaces] 依赖检查失败: {msg}")
+                self._append_mujoco_log(
+                    f"[molmospaces] 请在动作里选「安装/更新依赖」，或手动:\n"
+                    f"  {py} -m pip install -U "
+                    f"molmospaces-resources=={MOLMOSPACES_RESOURCES_MIN}"
+                )
+                self._on_mujoco_status(f"依赖不足: {msg}")
+                return
+            # Prefer VirtualGL→NVIDIA GLFW; wrapper only falls back to EGL+Tk if no GLX.
+            wrapper = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "tools",
+                "run_molmospaces_pipeline.py",
+            )
+            if not os.path.isfile(wrapper):
+                self._on_mujoco_status(f"未找到: {wrapper}")
+                return
+            argv = [py, wrapper, "--viewer", "--seed", "1"]
+            vgl = (
+                "/usr/bin/vglrun"
+                if os.path.isfile("/usr/bin/vglrun")
+                else "/opt/VirtualGL/bin/vglrun"
+                if os.path.isfile("/opt/VirtualGL/bin/vglrun")
+                else ""
+            )
+            if vgl:
+                argv = [vgl, "-d", os.environ.get("MUJOCO_VGL_DEVICE") or "egl", *argv]
+            label = "molmospaces quick_viewer"
+            resources_msg = msg
+        else:
+            self._on_mujoco_status(f"未知 MolmoSpaces 动作: {recipe}")
+            return
+
+        self.mujoco_log_edit.clear()
+        if repaired:
+            self._append_mujoco_log(
+                "[molmospaces] 已修复 cache manifest: " + ", ".join(repaired)
+            )
+        self._append_mujoco_log(f"[molmospaces] root={root}")
+        self._append_mujoco_log(f"[molmospaces] python={py}")
+        self._append_mujoco_log(f"[molmospaces] resources={resources_msg}")
+        self._append_mujoco_log(
+            "[molmospaces] viewer: VirtualGL→NVIDIA when available, else EGL+Tk"
+        )
+        self._mujoco_launcher.start_cwd_command(
+            cwd=root,
+            argv=argv,
+            label=label,
+            env_extra={
+                "MUJOCO_GL": "glfw",
+                "MOLMOSPACES_ROOT": root,
+                "PYTHONPATH": "",
+                "PYTHONNOUSERSITE": "1",
+            },
+        )
+        self._update_mujoco_ui()
+
+    def _on_mujoco_install_clicked(self) -> None:
+        if self._mujoco_launcher.is_running():
+            self._on_mujoco_status("MuJoCo 正在运行")
+            return
+        self.mujoco_log_edit.clear()
+        self._mujoco_launcher.start(
+            mjcf_path="",
+            mujoco_root=self.mujoco_root_edit.text().strip(),
+            python_bin=self.mujoco_python_edit.text().strip(),
+            mode=str(self.mujoco_mode_combo.currentData() or "auto"),
+            install=True,
+        )
+        self._update_mujoco_ui()
+
+    def _on_mujoco_start_clicked(self) -> None:
+        if self._mujoco_launcher.is_running():
+            self._on_mujoco_status("MuJoCo 正在运行")
+            return
+        if (
+            self._sim_eval_launcher.is_running()
+            or self._sim_bridge_launcher.is_running()
+        ):
+            self._on_mujoco_status("Isaac 评测/相机桥正在运行，请先停止")
+            return
+        if self._sim_backend_id() != "mujoco":
+            self._on_mujoco_status("请先将仿真后端切换为 MuJoCo")
+            return
+        mjcf = self._resolve_mujoco_mjcf_path()
+        if not mjcf or not os.path.isfile(mjcf):
+            self._append_mujoco_log(f"[ERROR] 模型无效: {mjcf or '(空)'}")
+            self._on_mujoco_status("请选择有效 MJCF")
+            return
+        if not (os.environ.get("DISPLAY") or "").strip():
+            self._append_mujoco_log(
+                "[warn] DISPLAY 为空，若窗口未弹出请检查本机图形环境"
+            )
+        self.mujoco_log_edit.clear()
+        self._mujoco_launcher.start(
+            mjcf_path=mjcf,
+            mujoco_root=self.mujoco_root_edit.text().strip(),
+            python_bin=self.mujoco_python_edit.text().strip(),
+            mode=str(self.mujoco_mode_combo.currentData() or "auto"),
+            install=False,
+        )
+        self._update_mujoco_ui()
+
+    def _on_mujoco_stop_clicked(self) -> None:
+        self._append_mujoco_log("--- 用户停止 MuJoCo ---")
+        self._mujoco_launcher.stop()
+        self._update_mujoco_ui()
+
     def _append_dojo_rl_log(self, line: str) -> None:
         if not hasattr(self, "dojo_rl_log_edit"):
             return
@@ -27741,7 +28406,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_dojo_rl_start_clicked(self) -> None:
         if self._dojo_rl_launcher.is_running():
-            self._on_dojo_rl_status("RoboDojo 在线 RL 正在运行")
+            self._on_dojo_rl_status("仿真强化学习训练 正在运行")
             return
         mode = str(self.dojo_rl_mode_combo.currentData() or "single")
         cfg = (
@@ -27826,7 +28491,7 @@ class CameraTopicWindow(QMainWindow):
         self._update_dojo_rl_ui()
 
     def _on_dojo_rl_stop_clicked(self) -> None:
-        self._append_dojo_rl_log("--- 用户停止 RoboDojo 在线 RL ---")
+        self._append_dojo_rl_log("--- 用户停止 仿真强化学习训练 ---")
         self._dojo_rl_launcher.stop()
         self._update_dojo_rl_ui()
 
@@ -30891,7 +31556,7 @@ def parse_only_tabs(tab_args: Optional[List[object]]) -> List[str]:
     if unknown:
         known = " / ".join(CONTROL_TAB_TITLES)
         aliases = (
-            "test→sub task, bagel→sub image, reward→Reward评测, online_rl→仿真在线强化学习, sim→仿真评测, world→世界模型, …"
+            "test→sub task, bagel→sub image, reward→Reward评测, sim_rl_train→仿真强化学习训练, mujoco→MuJoCo, sim→仿真评测, world→世界模型, …"
         )
         raise SystemExit(
             f"未知 tab: {', '.join(unknown)}\n"

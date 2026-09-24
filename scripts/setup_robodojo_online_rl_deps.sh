@@ -42,7 +42,8 @@ echo "[setup] pip=${PIP}"
   'polars>=1.30.0' \
   'pytest' \
   'kornia' \
-  'transformers==4.53.2'
+  'transformers==4.53.2' \
+  'gcsfs>=2024.6.0'
 
 # lerobot 非 online 热路径必需；若后续离线数据管线需要再装完整 HF lerobot。
 

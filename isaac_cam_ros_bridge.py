@@ -98,6 +98,47 @@ def _read_stamp(path: str) -> str:
             return ""
 
 
+def _numpy_to_imgmsg(
+    arr: np.ndarray,
+    *,
+    encoding: str,
+    frame_id: str,
+    stamp,
+) -> "Image":
+    """Build sensor_msgs/Image without cv_bridge / OpenCV (RoboStack ABI drift)."""
+    from sensor_msgs.msg import Image
+
+    msg = Image()
+    msg.header.stamp = stamp
+    msg.header.frame_id = frame_id
+    msg.height = int(arr.shape[0])
+    msg.width = int(arr.shape[1])
+    msg.encoding = encoding
+    msg.is_bigendian = 0
+    cont = np.ascontiguousarray(arr)
+    if encoding == "bgr8":
+        if cont.ndim != 3 or cont.shape[2] < 3:
+            raise ValueError(f"bgr8 expects HxWx3, got {cont.shape}")
+        # Input is RGB; sensor_msgs bgr8 wants BGR channel order.
+        payload = cont[..., :3][..., ::-1]
+        msg.step = msg.width * 3
+        msg.data = payload.tobytes()
+    elif encoding == "rgb8":
+        if cont.ndim != 3 or cont.shape[2] < 3:
+            raise ValueError(f"rgb8 expects HxWx3, got {cont.shape}")
+        msg.step = msg.width * 3
+        msg.data = cont[..., :3].tobytes()
+    elif encoding == "16UC1":
+        if cont.ndim != 2:
+            raise ValueError(f"16UC1 expects HxW, got {cont.shape}")
+        u16 = cont.astype(np.uint16, copy=False)
+        msg.step = msg.width * 2
+        msg.data = np.ascontiguousarray(u16).tobytes()
+    else:
+        raise ValueError(f"unsupported encoding: {encoding}")
+    return msg
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Isaac cam → ROS2 Image bridge")
     parser.add_argument(
@@ -114,7 +155,6 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     import rclpy
-    from cv_bridge import CvBridge
     from rclpy.node import Node
     from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import Image
@@ -123,7 +163,6 @@ def main(argv=None) -> int:
         def __init__(self) -> None:
             super().__init__("isaac_cam_ros_bridge")
             self._dir = os.path.abspath(args.dir)
-            self._bridge = CvBridge()
             self._last_color_stamp: Dict[str, str] = {}
             self._last_depth_stamp: Dict[str, str] = {}
             self._pubs: Dict[str, object] = {}
@@ -150,7 +189,7 @@ def main(argv=None) -> int:
             self.create_timer(period, self._on_timer)
             self.get_logger().info(
                 f"watching {self._dir} → color+depth "
-                f"{sorted(self._pubs.keys())}"
+                f"{sorted(self._pubs.keys())} (numpy Image encode, no cv_bridge)"
             )
 
         def _ensure_pub(self, topic: str) -> object:
@@ -207,15 +246,15 @@ def main(argv=None) -> int:
             if rgb is None:
                 return
             try:
-                import cv2
-
-                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                msg = self._bridge.cv2_to_imgmsg(bgr, encoding="bgr8")
+                msg = _numpy_to_imgmsg(
+                    rgb,
+                    encoding="bgr8",
+                    frame_id=frame_id,
+                    stamp=self.get_clock().now().to_msg(),
+                )
             except Exception as exc:
                 self.get_logger().warning(f"encode color {cam_key} failed: {exc}")
                 return
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = frame_id
             self._ensure_pub(color_topic).publish(msg)
             self._last_color_stamp[cam_key] = stamp_val
 
@@ -230,12 +269,15 @@ def main(argv=None) -> int:
             if depth_u16 is None:
                 return
             try:
-                msg = self._bridge.cv2_to_imgmsg(depth_u16, encoding="16UC1")
+                msg = _numpy_to_imgmsg(
+                    depth_u16,
+                    encoding="16UC1",
+                    frame_id=frame_id,
+                    stamp=self.get_clock().now().to_msg(),
+                )
             except Exception as exc:
                 self.get_logger().warning(f"encode depth {cam_key} failed: {exc}")
                 return
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = frame_id
             self._ensure_pub(depth_topic).publish(msg)
             self._last_depth_stamp[cam_key] = stamp_val
 
