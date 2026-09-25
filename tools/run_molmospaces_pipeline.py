@@ -16,6 +16,12 @@ from pathlib import Path
 def main() -> int:
     os.environ.setdefault("MUJOCO_GL", "egl")
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
+    # Default: front third-person (正对机器人). Set FIRST_PERSON=1 for head/exo.
+    os.environ.setdefault("MOLMOSPACES_VIEWER_FIRST_PERSON", "0")
+    os.environ.setdefault("MOLMOSPACES_VIEWER_CAM", "front")
+    # TurboVNC / software GLX: prefer EGL+Tk so a window actually appears.
+    os.environ.setdefault("MOLMOSPACES_FORCE_EGL", "1")
+    os.environ.setdefault("EAI_DIR", str(Path(__file__).resolve().parent.parent))
 
     here = Path(__file__).resolve().parent
     eai_root = here.parent

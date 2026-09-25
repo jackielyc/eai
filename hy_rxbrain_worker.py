@@ -87,8 +87,12 @@ def resolve_ckpt(user: Optional[str] = None) -> Optional[str]:
         [
             os.path.join(here, "weights", "Hy-Embodied-RxBrain-1.0"),
             os.path.expanduser("~/Hy-Embodied-RxBrain-1.0"),
-            os.path.expanduser(
-                "~/.cache/huggingface/hub/models--tencent--Hy-Embodied-RxBrain-1.0"
+            os.path.join(
+                here,
+                ".cache",
+                "huggingface",
+                "hub",
+                "models--tencent--Hy-Embodied-RxBrain-1.0",
             ),
         ]
     )

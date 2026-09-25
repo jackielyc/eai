@@ -238,7 +238,7 @@ if ! docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -d "${REMOTE_DIR}/im
 fi
 
 if [[ -f "${FASTDDS_XML}" ]]; then
-    docker exec -u "${CONTAINER_USER}" "${CONTAINER}" mkdir -p "${PSIBOT_HOME}/.cache/a2d_dds" 2>/dev/null || true
+    docker exec -u "${CONTAINER_USER}" "${CONTAINER}" mkdir -p "${REMOTE_DIR}/.cache/a2d_dds" 2>/dev/null || true
     if docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -f "${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"; then
         FASTDDS_IN_CONTAINER="${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"
     else
@@ -282,8 +282,8 @@ fi
 DOCKER_XAUTH_ENV=()
 if [[ -n "${XAUTH_HOST}" && -f "${XAUTH_HOST}" ]]; then
     # 复制到容器可读写路径，避免仅 root 可读或路径未挂载
-    XAUTH_COPY="${PSIBOT_HOME}/.cache/a2d_xauth"
-    mkdir -p "${PSIBOT_HOME}/.cache"
+    XAUTH_COPY="${EAI_DIR_HOST}/.cache/a2d_xauth"
+    mkdir -p "${EAI_DIR_HOST}/.cache"
     cp -f "${XAUTH_HOST}" "${XAUTH_COPY}" 2>/dev/null || true
     chmod 644 "${XAUTH_COPY}" 2>/dev/null || true
     if [[ -f "${XAUTH_COPY}" ]]; then
@@ -559,8 +559,8 @@ docker exec \
     -it "${CONTAINER}" \
     bash -lc "
 set -eo pipefail
-mkdir -p /tmp/a2d_runtime ${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime
-chmod 700 /tmp/a2d_runtime ${PSIBOT_HOME_CONTAINER}/.cache/a2d_runtime 2>/dev/null || true
+mkdir -p /tmp/a2d_runtime ${EAI_DIR_HOST}/.cache/a2d_runtime
+chmod 700 /tmp/a2d_runtime ${EAI_DIR_HOST}/.cache/a2d_runtime 2>/dev/null || true
 source /opt/ros/humble/setup.bash
 if [[ -f /opt/psi/rt/a2d-tele/install/setup.bash ]]; then
     source /opt/psi/rt/a2d-tele/install/setup.bash

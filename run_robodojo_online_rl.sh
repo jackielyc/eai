@@ -195,7 +195,10 @@ if ! python -c "import tqdm_loggable, flax, openpi_value.shared.download" >/dev/
 fi
 
 # Paligemma tokenizer：openpi 会从 gs:// 拉取，无 gcsfs 时用 HTTPS 预置到缓存
-_PALIGEMMA_CACHE="${OPENPI_DATA_HOME:-${HOME}/.cache/openpi}/big_vision/paligemma_tokenizer.model"
+if [[ -z "${OPENPI_DATA_HOME:-}" ]]; then
+  export OPENPI_DATA_HOME="${SCRIPT_DIR}/.cache/openpi"
+fi
+_PALIGEMMA_CACHE="${OPENPI_DATA_HOME}/big_vision/paligemma_tokenizer.model"
 _PALIGEMMA_CACHE="$(python -c "import os,pathlib; print(pathlib.Path(os.path.expanduser('${_PALIGEMMA_CACHE}')).resolve())")"
 if [[ ! -f "${_PALIGEMMA_CACHE}" ]]; then
   echo "[robodojo-online-rl] fetching paligemma_tokenizer.model -> ${_PALIGEMMA_CACHE}"

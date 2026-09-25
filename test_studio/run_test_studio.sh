@@ -29,8 +29,8 @@ if command -v xhost >/dev/null 2>&1; then
   xhost +local: >/dev/null 2>&1 || true
 fi
 
-XAUTH_COPY="${PSIBOT_HOME}/.cache/a2d_xauth"
-mkdir -p "${PSIBOT_HOME}/.cache" "${EAI_DIR_HOST}/log"
+XAUTH_COPY="${EAI_DIR_HOST}/.cache/a2d_xauth"
+mkdir -p "${EAI_DIR_HOST}/.cache" "${EAI_DIR_HOST}/log"
 if [[ -n "${XAUTHORITY:-}" && -f "${XAUTHORITY}" ]]; then
   cp -f "${XAUTHORITY}" "${XAUTH_COPY}" 2>/dev/null || true
 elif [[ -f "${HOME}/.Xauthority" ]]; then
@@ -93,8 +93,8 @@ exec docker exec \
   -it "${CONTAINER}" \
   bash -lc "
 set -eo pipefail
-mkdir -p /tmp/a2d_runtime ${PSIBOT_HOME}/.cache/a2d_runtime
-chmod 700 /tmp/a2d_runtime ${PSIBOT_HOME}/.cache/a2d_runtime 2>/dev/null || true
+mkdir -p /tmp/a2d_runtime ${EAI_DIR_HOST}/.cache/a2d_runtime
+chmod 700 /tmp/a2d_runtime ${EAI_DIR_HOST}/.cache/a2d_runtime 2>/dev/null || true
 source /opt/ros/humble/setup.bash
 if [[ -f /opt/psi/rt/a2d-tele/install/setup.bash ]]; then
   source /opt/psi/rt/a2d-tele/install/setup.bash

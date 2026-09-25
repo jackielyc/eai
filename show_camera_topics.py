@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / ICL / Astra / HumanEgo / 数据集 / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / IsaacLab-Arena） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / ICL / Astra / HumanEgo / 数据集 / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -54,6 +54,7 @@ if sys.version_info[:2] != (3, 10):
 
 # opencv-python 可能污染 Qt 插件搜索路径，须在 import PyQt5 之前清除
 import os
+import re
 
 os.environ.pop("QT_PLUGIN_PATH", None)
 
@@ -782,8 +783,15 @@ def resolve_sam3_model_path() -> str:
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = [
         os.path.join(here, "sam3.pt"),
-        os.path.expanduser(
-            "~/.cache/modelscope/models/facebook--sam3/snapshots/master/sam3.pt"
+        os.path.join(
+            here,
+            ".cache",
+            "modelscope",
+            "models",
+            "facebook--sam3",
+            "snapshots",
+            "master",
+            "sam3.pt",
         ),
     ]
     for path in candidates:
@@ -923,8 +931,80 @@ def resolve_fp_mesh_path() -> str:
 
 FP_MESH_DEFAULT = resolve_fp_mesh_path()
 EAI_DIR = os.path.dirname(os.path.abspath(__file__))
-PSI_R1_MODEL_XML = os.path.join(
-    os.path.dirname(EAI_DIR), "psi_r1_ruiyan", "urdf", "model.xml"
+_EAI_TOOLS_DIR = os.path.join(EAI_DIR, "tools")
+if _EAI_TOOLS_DIR not in sys.path:
+    sys.path.insert(0, _EAI_TOOLS_DIR)
+try:
+    from pi_policy_runtime import (  # noqa: E402
+        OPENPI_DATA_HOME_DEFAULT,
+        PI_CKPT_CONFIG_DEFAULT,
+        PI_CKPT_GS_DEFAULT,
+        PI_CKPT_HF_LOCAL_DEFAULT,
+        PI_SERVER_HOST_DEFAULT,
+        PI_SERVER_PORT_DEFAULT,
+        build_serve_policy_argv,
+        checkpoint_status,
+        ensure_checkpoint_materialized,
+        infer_policy_config,
+        is_local_checkpoint_usable,
+        is_pi_policy_id,
+        port_listening,
+        probe_pi_server,
+        resolve_pi_checkpoint,
+        stop_pi_server_on_port,
+    )
+except ImportError:  # pragma: no cover - keep UI importable if tools missing
+    OPENPI_DATA_HOME_DEFAULT = os.path.join(EAI_DIR, ".cache", "openpi")
+    PI_CKPT_CONFIG_DEFAULT = "pi05_droid_jointpos"
+    PI_CKPT_GS_DEFAULT = "gs://openpi-assets/checkpoints/pi05_droid_jointpos"
+    PI_CKPT_HF_LOCAL_DEFAULT = os.path.join(
+        EAI_DIR, ".cache", "openpi", "hf", "pi05_droid_jointpos"
+    )
+    PI_SERVER_HOST_DEFAULT = "localhost"
+    PI_SERVER_PORT_DEFAULT = 8080
+
+    def build_serve_policy_argv(**_kwargs):  # type: ignore[misc]
+        raise RuntimeError("pi_policy_runtime 未找到")
+
+    def checkpoint_status(path: str) -> str:  # type: ignore[misc]
+        return path or ""
+
+    def ensure_checkpoint_materialized(path: str, **_k):  # type: ignore[misc]
+        return False, "pi_policy_runtime 未找到"
+
+    def infer_policy_config(path: str, override: str = "") -> str:  # type: ignore[misc]
+        return (override or PI_CKPT_CONFIG_DEFAULT).strip() or PI_CKPT_CONFIG_DEFAULT
+
+    def is_local_checkpoint_usable(_path: str) -> bool:  # type: ignore[misc]
+        return False
+
+    def is_pi_policy_id(policy_id: str) -> bool:  # type: ignore[misc]
+        return "PiPolicyEvalConfig" in (policy_id or "")
+
+    def port_listening(_host: str, _port: int, timeout: float = 0.4) -> bool:  # type: ignore[misc]
+        return False
+
+    def probe_pi_server(*_a, **_k):  # type: ignore[misc]
+        return False, "pi_policy_runtime 未找到"
+
+    def resolve_pi_checkpoint(prefer: str = "", **_k):  # type: ignore[misc]
+        class _Ckpt:
+            path = prefer or PI_CKPT_GS_DEFAULT
+            config = PI_CKPT_CONFIG_DEFAULT
+            source = "fallback"
+
+        return _Ckpt()
+
+    def stop_pi_server_on_port(port: int = 8080, **_k):  # type: ignore[misc]
+        return f"pi_policy_runtime 未找到 (port={port})"
+PSI_R1_MODEL_XML_CANDIDATES: Tuple[str, ...] = (
+    os.path.join(os.path.dirname(EAI_DIR), "psi_r1_ruiyan", "urdf", "model.xml"),
+    os.path.join(EAI_DIR, "assets", "psi_r1_ruiyan", "urdf", "model.xml"),
+    os.path.join(EAI_DIR, "assets", "model.xml"),
+)
+PSI_R1_MODEL_XML = next(
+    (p for p in PSI_R1_MODEL_XML_CANDIDATES if os.path.isfile(p)),
+    PSI_R1_MODEL_XML_CANDIDATES[0],
 )
 LINGBOT_VISION_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/lingbot-vision"
@@ -1129,6 +1209,222 @@ def resolve_mujoco_python(repo: str = "") -> str:
         if path and os.path.isfile(path):
             return os.path.abspath(path)
     return "python3"
+
+
+def molmospaces_cache_env() -> dict:
+    """Env so MolmoSpaces reads eai/.cache instead of ~/.cache."""
+    cache = os.path.join(EAI_DIR, ".cache", "molmo-spaces-resources")
+    assets_parent = os.path.join(EAI_DIR, ".cache", "molmospaces", "assets")
+    assets = assets_parent
+    if os.path.isdir(assets_parent):
+        subs = []
+        try:
+            for name in sorted(os.listdir(assets_parent)):
+                path = os.path.join(assets_parent, name)
+                if os.path.isdir(path):
+                    subs.append(path)
+        except OSError:
+            subs = []
+        if len(subs) == 1:
+            assets = subs[0]
+    return {
+        "MLSPACES_CACHE_DIR": cache,
+        "MLSPACES_ASSETS_DIR": assets,
+    }
+
+
+def molmospaces_asset_roots(repo_root: str = "") -> List[str]:
+    """Directories that may contain benchmarks/ (assets cache, then repo assets/)."""
+    roots: List[str] = []
+    env = (os.environ.get("MLSPACES_ASSETS_DIR") or "").strip()
+    if env:
+        roots.append(os.path.abspath(os.path.expanduser(env)))
+    cache = os.path.join(EAI_DIR, ".cache", "molmospaces", "assets")
+    if os.path.isdir(cache):
+        try:
+            for name in sorted(os.listdir(cache)):
+                path = os.path.join(cache, name)
+                if os.path.isdir(path):
+                    roots.append(path)
+        except OSError:
+            pass
+    if repo_root:
+        roots.append(os.path.join(os.path.abspath(repo_root), "assets"))
+    seen = set()
+    out: List[str] = []
+    for path in roots:
+        if path in seen or not os.path.isdir(path):
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
+
+
+def molmospaces_benchmark_ready(path: str) -> bool:
+    if not path or not os.path.isdir(path):
+        return False
+    if os.path.isfile(os.path.join(path, "benchmark.json")):
+        return True
+    try:
+        for name in os.listdir(path):
+            if name.startswith("house_") and os.path.isdir(os.path.join(path, name)):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def resolve_molmospaces_benchmark(rel: str, repo_root: str = "") -> str:
+    """Resolve a catalog-relative benchmark dir. Missing dirs still get a preferred path."""
+    raw = (rel or "").strip()
+    if os.path.isabs(raw):
+        return os.path.abspath(raw)
+    rel = raw.lstrip("/")
+    rel_under_assets = rel[len("assets/") :] if rel.startswith("assets/") else rel
+    for root in molmospaces_asset_roots(repo_root):
+        for cand in (
+            os.path.join(root, rel_under_assets),
+            os.path.join(root, rel),
+        ):
+            if os.path.isdir(cand):
+                return os.path.abspath(cand)
+    roots = molmospaces_asset_roots(repo_root)
+    base = roots[0] if roots else os.path.join(repo_root or ".", "assets")
+    return os.path.abspath(os.path.join(base, rel_under_assets))
+
+
+def list_molmospaces_eval_tasks(repo_root: str = "") -> List[dict]:
+    """Official MS/MB benchmarks, plus any local benchmark.json not in the catalog."""
+    tasks: List[dict] = []
+    known_paths = set()
+    for task_id, label, rel, extra in MOLMOSPACES_EVAL_TASKS:
+        path = resolve_molmospaces_benchmark(rel, repo_root)
+        ready = molmospaces_benchmark_ready(path)
+        known_paths.add(os.path.abspath(path))
+        tasks.append(
+            {
+                "id": task_id,
+                "label": label,
+                "path": path,
+                "ready": ready,
+                "extra": tuple(extra),
+            }
+        )
+    for root in molmospaces_asset_roots(repo_root):
+        bench_root = os.path.join(root, "benchmarks")
+        if not os.path.isdir(bench_root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(bench_root):
+            dirnames[:] = [d for d in dirnames if d not in {".git", "__pycache__"}]
+            if "benchmark.json" not in filenames:
+                continue
+            full = os.path.abspath(dirpath)
+            if full in known_paths:
+                continue
+            known_paths.add(full)
+            name = os.path.basename(full)
+            tasks.append(
+                {
+                    "id": "local:" + name,
+                    "label": name,
+                    "path": full,
+                    "ready": True,
+                    "extra": (),
+                }
+            )
+    return tasks
+
+
+def list_isaaclab_arena_environments(root: str) -> List[str]:
+    """CLI names of @register_environment classes under isaaclab_arena_environments/."""
+    env_dir = os.path.join(os.path.abspath(root or ""), "isaaclab_arena_environments")
+    if not os.path.isdir(env_dir):
+        return []
+    skip = {"cli.py", "example_environment_base.py", "__init__.py"}
+    names: List[str] = []
+    try:
+        files = sorted(os.listdir(env_dir))
+    except OSError:
+        return []
+    for fname in files:
+        if not fname.endswith(".py") or fname in skip:
+            continue
+        path = os.path.join(env_dir, fname)
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        if "@register_environment" not in text:
+            continue
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("name"):
+                continue
+            if "=" not in stripped:
+                continue
+            quote = '"' if '"' in stripped else "'" if "'" in stripped else ""
+            if not quote:
+                continue
+            parts = stripped.split(quote)
+            if len(parts) >= 2 and parts[1]:
+                names.append(parts[1])
+                break
+    return names
+
+
+def resolve_isaaclab_arena_python() -> str:
+    for cand in ISAACLAB_ARENA_PYTHON_CANDIDATES:
+        if cand and os.path.isfile(cand):
+            return os.path.abspath(cand)
+    which = shutil.which("python3") or "python3"
+    return which
+
+
+def _path_without_markers(value: str, markers: Tuple[str, ...]) -> str:
+    kept: List[str] = []
+    for part in (value or "").split(os.pathsep):
+        if not part:
+            continue
+        if any(marker in part for marker in markers):
+            continue
+        kept.append(part)
+    return os.pathsep.join(kept)
+
+
+def isaaclab_arena_child_env(
+    root: str, python_bin: str, cuda_visible: str = ""
+) -> Dict[str, str]:
+    """Env for Arena's Python. Drop the GUI's ROS Humble 3.11 site-packages."""
+    prefix = os.path.dirname(os.path.dirname(os.path.abspath(python_bin)))
+    markers = ("ros-humble", "/opt/ros/")
+    path = _path_without_markers(os.environ.get("PATH", ""), markers)
+    bin_dir = os.path.join(prefix, "bin")
+    if path:
+        path = bin_dir + os.pathsep + path
+    else:
+        path = bin_dir
+    ld = _path_without_markers(os.environ.get("LD_LIBRARY_PATH", ""), markers)
+    lib_dir = os.path.join(prefix, "lib")
+    if os.path.isdir(lib_dir):
+        ld = lib_dir + (os.pathsep + ld if ld else "")
+    env = {
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONPATH": os.path.abspath(root),
+        "PATH": path,
+        "LD_LIBRARY_PATH": ld,
+        "CONDA_PREFIX": prefix,
+        "CONDA_DEFAULT_ENV": os.path.basename(prefix),
+        "AMENT_PREFIX_PATH": _path_without_markers(
+            os.environ.get("AMENT_PREFIX_PATH", ""), markers
+        ),
+        "ISAACLAB_ARENA_ROOT": os.path.abspath(root),
+    }
+    if cuda_visible != "":
+        env["CUDA_VISIBLE_DEVICES"] = cuda_visible
+        env["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+    return env
 
 
 def list_eai_mujoco_model_xmls() -> List[str]:
@@ -1339,10 +1635,145 @@ MOLMOSPACES_PYTHON_DEFAULT = (
 )
 # (label, recipe_id) — recipe_id used by launcher
 MOLMOSPACES_RUN_RECIPES: Tuple[Tuple[str, str], ...] = (
+    ("评测所选任务", "eval_task"),
     ("快速演示 --viewer", "quick_viewer"),
     ("安装/更新依赖", "install_deps"),
     ("打开仓库目录", "open_dir"),
     ("在终端打开", "open_terminal"),
+)
+# (label, --robot id) for run_pipeline.py --robot.
+# Local MJCF robots (not in MolmoSpaces) use ids in MOLMOSPACES_LOCAL_MJCF_ROBOTS.
+MOLMOSPACES_ROBOTS: Tuple[Tuple[str, str], ...] = (
+    ("Franka Droid", "droid"),
+    ("Franka", "franka"),
+    ("Floating RUM", "rum"),
+    ("RBY1 (导航)", "rby1"),
+    ("I2RT YAM", "yam"),
+    ("Bimanual YAM", "bimanual_yam"),
+    ("Psi R1 (本地 MJCF)", "psi_r1"),
+)
+# robot_id -> MJCF path; quick_viewer opens MuJoCo instead of MolmoSpaces pipeline.
+MOLMOSPACES_LOCAL_MJCF_ROBOTS: Dict[str, str] = {
+    "psi_r1": PSI_R1_MODEL_XML,
+}
+# quick_viewer default task is pick; some robots lack PickPlanner parallel IK.
+MOLMOSPACES_QUICK_VIEWER_TASK: Dict[str, str] = {
+    "rby1": "nav_to_obj",  # PickPlanner needs parallel_kinematics (RBY1: N/A)
+}
+# Official eval tasks from molmo_spaces/evaluation/{ms,mb}-bench.md.
+# rel is under MLSPACES_ASSETS_DIR (or eai/.cache/molmospaces/assets/<hash>/).
+# extra is appended to eval_main.py.
+MOLMOSPACES_EVAL_TASKS: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...] = (
+    (
+        "close_v1",
+        "Close (Close-v1)",
+        "benchmarks/molmospaces-bench-v1/ithor/FrankaCloseDataGenConfig/FrankaCloseDataGenConfig_20260123_json_benchmark",
+        (),
+    ),
+    (
+        "open_v1",
+        "Open (Open-v1)",
+        "benchmarks/molmospaces-bench-v1/ithor/FrankaOpenDataGenConfig/FrankaOpenDataGenConfig_20260123_json_benchmark",
+        (),
+    ),
+    (
+        "pick_v1_1",
+        "Pick (Pick-v1.1)",
+        "benchmarks/molmospaces-bench-v1/procthor-10k/FrankaPickDroidMiniBench/FrankaPickDroidMiniBench_json_benchmark_20251231",
+        (),
+    ),
+    (
+        "pnp_v1",
+        "Pick and Place (PnP-v1)",
+        "benchmarks/molmospaces-bench-v1/procthor-10k/FrankaPickandPlaceDroidMiniBench/FrankaPickandPlaceDroidMiniBench_20260111_json_benchmark",
+        (),
+    ),
+    (
+        "pick_v1_5",
+        "Pick-MSProc (Pick-v1.5)",
+        "benchmarks/molmospaces-bench-v2/procthor-10k/FrankaPickDroidMiniBench/FrankaPickDroidMiniBench_json_benchmark_20251231",
+        (),
+    ),
+    (
+        "pick_v2_classic",
+        "Pick-Classic (Pick-v2-classic)",
+        "benchmarks/molmospaces-bench-v2/procthor-objaverse/FrankaPickHardBench/FrankaPickHardBench_20260206_json_benchmark",
+        (),
+    ),
+    (
+        "pick_v2_filament",
+        "Pick-Filament (Pick-v2-filament)",
+        "benchmarks/molmospaces-bench-v2/procthor-objaverse/FrankaPickHardBench/FrankaPickHardBench_20260206_json_benchmark",
+        ("--use-filament",),
+    ),
+    (
+        "pick_v2_rand_cam",
+        "Pick-RandCam (Pick-v2-rand-cam)",
+        "benchmarks/molmospaces-bench-v2/procthor-objaverse/FrankaPickHardBench/FrankaPickHardBench_20260206_json_benchmark",
+        (
+            "--use-filament",
+            "--camera_names",
+            "randomized_zed2_analogue_1",
+            "wrist_camera_zed_mini",
+        ),
+    ),
+    (
+        "pnp_v2",
+        "Pick & Place (PnP-v2)",
+        "benchmarks/molmospaces-bench-v2/procthor-objaverse/FrankaPickandPlaceHardBench/FrankaPickandPlaceHardBench_20260206_json_benchmark",
+        ("--use-filament",),
+    ),
+    (
+        "pnp_next_to_v2",
+        "Pick & Place-NextTo (PnP-next-to-v2)",
+        "benchmarks/molmospaces-bench-v2/procthor-objaverse/FrankaPickandPlaceNextToHardBench/FrankaPickandPlaceNextToHardBench_20260305_json_benchmark",
+        ("--use-filament",),
+    ),
+    (
+        "pnp_color_v2",
+        "Pick & Place-Color (PnP-color-v2)",
+        "benchmarks/molmospaces-bench-v2/procthor-objaverse/FrankaPickandPlaceColorHardBench/FrankaPickandPlaceColorHardBench_20260304_json_benchmark",
+        ("--use-filament",),
+    ),
+)
+MOLMOSPACES_EVAL_POLICIES: Tuple[Tuple[str, str], ...] = (
+    (
+        "Dummy（无策略）",
+        "molmo_spaces.evaluation.configs.evaluation_configs:DummyBenchmarkEvalConfig",
+    ),
+    (
+        "Pi",
+        "molmo_spaces.evaluation.configs.evaluation_configs:PiPolicyEvalConfig",
+    ),
+    (
+        "Teleop",
+        "molmo_spaces.evaluation.configs.evaluation_configs:TeleopPolicyEvalConfig",
+    ),
+)
+MOLMOSPACES_EVAL_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "molmospaces_eval")
+# Default Pi ckpt: pi05_droid_jointpos (MolmoSpaces 推荐); 优先本地 HF 缓存。
+MOLMOSPACES_PI_CKPT_DEFAULT = (
+    PI_CKPT_HF_LOCAL_DEFAULT
+    if is_local_checkpoint_usable(PI_CKPT_HF_LOCAL_DEFAULT)
+    else resolve_pi_checkpoint().path
+)
+MOLMOSPACES_PI_CONFIG_DEFAULT = infer_policy_config(
+    MOLMOSPACES_PI_CKPT_DEFAULT, PI_CKPT_CONFIG_DEFAULT
+)
+MOLMOSPACES_PI_PORT_DEFAULT = int(
+    os.environ.get("MOLMOSPACES_PI_PORT") or PI_SERVER_PORT_DEFAULT
+)
+ISAACLAB_ARENA_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/psi-lab/IsaacLab-Arena"
+)
+ISAACLAB_ARENA_PYTHON_CANDIDATES: Tuple[str, ...] = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/IsaacLab-Arena/bin/python",
+    "/home/psibot/miniconda3/envs/IsaacLab-Arena/bin/python",
+)
+ISAACLAB_ARENA_POLICIES: Tuple[Tuple[str, str], ...] = (
+    ("zero_action（零动作）", "zero_action"),
+    ("replay", "replay"),
+    ("rsl_rl", "rsl_rl"),
 )
 MOLMOSPACES_RESOURCES_MIN = "0.0.3a2"
 MUJOCO_PYTHON_CANDIDATES: Tuple[str, ...] = (
@@ -1481,6 +1912,9 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "molmospaces": "仿真评测",
     "MolmoSpaces": "仿真评测",
     "spaces": "仿真评测",
+    "arena": "仿真评测",
+    "IsaacLab-Arena": "仿真评测",
+    "isaaclab_arena": "仿真评测",
     "ctx": "ICL",
     "context": "ICL",
     "icl": "ICL",
@@ -1546,6 +1980,13 @@ ROBODOJO_EVAL_RESULT_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/eval_result/RoboDojo"
 )
 ROBODOJO_ROOT_DEFAULT = "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo"
+# Fixed port for UI「策略部署」so eval can attach without rebundling server+client.
+ROBODOJO_POLICY_PORT_DEFAULT = int(
+    os.environ.get("ROBODOJO_POLICY_PORT", "18765") or "18765"
+)
+ROBODOJO_POLICY_HOST_DEFAULT = (
+    os.environ.get("ROBODOJO_POLICY_HOST", "127.0.0.1").strip() or "127.0.0.1"
+)
 RISE_ROOT_DEFAULT = os.path.join(
     ROBODOJO_ROOT_DEFAULT, "XPolicyLab", "policy", "RISE", "RISE"
 )
@@ -1849,6 +2290,78 @@ UI_MONO_FAMILY = "Monospace"
 UI_MONO_SIZE_SMALL = 9
 UI_MONO_SIZE_NORMAL = 10
 UI_MONO_SIZE_TITLE = 11
+
+
+class _LogHeightDragBar(QFrame):
+    """宽拖动手柄：拖动可调整关联日志框高度（比 QSplitter 细条更好抓）。"""
+
+    def __init__(
+        self,
+        log_widget: QWidget,
+        *,
+        grow_down: bool,
+        min_h: int = 80,
+        max_h: int = 900,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._log = log_widget
+        self._grow_down = grow_down
+        self._min_h = min_h
+        self._max_h = max_h
+        self._dragging = False
+        self._press_y = 0
+        self._press_h = 0
+        self.setFixedHeight(22)
+        self.setCursor(Qt.SizeVerCursor)
+        self.setToolTip("按住上下拖动，调整日志高度")
+        self.setStyleSheet(
+            "QFrame {"
+            "  background-color: #3a3a3a;"
+            "  border: 1px solid #666;"
+            "  border-radius: 3px;"
+            "}"
+            "QFrame:hover {"
+            f"  background-color: #4a5a6a;"
+            f"  border: 1px solid {UI_ACCENT_BLUE};"
+            "}"
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        tip = QLabel("⋮⋮ 拖动调整日志高度 ⋮⋮")
+        tip.setAlignment(Qt.AlignCenter)
+        tip.setStyleSheet(f"color: {UI_TEXT_MUTED}; background: transparent; border: none;")
+        tip.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        lay.addWidget(tip)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self._press_y = event.globalY()
+            self._press_h = max(self._log.height(), self._min_h)
+            self.grabMouse()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if not self._dragging:
+            super().mouseMoveEvent(event)
+            return
+        dy = event.globalY() - self._press_y
+        delta = dy if self._grow_down else -dy
+        new_h = max(self._min_h, min(self._max_h, self._press_h + delta))
+        self._log.setFixedHeight(new_h)
+        event.accept()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            self.releaseMouse()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
 
 # 测试 Tab：场景示意图像框（2×4）
 TEST_SCENARIO_LABELS = (
@@ -14868,6 +15381,170 @@ def list_robodojo_tasks() -> List[str]:
     return sorted(names)
 
 
+def list_robodojo_policies(
+    robodojo_root: str = "",
+) -> List[Tuple[str, str]]:
+    """列出 XPolicyLab/policy 下可部署策略：(显示名, 相对 RoboDojo 根的 policy_dir)。
+
+    判定：目录内存在 deploy.py（与 robodojo.sh server/client 一致）。
+    """
+    root = os.path.abspath(
+        os.path.expanduser((robodojo_root or "").strip() or ROBODOJO_ROOT_DEFAULT)
+    )
+    policy_root = os.path.join(root, "XPolicyLab", "policy")
+    if not os.path.isdir(policy_root):
+        return []
+    out: List[Tuple[str, str]] = []
+    try:
+        for name in sorted(os.listdir(policy_root), key=str.lower):
+            if name.startswith("_") or name.startswith("."):
+                continue
+            d = os.path.join(policy_root, name)
+            if not os.path.isdir(d):
+                continue
+            if not os.path.isfile(os.path.join(d, "deploy.py")):
+                continue
+            rel = f"XPolicyLab/policy/{name}"
+            out.append((name, rel))
+    except OSError:
+        return []
+    return out
+
+
+def _pid_listening_on_tcp_port(port: int) -> Optional[int]:
+    """Best-effort PID of a process listening on TCP port (Linux ss/fuser)."""
+    port = int(port)
+    try:
+        out = subprocess.check_output(
+            ["ss", "-ltnp", f"sport = :{port}"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+        )
+        for ln in out.splitlines():
+            if "LISTEN" not in ln:
+                continue
+            m = re.search(r"pid=(\d+)", ln)
+            if m:
+                return int(m.group(1))
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    try:
+        out = subprocess.check_output(
+            ["fuser", f"{port}/tcp"],
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=2,
+        )
+        for tok in out.replace("\n", " ").split():
+            if tok.isdigit():
+                return int(tok)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
+def inspect_robodojo_policy_listener(
+    host: str = "",
+    port: int = 0,
+) -> dict:
+    """Inspect whatever is on the RoboDojo policy deploy port.
+
+    Returns keys: listening, pid, cmdline, policy_name, ckpt_name, action_type,
+    is_policy_server.
+    """
+    host = (host or ROBODOJO_POLICY_HOST_DEFAULT).strip() or "127.0.0.1"
+    port = int(port or ROBODOJO_POLICY_PORT_DEFAULT)
+    info: dict = {
+        "host": host,
+        "port": port,
+        "listening": False,
+        "pid": None,
+        "cmdline": "",
+        "policy_name": "",
+        "ckpt_name": "",
+        "action_type": "",
+        "is_policy_server": False,
+    }
+    try:
+        info["listening"] = bool(port_listening(host, port))
+    except Exception:
+        info["listening"] = False
+    if not info["listening"]:
+        return info
+    pid = _pid_listening_on_tcp_port(port)
+    info["pid"] = pid
+    cmdline = ""
+    if pid and pid > 1:
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as fh:
+                cmdline = fh.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        except OSError:
+            cmdline = ""
+    info["cmdline"] = cmdline
+    # setup_policy_server.py … policy_name=starVLA ckpt_name=hf_qwenpi_v3
+    # or robodojo.sh server --policy-dir …/starVLA --ckpt …
+    m_pol = re.search(r"policy_name=([^\s]+)", cmdline)
+    if not m_pol:
+        m_pol = re.search(r"XPolicyLab/policy/([^\s/]+)", cmdline)
+    if m_pol:
+        info["policy_name"] = m_pol.group(1).strip().strip("'\"")
+    m_ckpt = re.search(r"ckpt_name=([^\s]+)", cmdline)
+    if not m_ckpt:
+        m_ckpt = re.search(r"--ckpt[=\s]+([^\s]+)", cmdline)
+    if m_ckpt:
+        info["ckpt_name"] = m_ckpt.group(1).strip().strip("'\"")
+    m_act = re.search(r"action_type=([^\s]+)", cmdline)
+    if not m_act:
+        m_act = re.search(r"--action-type[=\s]+([^\s]+)", cmdline)
+    if m_act:
+        info["action_type"] = m_act.group(1).strip().strip("'\"")
+    markers = (
+        "setup_policy_server.py",
+        "setup_eval_policy_server.sh",
+        "robodojo.sh server",
+        "XPolicyLab/policy/",
+        "model_server",
+        "server_policy.py",
+    )
+    info["is_policy_server"] = any(m in cmdline for m in markers) or bool(
+        info["policy_name"]
+    )
+    return info
+
+
+def robodojo_policy_matches_listener(
+    info: dict,
+    *,
+    policy_dir: str,
+    ckpt: str = "",
+    action_type: str = "",
+) -> bool:
+    """True if listener looks like the requested policy (and ckpt/action when known)."""
+    if not info or not info.get("listening") or not info.get("is_policy_server"):
+        return False
+    want = os.path.basename((policy_dir or "").rstrip("/"))
+    got = str(info.get("policy_name") or "").strip()
+    if want and got and want.lower() != got.lower():
+        return False
+    if want and not got:
+        # cmdline may omit policy_name; require path fragment
+        cmd = str(info.get("cmdline") or "")
+        if want not in cmd and f"policy/{want}" not in cmd:
+            return False
+    want_ckpt = (ckpt or "").strip()
+    got_ckpt = str(info.get("ckpt_name") or "").strip()
+    if want_ckpt and got_ckpt and want_ckpt != got_ckpt:
+        # allow soft match: hf_qwenpi_v3 vs path ending
+        if want_ckpt not in got_ckpt and got_ckpt not in want_ckpt:
+            return False
+    want_act = (action_type or "").strip().lower()
+    got_act = str(info.get("action_type") or "").strip().lower()
+    if want_act and got_act and want_act != got_act:
+        return False
+    return True
+
+
 class RoboDojoEvalLauncher(QObject):
     """启动/停止 RoboDojo 单任务评测（GUI: run_gui_eval.sh / headless: robodojo.sh eval）。
 
@@ -15067,6 +15744,9 @@ class RoboDojoEvalLauncher(QObject):
         display: str = "",
         use_gui: bool = True,
         reuse_existing: bool = True,
+        attach_external: bool = False,
+        policy_host: str = "",
+        policy_port: int = 0,
     ) -> str:
         """启动或复用评测。返回 started / reused / switched / busy / error。"""
         task = (task or "").strip()
@@ -15117,6 +15797,9 @@ class RoboDojoEvalLauncher(QObject):
             robodojo_root=robodojo_root,
             display=display,
             use_gui=use_gui,
+            attach_external=attach_external,
+            policy_host=policy_host,
+            policy_port=policy_port,
         )
 
     def _start_new_process(
@@ -15132,6 +15815,9 @@ class RoboDojoEvalLauncher(QObject):
         robodojo_root: str = "",
         display: str = "",
         use_gui: bool = True,
+        attach_external: bool = False,
+        policy_host: str = "",
+        policy_port: int = 0,
     ) -> str:
         if self.is_running():
             self.status_message.emit("RoboDojo 评测已在运行")
@@ -15152,6 +15838,8 @@ class RoboDojoEvalLauncher(QObject):
         self._restart_pending = False
         self._adopted = False
         self._external_pids = []
+        host = (policy_host or ROBODOJO_POLICY_HOST_DEFAULT).strip() or "127.0.0.1"
+        port = int(policy_port or ROBODOJO_POLICY_PORT_DEFAULT)
         self._last_start_kwargs = {
             "task": task,
             "bridge_dir": bridge_dir,
@@ -15163,15 +15851,22 @@ class RoboDojoEvalLauncher(QObject):
             "robodojo_root": root,
             "display": disp,
             "use_gui": self._use_gui,
+            "attach_external": bool(attach_external),
+            "policy_host": host,
+            "policy_port": port,
         }
         # 「无」：只启评测客户端；仍用 demo_policy 目录提供 client adapter 脚本
         skip_policy = not (policy_dir or "").strip()
         if skip_policy:
             policy_dir = "XPolicyLab/policy/demo_policy"
             self._last_start_kwargs["policy_dir"] = ""
+            attach_external = False
         is_starvla = (not skip_policy) and (
             "starVLA" in policy_dir or "starvla" in policy_dir.lower()
         )
+        # attach_external：只起 client，连已部署 server。
+        # 否则（一体启动）：本进程先起 server 再起 Isaac（与旧 robodojo.sh eval 相同）。
+        use_external = bool(attach_external) and (not skip_policy)
 
         # Viewer (RoboStack) injects ros-humble into PYTHONPATH; that makes
         # transformers see numpy version as None inside starvla/RoboDojo envs.
@@ -15202,11 +15897,13 @@ class RoboDojoEvalLauncher(QObject):
         if skip_policy:
             exports.append("export ROBODOJO_SKIP_POLICY_SERVER=1")
             exports.append("export ROBODOJO_FORCE_PROTOCOL=none")
-            # port still required by eval_policy.sh argv plumbing; unused for noop
-            skip_policy_port = (
-                os.environ.get("ROBODOJO_POLICY_PORT", "").strip() or "18765"
-            )
+            skip_policy_port = str(port)
             exports.append(f"export ROBODOJO_POLICY_PORT={shlex.quote(skip_policy_port)}")
+        elif use_external:
+            exports.append("export ROBODOJO_SKIP_POLICY_SERVER=1")
+            exports.append("unset ROBODOJO_FORCE_PROTOCOL || true")
+            exports.append(f"export ROBODOJO_POLICY_HOST={shlex.quote(host)}")
+            exports.append(f"export ROBODOJO_POLICY_PORT={shlex.quote(str(port))}")
         else:
             exports.append("unset ROBODOJO_SKIP_POLICY_SERVER ROBODOJO_FORCE_PROTOCOL || true")
         if bridge_dir:
@@ -15259,7 +15956,49 @@ class RoboDojoEvalLauncher(QObject):
                 ]
             )
             starvla_ckpt_note = f"  STARVLA_CKPT_PATH={ckpt_path}"
-            if self._use_gui:
+            # 已单独部署策略时：走通用 GUI/eval（只起 client），勿再跑 run_gui_starvla
+            # （后者会再起一套 server）。
+            if use_external and self._use_gui:
+                gui_script = os.path.join(root, "scripts", "run_gui_eval.sh")
+                if not os.path.isfile(gui_script):
+                    self.status_message.emit(f"未找到脚本: {gui_script}")
+                    return "error"
+                exports.extend(
+                    [
+                        f"export ROBODOJO_DISPLAY={shlex.quote(disp)}",
+                        f"export DISPLAY={shlex.quote(disp)}",
+                    ]
+                )
+                run_cmd = f"exec bash {shlex.quote(gui_script)} {shlex.quote(task)}"
+                log_cmd = (
+                    f"$ bash scripts/run_gui_eval.sh {task}  "
+                    f"# GUI client → {host}:{port}"
+                )
+                status_msg = f"正在启动评测（复用已部署策略 {host}:{port} / GUI）: {task}…"
+            elif use_external and not self._use_gui:
+                robodojo_sh = os.path.join(root, "scripts", "robodojo.sh")
+                if not os.path.isfile(robodojo_sh):
+                    self.status_message.emit(f"未找到脚本: {robodojo_sh}")
+                    return "error"
+                run_cmd = (
+                    f"exec bash {shlex.quote(robodojo_sh)} client "
+                    f"--policy-dir {shlex.quote(policy_dir)} "
+                    f"--task {shlex.quote(task)} "
+                    f"--ckpt {shlex.quote(ckpt)} "
+                    f"--policy-host {shlex.quote(host)} "
+                    f"--policy-port {int(port)} "
+                    f"--eval-num {shlex.quote(eval_num)} "
+                    f"--action-type {shlex.quote(action_type)} "
+                    f"--seed 0"
+                )
+                log_cmd = (
+                    f"$ bash scripts/robodojo.sh client --task {task} "
+                    f"--policy-host {host} --policy-port {port}  # headless"
+                )
+                status_msg = (
+                    f"正在启动评测（复用已部署策略 {host}:{port} / headless）: {task}…"
+                )
+            elif self._use_gui:
                 gui_script = os.path.join(root, "scripts", "run_gui_starvla_pi_v3.sh")
                 if not os.path.isfile(gui_script):
                     self.status_message.emit(f"未找到脚本: {gui_script}")
@@ -15314,6 +16053,11 @@ class RoboDojoEvalLauncher(QObject):
             if skip_policy:
                 status_msg = f"正在启动评测（无策略 / GUI）: {task}…"
                 log_cmd += "  # skip policy server"
+            elif use_external:
+                status_msg = (
+                    f"正在启动评测（复用已部署策略 {host}:{port} / GUI）: {task}…"
+                )
+                log_cmd += f"  # client → {host}:{port}"
             else:
                 status_msg = f"正在启动 RoboDojo GUI 评测: {task}…"
         else:
@@ -15321,27 +16065,47 @@ class RoboDojoEvalLauncher(QObject):
             if not os.path.isfile(robodojo_sh):
                 self.status_message.emit(f"未找到脚本: {robodojo_sh}")
                 return "error"
-            run_cmd = (
-                f"exec bash {shlex.quote(robodojo_sh)} eval "
-                f"--policy-dir {shlex.quote(policy_dir)} "
-                f"--task {shlex.quote(task)} "
-                f"--ckpt {shlex.quote(ckpt)} "
-                f"--policy-env {shlex.quote(policy_env)} "
-                f"--eval-env {shlex.quote(eval_env)} "
-                f"--eval-num {shlex.quote(eval_num)} "
-                f"--action-type {shlex.quote(action_type)} "
-                f"--seed 0"
-            )
-            log_cmd = (
-                f"$ bash scripts/robodojo.sh eval --task {task} "
-                f"--policy-dir {policy_dir} --ckpt {ckpt} "
-                f"--eval-num {eval_num}  # headless keep"
-            )
-            if skip_policy:
-                status_msg = f"正在启动评测（无策略 / headless）: {task}…"
-                log_cmd += "  # skip policy server"
+            if use_external:
+                run_cmd = (
+                    f"exec bash {shlex.quote(robodojo_sh)} client "
+                    f"--policy-dir {shlex.quote(policy_dir)} "
+                    f"--task {shlex.quote(task)} "
+                    f"--ckpt {shlex.quote(ckpt)} "
+                    f"--policy-host {shlex.quote(host)} "
+                    f"--policy-port {int(port)} "
+                    f"--eval-num {shlex.quote(eval_num)} "
+                    f"--action-type {shlex.quote(action_type)} "
+                    f"--seed 0"
+                )
+                log_cmd = (
+                    f"$ bash scripts/robodojo.sh client --task {task} "
+                    f"--policy-host {host} --policy-port {port}"
+                )
+                status_msg = (
+                    f"正在启动评测（复用已部署策略 {host}:{port} / headless）: {task}…"
+                )
             else:
-                status_msg = f"正在启动 RoboDojo headless 评测: {task}…"
+                run_cmd = (
+                    f"exec bash {shlex.quote(robodojo_sh)} eval "
+                    f"--policy-dir {shlex.quote(policy_dir)} "
+                    f"--task {shlex.quote(task)} "
+                    f"--ckpt {shlex.quote(ckpt)} "
+                    f"--policy-env {shlex.quote(policy_env)} "
+                    f"--eval-env {shlex.quote(eval_env)} "
+                    f"--eval-num {shlex.quote(eval_num)} "
+                    f"--action-type {shlex.quote(action_type)} "
+                    f"--seed 0"
+                )
+                log_cmd = (
+                    f"$ bash scripts/robodojo.sh eval --task {task} "
+                    f"--policy-dir {policy_dir} --ckpt {ckpt} "
+                    f"--eval-num {eval_num}  # headless keep"
+                )
+                if skip_policy:
+                    status_msg = f"正在启动评测（无策略 / headless）: {task}…"
+                    log_cmd += "  # skip policy server"
+                else:
+                    status_msg = f"正在启动 RoboDojo headless 评测: {task}…"
 
         cmd = " && ".join(exports) + f" && cd {shlex.quote(root)} && {run_cmd}"
         self._stopping = False
@@ -15364,7 +16128,12 @@ class RoboDojoEvalLauncher(QObject):
         if skip_policy:
             qenv.insert("ROBODOJO_SKIP_POLICY_SERVER", "1")
             qenv.insert("ROBODOJO_FORCE_PROTOCOL", "none")
-            qenv.insert("ROBODOJO_POLICY_PORT", skip_policy_port)
+            qenv.insert("ROBODOJO_POLICY_PORT", str(port))
+        elif use_external:
+            qenv.insert("ROBODOJO_SKIP_POLICY_SERVER", "1")
+            qenv.remove("ROBODOJO_FORCE_PROTOCOL")
+            qenv.insert("ROBODOJO_POLICY_HOST", host)
+            qenv.insert("ROBODOJO_POLICY_PORT", str(port))
         else:
             qenv.remove("ROBODOJO_SKIP_POLICY_SERVER")
             qenv.remove("ROBODOJO_FORCE_PROTOCOL")
@@ -16883,8 +17652,11 @@ class MuJoCoViewerLauncher(QObject):
         qenv.insert("PYTHONUNBUFFERED", "1")
         if env_extra:
             for k, v in env_extra.items():
-                if v is not None:
-                    qenv.insert(str(k), str(v))
+                key = str(k)
+                if v is None:
+                    qenv.remove(key)
+                else:
+                    qenv.insert(key, str(v))
         if not (qenv.value("DISPLAY") or "").strip():
             self.log_line.emit(
                 "[warn] DISPLAY 为空，图形窗口可能无法弹出（本机桌面/X11 转发）"
@@ -19466,17 +20238,21 @@ class CameraTopicWindow(QMainWindow):
         self.sim_backend_isaac_radio = QRadioButton("Isaac / RoboDojo")
         self.sim_backend_mujoco_radio = QRadioButton("MuJoCo")
         self.sim_backend_spaces_radio = QRadioButton("MolmoSpaces")
+        self.sim_backend_arena_radio = QRadioButton("IsaacLab-Arena")
         self.sim_backend_isaac_radio.setChecked(True)
         self._sim_backend_group = QButtonGroup(self)
         self._sim_backend_group.addButton(self.sim_backend_isaac_radio, 0)
         self._sim_backend_group.addButton(self.sim_backend_mujoco_radio, 1)
         self._sim_backend_group.addButton(self.sim_backend_spaces_radio, 2)
+        self._sim_backend_group.addButton(self.sim_backend_arena_radio, 3)
         self.sim_backend_isaac_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_mujoco_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_spaces_radio.toggled.connect(self._on_sim_backend_changed)
+        self.sim_backend_arena_radio.toggled.connect(self._on_sim_backend_changed)
         sim_backend_row.addWidget(self.sim_backend_isaac_radio)
         sim_backend_row.addWidget(self.sim_backend_mujoco_radio)
         sim_backend_row.addWidget(self.sim_backend_spaces_radio)
+        sim_backend_row.addWidget(self.sim_backend_arena_radio)
         sim_backend_row.addStretch(1)
         sim_outer.addLayout(sim_backend_row)
 
@@ -19558,18 +20334,27 @@ class CameraTopicWindow(QMainWindow):
         self.sim_log_edit = QTextEdit()
         self.sim_log_edit.setReadOnly(True)
         self.sim_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.sim_log_edit.setMinimumHeight(60)
-        self.sim_log_edit.setMaximumHeight(100)
-        self.sim_log_edit.setPlaceholderText("相机桥日志…")
+        self.sim_log_edit.setFixedHeight(120)
+        self.sim_log_edit.setPlaceholderText("相机桥 / Isaac 评测日志…")
+        self.sim_log_edit.setToolTip("拖动下方手柄可调整日志高度")
         self.sim_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
         isaac_outer.addWidget(self.sim_log_edit)
+        self.sim_log_resize_bar = _LogHeightDragBar(
+            self.sim_log_edit, grow_down=True, min_h=60, max_h=900
+        )
+        isaac_outer.addWidget(self.sim_log_resize_bar)
+
+        isaac_lower = QWidget()
+        isaac_lower_l = QVBoxLayout(isaac_lower)
+        isaac_lower_l.setContentsMargins(0, 0, 0, 0)
+        isaac_lower_l.setSpacing(6)
 
         sim_run_sep = QLabel("启动 RoboDojo 评测")
         sim_run_sep.setStyleSheet(f"color: {UI_TEXT_PRIMARY}; font-weight: bold;")
-        isaac_outer.addWidget(sim_run_sep)
+        isaac_lower_l.addWidget(sim_run_sep)
 
         sim_run_row = QHBoxLayout()
         sim_run_row.setSpacing(6)
@@ -19588,11 +20373,19 @@ class CameraTopicWindow(QMainWindow):
         sim_run_row.addWidget(self.sim_eval_task_combo)
         sim_run_row.addWidget(QLabel("策略"))
         self.sim_eval_policy_combo = ImeSafeComboBox()
+        self.sim_eval_policy_combo.setMinimumWidth(160)
+        self.sim_eval_policy_combo.setMaxVisibleItems(24)
         self.sim_eval_policy_combo.addItem("无", "")
-        self.sim_eval_policy_combo.addItem(
-            "demo_policy", "XPolicyLab/policy/demo_policy"
-        )
-        self.sim_eval_policy_combo.addItem("starVLA", "XPolicyLab/policy/starVLA")
+        for label, rel in list_robodojo_policies():
+            self.sim_eval_policy_combo.addItem(label, rel)
+        if self.sim_eval_policy_combo.count() <= 1:
+            # 扫描失败时的兜底
+            self.sim_eval_policy_combo.addItem(
+                "demo_policy", "XPolicyLab/policy/demo_policy"
+            )
+            self.sim_eval_policy_combo.addItem(
+                "starVLA", "XPolicyLab/policy/starVLA"
+            )
         # 默认仍选 demo_policy（「无」= 仅启评测、不启策略服务）
         idx_demo = self.sim_eval_policy_combo.findData(
             "XPolicyLab/policy/demo_policy"
@@ -19600,10 +20393,11 @@ class CameraTopicWindow(QMainWindow):
         if idx_demo >= 0:
             self.sim_eval_policy_combo.setCurrentIndex(idx_demo)
         self.sim_eval_policy_combo.setToolTip(
-            "XPolicyLab 策略目录（相对 RoboDojo 根）。\n"
+            "XPolicyLab 策略目录（自动扫描带 deploy.py 的 policy/*）。\n"
             "选「无」：只启动评测（Isaac / eval client），不启动策略服务；\n"
             "评测侧用进程内 hold-pose / GUI 遥控推进，相机可预览；\n"
-            "「手臂/手」页可控制仿真双臂与夹爪。"
+            "「手臂/手」页可控制仿真双臂与夹爪。\n"
+            "各策略还需对应 conda 环境与 ckpt 才可真正推理。"
         )
         self.sim_eval_policy_combo.currentIndexChanged.connect(
             self._on_sim_eval_policy_changed
@@ -19632,6 +20426,16 @@ class CameraTopicWindow(QMainWindow):
             "不勾选：headless（无 Isaac 窗口；相机预览仍可通过桥接看到）。"
         )
         sim_run_row.addWidget(self.sim_eval_use_gui_check)
+        self.sim_eval_bundled_check = QCheckBox("一体启动")
+        self.sim_eval_bundled_check.setChecked(False)
+        self.sim_eval_bundled_check.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_bundled_check.setToolTip(
+            "勾选：与旧 robodojo.sh eval 相同——评测进程内先起策略再起 Isaac，\n"
+            "避免「先仿真后模型」叠峰 OOM；不必先点「部署启动」。\n"
+            "不勾选（默认）：先单独「部署启动」，再「启动评测」只起 client。\n"
+            "策略选「无」时此选项无效。"
+        )
+        sim_run_row.addWidget(self.sim_eval_bundled_check)
         self.sim_eval_run_status = QLabel("评测: 空闲")
         self.sim_eval_run_status.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         sim_run_row.addWidget(self.sim_eval_run_status, 1)
@@ -19641,9 +20445,9 @@ class CameraTopicWindow(QMainWindow):
             "启动前会检查是否已有 eval_client / Isaac 在跑：有则复用并按需热切换任务。\n"
             "无运行进程时：按「仿真界面」选项新启动（EVAL_NUM=keep 常驻）。\n"
             "已由本窗口管理时：按钮为「切换任务」。\n"
-            "• 勾选仿真界面 → scripts/run_gui_eval.sh（GUI）\n"
-            "• 不勾选 → scripts/robodojo.sh eval（headless）\n"
-            "策略选「无」时只启评测客户端，不启策略服务。\n"
+            "未勾选「一体启动」且选了策略：须先「策略部署」匹配后再评测（只起 client）。\n"
+            "勾选「一体启动」：评测内先起模型再起仿真（旧流程，利于避 OOM）。\n"
+            "策略选「无」：只启评测客户端（零动作 / GUI 遥控）。\n"
             "相关进程一直保留，直到点击「停止评测」。"
         )
         self.sim_eval_start_btn.clicked.connect(self._on_sim_eval_start_clicked)
@@ -19658,11 +20462,43 @@ class CameraTopicWindow(QMainWindow):
         )
         self.sim_eval_stop_run_btn.clicked.connect(self._on_sim_eval_stop_run_clicked)
         sim_run_row.addWidget(self.sim_eval_stop_run_btn)
-        isaac_outer.addLayout(sim_run_row)
+        isaac_lower_l.addLayout(sim_run_row)
+
+        sim_policy_deploy_row = QHBoxLayout()
+        sim_policy_deploy_row.setSpacing(6)
+        sim_policy_deploy_row.addWidget(QLabel("策略部署"))
+        self.sim_policy_deploy_status = QLabel("策略: 未部署")
+        self.sim_policy_deploy_status.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_policy_deploy_status.setToolTip(
+            f"独立起 robodojo.sh server（默认 {ROBODOJO_POLICY_HOST_DEFAULT}:"
+            f"{ROBODOJO_POLICY_PORT_DEFAULT}），与「启动评测」解耦；\n"
+            "可先部署模型，再多次启动/切换评测，避免每次重载权重。"
+        )
+        sim_policy_deploy_row.addWidget(self.sim_policy_deploy_status, 1)
+        self.sim_policy_deploy_start_btn = QPushButton("部署启动")
+        self.sim_policy_deploy_start_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_policy_deploy_start_btn.setToolTip(
+            "仅启动策略 WebSocket 服务（robodojo.sh server），不起 Isaac。\n"
+            f"端口 {ROBODOJO_POLICY_PORT_DEFAULT}；与 Pi/openpi 抢同一张 GPU 时请先停另一侧。"
+        )
+        self.sim_policy_deploy_start_btn.clicked.connect(
+            self._on_sim_policy_deploy_start_clicked
+        )
+        sim_policy_deploy_row.addWidget(self.sim_policy_deploy_start_btn)
+        self.sim_policy_deploy_stop_btn = QPushButton("部署停止")
+        self.sim_policy_deploy_stop_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_policy_deploy_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.sim_policy_deploy_stop_btn.setEnabled(False)
+        self.sim_policy_deploy_stop_btn.setToolTip("停止本窗口拉起的 RoboDojo 策略服务")
+        self.sim_policy_deploy_stop_btn.clicked.connect(
+            self._on_sim_policy_deploy_stop_clicked
+        )
+        sim_policy_deploy_row.addWidget(self.sim_policy_deploy_stop_btn)
+        isaac_lower_l.addLayout(sim_policy_deploy_row)
 
         sim_eval_sep = QLabel("评测结果（RoboDojo）")
         sim_eval_sep.setStyleSheet(f"color: {UI_TEXT_PRIMARY}; font-weight: bold;")
-        isaac_outer.addWidget(sim_eval_sep)
+        isaac_lower_l.addWidget(sim_eval_sep)
 
         sim_eval_root_row = QHBoxLayout()
         sim_eval_root_row.setSpacing(6)
@@ -19681,7 +20517,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_refresh_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_eval_refresh_btn.clicked.connect(self._refresh_sim_eval_tree)
         sim_eval_root_row.addWidget(self.sim_eval_refresh_btn)
-        isaac_outer.addLayout(sim_eval_root_row)
+        isaac_lower_l.addLayout(sim_eval_root_row)
 
         sim_eval_filter_row = QHBoxLayout()
         sim_eval_filter_row.setSpacing(6)
@@ -19712,7 +20548,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_open_video_btn.setToolTip("窗口内播放选中 mp4（双击列表项亦可）")
         self.sim_eval_open_video_btn.clicked.connect(self._on_sim_eval_open_video_clicked)
         sim_eval_filter_row.addWidget(self.sim_eval_open_video_btn)
-        isaac_outer.addLayout(sim_eval_filter_row)
+        isaac_lower_l.addLayout(sim_eval_filter_row)
 
         sim_eval_split = QSplitter(Qt.Horizontal)
         self.sim_eval_tree = QTreeWidget()
@@ -19754,7 +20590,8 @@ class CameraTopicWindow(QMainWindow):
         sim_eval_split.addWidget(sim_eval_right)
         sim_eval_split.setStretchFactor(0, 2)
         sim_eval_split.setStretchFactor(1, 3)
-        isaac_outer.addWidget(sim_eval_split, 1)
+        isaac_lower_l.addWidget(sim_eval_split, 1)
+        isaac_outer.addWidget(isaac_lower, 1)
 
         self._sim_bridge_launcher = IsaacCamBridgeLauncher(self)
         self._sim_bridge_launcher.log_line.connect(self._append_sim_log)
@@ -19762,6 +20599,18 @@ class CameraTopicWindow(QMainWindow):
         self._sim_eval_launcher = RoboDojoEvalLauncher(self)
         self._sim_eval_launcher.log_line.connect(self._append_sim_log)
         self._sim_eval_launcher.running_changed.connect(self._update_sim_eval_run_ui)
+        self._robodojo_policy_launcher = MuJoCoViewerLauncher(self)
+        self._robodojo_policy_launcher.log_line.connect(self._append_sim_log)
+        self._robodojo_policy_launcher.status_message.connect(
+            lambda m: self._append_sim_log(f"[策略] {m}")
+        )
+        self._robodojo_policy_launcher.running_changed.connect(
+            self._on_sim_policy_deploy_running_changed
+        )
+        self._sim_policy_ready_timer = QTimer(self)
+        self._sim_policy_ready_timer.setInterval(1500)
+        self._sim_policy_ready_timer.timeout.connect(self._update_sim_policy_deploy_ui)
+        self._update_sim_policy_deploy_ui()
         self._sim_frame_timer = QTimer(self)
         self._sim_frame_timer.setInterval(2000)
         self._sim_frame_timer.timeout.connect(self._refresh_sim_frame_status)
@@ -19871,12 +20720,119 @@ class CameraTopicWindow(QMainWindow):
         for label, recipe_id in MOLMOSPACES_RUN_RECIPES:
             self.molmospaces_recipe_combo.addItem(label, recipe_id)
         self.molmospaces_recipe_combo.setToolTip(
+            "评测所选任务：只跑任务列表里当前这一项。"
             "快速演示: VirtualGL→NVIDIA；无 GLX 时 EGL+Tk 回退"
         )
         mj_spaces_row.addWidget(self.molmospaces_recipe_combo)
+        mj_spaces_row.addWidget(QLabel("本体"))
+        self.molmospaces_robot_combo = ImeSafeComboBox()
+        for label, robot_id in MOLMOSPACES_ROBOTS:
+            self.molmospaces_robot_combo.addItem(label, robot_id)
+        # Default Franka Droid (pipeline --robot droid)
+        idx_droid = self.molmospaces_robot_combo.findData("droid")
+        if idx_droid >= 0:
+            self.molmospaces_robot_combo.setCurrentIndex(idx_droid)
+        self.molmospaces_robot_combo.setToolTip(
+            "快速演示：Droid/Franka/RUM/YAM 跑 Pick；"
+            "RBY1 自动改导航 (nav_to_obj，无 parallel IK)；"
+            "Psi R1 开本地 MuJoCo。"
+            "评测任务以 benchmark JSON 内机器人为准。"
+        )
+        mj_spaces_row.addWidget(self.molmospaces_robot_combo)
         sp_page_l.addLayout(mj_spaces_row)
+        mj_task_row = QHBoxLayout()
+        mj_task_row.setSpacing(6)
+        mj_task_row.addWidget(QLabel("任务"))
+        self.molmospaces_task_combo = ImeSafeComboBox()
+        self.molmospaces_task_combo.setToolTip(
+            "每次只评测当前选中的一个任务。"
+            "未下载的项在启动时会提示，不会同时跑多个任务。"
+        )
+        mj_task_row.addWidget(self.molmospaces_task_combo, 1)
+        self.molmospaces_task_refresh_btn = QPushButton("刷新")
+        self.molmospaces_task_refresh_btn.setFocusPolicy(Qt.NoFocus)
+        self.molmospaces_task_refresh_btn.clicked.connect(
+            self._refresh_molmospaces_tasks
+        )
+        mj_task_row.addWidget(self.molmospaces_task_refresh_btn)
+        mj_task_row.addWidget(QLabel("策略"))
+        self.molmospaces_policy_combo = ImeSafeComboBox()
+        for label, policy_id in MOLMOSPACES_EVAL_POLICIES:
+            self.molmospaces_policy_combo.addItem(label, policy_id)
+        self.molmospaces_policy_combo.setToolTip(
+            "Dummy 不需要外部策略服务。"
+            "Pi 会按下方路径启动/校验 openpi serve_policy（默认 :8080）。"
+            "Teleop 需要对应遥控服务已启动。"
+        )
+        self.molmospaces_policy_combo.currentIndexChanged.connect(
+            self._on_molmospaces_policy_changed
+        )
+        mj_task_row.addWidget(self.molmospaces_policy_combo)
+        mj_task_row.addWidget(QLabel("回合"))
+        self.molmospaces_episodes_spin = QSpinBox()
+        self.molmospaces_episodes_spin.setRange(0, 10000)
+        self.molmospaces_episodes_spin.setValue(1)
+        self.molmospaces_episodes_spin.setSpecialValueText("全部")
+        self.molmospaces_episodes_spin.setToolTip(
+            "该任务最多评测的回合数。0 / 全部 = benchmark 里的全部回合。"
+        )
+        mj_task_row.addWidget(self.molmospaces_episodes_spin)
+        sp_page_l.addLayout(mj_task_row)
+        self.molmospaces_pi_row = QWidget()
+        pi_row = QHBoxLayout(self.molmospaces_pi_row)
+        pi_row.setContentsMargins(0, 0, 0, 0)
+        pi_row.setSpacing(6)
+        pi_row.addWidget(QLabel("Pi模型"))
+        self.molmospaces_pi_ckpt_edit = QLineEdit(MOLMOSPACES_PI_CKPT_DEFAULT)
+        self.molmospaces_pi_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.molmospaces_pi_ckpt_edit.setPlaceholderText(
+            "本地 ckpt，或 gs://openpi-assets/checkpoints/pi05_droid_jointpos"
+        )
+        self.molmospaces_pi_ckpt_edit.setToolTip(
+            "传给 openpi serve_policy 的 --policy.dir，并覆盖 eval --checkpoint_path。"
+            f"默认 {PI_CKPT_CONFIG_DEFAULT}（关节位置），优先 "
+            f"{PI_CKPT_HF_LOCAL_DEFAULT}。"
+        )
+        pi_row.addWidget(self.molmospaces_pi_ckpt_edit, 1)
+        self.molmospaces_pi_ckpt_browse_btn = QPushButton("…")
+        self.molmospaces_pi_ckpt_browse_btn.setFixedWidth(28)
+        self.molmospaces_pi_ckpt_browse_btn.setFocusPolicy(Qt.NoFocus)
+        self.molmospaces_pi_ckpt_browse_btn.clicked.connect(
+            self._on_molmospaces_pi_ckpt_browse
+        )
+        pi_row.addWidget(self.molmospaces_pi_ckpt_browse_btn)
+        self.molmospaces_pi_start_btn = QPushButton("部署启动")
+        self.molmospaces_pi_start_btn.setFocusPolicy(Qt.NoFocus)
+        self.molmospaces_pi_start_btn.setToolTip(
+            "下载/校验模型并启动 openpi serve_policy（默认 :8080）"
+        )
+        self.molmospaces_pi_start_btn.clicked.connect(
+            self._on_molmospaces_pi_start_clicked
+        )
+        pi_row.addWidget(self.molmospaces_pi_start_btn)
+        self.molmospaces_pi_stop_btn = QPushButton("部署停止")
+        self.molmospaces_pi_stop_btn.setFocusPolicy(Qt.NoFocus)
+        self.molmospaces_pi_stop_btn.setToolTip("停止 :8080 上的 Pi 策略服务")
+        self.molmospaces_pi_stop_btn.clicked.connect(
+            self._on_molmospaces_pi_stop_clicked
+        )
+        pi_row.addWidget(self.molmospaces_pi_stop_btn)
+        self.molmospaces_pi_probe_btn = QPushButton("验证")
+        self.molmospaces_pi_probe_btn.setFocusPolicy(Qt.NoFocus)
+        self.molmospaces_pi_probe_btn.setToolTip(
+            "探测 ws://localhost:8080 是否可调用（不自动启动）"
+        )
+        self.molmospaces_pi_probe_btn.clicked.connect(
+            self._on_molmospaces_pi_probe_clicked
+        )
+        pi_row.addWidget(self.molmospaces_pi_probe_btn)
+        sp_page_l.addWidget(self.molmospaces_pi_row)
+        self._on_molmospaces_policy_changed()
+        self._update_molmospaces_pi_deploy_ui()
         sp_hint = QLabel(
             "使用 molmospaces conda 环境；与 Isaac 评测 / MuJoCo viewer 互斥。"
+            "动作选「评测所选任务」时，只启动任务下拉框里当前这一项。"
+            "选 Pi 时用「部署启动/停止」管理策略服务；评测前会确认可调用。"
         )
         sp_hint.setWordWrap(True)
         sp_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
@@ -19884,15 +20840,115 @@ class CameraTopicWindow(QMainWindow):
         sp_page_l.addStretch(1)
         self.sim_backend_stack.addWidget(sp_page)
 
+        # --- page 3: IsaacLab-Arena ---
+        arena_page = QWidget()
+        arena_page_l = QVBoxLayout(arena_page)
+        arena_page_l.setContentsMargins(0, 0, 0, 0)
+        arena_page_l.setSpacing(6)
+        arena_root_row = QHBoxLayout()
+        arena_root_row.setSpacing(6)
+        arena_root_row.addWidget(QLabel("仓库"))
+        self.arena_root_edit = QLineEdit(
+            os.environ.get("ISAACLAB_ARENA_ROOT", ISAACLAB_ARENA_ROOT_DEFAULT)
+        )
+        self.arena_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.arena_root_edit.setToolTip(f"IsaacLab-Arena 仓库（默认 {ISAACLAB_ARENA_ROOT_DEFAULT}）")
+        arena_root_row.addWidget(self.arena_root_edit, 1)
+        self.arena_root_browse_btn = QPushButton("…")
+        self.arena_root_browse_btn.setFixedWidth(28)
+        self.arena_root_browse_btn.clicked.connect(self._on_arena_root_browse)
+        arena_root_row.addWidget(self.arena_root_browse_btn)
+        arena_page_l.addLayout(arena_root_row)
+        arena_task_row = QHBoxLayout()
+        arena_task_row.setSpacing(6)
+        arena_task_row.addWidget(QLabel("任务"))
+        self.arena_task_combo = ImeSafeComboBox()
+        self.arena_task_combo.setToolTip("每次只启动当前选中的一个 environment")
+        arena_task_row.addWidget(self.arena_task_combo, 1)
+        self.arena_task_refresh_btn = QPushButton("刷新")
+        self.arena_task_refresh_btn.setFocusPolicy(Qt.NoFocus)
+        self.arena_task_refresh_btn.clicked.connect(self._refresh_arena_tasks)
+        arena_task_row.addWidget(self.arena_task_refresh_btn)
+        arena_task_row.addWidget(QLabel("策略"))
+        self.arena_policy_combo = ImeSafeComboBox()
+        for label, policy_id in ISAACLAB_ARENA_POLICIES:
+            self.arena_policy_combo.addItem(label, policy_id)
+        self.arena_policy_combo.setToolTip(
+            "zero_action 不需要文件。replay 需要 HDF5；rsl_rl 需要 checkpoint。"
+            "缺文件时不会启动 Kit。"
+        )
+        self.arena_policy_combo.currentIndexChanged.connect(self._on_arena_policy_changed)
+        arena_task_row.addWidget(self.arena_policy_combo)
+        arena_task_row.addWidget(QLabel("步数"))
+        self.arena_steps_spin = QSpinBox()
+        self.arena_steps_spin.setRange(1, 100000)
+        self.arena_steps_spin.setValue(200)
+        self.arena_steps_spin.setToolTip("policy_runner --num_steps")
+        arena_task_row.addWidget(self.arena_steps_spin)
+        self.arena_headless_check = QCheckBox("无界面")
+        self.arena_headless_check.setChecked(not bool((os.environ.get("DISPLAY") or "").strip()))
+        self.arena_headless_check.setToolTip(
+            "不勾选时打开 Omniverse Kit 窗口（--viz kit）。"
+            "Isaac Lab 3 不传 --viz 会默认无界面。"
+        )
+        arena_task_row.addWidget(self.arena_headless_check)
+        self.arena_gpu_check = QCheckBox("GPU")
+        self.arena_gpu_check.setChecked(True)
+        self.arena_gpu_check.setToolTip("勾选后物理仿真与渲染使用 GPU（--device cuda）")
+        arena_task_row.addWidget(self.arena_gpu_check)
+        self.arena_gpu_spin = QSpinBox()
+        self.arena_gpu_spin.setRange(0, 15)
+        self.arena_gpu_spin.setValue(0)
+        self.arena_gpu_spin.setToolTip("nvidia-smi 上的 GPU 序号")
+        self.arena_gpu_spin.setFixedWidth(52)
+        arena_task_row.addWidget(self.arena_gpu_spin)
+        arena_page_l.addLayout(arena_task_row)
+        self.arena_policy_file_row = QWidget()
+        arena_file_row = QHBoxLayout(self.arena_policy_file_row)
+        arena_file_row.setContentsMargins(0, 0, 0, 0)
+        arena_file_row.setSpacing(6)
+        self.arena_policy_file_label = QLabel("回放文件")
+        arena_file_row.addWidget(self.arena_policy_file_label)
+        self.arena_policy_file_edit = QLineEdit()
+        self.arena_policy_file_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.arena_policy_file_edit.setPlaceholderText("replay 的 HDF5，或 rsl_rl 的 .pt")
+        arena_file_row.addWidget(self.arena_policy_file_edit, 1)
+        self.arena_policy_file_browse_btn = QPushButton("…")
+        self.arena_policy_file_browse_btn.setFixedWidth(28)
+        self.arena_policy_file_browse_btn.clicked.connect(self._on_arena_policy_file_browse)
+        arena_file_row.addWidget(self.arena_policy_file_browse_btn)
+        self.arena_policy_file_row.setVisible(False)
+        arena_page_l.addWidget(self.arena_policy_file_row)
+        arena_extra_row = QHBoxLayout()
+        arena_extra_row.setSpacing(6)
+        arena_extra_row.addWidget(QLabel("额外参数"))
+        self.arena_extra_edit = QLineEdit()
+        self.arena_extra_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.arena_extra_edit.setPlaceholderText("可选，写在环境名后面，如 --object cracker_box")
+        arena_extra_row.addWidget(self.arena_extra_edit, 1)
+        arena_page_l.addLayout(arena_extra_row)
+        arena_hint = QLabel(
+            "使用 IsaacLab-Arena conda 环境。"
+            "启动时只跑任务列表里当前这一项（policy_runner）。"
+            "与 Isaac / MuJoCo / MolmoSpaces 互斥。"
+        )
+        arena_hint.setWordWrap(True)
+        arena_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        arena_page_l.addWidget(arena_hint)
+        arena_page_l.addStretch(1)
+        self.sim_backend_stack.addWidget(arena_page)
+
+        # Shared MuJoCo / MolmoSpaces / Arena run controls + 可拖动高度的日志
         sim_outer.addWidget(self.sim_backend_stack, 1)
 
-        # Shared MuJoCo / MolmoSpaces run controls (hidden on Isaac backend)
         self.mujoco_run_row_widget = QWidget()
         mj_run_row = QHBoxLayout(self.mujoco_run_row_widget)
         mj_run_row.setContentsMargins(0, 0, 0, 0)
         mj_run_row.setSpacing(6)
         self.mujoco_start_btn = QPushButton("启动 MuJoCo")
-        self.mujoco_start_btn.setToolTip("启动当前所选后端（MuJoCo 或 MolmoSpaces）")
+        self.mujoco_start_btn.setToolTip(
+            "启动当前所选后端（MuJoCo / MolmoSpaces / IsaacLab-Arena）"
+        )
         self.mujoco_start_btn.clicked.connect(self._on_mujoco_unified_start_clicked)
         mj_run_row.addWidget(self.mujoco_start_btn)
         self.mujoco_stop_btn = QPushButton("停止")
@@ -19914,13 +20970,17 @@ class CameraTopicWindow(QMainWindow):
         self.mujoco_log_edit = QTextEdit()
         self.mujoco_log_edit.setReadOnly(True)
         self.mujoco_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.mujoco_log_edit.setMinimumHeight(80)
-        self.mujoco_log_edit.setMaximumHeight(160)
-        self.mujoco_log_edit.setPlaceholderText("MuJoCo / MolmoSpaces 日志…")
+        self.mujoco_log_edit.setFixedHeight(160)
+        self.mujoco_log_edit.setPlaceholderText("MuJoCo / MolmoSpaces / Arena 日志…")
+        self.mujoco_log_edit.setToolTip("拖动上方手柄可调整日志高度")
         self.mujoco_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
+        self.mujoco_log_resize_bar = _LogHeightDragBar(
+            self.mujoco_log_edit, grow_down=False, min_h=80, max_h=900
+        )
+        sim_outer.addWidget(self.mujoco_log_resize_bar)
         sim_outer.addWidget(self.mujoco_log_edit)
 
         self._mujoco_launcher = MuJoCoViewerLauncher(self)
@@ -19928,11 +20988,20 @@ class CameraTopicWindow(QMainWindow):
         self._mujoco_launcher.status_message.connect(self._on_mujoco_status)
         self._mujoco_launcher.running_changed.connect(self._update_mujoco_ui)
         self._mujoco_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
+        # Separate process for openpi serve_policy (survives eval stop).
+        self._pi_policy_launcher = MuJoCoViewerLauncher(self)
+        self._pi_policy_launcher.log_line.connect(self._append_mujoco_log)
+        self._pi_policy_launcher.status_message.connect(self._on_mujoco_status)
+        self._pi_policy_launcher.running_changed.connect(
+            self._update_molmospaces_pi_deploy_ui
+        )
         self._sim_eval_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
         self._sim_bridge_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
         self._refresh_mujoco_models(
             prefer=PSI_R1_MODEL_XML
         )
+        self._refresh_molmospaces_tasks()
+        self._refresh_arena_tasks()
         self._on_sim_backend_changed()
 
         # 稍后 addTab：仿真评测 / 真机评测 放在末尾
@@ -23889,6 +24958,8 @@ class CameraTopicWindow(QMainWindow):
         running = self._sim_eval_launcher.is_running()
         self.sim_eval_ckpt_edit.setEnabled(not running and not no_policy)
         self.sim_eval_action_combo.setEnabled(not running and not no_policy)
+        if hasattr(self, "sim_eval_bundled_check"):
+            self.sim_eval_bundled_check.setEnabled(not running and not no_policy)
         if no_policy:
             return
         if "starVLA" in policy:
@@ -23915,6 +24986,8 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_action_combo.setEnabled(not running and not no_policy)
         if hasattr(self, "sim_eval_use_gui_check"):
             self.sim_eval_use_gui_check.setEnabled(not running)
+        if hasattr(self, "sim_eval_bundled_check"):
+            self.sim_eval_bundled_check.setEnabled(not running and not no_policy)
         if stopping:
             self.sim_eval_run_status.setText("评测: 正在停止…")
             self.sim_eval_run_status.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
@@ -24265,6 +25338,12 @@ class CameraTopicWindow(QMainWindow):
             getattr(self, "sim_eval_use_gui_check", None) is not None
             and self.sim_eval_use_gui_check.isChecked()
         )
+        # 一体启动：评测进程内先起策略再起 Isaac（旧 robodojo.sh eval）；不依赖「部署启动」
+        bundled = bool(
+            (not skip_policy)
+            and getattr(self, "sim_eval_bundled_check", None) is not None
+            and self.sim_eval_bundled_check.isChecked()
+        )
         start_kwargs = dict(
             bridge_dir=bridge_dir,
             policy_dir=policy_dir,
@@ -24276,9 +25355,12 @@ class CameraTopicWindow(QMainWindow):
             display=os.environ.get("DISPLAY", ":1.0"),
             use_gui=use_gui,
             reuse_existing=True,
+            attach_external=False,
+            policy_host=ROBODOJO_POLICY_HOST_DEFAULT,
+            policy_port=ROBODOJO_POLICY_PORT_DEFAULT,
         )
 
-        # 已由本窗口管理：热切换
+        # 已由本窗口管理：热切换（不拦策略检查）
         if self._sim_eval_launcher.is_running():
             result = self._sim_eval_launcher.start(task, **start_kwargs)
             if result in ("switched", "reused"):
@@ -24310,6 +25392,113 @@ class CameraTopicWindow(QMainWindow):
                 return
             self._append_sim_log("复用失败，将尝试新启动评测…")
 
+        if not skip_policy and bundled:
+            # 一体启动会自己拉起 server，须先释放端口上的独立部署。
+            host = ROBODOJO_POLICY_HOST_DEFAULT
+            port = ROBODOJO_POLICY_PORT_DEFAULT
+            if (
+                hasattr(self, "_robodojo_policy_launcher")
+                and self._robodojo_policy_launcher.is_running()
+            ):
+                self._append_sim_log(
+                    "[策略] 一体启动：先停止本窗口独立「部署」进程，改由评测内拉起"
+                )
+                self._robodojo_policy_launcher.stop()
+                self._update_sim_policy_deploy_ui()
+                # stop 异步；等端口释放再继续
+                import time as _time
+
+                for _ in range(30):
+                    info_wait = inspect_robodojo_policy_listener(host, port)
+                    if not info_wait.get("listening"):
+                        break
+                    _time.sleep(0.2)
+            info = inspect_robodojo_policy_listener(host, port)
+            if info.get("listening"):
+                msg = (
+                    f"[策略] 一体启动需要空闲端口 {host}:{port}，"
+                    f"当前仍有进程占用"
+                    + (
+                        f"（{info.get('policy_name') or '?'}/"
+                        f"{info.get('ckpt_name') or '?'}）"
+                        if info.get("is_policy_server")
+                        else ""
+                    )
+                    + "。请先「部署停止」或结束占用后再一体启动。"
+                )
+                self._append_sim_log(msg)
+                try:
+                    from PyQt5.QtWidgets import QMessageBox
+
+                    QMessageBox.warning(self, "端口被占用", msg.replace("[策略] ", ""))
+                except Exception:
+                    pass
+                return
+            start_kwargs["attach_external"] = False
+            self._append_sim_log(
+                f"[策略] 一体启动：评测内先起 "
+                f"{os.path.basename(policy_dir.rstrip('/'))}/"
+                f"{start_kwargs['ckpt']} action={start_kwargs['action_type']}，"
+                f"就绪后再起 Isaac（旧流程，利于避 OOM）"
+            )
+        elif not skip_policy:
+            # 分离模式：必须已「部署启动」且匹配；评测绝不顺带起 server。
+            ckpt = str(start_kwargs["ckpt"])
+            action_type = str(start_kwargs.get("action_type") or "ee")
+            info = inspect_robodojo_policy_listener(
+                ROBODOJO_POLICY_HOST_DEFAULT, ROBODOJO_POLICY_PORT_DEFAULT
+            )
+            if not robodojo_policy_matches_listener(
+                info,
+                policy_dir=policy_dir,
+                ckpt=ckpt,
+                action_type=action_type,
+            ):
+                host = ROBODOJO_POLICY_HOST_DEFAULT
+                port = ROBODOJO_POLICY_PORT_DEFAULT
+                want = (
+                    f"{os.path.basename(policy_dir.rstrip('/'))}/{ckpt}"
+                    f" action={action_type}"
+                )
+                if not info.get("listening"):
+                    msg = (
+                        f"[策略] 模型未部署（{host}:{port} 无服务）。"
+                        f"请先对「{want}」点击「部署启动」，就绪后再「启动评测」；"
+                        "或勾选「一体启动」由评测内先起模型。"
+                    )
+                elif info.get("is_policy_server"):
+                    got = (
+                        f"{info.get('policy_name') or '?'}/"
+                        f"{info.get('ckpt_name') or '?'}"
+                        f" action={info.get('action_type') or '?'}"
+                    )
+                    msg = (
+                        f"[策略] 已部署的是 {got}，与当前选择 {want} 不一致。"
+                        "请先「部署停止」再部署目标模型，或改选与线上一致的策略/ckpt/action。"
+                        "评测不会自动拉起策略服务（除非勾选「一体启动」）。"
+                    )
+                else:
+                    msg = (
+                        f"[策略] {host}:{port} 被占用但不是策略服务。"
+                        "请先释放端口并「部署启动」目标模型，再启动评测。"
+                    )
+                self._append_sim_log(msg)
+                try:
+                    from PyQt5.QtWidgets import QMessageBox
+
+                    QMessageBox.warning(self, "需要先部署策略", msg.replace("[策略] ", ""))
+                except Exception:
+                    pass
+                return
+            start_kwargs["attach_external"] = True
+            self._append_sim_log(
+                f"[策略] 已确认部署就绪 "
+                f"{ROBODOJO_POLICY_HOST_DEFAULT}:{ROBODOJO_POLICY_PORT_DEFAULT} "
+                f"({info.get('policy_name') or os.path.basename(policy_dir)}/"
+                f"{info.get('ckpt_name') or ckpt}"
+                f" action={info.get('action_type') or action_type})，评测只起 client"
+            )
+
         # 全新启动：清旧帧并按需起相机桥
         self._reset_sim_bridge_frames()
         self._sim_preview_wait_logged = False
@@ -24335,9 +25524,16 @@ class CameraTopicWindow(QMainWindow):
                 f"评测模式: {mode_note}；策略=无（只启评测，不启策略服务）；"
                 f"EVAL_NUM=keep 常驻；共享帧={bridge_dir}"
             )
+        elif start_kwargs.get("attach_external"):
+            self._append_sim_log(
+                f"评测模式: {mode_note}；复用已部署策略 "
+                f"{start_kwargs['policy_host']}:{start_kwargs['policy_port']}；"
+                f"EVAL_NUM=keep 常驻；共享帧={bridge_dir}"
+            )
         else:
             self._append_sim_log(
-                f"评测模式: {mode_note}；EVAL_NUM=keep 常驻；共享帧={bridge_dir}"
+                f"评测模式: {mode_note}；一体启动（先策略后仿真）；"
+                f"EVAL_NUM=keep 常驻；共享帧={bridge_dir}"
             )
         result = self._sim_eval_launcher.start(task, **start_kwargs)
         self._update_sim_eval_run_ui()
@@ -24347,6 +25543,221 @@ class CameraTopicWindow(QMainWindow):
             "/camera/{left_wrist,head,right_wrist}_{color,depth}"
             "（优先共享 .npy，忽略同名真机 ROS 流）"
         )
+
+    def _on_sim_policy_deploy_running_changed(self, running: bool = False) -> None:
+        if running:
+            if hasattr(self, "_sim_policy_ready_timer"):
+                self._sim_policy_ready_timer.start()
+        else:
+            if hasattr(self, "_sim_policy_ready_timer"):
+                self._sim_policy_ready_timer.stop()
+        self._update_sim_policy_deploy_ui()
+
+    def _update_sim_policy_deploy_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_robodojo_policy_launcher", None)
+            and self._robodojo_policy_launcher.is_running()
+        )
+        info = inspect_robodojo_policy_listener(
+            ROBODOJO_POLICY_HOST_DEFAULT, ROBODOJO_POLICY_PORT_DEFAULT
+        )
+        listening = bool(info.get("listening"))
+        healthy = bool(info.get("is_policy_server"))
+        # 进程常驻 = 正常；端口已开就视为就绪，不要一直「部署中」。
+        if (
+            running
+            and listening
+            and healthy
+            and hasattr(self, "_sim_policy_ready_timer")
+            and self._sim_policy_ready_timer.isActive()
+        ):
+            self._sim_policy_ready_timer.stop()
+        if hasattr(self, "sim_policy_deploy_start_btn"):
+            # Allow click even when listening — handler will skip if already OK.
+            self.sim_policy_deploy_start_btn.setEnabled(not running)
+        if hasattr(self, "sim_policy_deploy_stop_btn"):
+            self.sim_policy_deploy_stop_btn.setEnabled(running or (listening and healthy))
+        if not hasattr(self, "sim_policy_deploy_status"):
+            return
+        host = ROBODOJO_POLICY_HOST_DEFAULT
+        port = ROBODOJO_POLICY_PORT_DEFAULT
+        pol = str(info.get("policy_name") or "")
+        ck = str(info.get("ckpt_name") or "")
+        act = str(info.get("action_type") or "")
+        detail = f"{pol}" + (f"/{ck}" if ck else "") + (f" action={act}" if act else "")
+        if listening and healthy:
+            owned = "本窗口托管" if running else "可复用"
+            self.sim_policy_deploy_status.setText(
+                f"策略: 已就绪 {host}:{port}"
+                + (f" ({detail})" if detail.strip("/") else "")
+                + f" — {owned}"
+            )
+            self.sim_policy_deploy_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        elif running:
+            self.sim_policy_deploy_status.setText(
+                f"策略: 部署中（等待端口）→ {host}:{port}"
+            )
+            self.sim_policy_deploy_status.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        elif listening:
+            self.sim_policy_deploy_status.setText(
+                f"策略: 端口占用但非策略服务 {host}:{port}"
+            )
+            self.sim_policy_deploy_status.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        else:
+            self.sim_policy_deploy_status.setText("策略: 未部署")
+            self.sim_policy_deploy_status.setStyleSheet("")
+
+    def _on_sim_policy_deploy_start_clicked(self) -> None:
+        policy_data = self.sim_eval_policy_combo.currentData()
+        policy_dir = "" if policy_data is None else str(policy_data)
+        if not policy_dir.strip():
+            self._append_sim_log("[策略] 请先选择策略（不能为「无」）再部署")
+            return
+        task = str(
+            self.sim_eval_task_combo.currentData()
+            or self.sim_eval_task_combo.currentText()
+            or "build_tower"
+        ).strip() or "build_tower"
+        ckpt = self.sim_eval_ckpt_edit.text().strip() or "demo"
+        action_type = str(self.sim_eval_action_combo.currentData() or "ee")
+        policy_env = ROBODOJO_ENV_DEFAULT
+        if "starVLA" in policy_dir and os.path.isdir(ROBODOJO_STARVLA_ENV_DEFAULT):
+            policy_env = ROBODOJO_STARVLA_ENV_DEFAULT
+        root = ROBODOJO_ROOT_DEFAULT
+        robodojo_sh = os.path.join(root, "scripts", "robodojo.sh")
+        if not os.path.isfile(robodojo_sh):
+            self._append_sim_log(f"[策略] 未找到 {robodojo_sh}")
+            return
+        host = ROBODOJO_POLICY_HOST_DEFAULT
+        port = ROBODOJO_POLICY_PORT_DEFAULT
+
+        if (
+            hasattr(self, "_robodojo_policy_launcher")
+            and self._robodojo_policy_launcher.is_running()
+        ):
+            self._append_sim_log(
+                f"[策略] 本窗口部署进程已在运行（{host}:{port}），跳过重复部署"
+            )
+            self._update_sim_policy_deploy_ui()
+            return
+
+        info = inspect_robodojo_policy_listener(host, port)
+        if info.get("listening") and robodojo_policy_matches_listener(
+            info, policy_dir=policy_dir, ckpt=ckpt, action_type=action_type
+        ):
+            pol = info.get("policy_name") or os.path.basename(policy_dir.rstrip("/"))
+            ck = info.get("ckpt_name") or ckpt
+            act = info.get("action_type") or action_type
+            pid = info.get("pid")
+            self._append_sim_log(
+                f"[策略] 已正常运行，跳过部署："
+                f"{host}:{port} policy={pol} ckpt={ck} action={act}"
+                + (f" pid={pid}" if pid else "")
+            )
+            self._update_sim_policy_deploy_ui()
+            return
+        if info.get("listening") and info.get("is_policy_server"):
+            pol = info.get("policy_name") or "?"
+            ck = info.get("ckpt_name") or "?"
+            act = info.get("action_type") or "?"
+            self._append_sim_log(
+                f"[策略] {host}:{port} 已有其它策略在跑（{pol}/{ck} action={act}），"
+                f"与当前选择 "
+                f"{os.path.basename(policy_dir.rstrip('/'))}/{ckpt} action={action_type} "
+                "不一致。请先「部署停止」再部署，或改选与线上一致的策略/ckpt/action。"
+            )
+            self._update_sim_policy_deploy_ui()
+            return
+        if info.get("listening"):
+            self._append_sim_log(
+                f"[策略] {host}:{port} 已被其它进程占用（非 XPolicyLab 策略服务），"
+                "请先释放端口或改 ROBODOJO_POLICY_PORT 后再部署"
+            )
+            self._update_sim_policy_deploy_ui()
+            return
+
+        exports = [
+            "unset PYTHONPATH PYTHONHOME || true",
+            "export PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1",
+            "export CONDA_ROOT=/home/psibot/miniconda3",
+            "export CONDA_EXE=/home/psibot/miniconda3/bin/conda",
+            "export PATH=/home/psibot/miniconda3/bin:\"${PATH}\"",
+            "export TMPDIR=/dev/shm/robodojo_tmp TEMP=/dev/shm/robodojo_tmp TMP=/dev/shm/robodojo_tmp",
+            "mkdir -p /dev/shm/robodojo_tmp",
+            f"export ROBODOJO_POLICY_ENV={shlex.quote(policy_env)}",
+        ]
+        if "starVLA" in policy_dir:
+            variant = resolve_starvla_hf_variant(ckpt)
+            ckpt_path = resolve_starvla_ckpt_file(variant)
+            if not ckpt_path:
+                self._append_sim_log(
+                    f"[策略] 未找到 starVLA 权重 variant={variant}，无法部署"
+                )
+                return
+            exports.extend(
+                [
+                    f"export STARVLA_HF_ROOT={shlex.quote(ROBODOJO_STARVLA_HF_ROOT_DEFAULT)}",
+                    f"export STARVLA_BASE_VLM={shlex.quote(ROBODOJO_STARVLA_BASE_VLM_DEFAULT)}",
+                    f"export STARVLA_CKPT_PATH={shlex.quote(ckpt_path)}",
+                    "export STARVLA_HF_VERIFY_ONLY=1",
+                    "export STARVLA_HF_SKIP_WEIGHT_HASH=1",
+                    "export STARVLA_INCLUDE_STATE=True",
+                    "export STARVLA_UNNORM_KEY=arx_x5",
+                ]
+            )
+        run_cmd = (
+            f"exec bash {shlex.quote(robodojo_sh)} server "
+            f"--policy-dir {shlex.quote(policy_dir)} "
+            f"--task {shlex.quote(task)} "
+            f"--ckpt {shlex.quote(ckpt)} "
+            f"--policy-env {shlex.quote(policy_env)} "
+            f"--action-type {shlex.quote(action_type)} "
+            f"--policy-port {int(port)} "
+            f"--bind-host {shlex.quote(host)} "
+            f"--policy-gpu 0 "
+            f"--seed 0"
+        )
+        cmd = " && ".join(exports) + f" && cd {shlex.quote(root)} && {run_cmd}"
+        self._append_sim_log(
+            f"[策略] 部署启动 {policy_dir} ckpt={ckpt} → {host}:{port}"
+        )
+        self._robodojo_policy_launcher.start_cwd_command(
+            cwd=root,
+            argv=["bash", "-lc", cmd],
+            label=f"robodojo policy:{os.path.basename(policy_dir.rstrip('/'))}",
+            env_extra={
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHONPATH": None,
+                "PYTHONHOME": None,
+            },
+        )
+        if hasattr(self, "_sim_policy_ready_timer"):
+            self._sim_policy_ready_timer.start()
+        self._update_sim_policy_deploy_ui()
+
+    def _on_sim_policy_deploy_stop_clicked(self) -> None:
+        self._append_sim_log("[策略] 正在停止部署…")
+        if (
+            hasattr(self, "_robodojo_policy_launcher")
+            and self._robodojo_policy_launcher.is_running()
+        ):
+            self._robodojo_policy_launcher.stop()
+        else:
+            # 外部已就绪的策略服务：尽量结束监听端口上的进程树
+            info = inspect_robodojo_policy_listener(
+                ROBODOJO_POLICY_HOST_DEFAULT, ROBODOJO_POLICY_PORT_DEFAULT
+            )
+            pid = info.get("pid")
+            if pid and info.get("is_policy_server"):
+                try:
+                    os.kill(int(pid), signal.SIGTERM)
+                    self._append_sim_log(f"[策略] 已向 pid={pid} 发送 SIGTERM")
+                except (ProcessLookupError, PermissionError, OSError) as exc:
+                    self._append_sim_log(f"[策略] 无法结束 pid={pid}: {exc}")
+            else:
+                self._append_sim_log("[策略] 没有本窗口管理的部署进程")
+        self._update_sim_policy_deploy_ui()
 
     def _on_sim_eval_stop_run_clicked(self) -> None:
         self._append_sim_log("--- 用户点击停止评测（停止全部仿真）---")
@@ -27668,12 +29079,16 @@ class CameraTopicWindow(QMainWindow):
                     text = "空闲 · MuJoCo"
                 elif backend == "molmospaces":
                     text = "空闲 · MolmoSpaces"
+                elif backend == "arena":
+                    text = "空闲 · IsaacLab-Arena"
             self.mujoco_status_label.setText(text)
         if hasattr(self, "status_bar") and self.status_bar is not None:
             self.status_bar.showMessage(msg)
 
     def _sim_backend_id(self) -> str:
-        """Return isaac | mujoco | molmospaces."""
+        """Return isaac | mujoco | molmospaces | arena."""
+        if getattr(self, "sim_backend_arena_radio", None) is not None and self.sim_backend_arena_radio.isChecked():
+            return "arena"
         if getattr(self, "sim_backend_spaces_radio", None) is not None and self.sim_backend_spaces_radio.isChecked():
             return "molmospaces"
         if getattr(self, "sim_backend_mujoco_radio", None) is not None and self.sim_backend_mujoco_radio.isChecked():
@@ -27681,12 +29096,11 @@ class CameraTopicWindow(QMainWindow):
         return "isaac"
 
     def _mujoco_backend_is_mujoco(self) -> bool:
-        # Kept for callers that branch MuJoCo vs MolmoSpaces within viewer backends.
-        return self._sim_backend_id() != "molmospaces"
+        return self._sim_backend_id() == "mujoco"
 
     def _on_sim_backend_changed(self, *_args) -> None:
         backend = self._sim_backend_id()
-        idx = {"isaac": 0, "mujoco": 1, "molmospaces": 2}.get(backend, 0)
+        idx = {"isaac": 0, "mujoco": 1, "molmospaces": 2, "arena": 3}.get(backend, 0)
         if hasattr(self, "sim_backend_stack"):
             self.sim_backend_stack.setCurrentIndex(idx)
         hints = {
@@ -27699,21 +29113,30 @@ class CameraTopicWindow(QMainWindow):
                 "与 Isaac 评测互斥；不接 /camera/* 预览。"
             ),
             "molmospaces": (
-                "MolmoSpaces：仓库快速演示（VirtualGL→NVIDIA / EGL+Tk 回退）。"
+                "MolmoSpaces：任务下拉框列出可评测 benchmark，启动时只跑当前选中的一项。"
                 "与 Isaac 评测互斥；不接 /camera/* 预览。"
+            ),
+            "arena": (
+                "IsaacLab-Arena：列出已注册 environment，启动时只跑当前选中的一项。"
+                "与 Isaac / MuJoCo / MolmoSpaces 互斥；不接 /camera/* 预览。"
             ),
         }
         if hasattr(self, "sim_hint_label"):
             self.sim_hint_label.setText(hints.get(backend, ""))
-        show_mj = backend in ("mujoco", "molmospaces")
+        show_mj = backend in ("mujoco", "molmospaces", "arena")
         if hasattr(self, "mujoco_run_row_widget"):
             self.mujoco_run_row_widget.setVisible(show_mj)
         if hasattr(self, "mujoco_log_edit"):
             self.mujoco_log_edit.setVisible(show_mj)
+        if hasattr(self, "mujoco_log_resize_bar"):
+            self.mujoco_log_resize_bar.setVisible(show_mj)
         if hasattr(self, "mujoco_start_btn"):
-            self.mujoco_start_btn.setText(
-                "启动 MuJoCo" if backend == "mujoco" else "启动 MolmoSpaces"
-            )
+            start_labels = {
+                "mujoco": "启动 MuJoCo",
+                "molmospaces": "启动 MolmoSpaces",
+                "arena": "启动 Arena",
+            }
+            self.mujoco_start_btn.setText(start_labels.get(backend, "启动"))
         if hasattr(self, "mujoco_open_model_btn"):
             self.mujoco_open_model_btn.setText(
                 "打开模型目录" if backend == "mujoco" else "打开仓库目录"
@@ -27726,6 +29149,8 @@ class CameraTopicWindow(QMainWindow):
                 self.mujoco_status_label.setText("空闲 · MuJoCo")
             elif backend == "molmospaces":
                 self.mujoco_status_label.setText("空闲 · MolmoSpaces")
+            elif backend == "arena":
+                self.mujoco_status_label.setText("空闲 · IsaacLab-Arena")
         if backend != "isaac":
             # Stop Isaac-only preview timers / forced topic subscribe while on other backends.
             if getattr(self, "_sim_npy_preview_timer", None) is not None:
@@ -27768,6 +29193,7 @@ class CameraTopicWindow(QMainWindow):
             "sim_backend_isaac_radio",
             "sim_backend_mujoco_radio",
             "sim_backend_spaces_radio",
+            "sim_backend_arena_radio",
         ):
             w = getattr(self, wname, None)
             if w is not None:
@@ -27778,7 +29204,7 @@ class CameraTopicWindow(QMainWindow):
             self.mujoco_start_btn.setEnabled(
                 (not mj_running)
                 and (not isaac_running)
-                and backend in ("mujoco", "molmospaces")
+                and backend in ("mujoco", "molmospaces", "arena")
             )
 
         if mj_running:
@@ -27808,7 +29234,7 @@ class CameraTopicWindow(QMainWindow):
         backend = self._sim_backend_id()
         if hasattr(self, "mujoco_start_btn"):
             self.mujoco_start_btn.setEnabled(
-                (not running) and backend in ("mujoco", "molmospaces")
+                (not running) and backend in ("mujoco", "molmospaces", "arena")
             )
         if hasattr(self, "mujoco_stop_btn"):
             self.mujoco_stop_btn.setEnabled(running)
@@ -27827,6 +29253,28 @@ class CameraTopicWindow(QMainWindow):
             "molmospaces_root_edit",
             "molmospaces_root_browse_btn",
             "molmospaces_recipe_combo",
+            "molmospaces_robot_combo",
+            "molmospaces_task_combo",
+            "molmospaces_task_refresh_btn",
+            "molmospaces_policy_combo",
+            "molmospaces_episodes_spin",
+            "molmospaces_pi_ckpt_edit",
+            "molmospaces_pi_ckpt_browse_btn",
+            "molmospaces_pi_start_btn",
+            "molmospaces_pi_stop_btn",
+            "molmospaces_pi_probe_btn",
+            "arena_root_edit",
+            "arena_root_browse_btn",
+            "arena_task_combo",
+            "arena_task_refresh_btn",
+            "arena_policy_combo",
+            "arena_policy_file_edit",
+            "arena_policy_file_browse_btn",
+            "arena_steps_spin",
+            "arena_headless_check",
+            "arena_gpu_check",
+            "arena_gpu_spin",
+            "arena_extra_edit",
             "mujoco_open_model_btn",
         ):
             w = getattr(self, wname, None)
@@ -27835,21 +29283,28 @@ class CameraTopicWindow(QMainWindow):
         self._update_sim_backend_mutex_ui()
 
     def _on_mujoco_unified_start_clicked(self) -> None:
-        if self._sim_backend_id() == "molmospaces":
+        backend = self._sim_backend_id()
+        if backend == "molmospaces":
             self._on_molmospaces_run_clicked()
+        elif backend == "arena":
+            self._on_arena_run_clicked()
         else:
             self._on_mujoco_start_clicked()
 
     def _on_mujoco_open_selected_dir(self) -> None:
-        if self._sim_backend_id() == "molmospaces":
+        backend = self._sim_backend_id()
+        if backend == "molmospaces":
             root = self._resolve_molmospaces_root()
-            if os.path.isdir(root):
-                QDesktopServices.openUrl(QUrl.fromLocalFile(root))
-                self._append_mujoco_log(f"已打开目录: {root}")
-            else:
-                self._on_mujoco_status(f"目录不存在: {root}")
+        elif backend == "arena":
+            root = self._resolve_arena_root()
         else:
             self._on_mujoco_open_model_dir()
+            return
+        if os.path.isdir(root):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(root))
+            self._append_mujoco_log(f"已打开目录: {root}")
+        else:
+            self._on_mujoco_status(f"目录不存在: {root}")
 
     def _resolve_mujoco_mjcf_path(self) -> str:
         raw = (
@@ -27969,6 +29424,165 @@ class CameraTopicWindow(QMainWindow):
         if os.path.isdir(path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
+    def _resolve_arena_root(self) -> str:
+        raw = ""
+        if hasattr(self, "arena_root_edit"):
+            raw = self.arena_root_edit.text().strip()
+        raw = raw or os.environ.get("ISAACLAB_ARENA_ROOT", "") or ISAACLAB_ARENA_ROOT_DEFAULT
+        return os.path.abspath(os.path.expanduser(raw))
+
+    def _on_arena_root_browse(self) -> None:
+        cur = self._resolve_arena_root()
+        selected = QFileDialog.getExistingDirectory(self, "选择 IsaacLab-Arena 仓库", cur)
+        if selected and hasattr(self, "arena_root_edit"):
+            self.arena_root_edit.setText(selected)
+            self._refresh_arena_tasks()
+
+    def _refresh_arena_tasks(self) -> None:
+        if not hasattr(self, "arena_task_combo"):
+            return
+        root = self._resolve_arena_root()
+        current = str(self.arena_task_combo.currentData() or "")
+        names = list_isaaclab_arena_environments(root)
+        self.arena_task_combo.blockSignals(True)
+        self.arena_task_combo.clear()
+        for name in names:
+            self.arena_task_combo.addItem(name, name)
+        if current:
+            idx = self.arena_task_combo.findData(current)
+            if idx >= 0:
+                self.arena_task_combo.setCurrentIndex(idx)
+        self.arena_task_combo.blockSignals(False)
+        self._append_mujoco_log(f"[arena] 已列出 {len(names)} 个评测任务")
+
+    def _on_arena_policy_changed(self, *_args) -> None:
+        policy = "zero_action"
+        if hasattr(self, "arena_policy_combo"):
+            policy = str(self.arena_policy_combo.currentData() or policy)
+        show = policy in ("replay", "rsl_rl")
+        if hasattr(self, "arena_policy_file_row"):
+            self.arena_policy_file_row.setVisible(show)
+        if not show or not hasattr(self, "arena_policy_file_label"):
+            return
+        if policy == "replay":
+            self.arena_policy_file_label.setText("回放文件")
+            self.arena_policy_file_edit.setPlaceholderText("HDF5，传给 --replay_file_path")
+        else:
+            self.arena_policy_file_label.setText("checkpoint")
+            self.arena_policy_file_edit.setPlaceholderText(".pt，传给 --checkpoint_path")
+
+    def _on_arena_policy_file_browse(self) -> None:
+        policy = str(self.arena_policy_combo.currentData() or "")
+        if policy == "rsl_rl":
+            caption = "选择 RSL-RL checkpoint"
+            filt = "Checkpoint (*.pt *.pth);;All (*)"
+        else:
+            caption = "选择回放 HDF5"
+            filt = "HDF5 (*.hdf5 *.h5);;All (*)"
+        cur = self.arena_policy_file_edit.text().strip()
+        start = cur if os.path.isfile(cur) else os.path.dirname(cur) if cur else ""
+        selected, _ = QFileDialog.getOpenFileName(self, caption, start, filt)
+        if selected:
+            self.arena_policy_file_edit.setText(selected)
+
+    def _on_arena_run_clicked(self) -> None:
+        if (
+            self._sim_eval_launcher.is_running()
+            or self._sim_bridge_launcher.is_running()
+        ):
+            self._on_mujoco_status("Isaac 评测/相机桥正在运行，请先停止")
+            return
+        if self._sim_backend_id() != "arena":
+            self._on_mujoco_status("请先将仿真后端切换为 IsaacLab-Arena")
+            return
+        if self._mujoco_launcher.is_running():
+            self._on_mujoco_status("MuJoCo / MolmoSpaces / Arena 正在运行，请先停止")
+            return
+        root = self._resolve_arena_root()
+        if not os.path.isdir(root):
+            self._on_mujoco_status(f"IsaacLab-Arena 目录不存在: {root}")
+            return
+        script = os.path.join(root, "isaaclab_arena", "evaluation", "policy_runner.py")
+        if not os.path.isfile(script):
+            self._on_mujoco_status(f"未找到: {script}")
+            return
+        env_name = ""
+        if hasattr(self, "arena_task_combo"):
+            env_name = str(self.arena_task_combo.currentData() or "").strip()
+        if not env_name:
+            self._on_mujoco_status("请选择一个 IsaacLab-Arena 任务")
+            return
+        policy = "zero_action"
+        if hasattr(self, "arena_policy_combo"):
+            policy = str(self.arena_policy_combo.currentData() or policy)
+        steps = 200
+        if hasattr(self, "arena_steps_spin"):
+            steps = int(self.arena_steps_spin.value())
+        py = resolve_isaaclab_arena_python()
+        argv = [
+            py,
+            script,
+            "--policy_type",
+            policy,
+            "--num_steps",
+            str(steps),
+        ]
+        use_gpu = True
+        gpu_id = 0
+        if hasattr(self, "arena_gpu_check"):
+            use_gpu = self.arena_gpu_check.isChecked()
+        if hasattr(self, "arena_gpu_spin"):
+            gpu_id = int(self.arena_gpu_spin.value())
+        if use_gpu:
+            argv.extend(["--device", "cuda:0"])
+        else:
+            argv.extend(["--device", "cpu"])
+        if policy in ("replay", "rsl_rl"):
+            policy_file = ""
+            if hasattr(self, "arena_policy_file_edit"):
+                policy_file = self.arena_policy_file_edit.text().strip()
+            if not policy_file or not os.path.isfile(policy_file):
+                need = "HDF5 回放文件" if policy == "replay" else "checkpoint（.pt）"
+                self._on_mujoco_status(f"{policy} 需要{need}，未启动 Kit")
+                return
+            flag = "--replay_file_path" if policy == "replay" else "--checkpoint_path"
+            argv.extend([flag, os.path.abspath(policy_file)])
+        show_gui = not (
+            hasattr(self, "arena_headless_check") and self.arena_headless_check.isChecked()
+        )
+        if show_gui:
+            argv.extend(["--viz", "kit"])
+        else:
+            argv.extend(["--viz", "none"])
+        argv.append(env_name)
+        extra = ""
+        if hasattr(self, "arena_extra_edit"):
+            extra = self.arena_extra_edit.text().strip()
+        if extra:
+            try:
+                argv.extend(shlex.split(extra))
+            except ValueError as exc:
+                self._on_mujoco_status(f"额外参数无法解析: {exc}")
+                return
+        self.mujoco_log_edit.clear()
+        self._append_mujoco_log(f"[arena] root={root}")
+        self._append_mujoco_log(f"[arena] python={py}")
+        device_label = f"cuda:{gpu_id}" if use_gpu else "cpu"
+        viz_label = "kit" if show_gui else "none"
+        self._append_mujoco_log(
+            f"[arena] task={env_name} policy={policy} steps={steps} "
+            f"device={device_label} viz={viz_label}"
+        )
+        self._mujoco_launcher.start_cwd_command(
+            cwd=root,
+            argv=argv,
+            label=f"arena {env_name}",
+            env_extra=isaaclab_arena_child_env(
+                root, py, cuda_visible=str(gpu_id) if use_gpu else ""
+            ),
+        )
+        self._update_mujoco_ui()
+
     def _resolve_molmospaces_root(self) -> str:
         raw = ""
         if hasattr(self, "molmospaces_root_edit"):
@@ -27992,6 +29606,14 @@ class CameraTopicWindow(QMainWindow):
                 return os.path.abspath(c)
         return "python3"
 
+    def _molmospaces_selected_robot(self) -> str:
+        """Return --robot id from the MolmoSpaces 本体 combo (default droid)."""
+        if hasattr(self, "molmospaces_robot_combo"):
+            rid = self.molmospaces_robot_combo.currentData()
+            if rid:
+                return str(rid)
+        return "droid"
+
     def _on_molmospaces_root_browse(self) -> None:
         cur = self._resolve_molmospaces_root()
         selected = QFileDialog.getExistingDirectory(
@@ -27999,6 +29621,37 @@ class CameraTopicWindow(QMainWindow):
         )
         if selected and hasattr(self, "molmospaces_root_edit"):
             self.molmospaces_root_edit.setText(selected)
+            self._refresh_molmospaces_tasks()
+
+    def _refresh_molmospaces_tasks(self) -> None:
+        if not hasattr(self, "molmospaces_task_combo"):
+            return
+        root = self._resolve_molmospaces_root() if hasattr(self, "_resolve_molmospaces_root") else ""
+        current = self.molmospaces_task_combo.currentData()
+        current_id = ""
+        if isinstance(current, dict):
+            current_id = str(current.get("id") or "")
+        tasks = list_molmospaces_eval_tasks(root)
+        self.molmospaces_task_combo.blockSignals(True)
+        self.molmospaces_task_combo.clear()
+        ready_n = 0
+        for task in tasks:
+            label = str(task["label"])
+            if task.get("ready"):
+                ready_n += 1
+            else:
+                label = f"{label} · 未下载"
+            self.molmospaces_task_combo.addItem(label, task)
+        if current_id:
+            for i in range(self.molmospaces_task_combo.count()):
+                data = self.molmospaces_task_combo.itemData(i)
+                if isinstance(data, dict) and data.get("id") == current_id:
+                    self.molmospaces_task_combo.setCurrentIndex(i)
+                    break
+        self.molmospaces_task_combo.blockSignals(False)
+        self._append_mujoco_log(
+            f"[molmospaces] 已列出 {len(tasks)} 个评测任务（本地数据就绪 {ready_n}）"
+        )
 
     def _repair_molmospaces_cache_manifest(self) -> List[str]:
         """Fix cache dirs missing from MolmoSpaces manifest.
@@ -28006,7 +29659,7 @@ class CameraTopicWindow(QMainWindow):
         - Non-empty/complete orphans → register in manifest
         - Tiny/incomplete remnants → delete so setup can re-download
         """
-        cache = os.path.expanduser("~/.cache/molmo-spaces-resources")
+        cache = os.path.join(EAI_DIR, ".cache", "molmo-spaces-resources")
         manifest_path = os.path.join(
             cache, "mjthor_data_type_to_source_to_versions.json"
         )
@@ -28123,6 +29776,194 @@ class CameraTopicWindow(QMainWindow):
         err = (r.stderr or r.stdout or "").strip()
         return False, err or f"检测失败 code={r.returncode}"
 
+    def _on_molmospaces_policy_changed(self, *_args) -> None:
+        policy = ""
+        if hasattr(self, "molmospaces_policy_combo"):
+            policy = str(self.molmospaces_policy_combo.currentData() or "")
+        show = is_pi_policy_id(policy)
+        if hasattr(self, "molmospaces_pi_row"):
+            self.molmospaces_pi_row.setVisible(show)
+        self._update_molmospaces_pi_deploy_ui()
+
+    def _molmospaces_pi_ckpt_text(self) -> str:
+        if hasattr(self, "molmospaces_pi_ckpt_edit"):
+            raw = self.molmospaces_pi_ckpt_edit.text().strip()
+            if raw:
+                return raw
+        return MOLMOSPACES_PI_CKPT_DEFAULT
+
+    def _update_molmospaces_pi_deploy_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_pi_policy_launcher", None)
+            and self._pi_policy_launcher.is_running()
+        )
+        listening = port_listening(PI_SERVER_HOST_DEFAULT, MOLMOSPACES_PI_PORT_DEFAULT)
+        if hasattr(self, "molmospaces_pi_start_btn"):
+            self.molmospaces_pi_start_btn.setEnabled(not running)
+            self.molmospaces_pi_start_btn.setText(
+                "部署中…" if running else "部署启动"
+            )
+        if hasattr(self, "molmospaces_pi_stop_btn"):
+            self.molmospaces_pi_stop_btn.setEnabled(running or listening)
+
+    def _on_molmospaces_pi_ckpt_browse(self) -> None:
+        cur = self._molmospaces_pi_ckpt_text()
+        start = cur if os.path.isdir(cur) else os.path.dirname(cur) if cur else ""
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 OpenPI / Pi checkpoint 目录", start
+        )
+        if selected and hasattr(self, "molmospaces_pi_ckpt_edit"):
+            self.molmospaces_pi_ckpt_edit.setText(selected)
+
+    def _on_molmospaces_pi_probe_clicked(self) -> None:
+        ok, msg = probe_pi_server(
+            PI_SERVER_HOST_DEFAULT, MOLMOSPACES_PI_PORT_DEFAULT, timeout_s=5.0
+        )
+        self._append_mujoco_log(f"[pi] 验证: {msg}")
+        if ok:
+            self._on_mujoco_status(f"Pi 服务可用: {msg}")
+        else:
+            self._on_mujoco_status(f"Pi 服务不可用: {msg}")
+        self._update_molmospaces_pi_deploy_ui()
+
+    def _on_molmospaces_pi_start_clicked(self) -> None:
+        try:
+            self._append_mujoco_log("[pi] 正在部署启动…")
+            ok, msg = self._ensure_pi_policy_ready(start_if_needed=True, wait_s=900.0)
+        except Exception as exc:  # noqa: BLE001
+            msg = f"{type(exc).__name__}: {exc}"
+            self._append_mujoco_log(f"[pi] 部署异常: {msg}")
+            self._on_mujoco_status(f"Pi 部署失败: {msg}")
+            self._update_molmospaces_pi_deploy_ui()
+            return
+        self._update_molmospaces_pi_deploy_ui()
+        if ok:
+            self._on_mujoco_status(f"Pi 已部署: {msg}")
+        else:
+            self._on_mujoco_status(f"Pi 部署失败: {msg}")
+
+    def _on_molmospaces_pi_stop_clicked(self) -> None:
+        if hasattr(self, "_pi_policy_launcher") and self._pi_policy_launcher.is_running():
+            self._append_mujoco_log("[pi] 正在停止 UI 启动的 serve_policy…")
+            self._pi_policy_launcher.stop()
+        msg = stop_pi_server_on_port(
+            MOLMOSPACES_PI_PORT_DEFAULT, log=self._append_mujoco_log
+        )
+        self._append_mujoco_log(f"[pi] {msg}")
+        self._update_molmospaces_pi_deploy_ui()
+        self._on_mujoco_status(msg)
+
+    def _ensure_pi_policy_ready(
+        self,
+        *,
+        start_if_needed: bool = True,
+        wait_s: float = 600.0,
+    ) -> Tuple[bool, str]:
+        """Validate Pi ckpt and confirm ws://host:port is callable."""
+        prefer = self._molmospaces_pi_ckpt_text()
+        # Force jointpos default config when path points at jointpos dirs / gs.
+        ckpt = resolve_pi_checkpoint(prefer, config=MOLMOSPACES_PI_CONFIG_DEFAULT)
+        path = ckpt.path
+        config = ckpt.config or MOLMOSPACES_PI_CONFIG_DEFAULT
+        if "jointpos" in path.replace("\\", "/") and "polaris" not in os.path.basename(
+            path.rstrip("/")
+        ):
+            config = "pi05_droid_jointpos"
+        host = PI_SERVER_HOST_DEFAULT
+        port = MOLMOSPACES_PI_PORT_DEFAULT
+        status = checkpoint_status(path)
+        if prefer and prefer.rstrip("/") != path.rstrip("/"):
+            self._append_mujoco_log(
+                f"[pi] 已改用可用模型: {prefer} → {path} ({ckpt.source})"
+            )
+        self._append_mujoco_log(f"[pi] checkpoint={path}")
+        self._append_mujoco_log(f"[pi] config={config} status={status}")
+        if hasattr(self, "molmospaces_pi_ckpt_edit") and path:
+            self.molmospaces_pi_ckpt_edit.setText(path)
+
+        if path.startswith("gs://") or not is_local_checkpoint_usable(path):
+            # gs or missing local → materialize (HF mirror for jointpos).
+            materialize_src = path if path.startswith("gs://") else PI_CKPT_GS_DEFAULT
+            if not path.startswith("gs://"):
+                self._append_mujoco_log(
+                    f"[pi] 本地不可用 ({status})，改拉官方 {materialize_src}"
+                )
+            ok_dl, local_or_err = ensure_checkpoint_materialized(
+                materialize_src, log=self._append_mujoco_log
+            )
+            if not ok_dl:
+                return False, local_or_err
+            path = local_or_err
+            config = infer_policy_config(path, config)
+            if "jointpos" in path and "polaris" not in os.path.basename(
+                path.rstrip("/")
+            ):
+                config = "pi05_droid_jointpos"
+            status = checkpoint_status(path)
+            self._append_mujoco_log(f"[pi] 本地化后 checkpoint={path} ({status})")
+            if hasattr(self, "molmospaces_pi_ckpt_edit"):
+                self.molmospaces_pi_ckpt_edit.setText(path)
+
+        ok, msg = probe_pi_server(host, port, timeout_s=3.0)
+        if ok:
+            self._append_mujoco_log(f"[pi] {msg}")
+            self._update_molmospaces_pi_deploy_ui()
+            return True, msg
+
+        if port_listening(host, port):
+            return (
+                False,
+                f"{host}:{port} 已占用但不是可用的 OpenPI 服务: {msg}。"
+                "请先点「部署停止」再启动。",
+            )
+
+        if not start_if_needed:
+            return False, msg
+
+        if not hasattr(self, "_pi_policy_launcher"):
+            return False, "内部错误: Pi 服务 launcher 未初始化"
+
+        if self._pi_policy_launcher.is_running():
+            self._append_mujoco_log("[pi] serve_policy 已在启动中，继续等待…")
+        else:
+            try:
+                argv, cwd, env_extra = build_serve_policy_argv(
+                    checkpoint=path,
+                    config=config,
+                    port=port,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return False, f"无法组装 serve_policy 命令: {exc}"
+            self._append_mujoco_log(
+                f"[pi] 启动 serve_policy config={config} dir={path} port={port}"
+            )
+            self._append_mujoco_log(
+                f"[pi] OPENPI_DATA_HOME={env_extra.get('OPENPI_DATA_HOME')}"
+            )
+            self._pi_policy_launcher.start_cwd_command(
+                cwd=str(cwd),
+                argv=argv,
+                label=f"openpi serve_policy:{config}",
+                env_extra=env_extra,
+            )
+            self._update_molmospaces_pi_deploy_ui()
+
+        deadline = time.time() + max(30.0, float(wait_s))
+        last = msg
+        while time.time() < deadline:
+            QApplication.processEvents()
+            if not self._pi_policy_launcher.is_running() and not port_listening(
+                host, port
+            ):
+                return False, "serve_policy 进程已退出，请查看上方日志"
+            ok, last = probe_pi_server(host, port, timeout_s=4.0)
+            if ok:
+                self._append_mujoco_log(f"[pi] {last}")
+                self._update_molmospaces_pi_deploy_ui()
+                return True, last
+            time.sleep(2.0)
+        return False, f"等待策略服务超时: {last}"
+
     def _on_molmospaces_run_clicked(self) -> None:
         if (
             self._sim_eval_launcher.is_running()
@@ -28193,7 +30034,158 @@ class CameraTopicWindow(QMainWindow):
 
         pipeline = os.path.join(root, "scripts", "datagen", "run_pipeline.py")
         repaired: List[str] = []
+        if recipe == "eval_task":
+            robot_id = self._molmospaces_selected_robot()
+            if robot_id in MOLMOSPACES_LOCAL_MJCF_ROBOTS:
+                self._on_mujoco_status(
+                    f"本体「{robot_id}」仅支持快速演示（本地 MJCF），请改选内置机型再评测"
+                )
+                return
+            task = None
+            if hasattr(self, "molmospaces_task_combo"):
+                task = self.molmospaces_task_combo.currentData()
+            if not isinstance(task, dict) or not task.get("path"):
+                self._on_mujoco_status("请选择一个 MolmoSpaces 评测任务")
+                return
+            bench = str(task["path"])
+            if not molmospaces_benchmark_ready(bench):
+                self._append_mujoco_log(
+                    f"[molmospaces] 任务数据未就绪: {bench}\n"
+                    "  在 molmospaces 仓库执行一次资源初始化后再刷新:\n"
+                    f"  {py} -m molmo_spaces.molmo_spaces_constants"
+                )
+                self._on_mujoco_status(f"任务未下载: {task.get('label')}")
+                return
+            policy = "molmo_spaces.evaluation.configs.evaluation_configs:DummyBenchmarkEvalConfig"
+            if hasattr(self, "molmospaces_policy_combo"):
+                policy = str(
+                    self.molmospaces_policy_combo.currentData() or policy
+                )
+            pi_ckpt = ""
+            if is_pi_policy_id(policy):
+                self.mujoco_log_edit.clear()
+                self._append_mujoco_log("[pi] 选用 Pi：先确认模型/服务可调用…")
+                ok, msg = self._ensure_pi_policy_ready(
+                    start_if_needed=True, wait_s=900.0
+                )
+                if not ok:
+                    self._append_mujoco_log(f"[pi] 预检失败: {msg}")
+                    self._on_mujoco_status(f"Pi 未就绪: {msg}")
+                    return
+                pi_ckpt = resolve_pi_checkpoint(self._molmospaces_pi_ckpt_text()).path
+                self._append_mujoco_log(f"[pi] 预检通过: {msg}")
+            wrapper = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "tools",
+                "run_molmospaces_eval.py",
+            )
+            if not os.path.isfile(wrapper):
+                self._on_mujoco_status(f"未找到: {wrapper}")
+                return
+            os.makedirs(MOLMOSPACES_EVAL_OUTPUT_DIR, exist_ok=True)
+            argv = [
+                py,
+                wrapper,
+                policy,
+                "--benchmark_dir",
+                bench,
+                "--no_wandb",
+                "--num_workers",
+                "1",
+                "--output_dir",
+                MOLMOSPACES_EVAL_OUTPUT_DIR,
+            ]
+            if pi_ckpt:
+                argv.extend(["--checkpoint_path", pi_ckpt])
+            max_eps = 1
+            if hasattr(self, "molmospaces_episodes_spin"):
+                max_eps = int(self.molmospaces_episodes_spin.value())
+            if max_eps > 0:
+                argv.extend(["--max_episodes", str(max_eps)])
+            extra = task.get("extra") or ()
+            argv.extend(str(x) for x in extra)
+            vgl = (
+                "/usr/bin/vglrun"
+                if os.path.isfile("/usr/bin/vglrun")
+                else "/opt/VirtualGL/bin/vglrun"
+                if os.path.isfile("/opt/VirtualGL/bin/vglrun")
+                else ""
+            )
+            if vgl:
+                argv = [vgl, "-d", os.environ.get("MUJOCO_VGL_DEVICE") or "egl", *argv]
+            label = f"molmospaces eval {task.get('id')}"
+            if not is_pi_policy_id(policy):
+                self.mujoco_log_edit.clear()
+            self._append_mujoco_log(f"[molmospaces] task={task.get('label')}")
+            self._append_mujoco_log(f"[molmospaces] benchmark={bench}")
+            self._append_mujoco_log(f"[molmospaces] policy={policy}")
+            if pi_ckpt:
+                self._append_mujoco_log(f"[molmospaces] checkpoint={pi_ckpt}")
+            self._append_mujoco_log(
+                f"[molmospaces] max_episodes={'全部' if max_eps <= 0 else max_eps}"
+            )
+            self._mujoco_launcher.start_cwd_command(
+                cwd=root,
+                argv=argv,
+                label=label,
+                env_extra={
+                    "MUJOCO_GL": "glfw",
+                    "MOLMOSPACES_ROOT": root,
+                    "MOLMOSPACES_EVAL_VIEWER": "1",
+                    # Front third-person by default; set FIRST_PERSON=1 for head/exo.
+                    "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
+                    "MOLMOSPACES_VIEWER_CAM": "front",
+                    # TurboVNC: force EGL+Tk window (GLFW often invisible here).
+                    "MOLMOSPACES_FORCE_EGL": "1",
+                    "EAI_DIR": EAI_DIR,
+                    "OPENPI_DATA_HOME": os.environ.get("OPENPI_DATA_HOME")
+                    or OPENPI_DATA_HOME_DEFAULT,
+                    "PYTHONPATH": "",
+                    "PYTHONNOUSERSITE": "1",
+                    **molmospaces_cache_env(),
+                },
+            )
+            self._update_mujoco_ui()
+            return
         if recipe == "quick_viewer":
+            robot_id = self._molmospaces_selected_robot()
+            local_mjcf = MOLMOSPACES_LOCAL_MJCF_ROBOTS.get(robot_id, "")
+            if local_mjcf:
+                mjcf = local_mjcf
+                if not os.path.isfile(mjcf):
+                    # Re-resolve in case candidates were checked before assets existed.
+                    if robot_id == "psi_r1":
+                        for cand in PSI_R1_MODEL_XML_CANDIDATES:
+                            if os.path.isfile(cand):
+                                mjcf = cand
+                                break
+                if not os.path.isfile(mjcf):
+                    self._append_mujoco_log(f"[ERROR] Psi R1 MJCF 不存在: {mjcf}")
+                    self._on_mujoco_status("未找到 Psi R1 model.xml")
+                    return
+                self.mujoco_log_edit.clear()
+                self._append_mujoco_log(
+                    f"[molmospaces] 本体={robot_id} → 本地 MuJoCo viewer"
+                )
+                self._append_mujoco_log(f"[molmospaces] mjcf={mjcf}")
+                self._mujoco_launcher.start(
+                    mjcf_path=mjcf,
+                    mujoco_root=self.mujoco_root_edit.text().strip()
+                    if hasattr(self, "mujoco_root_edit")
+                    else "",
+                    python_bin=self.mujoco_python_edit.text().strip()
+                    if hasattr(self, "mujoco_python_edit")
+                    else "",
+                    mode=str(
+                        self.mujoco_mode_combo.currentData()
+                        if hasattr(self, "mujoco_mode_combo")
+                        else "auto"
+                    )
+                    or "auto",
+                    install=False,
+                )
+                self._update_mujoco_ui()
+                return
             if not os.path.isfile(pipeline):
                 self._on_mujoco_status(f"未找到: {pipeline}")
                 return
@@ -28217,7 +30209,20 @@ class CameraTopicWindow(QMainWindow):
             if not os.path.isfile(wrapper):
                 self._on_mujoco_status(f"未找到: {wrapper}")
                 return
-            argv = [py, wrapper, "--viewer", "--seed", "1"]
+            argv = [
+                py,
+                wrapper,
+                "--viewer",
+                "--seed",
+                "1",
+                "--robot",
+                robot_id,
+            ]
+            task_type = MOLMOSPACES_QUICK_VIEWER_TASK.get(robot_id, "pick")
+            if task_type != "pick":
+                argv.extend(["--task_type", task_type])
+            # Stash for the shared log block below.
+            self._molmospaces_last_task_type = task_type
             vgl = (
                 "/usr/bin/vglrun"
                 if os.path.isfile("/usr/bin/vglrun")
@@ -28240,9 +30245,21 @@ class CameraTopicWindow(QMainWindow):
             )
         self._append_mujoco_log(f"[molmospaces] root={root}")
         self._append_mujoco_log(f"[molmospaces] python={py}")
+        self._append_mujoco_log(f"[molmospaces] robot={self._molmospaces_selected_robot()}")
+        task_type = getattr(self, "_molmospaces_last_task_type", None) or (
+            MOLMOSPACES_QUICK_VIEWER_TASK.get(self._molmospaces_selected_robot(), "pick")
+        )
+        self._append_mujoco_log(f"[molmospaces] task_type={task_type}")
+        if self._molmospaces_selected_robot() == "rby1" and task_type == "nav_to_obj":
+            self._append_mujoco_log(
+                "[molmospaces] 提示: RBY1 无 parallel IK，PickPlanner 不可用，已改导航演示"
+            )
         self._append_mujoco_log(f"[molmospaces] resources={resources_msg}")
         self._append_mujoco_log(
             "[molmospaces] viewer: VirtualGL→NVIDIA when available, else EGL+Tk"
+        )
+        self._append_mujoco_log(
+            "[molmospaces] viewer cam: front third-person (机器人正面)"
         )
         self._mujoco_launcher.start_cwd_command(
             cwd=root,
@@ -28251,8 +30268,13 @@ class CameraTopicWindow(QMainWindow):
             env_extra={
                 "MUJOCO_GL": "glfw",
                 "MOLMOSPACES_ROOT": root,
+                "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
+                "MOLMOSPACES_VIEWER_CAM": "front",
+                "MOLMOSPACES_FORCE_EGL": "1",
+                "EAI_DIR": EAI_DIR,
                 "PYTHONPATH": "",
                 "PYTHONNOUSERSITE": "1",
+                **molmospaces_cache_env(),
             },
         )
         self._update_mujoco_ui()

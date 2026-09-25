@@ -18,10 +18,13 @@ from typing import Any, Callable, Optional
 
 
 def glx_available() -> bool:
-    """Return True if this display has usable GLX (via glxinfo, not GLFW).
+    """Return True if this display has usable *hardware* GLX (via glxinfo).
 
     Do **not** probe with ``glfw.create_window``: on TurboVNC the native
     MuJoCo/GLFW path can abort the whole process when GLX is missing.
+
+    Software GLX (llvmpipe / swrast) is treated as unavailable: GLFW windows
+    often never appear on TurboVNC; callers should fall back to EGL+Tk.
     """
     import shutil
     import subprocess
@@ -41,11 +44,15 @@ def glx_available() -> bool:
         return False
     if proc.returncode != 0:
         return False
-    out = (proc.stdout or "") + (proc.stderr or "")
-    if "Error:" in out or "GLX extension" in out:
+    out = ((proc.stdout or "") + (proc.stderr or "")).lower()
+    if "error:" in out or "glx extension" in out:
         return False
-    return "OpenGL renderer string:" in out or "OpenGL version string:" in out
-
+    # Mesa software renderers: not useful for interactive MuJoCo GLFW.
+    if any(x in out for x in ("llvmpipe", "softpipe", "swrast", "microsoft basic render")):
+        return False
+    if "opengl renderer string:" not in out and "opengl version string:" not in out:
+        return False
+    return True
 
 class EglPassiveHandle:
     """Minimal Handle stand-in backed by MUJOCO_GL=egl + Tkinter."""
@@ -200,10 +207,15 @@ class EglPassiveHandle:
             if not self._running:
                 return
             with self._lock:
-                mujoco.mj_forward(self._model, self._data)
-                # Renderer uses free camera via scene; set from MjvCamera fields
-                renderer.update_scene(self._data, camera=self._cam)
-                rgb = renderer.render()
+                # Do NOT call mj_forward here: the sim thread owns stepping /
+                # forward, and concurrent mj_forward races can raise
+                # FatalError (e.g. "equality ... between two static bodies").
+                try:
+                    renderer.update_scene(self._data, camera=self._cam)
+                    rgb = renderer.render()
+                except Exception as exc:
+                    status.set(f"EGL viewer render skip: {exc}")
+                    return
             img = Image.fromarray(np.asarray(rgb))
             photo = ImageTk.PhotoImage(img)
             photo_box["img"] = photo
@@ -215,6 +227,7 @@ class EglPassiveHandle:
                     cmd = self._cmd_q.get_nowait()
                     if cmd == "quit":
                         self._running = False
+                        _teardown_widgets()
                         root.quit()
                         return
                     if cmd == "sync":
@@ -224,7 +237,20 @@ class EglPassiveHandle:
             if self._running:
                 root.after(33, _poll)
             else:
+                _teardown_widgets()
                 root.quit()
+
+        def _teardown_widgets() -> None:
+            # Drop Tk image/var refs on the UI thread before the interpreter dies.
+            try:
+                photo_box["img"] = None
+                panel.configure(image="")
+            except Exception:
+                pass
+            try:
+                status.set("")
+            except Exception:
+                pass
 
         def _on_key(event) -> None:
             if self._key_callback is None:
@@ -242,6 +268,7 @@ class EglPassiveHandle:
 
         def _on_close() -> None:
             self._running = False
+            _teardown_widgets()
             root.quit()
 
         root.bind("<Key>", _on_key)
@@ -254,12 +281,14 @@ class EglPassiveHandle:
             root.mainloop()
         finally:
             self._running = False
+            _teardown_widgets()
             try:
                 renderer.close()
             except Exception:
                 pass
-            # Do not call root.destroy() here — mainloop already ended on this
-            # thread; destroy from another thread triggers Tcl_AsyncDelete.
+            # Do NOT call root.destroy() here. Destroying (or GC of StringVar /
+            # PhotoImage from another thread after worker teardown) triggers
+            # Tcl_AsyncDelete / "main thread is not in main loop".
             self._closed.set()
 
 
