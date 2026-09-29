@@ -1,8 +1,8 @@
-### Multimodal LoRA SFT — Qwen3.5-35B-A3B on VN sys2 English data
+### Multimodal LoRA SFT — Qwen3.5-35B-A3B on VN sys2 current_only English data
 model_name_or_path: /share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-35B-A3B
-dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_train-en.jsonl
-eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_val-en.jsonl
-output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-35b-a3b-lora-vn-en
+dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_current_only_train-en.jsonl
+eval_dataset_path: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_current_only_val-en.jsonl
+output_dir: /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/output/qwen35-35b-a3b-lora-vn-current-only-en
 
 max_seq_length: 2048
 max_samples: null

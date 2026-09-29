@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Multimodal LoRA SFT Qwen3.5-4B on VN sys2 English data
+# Multimodal LoRA SFT Qwen3.5-4B on VN sys2 current_only English data
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="/share_data/projects/mahjong/share/personal/liyichao"
-PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/Qwen2.5-VL/bin/python}"
+PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/eai-train/bin/python}"
 CONFIG="${CONFIG:-${ROOT}/configs/qwen35_4b_lora.yaml}"
 
 # shellcheck source=dist_env.sh

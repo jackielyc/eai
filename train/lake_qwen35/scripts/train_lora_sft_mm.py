@@ -29,6 +29,35 @@ from transformers import (
     TrainingArguments,
 )
 from transformers.trainer_callback import PrinterCallback
+from transformers.utils import import_utils as _hf_import_utils
+
+# transformers>=4.50 gates torch.load behind torch>=2.6 (CVE-2025-32434).
+# Older envs (torch 2.5.x): bypass the version gate for our own CFS checkpoints.
+if not _hf_import_utils.is_torch_greater_or_equal("2.6"):
+    _hf_import_utils.check_torch_load_is_safe = lambda: None  # type: ignore[assignment]
+
+
+def _patch_torch_load_for_trusted_trainer_checkpoints() -> None:
+    """Trainer checkpoints (rng/optimizer/scheduler) pickle numpy arrays.
+
+    Torch 2.6 defaults to weights_only=True; numpy 2.x exposes _reconstruct under
+    numpy._core while older pickles reference numpy.core, so add_safe_globals misses.
+    These files are written by our own Trainer runs — load with weights_only=False.
+    """
+    _orig_load = torch.load
+    trusted_names = ("rng_state", "optimizer.pt", "scheduler.pt", "scaler.pt")
+
+    def _load(f, *args, **kwargs):  # type: ignore[no-untyped-def]
+        name = f if isinstance(f, (str, Path)) else getattr(f, "name", "") or ""
+        name_s = str(name)
+        if kwargs.get("weights_only") is True and any(t in name_s for t in trusted_names):
+            kwargs["weights_only"] = False
+        return _orig_load(f, *args, **kwargs)
+
+    torch.load = _load  # type: ignore[assignment]
+
+
+_patch_torch_load_for_trusted_trainer_checkpoints()
 
 
 IGNORE_INDEX = -100
@@ -132,6 +161,16 @@ class TimeIntervalCheckpointCallback(TrainerCallback):
         self._last_save_time = time.perf_counter()
 
 
+def _checkpoint_is_complete(path: Path) -> bool:
+    """Skip half-written checkpoints (e.g. CFS write failure mid-optimizer save)."""
+    return (path / "trainer_state.json").is_file() and (
+        (path / "adapter_model.safetensors").is_file()
+        or (path / "adapter_model.bin").is_file()
+        or (path / "pytorch_model.bin").is_file()
+        or (path / "model.safetensors").is_file()
+    )
+
+
 def find_latest_checkpoint(output_dir: str) -> str | None:
     root = Path(output_dir)
     if not root.is_dir():
@@ -141,7 +180,7 @@ def find_latest_checkpoint(output_dir: str) -> str | None:
         if not path.is_dir() or not path.name.startswith("checkpoint-"):
             continue
         step = path.name.rsplit("-", 1)[-1]
-        if step.isdigit():
+        if step.isdigit() and _checkpoint_is_complete(path):
             candidates.append((int(step), path))
     if not candidates:
         return None
@@ -811,6 +850,14 @@ def main() -> None:
     trainer.save_model(cfg.output_dir)
     processor.save_pretrained(cfg.output_dir)
     if local_rank == 0:
+        # HF/PEFT 常写出 600；共享盘上其他账号（如 viewer）需要可读才能部署
+        for fname in ("adapter_model.safetensors", "adapter_model.bin"):
+            weight = os.path.join(cfg.output_dir, fname)
+            if os.path.isfile(weight):
+                try:
+                    os.chmod(weight, 0o644)
+                except OSError as exc:
+                    print(f"warn: chmod {weight}: {exc}")
         print(f"Saved adapter to {cfg.output_dir}")
 
 

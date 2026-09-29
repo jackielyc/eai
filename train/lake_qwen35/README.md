@@ -21,8 +21,9 @@ lake_qwen35/
 ## 环境
 
 ```bash
-# 训练
-export PYTHON=/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/Qwen2.5-VL/bin/python
+# 训练专用环境（torch 2.6 + transformers 5.15，支持 checkpoint resume）
+# 创建/刷新: bash ../setup_eai_train_env.sh
+export PYTHON=/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai-train/bin/python
 # 数据转换（需要 zarr）
 export CONVERT_PYTHON=/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/psi-policy/bin/python
 cd /share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35
@@ -128,11 +129,11 @@ SKIP_FULL=0 RESUME=1 SKIP_EXISTING=1 bash scripts/run_convert.sh
 SKIP_FULL=0 RESUME=0 bash scripts/run_convert.sh
 ```
 
-默认训练使用 VN 英文 jsonl：
+默认训练使用 VN current_only 英文 jsonl：
 
 ```yaml
-dataset_path: .../data/vn_sys2_train-en.jsonl
-eval_dataset_path: .../data/vn_sys2_val-en.jsonl
+dataset_path: .../data/vn_sys2_current_only_train-en.jsonl
+eval_dataset_path: .../data/vn_sys2_current_only_val-en.jsonl
 ```
 
 子集兼容文件仍会自动生成：`hermas_sys2_train_20k.json`（从 jsonl 流式截取前 N 行）。

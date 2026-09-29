@@ -1,0 +1,28 @@
+# eai/train LoRA SFT stack (Qwen3.5 multimodal + text)
+#
+# Create / refresh:
+#   bash /share_data/projects/mahjong/share/personal/liyichao/eai/train/setup_eai_train_env.sh
+#
+# Or manually (driver 535 → use cu118; cu121 has no torch>=2.6 wheels):
+#   conda create -n eai-train python=3.10 -y
+#   pip install torch==2.6.0+cu118 torchvision==0.21.0+cu118 torchaudio==2.6.0+cu118 \
+#     --index-url https://download.pytorch.org/whl/cu118
+#   pip install -r requirements-train.txt
+
+# Qwen3.5 (model_type=qwen3_5) needs recent transformers
+transformers==5.15.0
+peft==0.20.0
+accelerate==1.14.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+einops>=0.8.0
+
+Pillow>=10.0.0
+PyYAML>=6.0
+numpy>=1.24.0
+tqdm>=4.66.0
+packaging>=24.0
+filelock>=3.13.0
+huggingface-hub>=0.30.0
+tokenizers>=0.21.0

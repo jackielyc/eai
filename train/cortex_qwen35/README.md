@@ -29,8 +29,9 @@ cortex_qwen35/
 ## 环境
 
 ```bash
-# 使用已有环境（transformers 5.15 + peft，可加载 Qwen3.5）
-export PYTHON=/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/Qwen2.5-VL/bin/python
+# 训练专用环境（torch 2.6 + transformers 5.15，支持 checkpoint resume）
+# 创建/刷新: bash ../setup_eai_train_env.sh
+export PYTHON=/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai-train/bin/python
 ```
 
 ## 数据

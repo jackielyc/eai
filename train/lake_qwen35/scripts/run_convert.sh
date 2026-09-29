@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=convert_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/convert_env.sh"
 WORKSPACE="/share_data/projects/mahjong/share/personal/liyichao"
-# zarr 读取依赖 psi-policy 环境；训练仍用 Qwen2.5-VL
+# zarr 读取依赖 psi-policy 环境；训练用 eai-train
 CONVERT_PYTHON="${CONVERT_PYTHON:-${WORKSPACE}/miniconda3/envs/psi-policy/bin/python}"
 
 DATA_ROOT="${DATA_ROOT:-/share_data_lake}"

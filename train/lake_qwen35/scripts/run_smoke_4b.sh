@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
-# Tiny smoke test: multimodal VN English SFT on 1 GPU
+# Tiny smoke test: multimodal VN current_only English SFT on 1 GPU
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="/share_data/projects/mahjong/share/personal/liyichao"
-PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/Qwen2.5-VL/bin/python}"
+PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/eai-train/bin/python}"
 GPU="${GPU:-0}"
-OUT="${ROOT}/output/qwen35-4b-lora-vn-en-smoke"
-TRAIN_JSONL="${ROOT}/data/vn_sys2_train-en.jsonl"
-VAL_JSONL="${ROOT}/data/vn_sys2_val-en.jsonl"
+OUT="${ROOT}/output/qwen35-4b-lora-vn-current-only-en-smoke"
+TRAIN_JSONL="${ROOT}/data/vn_sys2_current_only_train-en.jsonl"
+VAL_JSONL="${ROOT}/data/vn_sys2_current_only_val-en.jsonl"
 
 export CUDA_VISIBLE_DEVICES="${GPU}"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
 
 mkdir -p "${ROOT}/output"
-LOG="${ROOT}/output/smoke_vn_en_$(date +%Y%m%d_%H%M%S).log"
+LOG="${ROOT}/output/smoke_vn_current_only_en_$(date +%Y%m%d_%H%M%S).log"
 
 if [[ ! -f "${TRAIN_JSONL}" ]]; then
-  echo "[error] missing ${TRAIN_JSONL}; prepare VN English data first" >&2
+  echo "[error] missing ${TRAIN_JSONL}; prepare VN current_only English data first" >&2
   exit 1
 fi
 

@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="/share_data/projects/mahjong/share/personal/liyichao"
-PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/Qwen2.5-VL/bin/python}"
+PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/eai-train/bin/python}"
 CONFIG="${CONFIG:-${ROOT}/configs/qwen35_35b_a3b_lora.yaml}"
 DEVICE_MAP="${DEVICE_MAP:-auto}"
 FSDP="${FSDP:-none}"

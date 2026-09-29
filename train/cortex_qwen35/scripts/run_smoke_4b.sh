@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="/share_data/projects/mahjong/share/personal/liyichao"
-PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/Qwen2.5-VL/bin/python}"
+PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/eai-train/bin/python}"
 GPU="${GPU:-0}"
 OUT="${ROOT}/output/qwen35-4b-lora-smoke"
 

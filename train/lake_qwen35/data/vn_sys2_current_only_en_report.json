@@ -1,0 +1,22 @@
+[
+  {
+    "src": "/share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_train-en.jsonl",
+    "dst": "/share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_current_only_train-en.jsonl",
+    "n_in": 1739303,
+    "n_out": 1739273,
+    "miss_eid": 0,
+    "miss_det": 0,
+    "miss_parse": 30,
+    "elapsed_s": 44.0
+  },
+  {
+    "src": "/share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_val-en.jsonl",
+    "dst": "/share_data/projects/mahjong/share/personal/liyichao/eai/train/lake_qwen35/data/vn_sys2_current_only_val-en.jsonl",
+    "n_in": 90816,
+    "n_out": 90816,
+    "miss_eid": 0,
+    "miss_det": 0,
+    "miss_parse": 0,
+    "elapsed_s": 2.4
+  }
+]

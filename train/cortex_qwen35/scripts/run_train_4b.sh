@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="/share_data/projects/mahjong/share/personal/liyichao"
-PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/Qwen2.5-VL/bin/python}"
+PYTHON="${PYTHON:-${WORKSPACE}/miniconda3/envs/eai-train/bin/python}"
 CONFIG="${CONFIG:-${ROOT}/configs/qwen35_4b_lora.yaml}"
 NPROC="${NPROC:-6}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5}"
