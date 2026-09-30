@@ -24,6 +24,8 @@ def main() -> int:
     os.environ.setdefault("MOLMOSPACES_VIEWER_FIRST_PERSON", "0")
     os.environ.setdefault("MOLMOSPACES_VIEWER_CAM", "front")
     os.environ.setdefault("MOLMOSPACES_FORCE_EGL", "1")
+    # Keep last frame after run until window close / GUI stop.
+    os.environ.setdefault("MOLMOSPACES_VIEWER_KEEP_OPEN", "1")
     os.environ.setdefault("EAI_DIR", str(Path(__file__).resolve().parent.parent))
 
     here = Path(__file__).resolve().parent

@@ -279,7 +279,10 @@ class QwenDeployController(QObject):
             name = str(entry.get("name") or os.path.basename(path.rstrip("/")))
             kind = str(entry.get("kind") or "")
             kind_label = sct.deploy_model_kind_label(kind)
+            readable = str(entry.get("readable") or "1") != "0"
             item_label = f"{name} ({kind_label})"
+            if not readable:
+                item_label = f"{name} ({kind_label} · 不可读)"
             spec = {
                 "path": path,
                 "name": name,
@@ -287,6 +290,7 @@ class QwenDeployController(QObject):
                 "label": str(entry.get("label") or name),
                 "kind": kind,
                 "root": str(entry.get("root") or root),
+                "readable": "1" if readable else "0",
             }
             view.model_combo.addItem(item_label, spec)
             idx = view.model_combo.count() - 1
@@ -294,6 +298,15 @@ class QwenDeployController(QObject):
                 f"{name}\nmodel_id={spec['model_id']}\n"
                 f"路径: {path}\n类型: {kind_label}\n根目录: {spec['root']}"
             )
+            if not readable:
+                tip += (
+                    "\n权重不可读（多为 root 600）："
+                    "sudo chmod a+r <dir>/adapter_model.safetensors"
+                )
+                model = view.model_combo.model()
+                item = model.item(idx) if hasattr(model, "item") else None
+                if item is not None:
+                    item.setEnabled(False)
             view.model_combo.setItemData(idx, tip, Qt.ToolTipRole)
         if prev_path:
             for i in range(view.model_combo.count()):

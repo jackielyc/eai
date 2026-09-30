@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / IsaacLab-Arena） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / ICL / Astra / HumanEgo / 数据集 / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / ICL / Astra / HumanEgo / 数据集 / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -69,13 +69,13 @@ import uuid
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-import cv2
-import numpy as np
+# cv2 / numpy 很重（~0.5–0.8s）；启动闪屏出现后再加载。
+cv2: Any = None
+np: Any = None
 
-# opencv-contrib 会在 import 时把 QT_QPA_PLATFORM_PLUGIN_PATH 指到 cv2/qt/plugins，
-# 与 conda PyQt5 的 xcb 冲突；手骨架只需 headless cv2，此处清掉污染路径。
+
 def _clear_opencv_qt_plugin_hijack() -> None:
     for key in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH"):
         val = os.environ.get(key, "")
@@ -83,12 +83,52 @@ def _clear_opencv_qt_plugin_hijack() -> None:
             os.environ.pop(key, None)
 
 
-_clear_opencv_qt_plugin_hijack()
+def _ensure_cv2_numpy() -> None:
+    """Lazy-import cv2 + numpy (and clear OpenCV Qt plugin hijack)."""
+    global cv2, np
+    if cv2 is not None and np is not None:
+        return
+    import numpy as _np
+    import cv2 as _cv2
 
-import pyqtgraph as pg
-import pyqtgraph.opengl as gl
+    np = _np
+    cv2 = _cv2
+    _clear_opencv_qt_plugin_hijack()
+
+
+# pyqtgraph / OpenGL 很重（~1s+），且 DepthPanel3D 默认只显示 2D；
+# 推迟到用户点击「启用 3D 点云」时再 import。
+pg: Any = None
+gl: Any = None
+
+# 启动闪屏进度回调（由 main / boot 设置）
+_boot_progress: Optional[Callable[[str], None]] = None
+
+
+def _boot_tick(msg: str) -> None:
+    cb = _boot_progress
+    if cb is None:
+        return
+    try:
+        cb(msg)
+    except Exception:
+        pass
+
+
+def _ensure_pyqtgraph_opengl() -> Tuple[Any, Any]:
+    """Lazy-import pyqtgraph + OpenGL; return (pg, gl)."""
+    global pg, gl
+    if pg is not None and gl is not None:
+        return pg, gl
+    import pyqtgraph as _pg
+    import pyqtgraph.opengl as _gl
+
+    pg = _pg
+    gl = _gl
+    return pg, gl
+
+
 import rclpy
-from cv_bridge import CvBridge, CvBridgeError
 from PyQt5.QtCore import (
     Qt,
     QProcess,
@@ -174,7 +214,12 @@ from std_msgs.msg import UInt32, UInt8
 from std_srvs.srv import SetBool, Trigger
 from sensor_msgs.msg import CameraInfo, CompressedImage, Image, JointState
 from geometry_msgs.msg import PoseStamped
-from tf2_ros import Buffer, TransformListener
+
+if TYPE_CHECKING:
+    from tf2_ros import Buffer as Buffer
+else:
+    # 运行时类型占位；真正的 Buffer 在 CameraTopicNode 里 lazy import
+    Buffer = Any  # type: ignore[misc, assignment]
 
 
 # 中文输入依赖宿主机 fcitx + run_in_docker.sh 的 dbus abstract 代理。
@@ -950,6 +995,7 @@ try:
         is_pi_policy_id,
         port_listening,
         probe_pi_server,
+        pi_server_matches,
         resolve_pi_checkpoint,
         stop_pi_server_on_port,
     )
@@ -987,6 +1033,9 @@ except ImportError:  # pragma: no cover - keep UI importable if tools missing
     def probe_pi_server(*_a, **_k):  # type: ignore[misc]
         return False, "pi_policy_runtime 未找到"
 
+    def pi_server_matches(**_k):  # type: ignore[misc]
+        return True, "fallback"
+
     def resolve_pi_checkpoint(prefer: str = "", **_k):  # type: ignore[misc]
         class _Ckpt:
             path = prefer or PI_CKPT_GS_DEFAULT
@@ -997,6 +1046,134 @@ except ImportError:  # pragma: no cover - keep UI importable if tools missing
 
     def stop_pi_server_on_port(port: int = 8080, **_k):  # type: ignore[misc]
         return f"pi_policy_runtime 未找到 (port={port})"
+
+try:
+    from libero_policy_runtime import (  # noqa: E402
+        LIBERO_CKPT_GS_DEFAULT,
+        LIBERO_EVAL_OUTPUT_DIR,
+        LIBERO_HOST_DEFAULT,
+        LIBERO_POLICY_CONFIGS,
+        LIBERO_PORT_DEFAULT,
+        LIBERO_TASK_SUITES,
+        build_libero_eval_argv,
+        install_hint as libero_install_hint,
+        probe_libero_deps,
+        resolve_libero_checkpoint,
+        resolve_libero_python,
+    )
+except ImportError:  # pragma: no cover
+    LIBERO_CKPT_GS_DEFAULT = "gs://openpi-assets/checkpoints/pi05_libero"
+    LIBERO_CKPT_HF_LOCAL_DEFAULT = os.path.join(
+        EAI_DIR, ".cache", "openpi", "hf", "pi05_libero"
+    )
+    LIBERO_EVAL_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "libero_eval")
+    LIBERO_HOST_DEFAULT = "localhost"
+    LIBERO_PORT_DEFAULT = 8080
+    LIBERO_POLICY_CONFIGS = (
+        ("π0.5-LIBERO (pi05_libero)", "pi05_libero"),
+        ("π0-LIBERO (pi0_libero)", "pi0_libero"),
+    )
+    LIBERO_TASK_SUITES = (
+        ("libero_spatial", "libero_spatial"),
+        ("libero_object", "libero_object"),
+        ("libero_goal", "libero_goal"),
+        ("libero_10 (long)", "libero_10"),
+        ("libero_90", "libero_90"),
+    )
+
+    def build_libero_eval_argv(**_kwargs):  # type: ignore[misc]
+        raise RuntimeError("libero_policy_runtime 未找到")
+
+    def libero_install_hint(_python_bin: str = "") -> str:  # type: ignore[misc]
+        return "libero_policy_runtime 未找到"
+
+    def probe_libero_deps(_python_bin: str, **_k):  # type: ignore[misc]
+        return False, "libero_policy_runtime 未找到"
+
+    def resolve_libero_checkpoint(prefer: str = "", config: str = ""):  # type: ignore[misc]
+        class _Ckpt:
+            path = prefer or LIBERO_CKPT_HF_LOCAL_DEFAULT
+            config = config or "pi05_libero"
+            source = "fallback"
+
+        return _Ckpt()
+
+    def resolve_libero_python(prefer: str = "") -> str:  # type: ignore[misc]
+        return prefer or "python3"
+
+try:
+    from robotwin_policy_runtime import (  # noqa: E402
+        ROBOTWIN_CKPT_HF_DEFAULT,
+        ROBOTWIN_EVAL_OUTPUT_DIR,
+        ROBOTWIN_POLICY_CONFIGS,
+        ROBOTWIN_ROOT_DEFAULT,
+        ROBOTWIN_TASKS,
+        build_robotwin_eval_argv,
+        ensure_robotwin_checkpoint,
+        install_hint as robotwin_install_hint,
+        probe_robotwin_deps,
+        resolve_robotwin_assets,
+        resolve_robotwin_checkpoint,
+        resolve_robotwin_python,
+        resolve_robotwin_root,
+    )
+except ImportError:  # pragma: no cover
+    ROBOTWIN_CKPT_HF_DEFAULT = "RLinf/RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
+    ROBOTWIN_EVAL_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "robotwin_eval")
+    ROBOTWIN_ROOT_DEFAULT = "/share_data/projects/mahjong/share/personal/liyichao/RoboTwin"
+    ROBOTWIN_POLICY_CONFIGS = (
+        ("π0.5 Aloha (pi05_aloha_robotwin)", "pi05_aloha_robotwin"),
+        ("π0 Aloha (pi0_aloha_robotwin)", "pi0_aloha_robotwin"),
+    )
+    ROBOTWIN_TASKS = (
+        ("adjust_bottle", "adjust_bottle"),
+        ("place_empty_cup", "place_empty_cup"),
+    )
+
+    def build_robotwin_eval_argv(**_kwargs):  # type: ignore[misc]
+        raise RuntimeError("robotwin_policy_runtime 未找到")
+
+    def ensure_robotwin_checkpoint(prefer: str = "", config: str = "", **_k):  # type: ignore[misc]
+        path = prefer or os.path.join(
+            EAI_DIR,
+            ".cache",
+            "robotwin",
+            "hf",
+            "RLinf-Pi05-RoboTwin-SFT-adjust_bottle",
+        )
+        if os.path.isdir(path):
+            return True, path
+        return False, "robotwin_policy_runtime 未找到"
+
+    def robotwin_install_hint(_python_bin: str = "") -> str:  # type: ignore[misc]
+        return "robotwin_policy_runtime 未找到"
+
+    def probe_robotwin_deps(_python_bin: str, **_k):  # type: ignore[misc]
+        return False, "robotwin_policy_runtime 未找到"
+
+    def resolve_robotwin_assets(prefer: str = "", **_k) -> str:  # type: ignore[misc]
+        return prefer or ROBOTWIN_ROOT_DEFAULT
+
+    def resolve_robotwin_checkpoint(prefer: str = "", config: str = ""):  # type: ignore[misc]
+        class _Ckpt:
+            path = prefer or os.path.join(
+                EAI_DIR,
+                ".cache",
+                "robotwin",
+                "hf",
+                "RLinf-Pi05-RoboTwin-SFT-adjust_bottle",
+            )
+            config = config or "pi05_aloha_robotwin"
+            source = "fallback"
+
+        return _Ckpt()
+
+    def resolve_robotwin_python(prefer: str = "") -> str:  # type: ignore[misc]
+        return prefer or "python3"
+
+    def resolve_robotwin_root(raw: str = ""):  # type: ignore[misc]
+        return raw or ROBOTWIN_ROOT_DEFAULT
+
 PSI_R1_MODEL_XML_CANDIDATES: Tuple[str, ...] = (
     os.path.join(os.path.dirname(EAI_DIR), "psi_r1_ruiyan", "urdf", "model.xml"),
     os.path.join(EAI_DIR, "assets", "psi_r1_ruiyan", "urdf", "model.xml"),
@@ -1168,6 +1345,207 @@ def list_robodojo_online_rl_configs(rise_root: str = "") -> List[str]:
     except OSError:
         return []
     return sorted(names)
+
+
+def resolve_robometer_root(path: str = "") -> str:
+    raw = (
+        (path or "").strip()
+        or os.environ.get("ROBOMETER_ROOT", "")
+        or ROBOMETER_ROOT_DEFAULT
+    )
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def resolve_robometer_python(repo: str = "") -> str:
+    root = resolve_robometer_root(repo)
+    for path in (
+        (os.environ.get("ROBOMETER_PYTHON") or "").strip(),
+        *ROBOMETER_PYTHON_CANDIDATES,
+        # 仓库 .venv 常是 uv 空壳（python 链到 conda，但 site-packages 独立且无 torch）
+        os.path.join(root, ".venv", "bin", "python"),
+        os.path.join(root, "venv", "bin", "python"),
+    ):
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return os.path.abspath(os.path.expanduser(path))
+    which = shutil.which("python3") or shutil.which("python")
+    return which or "python3"
+
+
+def list_robometer_configs(repo: str = "") -> List[str]:
+    """扫描 robometer_policy_learning/configs 下顶层 yaml。"""
+    root = resolve_robometer_root(repo)
+    cfg_dir = os.path.join(root, "robometer_policy_learning", "configs")
+    if not os.path.isdir(cfg_dir):
+        return []
+    names: List[str] = []
+    try:
+        for fname in os.listdir(cfg_dir):
+            if not fname.endswith(".yaml"):
+                continue
+            names.append(fname[: -len(".yaml")])
+    except OSError:
+        return []
+    return sorted(names)
+
+
+def resolve_rynnvalue_root(path: str = "") -> str:
+    raw = (
+        (path or "").strip()
+        or os.environ.get("RYNNVALUE_ROOT", "")
+        or RYNNVALUE_ROOT_DEFAULT
+    )
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def resolve_rynnvalue_python(repo: str = "") -> str:
+    root = resolve_rynnvalue_root(repo)
+    for path in (
+        (os.environ.get("RYNNVALUE_PYTHON") or "").strip(),
+        os.path.join(root, ".venv", "bin", "python"),
+        os.path.join(root, "venv", "bin", "python"),
+        *RYNNVALUE_PYTHON_CANDIDATES,
+    ):
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return os.path.abspath(os.path.expanduser(path))
+    which = shutil.which("python3") or shutil.which("python")
+    return which or "python3"
+
+
+def _rynnvalue_hf_model_ready(path: str) -> bool:
+    """True if path looks like a usable RynnValue HuggingFace export."""
+    root = os.path.abspath(os.path.expanduser((path or "").strip()))
+    if not root or not os.path.isdir(root):
+        return False
+    if not os.path.isfile(os.path.join(root, "config.json")):
+        return False
+    for name in ("model.safetensors", "pytorch_model.bin", "model.pt"):
+        if os.path.isfile(os.path.join(root, name)):
+            return True
+    try:
+        for fname in os.listdir(root):
+            if fname.endswith(".safetensors") or fname.endswith(".bin"):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _rynnvalue_ckpt_ready(path: str) -> bool:
+    """True if path is a training ckpt dir containing model.pt."""
+    root = os.path.abspath(os.path.expanduser((path or "").strip()))
+    if not root or not os.path.isdir(root):
+        return False
+    return os.path.isfile(os.path.join(root, "model.pt"))
+
+
+def resolve_rynnvalue_model(path: str = "") -> str:
+    """Prefer explicit / env / local cache HF export; empty if none ready."""
+    models_root = "/share_data/projects/mahjong/share/personal/liyichao/models"
+    candidates = [
+        (path or "").strip(),
+        (os.environ.get("RYNNVALUE_MODEL_PATH") or "").strip(),
+        RYNNVALUE_MODEL_DEFAULT,
+        os.path.join(RYNNVALUE_CACHE_DIR, "RynnValue-4B"),
+        os.path.join(models_root, "RynnValue-4B"),
+        os.path.join(EAI_DIR, "weights", "RynnValue-4B"),
+        os.path.join(RYNNVALUE_CACHE_DIR, "RynnValue-8B"),
+        os.path.join(models_root, "RynnValue-8B"),
+        os.path.join(EAI_DIR, "weights", "RynnValue-8B"),
+    ]
+    for cand in candidates:
+        if cand and _rynnvalue_hf_model_ready(cand):
+            return os.path.abspath(os.path.expanduser(cand))
+    # Fall back to default cache path even if still downloading (UI placeholder).
+    for cand in candidates:
+        if cand:
+            return os.path.abspath(os.path.expanduser(cand))
+    return RYNNVALUE_MODEL_DEFAULT
+
+
+def resolve_rynnvalue_ckpt(path: str = "") -> str:
+    """Prefer explicit / env / local training checkpoint; empty if none."""
+    candidates = [
+        (path or "").strip(),
+        (os.environ.get("RYNNVALUE_CKPT_PATH") or "").strip(),
+        RYNNVALUE_CKPT_DEFAULT,
+    ]
+    for cand in candidates:
+        if cand and _rynnvalue_ckpt_ready(cand):
+            return os.path.abspath(os.path.expanduser(cand))
+    # Scan cache for checkpoint_model_* / */model.pt
+    cache = RYNNVALUE_CACHE_DIR
+    if os.path.isdir(cache):
+        try:
+            names = sorted(os.listdir(cache), reverse=True)
+        except OSError:
+            names = []
+        for name in names:
+            cand = os.path.join(cache, name)
+            if _rynnvalue_ckpt_ready(cand):
+                return cand
+            nested = os.path.join(cand, "model.pt")
+            if os.path.isfile(nested):
+                return cand
+    return ""
+
+
+def parse_rynnvalue_server_url(url: str) -> Tuple[str, int]:
+    """Return (host, port) from a reward_server base URL."""
+    raw = (url or "").strip() or "http://127.0.0.1:8001"
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+        host = (parsed.hostname or "127.0.0.1").strip() or "127.0.0.1"
+        port = int(parsed.port or 8001)
+        return host, port
+    except Exception:
+        return "127.0.0.1", 8001
+
+
+def probe_rynnvalue_reward_server(
+    url: str, timeout_s: float = 2.5
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Probe RynnValue reward_server /health (+ optional /model_info)."""
+    base = (url or "").strip().rstrip("/") or "http://127.0.0.1:8001"
+    info: Dict[str, Any] = {"url": base}
+    ok, body, err = _http_get_json(f"{base}/health", timeout_s=timeout_s)
+    if not ok:
+        host, port = parse_rynnvalue_server_url(base)
+        listening = False
+        try:
+            listening = bool(port_listening(host, port))
+        except Exception:
+            listening = False
+        if listening:
+            return (
+                False,
+                f"端口 {host}:{port} 已占用，但 /health 未就绪（可能仍在加载模型）",
+                {**info, "listening": True, "error": err},
+            )
+        return False, f"未部署 / 不可达: {err or 'connection failed'}", {
+            **info,
+            "listening": False,
+            "error": err,
+        }
+
+    status = ""
+    reward_model = ""
+    if isinstance(body, dict):
+        status = str(body.get("status") or "")
+        reward_model = str(body.get("reward_model") or "")
+        info["health"] = body
+    healthy = (not status) or status.lower() in ("healthy", "ok", "ready")
+    if not healthy:
+        return False, f"/health 异常: {body}", info
+
+    ok_info, model_body, _ = _http_get_json(f"{base}/model_info", timeout_s=timeout_s)
+    if ok_info and isinstance(model_body, dict):
+        info["model_info"] = model_body
+        reward_model = str(model_body.get("reward_model") or reward_model)
+
+    label = reward_model or "reward_server"
+    return True, f"已就绪（{label} @ {base}）", info
 
 
 def resolve_mujoco_root(path: str = "") -> str:
@@ -1623,6 +2001,51 @@ RLINF_REWARD_WORKFLOW_SCRIPT = os.path.join(EAI_DIR, "run_reward_workflow.sh")
 RLINF_REWARD_WORKFLOW_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "reward_workflow")
 ROBODOJO_ONLINE_RL_SCRIPT = os.path.join(EAI_DIR, "run_robodojo_online_rl.sh")
 ROBODOJO_ONLINE_RL_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "robodojo_online_rl")
+ROBOMETER_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/robometer-policy-learning"
+)
+ROBOMETER_PYTHON_CANDIDATES: Tuple[str, ...] = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/robometer-policy/bin/python",
+    "/home/psibot/miniconda3/envs/robometer-policy/bin/python",
+)
+ROBOMETER_RUN_SCRIPT = os.path.join(EAI_DIR, "run_robometer_policy.sh")
+ROBOMETER_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "robometer_policy")
+# (label, job_id, default hydra config)
+ROBOMETER_JOBS: Tuple[Tuple[str, str, str], ...] = (
+    ("在线 RL（train.py）", "train", "libero_online_rl"),
+    ("DSRL（train_dsrl.py）", "train_dsrl", "dsrl_libero_config"),
+    ("评测 Pi0（eval_pi0.py）", "eval_pi0", "eval_pi0"),
+    ("评测 DSRL（eval_trained_dsrl.py）", "eval_trained_dsrl", "eval_trained_dsrl"),
+    ("异步训练（train_async.py）", "train_async", "config_distributed"),
+    ("Reward Relabel 服务", "relabel_server", "reward_relabel_server"),
+)
+RYNNVALUE_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/RynnValue"
+)
+RYNNVALUE_PYTHON_CANDIDATES: Tuple[str, ...] = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/rynnvalue/bin/python",
+    "/home/psibot/miniconda3/envs/rynnvalue/bin/python",
+)
+RYNNVALUE_RUN_SCRIPT = os.path.join(EAI_DIR, "run_rynnvalue.sh")
+RYNNVALUE_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "rynnvalue")
+RYNNVALUE_MODEL_DEFAULT = os.path.join(RYNNVALUE_CACHE_DIR, "RynnValue-4B")
+RYNNVALUE_CKPT_DEFAULT = os.path.join(RYNNVALUE_CACHE_DIR, "checkpoint")
+RYNNVALUE_EXAMPLE_VIDEO = os.path.join(
+    RYNNVALUE_ROOT_DEFAULT,
+    "example",
+    "Put_the_box_in_the_drawer_and_close_it.mp4",
+)
+RYNNVALUE_DEFAULT_INSTRUCTION = "Put the box in the drawer and close it"
+# Released RynnValue-* have use_meta=True; example clip is ALOHA top-down.
+RYNNVALUE_DEFAULT_ROBOT = "an ALOHA dual-arm robot"
+RYNNVALUE_DEFAULT_CAMERA = "the top-down camera"
+# (label, job_id)
+RYNNVALUE_JOBS: Tuple[Tuple[str, str], ...] = (
+    ("视频推理（rynn_infer）", "infer"),
+    ("Reward 服务（start_server）", "reward_server"),
+    ("Policy Ranking 评测", "policy_ranking"),
+    ("Confusion Matrix 评测", "confusion_matrix"),
+)
 MUJOCO_VIEWER_SCRIPT = os.path.join(EAI_DIR, "run_mujoco_viewer.sh")
 MUJOCO_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/mujoco"
@@ -1738,12 +2161,12 @@ MOLMOSPACES_EVAL_TASKS: Tuple[Tuple[str, str, str, Tuple[str, ...]], ...] = (
 )
 MOLMOSPACES_EVAL_POLICIES: Tuple[Tuple[str, str], ...] = (
     (
-        "Dummy（无策略）",
-        "molmo_spaces.evaluation.configs.evaluation_configs:DummyBenchmarkEvalConfig",
-    ),
-    (
         "Pi",
         "molmo_spaces.evaluation.configs.evaluation_configs:PiPolicyEvalConfig",
+    ),
+    (
+        "Dummy（无策略）",
+        "molmo_spaces.evaluation.configs.evaluation_configs:DummyBenchmarkEvalConfig",
     ),
     (
         "Teleop",
@@ -1751,12 +2174,8 @@ MOLMOSPACES_EVAL_POLICIES: Tuple[Tuple[str, str], ...] = (
     ),
 )
 MOLMOSPACES_EVAL_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "molmospaces_eval")
-# Default Pi ckpt: pi05_droid_jointpos (MolmoSpaces 推荐); 优先本地 HF 缓存。
-MOLMOSPACES_PI_CKPT_DEFAULT = (
-    PI_CKPT_HF_LOCAL_DEFAULT
-    if is_local_checkpoint_usable(PI_CKPT_HF_LOCAL_DEFAULT)
-    else resolve_pi_checkpoint().path
-)
+# Default Pi ckpt: prefer fully usable local, else present local download (models/ / HF cache).
+MOLMOSPACES_PI_CKPT_DEFAULT = resolve_pi_checkpoint(prefer_present_local=True).path
 MOLMOSPACES_PI_CONFIG_DEFAULT = infer_policy_config(
     MOLMOSPACES_PI_CKPT_DEFAULT, PI_CKPT_CONFIG_DEFAULT
 )
@@ -1775,6 +2194,11 @@ ISAACLAB_ARENA_POLICIES: Tuple[Tuple[str, str], ...] = (
     ("replay", "replay"),
     ("rsl_rl", "rsl_rl"),
 )
+LIBERO_CKPT_DEFAULT = resolve_libero_checkpoint().path
+LIBERO_CONFIG_DEFAULT = "pi05_libero"
+ROBOTWIN_CKPT_DEFAULT = resolve_robotwin_checkpoint().path
+ROBOTWIN_CONFIG_DEFAULT = "pi05_aloha_robotwin"
+ROBOTWIN_TASK_DEFAULT = "adjust_bottle"
 MOLMOSPACES_RESOURCES_MIN = "0.0.3a2"
 MUJOCO_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/molmospaces/bin/python",
@@ -1827,6 +2251,8 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "Reward评测",
     "Reward训练",
     "仿真强化学习训练",
+    "RoboMeter",
+    "RynnValue",
     "ICL",
     "Astra",
     "HumanEgo",
@@ -1905,6 +2331,16 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "rise_rl": "仿真强化学习训练",
     "dojo_rl": "仿真强化学习训练",
     "RoboDojo在线RL": "仿真强化学习训练",
+    "robometer": "RoboMeter",
+    "RoboMeter": "RoboMeter",
+    "rfm_rl": "RoboMeter",
+    "policy_learning": "RoboMeter",
+    "robometer-policy": "RoboMeter",
+    "rynnvalue": "RynnValue",
+    "RynnValue": "RynnValue",
+    "rynn_value": "RynnValue",
+    "rynn-value": "RynnValue",
+    "rynn": "RynnValue",
     "mujoco": "仿真评测",
     "MuJoCo": "仿真评测",
     "mj": "仿真评测",
@@ -1915,6 +2351,12 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "arena": "仿真评测",
     "IsaacLab-Arena": "仿真评测",
     "isaaclab_arena": "仿真评测",
+    "libero": "仿真评测",
+    "LIBERO": "仿真评测",
+    "robotwin": "仿真评测",
+    "RoboTwin": "仿真评测",
+    "robo_twin": "仿真评测",
+    "rlinf": "仿真评测",
     "ctx": "ICL",
     "context": "ICL",
     "icl": "ICL",
@@ -2293,7 +2735,7 @@ UI_MONO_SIZE_TITLE = 11
 
 
 class _LogHeightDragBar(QFrame):
-    """宽拖动手柄：拖动可调整关联日志框高度（比 QSplitter 细条更好抓）。"""
+    """宽拖动手柄：拖动可调整关联文本框高度（比 QSplitter 细条更好抓）。"""
 
     def __init__(
         self,
@@ -2302,6 +2744,7 @@ class _LogHeightDragBar(QFrame):
         grow_down: bool,
         min_h: int = 80,
         max_h: int = 900,
+        label: str = "拖动调整高度",
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -2312,9 +2755,10 @@ class _LogHeightDragBar(QFrame):
         self._dragging = False
         self._press_y = 0
         self._press_h = 0
+        self._was_at_bottom = True
         self.setFixedHeight(22)
         self.setCursor(Qt.SizeVerCursor)
-        self.setToolTip("按住上下拖动，调整日志高度")
+        self.setToolTip(f"按住上下拖动，{label}")
         self.setStyleSheet(
             "QFrame {"
             "  background-color: #3a3a3a;"
@@ -2328,17 +2772,103 @@ class _LogHeightDragBar(QFrame):
         )
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        tip = QLabel("⋮⋮ 拖动调整日志高度 ⋮⋮")
+        tip = QLabel(f"⋮⋮ {label} ⋮⋮")
         tip.setAlignment(Qt.AlignCenter)
         tip.setStyleSheet(f"color: {UI_TEXT_MUTED}; background: transparent; border: none;")
         tip.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         lay.addWidget(tip)
+
+    def _log_at_bottom(self) -> bool:
+        bar = getattr(self._log, "verticalScrollBar", lambda: None)()
+        if bar is None:
+            return True
+        return bar.value() >= max(0, bar.maximum() - 4)
+
+    def _fit_max_height(self) -> int:
+        """Clamp so the log (and siblings) stay fully inside the parent — avoid
+        growing past the window and clipping the bottom of the log view."""
+        parent = self._log.parentWidget()
+        if parent is None:
+            return self._max_h
+        layout = parent.layout()
+        parent_h = parent.height()
+        if parent_h <= 0:
+            return self._max_h
+        used = 0
+        if layout is not None:
+            margins = layout.contentsMargins()
+            used += margins.top() + margins.bottom()
+            for i in range(layout.count()):
+                item = layout.itemAt(i)
+                if item is None:
+                    continue
+                w = item.widget()
+                if w is self._log:
+                    continue
+                if w is not None:
+                    if not w.isVisible():
+                        continue
+                    stretch = 0
+                    try:
+                        stretch = int(layout.stretch(i))
+                    except Exception:  # noqa: BLE001
+                        stretch = 0
+                    if stretch > 0:
+                        # Leave stretch panes a usable minimum so they (and the
+                        # log below/above) are not pushed off-screen.
+                        used += max(48, w.minimumSizeHint().height())
+                    else:
+                        used += w.height() if w.height() > 0 else max(
+                            w.minimumSizeHint().height(), w.sizeHint().height()
+                        )
+                    continue
+                lay = item.layout()
+                if lay is not None:
+                    used += max(lay.minimumSize().height(), lay.sizeHint().height())
+                    continue
+                sp = item.spacerItem()
+                if sp is not None and sp.sizeHint().height() > 0:
+                    used += sp.sizeHint().height()
+            if layout.count() > 1:
+                used += (layout.count() - 1) * max(0, layout.spacing())
+        room = parent_h - used
+        return max(self._min_h, min(self._max_h, room))
+
+    def _apply_height(self, new_h: int) -> None:
+        fit = self._fit_max_height()
+        h = max(self._min_h, min(fit, new_h))
+        self._log.setFixedHeight(h)
+        self._log.updateGeometry()
+        parent = self._log.parentWidget()
+        if parent is not None and parent.layout() is not None:
+            parent.layout().activate()
+        # If we were pinned to the latest lines, keep the bottom visible after
+        # the viewport height change (otherwise the clipped bottom stays hidden).
+        if self._was_at_bottom:
+            bar = getattr(self._log, "verticalScrollBar", lambda: None)()
+            if bar is not None:
+                bar.setValue(bar.maximum())
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        # Parent shrunk → pull log back into view so bottom lines aren't clipped.
+        if obj is self._log.parentWidget() and event.type() == QEvent.Resize:
+            if self._log.height() > self._fit_max_height():
+                self._was_at_bottom = self._log_at_bottom()
+                self._apply_height(self._log.height())
+        return super().eventFilter(obj, event)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        parent = self._log.parentWidget()
+        if parent is not None:
+            parent.installEventFilter(self)
+        super().showEvent(event)
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
             self._dragging = True
             self._press_y = event.globalY()
             self._press_h = max(self._log.height(), self._min_h)
+            self._was_at_bottom = self._log_at_bottom()
             self.grabMouse()
             event.accept()
             return
@@ -2350,17 +2880,63 @@ class _LogHeightDragBar(QFrame):
             return
         dy = event.globalY() - self._press_y
         delta = dy if self._grow_down else -dy
-        new_h = max(self._min_h, min(self._max_h, self._press_h + delta))
-        self._log.setFixedHeight(new_h)
+        self._apply_height(self._press_h + delta)
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton and self._dragging:
             self._dragging = False
             self.releaseMouse()
+            # Final clamp after sibling layouts settle.
+            self._apply_height(self._log.height())
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+
+def _configure_resizable_text_edit(
+    edit: QTextEdit,
+    *,
+    default_h: int,
+    tooltip: str = "拖动手柄可调整高度",
+) -> None:
+    """给多行文本框设合理默认高度；需再配 `_LogHeightDragBar` 才能拖动。"""
+    # 清掉旧的 min/max，改用 FixedHeight，便于拖动手柄改高。
+    edit.setMinimumHeight(0)
+    edit.setMaximumHeight(16777215)
+    edit.setFixedHeight(int(default_h))
+    edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    if tooltip:
+        edit.setToolTip(tooltip)
+
+
+def _add_text_edit_with_drag_bar(
+    layout: QVBoxLayout,
+    edit: QTextEdit,
+    *,
+    default_h: int,
+    min_h: int = 80,
+    max_h: int = 900,
+    grow_down: bool = True,
+    bar_before: bool = False,
+    label: str = "拖动调整高度",
+) -> _LogHeightDragBar:
+    """放入文本框 + 拖动手柄（默认手柄在文本框下方，向下拖变高）。"""
+    _configure_resizable_text_edit(
+        edit,
+        default_h=default_h,
+        tooltip=f"{'拖动上方' if bar_before else '拖动下方'}手柄可调整高度",
+    )
+    bar = _LogHeightDragBar(
+        edit, grow_down=grow_down, min_h=min_h, max_h=max_h, label=label
+    )
+    if bar_before:
+        layout.addWidget(bar)
+        layout.addWidget(edit)
+    else:
+        layout.addWidget(edit)
+        layout.addWidget(bar)
+    return bar
 
 
 # 测试 Tab：场景示意图像框（2×4）
@@ -3222,6 +3798,11 @@ LAKE_ORCHESTRATOR_SYSTEM_PROMPT_EN = (
     "First output a numbered list under All subtasks, then answer in four "
     "lines labeled Skill, Current subtask, Previous subtask, and Next subtask."
 )
+# 对齐 hermas_sys2_current_only_*-en：仅 All subtasks + Current subtask 两行
+LAKE_ORCHESTRATOR_SYSTEM_PROMPT_EN2 = (
+    "Given a scene image and a task name, output two lines: "
+    "All subtasks, then Current subtask."
+)
 LAKE_ORCHESTRATOR_SYSTEM_PROMPT_TRAINING = (
     "你是机器人操作任务的认知编排器。给定场景图像与高层任务名称，"
     "预测该任务下的全部二层（layer-2）子任务列表，以及当前可执行的子任务。"
@@ -3241,11 +3822,22 @@ LAKE_USER_PROMPT_TEMPLATE_EN = "Task: {task}"
 
 
 def lake_orchestrator_prompt_lang(system_prompt: str = "") -> str:
-    """根据 system prompt 判断编排语言：'en' / 'zh'。"""
+    """根据 system prompt 判断编排语言：'zh' / 'en' / 'en2'。"""
     s = (system_prompt or "").strip()
     if not s:
         return "zh"
     low = s.lower()
+    if (
+        s == LAKE_ORCHESTRATOR_SYSTEM_PROMPT_EN2
+        or "output two lines" in low
+        or (
+            "given a scene image and a task name" in low
+            and "current subtask" in low
+            and "previous subtask" not in low
+            and "skill" not in low
+        )
+    ):
+        return "en2"
     if (
         s.startswith("You are a robot")
         or "all subtasks" in low
@@ -3257,11 +3849,12 @@ def lake_orchestrator_prompt_lang(system_prompt: str = "") -> str:
 
 
 def lake_orchestrator_system_prompt_for_lang(lang: str) -> str:
-    return (
-        LAKE_ORCHESTRATOR_SYSTEM_PROMPT_EN
-        if (lang or "").lower().startswith("en")
-        else LAKE_ORCHESTRATOR_SYSTEM_PROMPT
-    )
+    key = (lang or "").strip().lower()
+    if key in ("en2", "en_2", "en-2", "current_only", "en_short"):
+        return LAKE_ORCHESTRATOR_SYSTEM_PROMPT_EN2
+    if key.startswith("en"):
+        return LAKE_ORCHESTRATOR_SYSTEM_PROMPT_EN
+    return LAKE_ORCHESTRATOR_SYSTEM_PROMPT
 
 
 def lake_default_previous_subtask(lang: str = "zh") -> str:
@@ -3304,7 +3897,7 @@ def format_lake_user_prompt(
         if sep in task_line:
             task_line = task_line.split(sep, 1)[0].strip()
             break
-    if lang == "en":
+    if (lang or "").startswith("en"):
         return LAKE_USER_PROMPT_TEMPLATE_EN.format(task=task_line)
     return LAKE_USER_PROMPT_TEMPLATE.format(task=task_line)
 
@@ -8049,7 +8642,7 @@ class ChatPanelWidget(QWidget):
         if saved_system:
             self._config.system_prompt = saved_system
         saved_lang = str(saved_settings.get("system_prompt_lang") or "").strip().lower()
-        if saved_lang in ("en", "zh") and not saved_system:
+        if saved_lang in ("en", "zh", "en2") and not saved_system:
             self._config.system_prompt = lake_orchestrator_system_prompt_for_lang(
                 saved_lang
             )
@@ -8155,10 +8748,10 @@ class ChatPanelWidget(QWidget):
         self.traditional_chat_btn.clicked.connect(self._on_traditional_chat_clicked)
         header.addWidget(self.traditional_chat_btn)
         self.system_lang_btn = QPushButton("English")
-        self.system_lang_btn.setFixedWidth(64)
+        self.system_lang_btn.setFixedWidth(72)
         self.system_lang_btn.setFocusPolicy(Qt.NoFocus)
         self.system_lang_btn.setToolTip(
-            "中文 / English 编排提示词切换（对齐对应语言训练数据）"
+            "中文 → English 完整版 → EN 两行简版（All/Current）循环切换"
         )
         self.system_lang_btn.clicked.connect(self._on_toggle_system_prompt_lang)
         header.addWidget(self.system_lang_btn)
@@ -8204,16 +8797,22 @@ class ChatPanelWidget(QWidget):
         self.system_prompt_edit = ImeSafeTextEdit()
         self.system_prompt_edit.setPlainText(self._config.system_prompt)
         self.system_prompt_edit.setPlaceholderText("System prompt…")
-        self.system_prompt_edit.setMinimumHeight(72)
-        self.system_prompt_edit.setMaximumHeight(140)
         self.system_prompt_edit.setToolTip(
             "认知编排器 system 提示词；Lake 模式下随请求发送。"
-            "点「保存 System」写入 eai/chat_user_settings.json"
+            "点「保存 System」写入 eai/chat_user_settings.json；"
+            "拖动手柄可调整高度。"
         )
         self.system_prompt_edit.setStyleSheet(
             "QTextEdit { background-color: #252525; color: #eee; border: 1px solid #555; }"
         )
-        settings_layout.addWidget(self.system_prompt_edit)
+        self.system_prompt_resize_bar = _add_text_edit_with_drag_bar(
+            settings_layout,
+            self.system_prompt_edit,
+            default_h=160,
+            min_h=72,
+            max_h=600,
+            label="拖动调整 System 高度",
+        )
         system_btn_row = QHBoxLayout()
         self.save_system_btn = QPushButton("保存 System")
         self.save_system_btn.setToolTip(
@@ -8280,7 +8879,7 @@ class ChatPanelWidget(QWidget):
         self.history_view.setReadOnly(True)
         self.history_view.setPlaceholderText("对话记录将显示在这里…")
         self.history_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.history_view.setMinimumHeight(100)
+        self.history_view.setMinimumHeight(160)
         self.history_view.setFocusPolicy(Qt.NoFocus)
         self.history_view.document().setDocumentMargin(8)
         self.history_view.setStyleSheet(
@@ -8295,9 +8894,12 @@ class ChatPanelWidget(QWidget):
         self.input_edit = ChatInputEdit()
         self.input_edit._chat_panel = self
         self.input_edit.setPlaceholderText(LAKE_CHAT_INPUT_PLACEHOLDER)
-        # 紧凑高度，避免挤占/盖住上方结果区
-        self.input_edit.setFixedHeight(72)
-        self.input_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # 默认可多行输入；上方手柄可再拉高，避免长期挤占历史区
+        _configure_resizable_text_edit(
+            self.input_edit,
+            default_h=100,
+            tooltip="拖动上方手柄可调整输入框高度",
+        )
         self.input_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.input_edit.document().setDocumentMargin(4)
         self.input_edit.setStyleSheet(
@@ -8309,6 +8911,14 @@ class ChatPanelWidget(QWidget):
         self._ime_dirty_from_history = False
         self._ime_rebuilding = False
         self._history_dialog = None
+        self.input_resize_bar = _LogHeightDragBar(
+            self.input_edit,
+            grow_down=False,
+            min_h=72,
+            max_h=360,
+            label="拖动调整输入高度",
+        )
+        layout.addWidget(self.input_resize_bar)
         input_row.addWidget(self.input_edit, stretch=1)
         send_col = QVBoxLayout()
         self.send_btn = QPushButton("发送")
@@ -9073,7 +9683,7 @@ class ChatPanelWidget(QWidget):
             new = ChatInputEdit(self)
             new._chat_panel = self
             new.setPlaceholderText(placeholder)
-            new.setFixedHeight(height if height > 0 else 72)
+            new.setFixedHeight(height if height > 0 else 100)
             new.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             new.setAttribute(Qt.WA_InputMethodEnabled, True)
             new.setStyleSheet(style)
@@ -9090,6 +9700,9 @@ class ChatPanelWidget(QWidget):
                 row.replaceWidget(old, new)
             old.deleteLater()
             self.input_edit = new
+            bar = getattr(self, "input_resize_bar", None)
+            if bar is not None:
+                bar._log = new
             self._ime_dirty_from_history = False
             _IME_LAST_TEXT_WIDGET = new
             new.setFocus(Qt.OtherFocusReason)
@@ -9168,19 +9781,29 @@ class ChatPanelWidget(QWidget):
             if hasattr(self, "system_prompt_edit")
             else self._config.system_prompt
         )
-        if lang == "en":
-            self.system_lang_btn.setText("中文")
+        # 按钮文案 = 下一次将切换到的状态
+        if lang == "zh":
+            self.system_lang_btn.setText("English")
             self.system_lang_btn.setToolTip(
-                "当前为 English system prompt；点击切换回中文编排提示词"
+                "当前为中文 system prompt；点击切换为 English 完整编排\n"
+                "（Skill / Current / Previous / Next）"
+            )
+            placeholder = LAKE_CHAT_INPUT_PLACEHOLDER
+        elif lang == "en":
+            self.system_lang_btn.setText("EN-2L")
+            self.system_lang_btn.setToolTip(
+                "当前为 English 完整版；点击切换为两行简版\n"
+                "（Given a scene image… All subtasks, then Current subtask）\n"
+                "对齐 hermas_sys2_current_only_*-en"
             )
             placeholder = LAKE_CHAT_INPUT_PLACEHOLDER_EN
         else:
-            self.system_lang_btn.setText("English")
+            self.system_lang_btn.setText("中文")
             self.system_lang_btn.setToolTip(
-                "当前为中文 system prompt；点击切换为 English 编排提示词\n"
-                "（对齐 hermas_sys2_*-en：All subtasks / Skill / Current subtask …）"
+                "当前为 EN 两行简版（All subtasks + Current subtask）；\n"
+                "点击切换回中文编排提示词"
             )
-            placeholder = LAKE_CHAT_INPUT_PLACEHOLDER
+            placeholder = LAKE_CHAT_INPUT_PLACEHOLDER_EN
         if (
             not self._traditional_chat_mode
             and hasattr(self, "input_edit")
@@ -9191,7 +9814,13 @@ class ChatPanelWidget(QWidget):
     def _on_toggle_system_prompt_lang(self) -> None:
         self._apply_traditional_chat_mode(False, notify=False)
         cur = lake_orchestrator_prompt_lang(self.system_prompt_edit.toPlainText())
-        new_lang = "zh" if cur == "en" else "en"
+        # 中文 → English 完整 → EN 两行简版 → 中文
+        if cur == "zh":
+            new_lang = "en"
+        elif cur == "en":
+            new_lang = "en2"
+        else:
+            new_lang = "zh"
         prompt = lake_orchestrator_system_prompt_for_lang(new_lang)
         self.system_prompt_edit.setPlainText(prompt)
         self._config.system_prompt = prompt
@@ -9199,7 +9828,11 @@ class ChatPanelWidget(QWidget):
         self._lake_language_memory = lake_default_previous_subtask(new_lang)
         self._sync_config_from_ui()
         self._refresh_system_lang_btn()
-        label = "English" if new_lang == "en" else "中文"
+        label = {
+            "en": "English 完整版",
+            "en2": "EN 两行简版（All/Current）",
+            "zh": "中文",
+        }.get(new_lang, new_lang)
         self._append_system_line(
             f"已切换 System prompt 为 {label}；user 仅包装「任务 / Task」行"
         )
@@ -10489,18 +11122,19 @@ class DepthPanel3D(QWidget):
         if self._gl_ready and self.view is not None:
             return True
         try:
-            view = gl.GLViewWidget()
+            _pg, _gl = _ensure_pyqtgraph_opengl()
+            view = _gl.GLViewWidget()
             view.setMinimumSize(80, 60)
             view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             view.setBackgroundColor((30, 30, 30))
             view.opts["distance"] = 2.0
 
-            grid = gl.GLGridItem()
+            grid = _gl.GLGridItem()
             grid.setSize(2, 2)
             grid.setSpacing(0.2, 0.2)
             view.addItem(grid)
 
-            scatter = gl.GLScatterPlotItem(
+            scatter = _gl.GLScatterPlotItem(
                 pos=np.zeros((1, 3), dtype=np.float32),
                 color=np.array([[0.5, 0.5, 0.5, 1.0]], dtype=np.float32),
                 size=3,
@@ -10508,7 +11142,7 @@ class DepthPanel3D(QWidget):
             )
             view.addItem(scatter)
 
-            segment_scatter = gl.GLScatterPlotItem(
+            segment_scatter = _gl.GLScatterPlotItem(
                 pos=np.zeros((1, 3), dtype=np.float32),
                 color=np.array([[1.0, 0.85, 0.1, 1.0]], dtype=np.float32),
                 size=6,
@@ -10516,7 +11150,7 @@ class DepthPanel3D(QWidget):
             )
             view.addItem(segment_scatter)
 
-            pose_obb_lines = gl.GLLinePlotItem(
+            pose_obb_lines = _gl.GLLinePlotItem(
                 pos=np.zeros((2, 3), dtype=np.float32),
                 color=(0.2, 0.9, 1.0, 1.0),
                 width=2,
@@ -10525,7 +11159,7 @@ class DepthPanel3D(QWidget):
             )
             view.addItem(pose_obb_lines)
 
-            pose_axes_lines = gl.GLLinePlotItem(
+            pose_axes_lines = _gl.GLLinePlotItem(
                 pos=np.zeros((2, 3), dtype=np.float32),
                 color=(1.0, 1.0, 1.0, 1.0),
                 width=3,
@@ -10534,26 +11168,26 @@ class DepthPanel3D(QWidget):
             )
             view.addItem(pose_axes_lines)
 
-            robot_left_scatter = gl.GLScatterPlotItem(
+            robot_left_scatter = _gl.GLScatterPlotItem(
                 pos=np.zeros((1, 3), dtype=np.float32),
                 color=np.array([[1.0, 0.2, 0.8, 1.0]], dtype=np.float32),
                 size=14,
                 pxMode=False,
             )
-            robot_right_scatter = gl.GLScatterPlotItem(
+            robot_right_scatter = _gl.GLScatterPlotItem(
                 pos=np.zeros((1, 3), dtype=np.float32),
                 color=np.array([[0.2, 0.85, 1.0, 1.0]], dtype=np.float32),
                 size=14,
                 pxMode=False,
             )
-            robot_left_axes = gl.GLLinePlotItem(
+            robot_left_axes = _gl.GLLinePlotItem(
                 pos=np.zeros((2, 3), dtype=np.float32),
                 color=(1.0, 0.3, 0.8, 1.0),
                 width=2,
                 antialias=True,
                 mode="lines",
             )
-            robot_right_axes = gl.GLLinePlotItem(
+            robot_right_axes = _gl.GLLinePlotItem(
                 pos=np.zeros((2, 3), dtype=np.float32),
                 color=(0.3, 0.85, 1.0, 1.0),
                 width=2,
@@ -10658,8 +11292,8 @@ class DepthPanel3D(QWidget):
 
     def _set_robot_tcp_gl(
         self,
-        scatter_item: gl.GLScatterPlotItem,
-        axes_item: gl.GLLinePlotItem,
+        scatter_item: Any,
+        axes_item: Any,
         cam_pose: Optional[Tuple[np.ndarray, np.ndarray]],
         color_rgba: Tuple[float, float, float, float],
     ) -> None:
@@ -10995,7 +11629,8 @@ class DepthPanel3D(QWidget):
                         pos=result.points, color=result.colors, size=3, pxMode=True
                     )
                     center = result.points.mean(axis=0)
-                    self.view.opts["center"] = pg.Vector(center[0], center[1], center[2])
+                    _pg, _ = _ensure_pyqtgraph_opengl()
+                    self.view.opts["center"] = _pg.Vector(center[0], center[1], center[2])
 
                 self._safe_gl_set(_do)
             h, w = result.full_shape
@@ -11080,6 +11715,8 @@ class CameraTopicNode(Node):
         super().__init__("camera_topic_viewer")
         self.ros_bridge = bridge
         self.prefix = prefix
+        from cv_bridge import CvBridge
+
         self.cv_bridge = CvBridge()
         self.subscriptions_map: Dict[str, object] = {}
         self.camera_info_subs: Dict[str, object] = {}
@@ -11105,7 +11742,9 @@ class CameraTopicNode(Node):
         self._robot_lock = threading.Lock()
         self._robot_state = RobotStateSnapshot([], [], [], [], [], None, None, 0.0)
         self._last_robot_state_emit = 0.0
-        self._tf_buffer = Buffer()
+        from tf2_ros import Buffer as _TfBuffer, TransformListener
+
+        self._tf_buffer = _TfBuffer()
         self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
         # A2D: image frame_id 是 camera_frame，但默认 TF 树没有它；自动补发 base_link->camera_frame
         self._head_camera_tf = None
@@ -12816,9 +13455,15 @@ class CameraTopicNode(Node):
                     f"首帧 {topic}: {msg.width}x{msg.height} encoding={msg.encoding}"
                 )
             self._publish_frame_to_ui(topic, cv_image, now)
-        except CvBridgeError as exc:
-            self.get_logger().warn(f"{topic}: {exc}")
         except Exception as exc:
+            try:
+                from cv_bridge import CvBridgeError
+
+                if isinstance(exc, CvBridgeError):
+                    self.get_logger().warn(f"{topic}: {exc}")
+                    return
+            except Exception:
+                pass
             self.get_logger().error(f"{topic}: 处理失败 {exc}")
 
     def _compressed_callback(self, msg: CompressedImage, topic: str) -> None:
@@ -12830,9 +13475,15 @@ class CameraTopicNode(Node):
             if self._frame_counts.get(topic, 0) == 0:
                 self.get_logger().info(f"首帧 {topic}: compressed {len(msg.data)} bytes")
             self._publish_frame_to_ui(topic, cv_image, now)
-        except CvBridgeError as exc:
-            self.get_logger().warn(f"{topic}: {exc}")
         except Exception as exc:
+            try:
+                from cv_bridge import CvBridgeError
+
+                if isinstance(exc, CvBridgeError):
+                    self.get_logger().warn(f"{topic}: {exc}")
+                    return
+            except Exception:
+                pass
             self.get_logger().error(f"{topic}: 处理失败 {exc}")
 
 
@@ -17531,6 +18182,456 @@ class RoboDojoOnlineRLLauncher(QObject):
             self.running_changed.emit(False)
 
 
+class RoboMeterPolicyLauncher(QObject):
+    """启动 robometer-policy-learning 训练 / 评测。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    log_dir_ready = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._log_dir: str = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        job: str,
+        config_name: str,
+        repo_root: str,
+        python_bin: str = "",
+        cuda_devices: str = "",
+        render_gui: bool = False,
+        hydra_overrides: Sequence[str] = (),
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("RoboMeter 正在运行")
+            return
+        script = ROBOMETER_RUN_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        root = resolve_robometer_root(repo_root)
+        if not os.path.isdir(os.path.join(root, "robometer_policy_learning")):
+            self.status_message.emit(f"无效仓库: {root}")
+            return
+        py = (python_bin or "").strip() or resolve_robometer_python(root)
+        cfg = (config_name or "").strip()
+        if not cfg:
+            self.status_message.emit("请选择 Hydra config")
+            return
+        cfg_path = os.path.join(
+            root, "robometer_policy_learning", "configs", f"{cfg}.yaml"
+        )
+        if not os.path.isfile(cfg_path):
+            self.status_message.emit(f"配置不存在: {cfg_path}")
+            return
+        job_norm = (job or "train").strip().lower().replace("-", "_")
+        os.makedirs(ROBOMETER_CACHE_DIR, exist_ok=True)
+
+        args = [
+            "--job",
+            job_norm,
+            "--config",
+            cfg,
+            "--root",
+            root,
+            "--python",
+            py,
+        ]
+        if render_gui:
+            args.append("--gui")
+        overrides = [str(x).strip() for x in hydra_overrides if str(x).strip()]
+        if overrides:
+            args.append("--")
+            args.extend(overrides)
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.remove("QT_XCB_GL_INTEGRATION")
+        qenv.remove("QT_OPENGL")
+        qenv.remove("QT_QUICK_BACKEND")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("PYTHONUNBUFFERED", "1")
+        qenv.insert("ROBOMETER_ROOT", root)
+        qenv.insert("ROBOMETER_PYTHON", py)
+        qenv.insert("PYTHONPATH", root)
+        qenv.insert("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+        # train / train_async use OffScreenRenderEnv; glfw under Qt parent often
+        # triggers cudnn "Invalid handle. Cannot load symbol cudnnGetVersion".
+        use_glfw = bool(render_gui) and job_norm not in ("train", "train_async", "online_rl")
+        if use_glfw:
+            qenv.insert("MUJOCO_GL", "glfw")
+            qenv.remove("PYOPENGL_PLATFORM")
+        else:
+            qenv.insert("MUJOCO_GL", "egl")
+            qenv.insert("PYOPENGL_PLATFORM", "egl")
+        cuda = (cuda_devices or "").strip()
+        if cuda:
+            qenv.insert("CUDA_VISIBLE_DEVICES", cuda)
+
+        self._log_dir = ""
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(root)
+        proc.setProcessEnvironment(qenv)
+        proc.start("setsid", ["bash", script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        gui_flag = " --gui" if render_gui else ""
+        self.log_line.emit(
+            f"$ bash run_robometer_policy.sh --job {job_norm} --config {cfg}{gui_flag}"
+        )
+        self.status_message.emit(f"正在启动 RoboMeter（{job_norm} / {cfg}）…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 RoboMeter")
+            return
+        self.status_message.emit("正在停止 RoboMeter…")
+        if self._process is not None:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            QTimer.singleShot(4000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            self._process.waitForFinished(2000)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.kill()
+            else:
+                self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is None or self._process.state() == QProcess.NotRunning:
+            return
+        pid = int(self._process.processId())
+        if pid > 0:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[robometer] log_dir="):
+                self._log_dir = text.split("=", 1)[-1].strip()
+                if self._log_dir:
+                    self.log_dir_ready.emit(self._log_dir)
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- RoboMeter 正常退出 ---")
+            self.status_message.emit("RoboMeter 已完成")
+        else:
+            self.log_line.emit(f"--- RoboMeter 退出 (code={exit_code}) ---")
+            self.status_message.emit(f"RoboMeter 异常退出 (code={exit_code})")
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 RoboMeter 进程")
+            self.status_message.emit("无法启动 RoboMeter")
+            self.running_changed.emit(False)
+
+
+class RynnValueLauncher(QObject):
+    """启动 RynnValue 视频推理 / Reward 服务 / Robometer 评测。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    log_dir_ready = pyqtSignal(str)
+    output_video_ready = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._log_dir: str = ""
+        self._render_gui: bool = False
+        self._pending_video: str = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        job: str,
+        repo_root: str,
+        python_bin: str = "",
+        model_path: str = "",
+        checkpoint_path: str = "",
+        video_path: str = "",
+        instruction: str = "",
+        robot_description: str = "",
+        camera_description: str = "",
+        output_path: str = "",
+        num_frames: int = 16,
+        num_steps: int = 32,
+        batch_size: int = 1,
+        max_image_side: int = 640,
+        max_new_tokens: int = 128,
+        fps: int = 30,
+        port: int = 8001,
+        cuda_devices: str = "",
+        datasets_path: str = "",
+        render_gui: bool = False,
+        extra_args: Sequence[str] = (),
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("RynnValue 正在运行")
+            return
+        script = RYNNVALUE_RUN_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        root = resolve_rynnvalue_root(repo_root)
+        if not os.path.isdir(os.path.join(root, "rynn_infer")):
+            self.status_message.emit(f"无效仓库: {root}")
+            return
+        job_norm = (job or "infer").strip().lower().replace("-", "_")
+        model = (model_path or "").strip()
+        if job_norm in ("infer", "inference", "demo", "policy_ranking", "ranking",
+                        "confusion_matrix", "confusion") and not model:
+            self.status_message.emit("请填写 model path")
+            return
+        if job_norm in ("reward_server", "server", "serve") and not model and not (
+            checkpoint_path or ""
+        ).strip():
+            self.status_message.emit("请填写 model path 或 checkpoint")
+            return
+        if job_norm in ("infer", "inference", "demo"):
+            vid = (video_path or "").strip() or os.path.join(
+                root, "example", "Put_the_box_in_the_drawer_and_close_it.mp4"
+            )
+            if not os.path.isfile(vid):
+                self.status_message.emit(f"视频不存在: {vid}")
+                return
+
+        py = (python_bin or "").strip() or resolve_rynnvalue_python(root)
+        os.makedirs(RYNNVALUE_CACHE_DIR, exist_ok=True)
+        self._render_gui = bool(render_gui)
+        self._pending_video = ""
+        self._log_dir = os.path.join(root, "rynn_infer", "outputs")
+
+        args = [
+            "--job",
+            job_norm,
+            "--root",
+            root,
+            "--python",
+            py,
+            "--num-frames",
+            str(max(1, int(num_frames))),
+            "--num-steps",
+            str(max(0, int(num_steps))),
+            "--batch-size",
+            str(max(1, int(batch_size))),
+            "--max-image-side",
+            str(max(0, int(max_image_side))),
+            "--max-new-tokens",
+            str(max(1, int(max_new_tokens))),
+            "--fps",
+            str(max(1, int(fps))),
+            "--port",
+            str(max(1, int(port))),
+        ]
+        if model:
+            args.extend(["--model-path", model])
+        ckpt = (checkpoint_path or "").strip()
+        if ckpt:
+            args.extend(["--checkpoint-path", ckpt])
+        if job_norm in ("infer", "inference", "demo"):
+            args.extend(["--video-path", vid])
+            instr = (instruction or "").strip() or RYNNVALUE_DEFAULT_INSTRUCTION
+            args.extend(["--instruction", instr])
+            robot = (robot_description or "").strip() or RYNNVALUE_DEFAULT_ROBOT
+            camera = (camera_description or "").strip() or RYNNVALUE_DEFAULT_CAMERA
+            args.extend(["--robot-description", robot])
+            args.extend(["--camera-description", camera])
+            out = (output_path or "").strip()
+            if out:
+                args.extend(["--output-path", out])
+                self._log_dir = out
+        ds = (datasets_path or "").strip()
+        if ds:
+            args.extend(["--datasets-path", ds])
+        if self._render_gui:
+            args.append("--gui")
+        extras = [str(x).strip() for x in extra_args if str(x).strip()]
+        if extras:
+            args.append("--")
+            args.extend(extras)
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("PYTHONUNBUFFERED", "1")
+        qenv.insert("RYNNVALUE_ROOT", root)
+        qenv.insert("RYNNVALUE_PYTHON", py)
+        qenv.insert("MPLBACKEND", "Agg")
+        qenv.insert("HF_ENDPOINT", qenv.value("HF_ENDPOINT") or "https://hf-mirror.com")
+        cuda = (cuda_devices or "").strip()
+        if cuda:
+            qenv.insert("CUDA_VISIBLE_DEVICES", cuda)
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(root)
+        proc.setProcessEnvironment(qenv)
+        proc.start("setsid", ["bash", script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        if self._log_dir:
+            self.log_dir_ready.emit(self._log_dir)
+        gui_flag = " --gui" if self._render_gui else ""
+        self.log_line.emit(
+            f"$ bash run_rynnvalue.sh --job {job_norm}{gui_flag}"
+        )
+        self.status_message.emit(f"正在启动 RynnValue（{job_norm}）…")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 RynnValue")
+            return
+        self.status_message.emit("正在停止 RynnValue…")
+        if self._process is not None:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            QTimer.singleShot(4000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            self._process.waitForFinished(2000)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.kill()
+            else:
+                self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is None or self._process.state() == QProcess.NotRunning:
+            return
+        pid = int(self._process.processId())
+        if pid > 0:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[rynnvalue] log_dir="):
+                self._log_dir = text.split("=", 1)[-1].strip()
+                if self._log_dir:
+                    self.log_dir_ready.emit(self._log_dir)
+            if text.startswith("[rynnvalue] output_video="):
+                self._pending_video = text.split("=", 1)[-1].strip()
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- RynnValue 正常退出 ---")
+            self.status_message.emit("RynnValue 已完成")
+            if self._pending_video and os.path.isfile(self._pending_video):
+                self.output_video_ready.emit(self._pending_video)
+        else:
+            self.log_line.emit(f"--- RynnValue 退出 (code={exit_code}) ---")
+            self.status_message.emit(f"RynnValue 异常退出 (code={exit_code})")
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 RynnValue 进程")
+            self.status_message.emit("无法启动 RynnValue")
+            self.running_changed.emit(False)
+
 
 class MuJoCoViewerLauncher(QObject):
     """启动 MuJoCo 交互式图形界面（viewer / simulate）。"""
@@ -18323,6 +19424,36 @@ class CameraTopicWindow(QMainWindow):
             "可拖动标签调整顺序；下次启动会按此顺序打开（写入 eai/control_tabs_order.json）"
         )
 
+        self._ui_prefix = prefix
+        self._llm_config = llm_config
+        self._heavy_ui_built = False
+        self._root_layout = root_layout
+        # 空壳：先让主窗口能 show，再显式 build_heavy_ui
+        self._boot_placeholder = QLabel("正在构建控制区…")
+        self._boot_placeholder.setAlignment(Qt.AlignCenter)
+        self._boot_placeholder.setMinimumHeight(120)
+        control_tabs.addTab(self._boot_placeholder, "…")
+        root_layout.addWidget(control_tabs)
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage("正在构建界面…")
+
+    def build_heavy_ui(self) -> None:
+        """构建全部控制区 Tab + 工作区（在 window.show() 之后调用，先看见主窗口）。"""
+        if getattr(self, "_heavy_ui_built", False):
+            return
+        self._heavy_ui_built = True
+        prefix = self._ui_prefix
+        llm_config = self._llm_config
+        node = self.node
+        bridge = self.bridge
+        control_tabs = self.control_tabs
+        root_layout = self._root_layout
+        _wx, _wy, win_w, _wh = default_viewer_geometry()
+        while control_tabs.count() > 0:
+            control_tabs.removeTab(0)
+        _boot_tick("构建界面…")
+
         camera_tab = QWidget()
         camera_layout = QHBoxLayout(camera_tab)
         camera_layout.setContentsMargins(8, 6, 8, 6)
@@ -18341,6 +19472,7 @@ class CameraTopicWindow(QMainWindow):
         camera_layout.addWidget(clear_btn)
         camera_layout.addStretch()
         control_tabs.addTab(camera_tab, "大脑")
+        _boot_tick("构建界面：回放…")
 
         robot_tab = QWidget()
         robot_layout = QVBoxLayout(robot_tab)
@@ -18541,7 +19673,11 @@ class CameraTopicWindow(QMainWindow):
         self.sam3_result_edit = QTextEdit()
         self.sam3_result_edit.setReadOnly(True)
         self.sam3_result_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.sam3_result_edit.setMaximumHeight(108)
+        _configure_resizable_text_edit(
+            self.sam3_result_edit,
+            default_h=140,
+            tooltip="拖动下方手柄可调整结果区高度",
+        )
         self.sam3_result_edit.setPlaceholderText("SAM3 调用结果将显示在这里…")
         self.sam3_result_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
@@ -18552,14 +19688,18 @@ class CameraTopicWindow(QMainWindow):
         sam3_result_row.addWidget(self.sam3_result_edit, 1)
         self.sam3_preview_label = QLabel("分割预览")
         self.sam3_preview_label.setAlignment(Qt.AlignCenter)
-        self.sam3_preview_label.setMinimumSize(160, 108)
-        self.sam3_preview_label.setMaximumSize(240, 160)
+        self.sam3_preview_label.setMinimumSize(160, 140)
+        self.sam3_preview_label.setMaximumSize(240, 220)
         self.sam3_preview_label.setStyleSheet(
             "QLabel { color: #888; background-color: #1a1a1a; border: 1px solid #555; }"
         )
         self.sam3_preview_label.setToolTip("分割 mask 叠加预览（相机画面上也会持续绘制）")
         sam3_result_row.addWidget(self.sam3_preview_label)
         segment_outer.addLayout(sam3_result_row)
+        self.sam3_result_resize_bar = _LogHeightDragBar(
+            self.sam3_result_edit, grow_down=True, min_h=80, max_h=480, label="拖动调整 SAM3 结果高度"
+        )
+        segment_outer.addWidget(self.sam3_result_resize_bar)
 
         pose_row = QHBoxLayout()
         pose_row.setSpacing(6)
@@ -18614,13 +19754,19 @@ class CameraTopicWindow(QMainWindow):
         self.fp_result_edit = QTextEdit()
         self.fp_result_edit.setReadOnly(True)
         self.fp_result_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.fp_result_edit.setMaximumHeight(120)
         self.fp_result_edit.setPlaceholderText("FoundationPose 调用结果将显示在这里…")
         self.fp_result_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        segment_outer.addWidget(self.fp_result_edit)
+        self.fp_result_edit_resize_bar = _add_text_edit_with_drag_bar(
+            segment_outer,
+            self.fp_result_edit,
+            default_h=140,
+            min_h=80,
+            max_h=900,
+            label="拖动调整 FP 结果高度",
+        )
 
         control_tabs.addTab(segment_tab, "分割")
 
@@ -18722,13 +19868,19 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_log_edit = QTextEdit()
         self.lingbot_log_edit.setReadOnly(True)
         self.lingbot_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.lingbot_log_edit.setMaximumHeight(120)
         self.lingbot_log_edit.setPlaceholderText("LingBot-Vision 日志…")
         self.lingbot_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        vis_outer.addWidget(self.lingbot_log_edit)
+        self.lingbot_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            vis_outer,
+            self.lingbot_log_edit,
+            default_h=160,
+            min_h=80,
+            max_h=900,
+            label="拖动调整 Vision 日志高度",
+        )
 
         self._lingbot_launcher = LingbotVisionLauncher(self)
         self._lingbot_launcher.log_line.connect(self._append_lingbot_log)
@@ -18738,6 +19890,7 @@ class CameraTopicWindow(QMainWindow):
         self._on_lingbot_source_changed()
 
         control_tabs.addTab(vis_tab, "视觉基础模型")
+        _boot_tick("构建界面：空间/3D…")
 
         depth_tab = QWidget()
         depth_outer = QVBoxLayout(depth_tab)
@@ -18907,13 +20060,19 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_depth_log_edit = QTextEdit()
         self.lingbot_depth_log_edit.setReadOnly(True)
         self.lingbot_depth_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.lingbot_depth_log_edit.setMaximumHeight(120)
         self.lingbot_depth_log_edit.setPlaceholderText("LingBot-Depth 日志…")
         self.lingbot_depth_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        depth_outer.addWidget(self.lingbot_depth_log_edit)
+        self.lingbot_depth_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            depth_outer,
+            self.lingbot_depth_log_edit,
+            default_h=160,
+            min_h=80,
+            max_h=900,
+            label="拖动调整 Depth 日志高度",
+        )
 
         self._lingbot_depth_launcher = LingbotDepthLauncher(self)
         self._lingbot_depth_launcher.log_line.connect(self._append_lingbot_depth_log)
@@ -19063,13 +20222,19 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_map_log_edit = QTextEdit()
         self.lingbot_map_log_edit.setReadOnly(True)
         self.lingbot_map_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.lingbot_map_log_edit.setMaximumHeight(140)
         self.lingbot_map_log_edit.setPlaceholderText("LingBot-Map 日志…")
         self.lingbot_map_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        map_outer.addWidget(self.lingbot_map_log_edit)
+        self.lingbot_map_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            map_outer,
+            self.lingbot_map_log_edit,
+            default_h=160,
+            min_h=80,
+            max_h=900,
+            label="拖动调整 Map 日志高度",
+        )
 
         self._lingbot_map_launcher = LingbotMapLauncher(self)
         self._lingbot_map_launcher.log_line.connect(self._append_lingbot_map_log)
@@ -19263,13 +20428,19 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_video_log_edit = QTextEdit()
         self.lingbot_video_log_edit.setReadOnly(True)
         self.lingbot_video_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.lingbot_video_log_edit.setMaximumHeight(140)
         self.lingbot_video_log_edit.setPlaceholderText("LingBot-Video 日志…")
         self.lingbot_video_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        video_outer.addWidget(self.lingbot_video_log_edit)
+        self.lingbot_video_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            video_outer,
+            self.lingbot_video_log_edit,
+            default_h=160,
+            min_h=80,
+            max_h=900,
+            label="拖动调整 Video 日志高度",
+        )
 
         self._lingbot_video_launcher = LingbotVideoLauncher(self)
         self._lingbot_video_launcher.log_line.connect(self._append_lingbot_video_log)
@@ -19399,10 +20570,22 @@ class CameraTopicWindow(QMainWindow):
         world_prompt_row.setSpacing(6)
         world_prompt_row.addWidget(QLabel("prompt"))
         self.lingbot_world_prompt_edit = QTextEdit()
-        self.lingbot_world_prompt_edit.setMaximumHeight(64)
+        _configure_resizable_text_edit(
+            self.lingbot_world_prompt_edit,
+            default_h=100,
+            tooltip="拖动下方手柄可调整 prompt 高度",
+        )
         self.lingbot_world_prompt_edit.setPlainText(LINGBOT_WORLD_PROMPT_DEFAULT)
         world_prompt_row.addWidget(self.lingbot_world_prompt_edit, 1)
         world_outer.addLayout(world_prompt_row)
+        self.lingbot_world_prompt_resize_bar = _LogHeightDragBar(
+            self.lingbot_world_prompt_edit,
+            grow_down=True,
+            min_h=64,
+            max_h=360,
+            label="拖动调整 prompt 高度",
+        )
+        world_outer.addWidget(self.lingbot_world_prompt_resize_bar)
 
         world_run_row = QHBoxLayout()
         world_run_row.setSpacing(6)
@@ -19436,13 +20619,19 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_world_log_edit = QTextEdit()
         self.lingbot_world_log_edit.setReadOnly(True)
         self.lingbot_world_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.lingbot_world_log_edit.setMaximumHeight(120)
         self.lingbot_world_log_edit.setPlaceholderText("LingBot-World 日志…")
         self.lingbot_world_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        world_outer.addWidget(self.lingbot_world_log_edit)
+        self.lingbot_world_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            world_outer,
+            self.lingbot_world_log_edit,
+            default_h=160,
+            min_h=80,
+            max_h=900,
+            label="拖动调整 World 日志高度",
+        )
 
         self._lingbot_world_launcher = LingbotWorldLauncher(self)
         self._lingbot_world_launcher.log_line.connect(self._append_lingbot_world_log)
@@ -19454,6 +20643,7 @@ class CameraTopicWindow(QMainWindow):
         self._refresh_lingbot_world_topic_combo()
 
         control_tabs.addTab(world_tab, "世界模型")
+        _boot_tick("构建界面：BAGEL / CAD…")
 
         bagel_tab = QWidget()
         self.bagel_tab = bagel_tab
@@ -19681,9 +20871,6 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_image_w_spin.valueChanged.connect(self._on_bagel_image_wh_changed)
         self.bagel_image_h_spin.valueChanged.connect(self._on_bagel_image_wh_changed)
         self._on_bagel_image_size_changed()
-        self.bagel_call_prompt_edit = ImeSafeLineEdit("")
-        self.bagel_call_prompt_edit.setPlaceholderText("输入提示词后点「调用」")
-        bagel_call_row.addWidget(self.bagel_call_prompt_edit, 1)
         self.bagel_call_pick_btn = QPushButton("选图")
         self.bagel_call_pick_btn.setToolTip("理解 / 编辑用输入图")
         self.bagel_call_pick_btn.clicked.connect(self._on_bagel_call_pick_clicked)
@@ -19703,6 +20890,31 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_call_btn.clicked.connect(self._on_bagel_call_clicked)
         bagel_call_row.addWidget(self.bagel_call_btn)
         bagel_outer.addLayout(bagel_call_row)
+
+        bagel_prompt_row = QHBoxLayout()
+        bagel_prompt_row.setSpacing(6)
+        bagel_prompt_row.addWidget(QLabel("提示词"))
+        self.bagel_call_prompt_edit = ImeSafeTextEdit()
+        self.bagel_call_prompt_edit.setPlaceholderText("输入提示词后点「调用」")
+        self.bagel_call_prompt_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        _configure_resizable_text_edit(
+            self.bagel_call_prompt_edit,
+            default_h=88,
+            tooltip="拖动下方手柄可调整提示词高度",
+        )
+        bagel_prompt_row.addWidget(self.bagel_call_prompt_edit, 1)
+        bagel_outer.addLayout(bagel_prompt_row)
+        self.bagel_call_prompt_resize_bar = _LogHeightDragBar(
+            self.bagel_call_prompt_edit,
+            grow_down=True,
+            min_h=56,
+            max_h=360,
+            label="拖动调整提示词高度",
+        )
+        bagel_outer.addWidget(self.bagel_call_prompt_resize_bar)
 
         bagel_speed_row = QHBoxLayout()
         bagel_speed_row.setSpacing(6)
@@ -19857,73 +21069,54 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_log_edit = QTextEdit()
         self.bagel_log_edit.setReadOnly(True)
         self.bagel_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.bagel_log_edit.setMinimumHeight(100)
-        self.bagel_log_edit.setMaximumHeight(160)
         self.bagel_log_edit.setPlaceholderText("Bagel 启动 / 推理日志…")
         self.bagel_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        bagel_outer.addWidget(self.bagel_log_edit)
+        self.bagel_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            bagel_outer,
+            self.bagel_log_edit,
+            default_h=160,
+            min_h=80,
+            max_h=900,
+            label="拖动调整 Bagel 日志高度",
+        )
 
-        if QWebEngineView is not None:
-            self.bagel_web_view = QWebEngineView()
-            self.bagel_web_view.setMinimumHeight(0)
-            self.bagel_web_view.setStyleSheet(
-                "QWebEngineView { background-color: #1a1a1a; }"
+        # 延迟创建 QWebEngineView：启动期立刻创建会在无/弱 GLX 下 SIP segfault
+        # （与 Astra 页同一策略）。真正加载 Gradio URL 时再 _ensure_bagel_web_view。
+        self.bagel_web_view = None
+        self.bagel_web_page = None
+        self._bagel_web_container = QWidget()
+        self._bagel_web_container_layout = QVBoxLayout(self._bagel_web_container)
+        self._bagel_web_container_layout.setContentsMargins(0, 0, 0, 0)
+        if QWebEngineView is not None and self._want_control_tab("sub image"):
+            self._bagel_web_placeholder = QLabel(
+                "Bagel 嵌入页按需加载：启动 Gradio 或点「浏览器打开」后创建 WebEngine。"
             )
-            try:
-                self.bagel_web_view.page().setBackgroundColor(QColor("#1a1a1a"))
-            except Exception:
-                pass
-            if BagelWebEnginePage is not None:
-                self.bagel_web_page = BagelWebEnginePage(self.bagel_web_view)
-                self.bagel_web_view.setPage(self.bagel_web_page)
-                try:
-                    self.bagel_web_page.setBackgroundColor(QColor("#1a1a1a"))
-                except Exception:
-                    pass
-                try:
-                    settings = self.bagel_web_view.settings()
-                    if QWebEngineSettings is not None:
-                        settings.setAttribute(
-                            QWebEngineSettings.LocalContentCanAccessRemoteUrls, True
-                        )
-                        settings.setAttribute(
-                            QWebEngineSettings.LocalContentCanAccessFileUrls, True
-                        )
-                        settings.setAttribute(
-                            QWebEngineSettings.JavascriptEnabled, True
-                        )
-                        settings.setAttribute(
-                            QWebEngineSettings.LocalStorageEnabled, True
-                        )
-                except Exception:
-                    pass
-            else:
-                self.bagel_web_page = None
-            # about:blank 默认白底，先放一块深色占位页
-            self.bagel_web_view.setHtml(
-                "<html><body style='margin:0;background:#1a1a1a;color:#888;"
-                "font-family:sans-serif;display:flex;align-items:center;"
-                "justify-content:center;height:100vh;'>"
-                "Bagel Gradio 未启动</body></html>"
-            )
-            bagel_outer.addWidget(self.bagel_web_view, 0)
-            self.bagel_web_view.hide()
+            self._bagel_web_placeholder.setAlignment(Qt.AlignCenter)
+            self._bagel_web_placeholder.setWordWrap(True)
+            self._bagel_web_placeholder.setMinimumHeight(0)
+            self._bagel_web_placeholder.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+            self._bagel_web_container_layout.addWidget(self._bagel_web_placeholder, 0)
             self._bagel_web_fallback = None
         else:
-            self.bagel_web_view = None
-            self.bagel_web_page = None
-            bagel_web_fallback = QLabel(
-                "未安装 PyQtWebEngine：无法页内嵌入。启动后请点「浏览器打开」。"
-            )
+            self._bagel_web_placeholder = None
+            if QWebEngineView is None:
+                bagel_msg = (
+                    "未安装 PyQtWebEngine：无法页内嵌入。启动后请点「浏览器打开」。"
+                )
+            else:
+                bagel_msg = "当前未启用 sub image 页内嵌入（--tab 过滤）。"
+            bagel_web_fallback = QLabel(bagel_msg)
             bagel_web_fallback.setAlignment(Qt.AlignCenter)
             bagel_web_fallback.setMinimumHeight(0)
             bagel_web_fallback.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-            bagel_outer.addWidget(bagel_web_fallback, 0)
+            self._bagel_web_container_layout.addWidget(bagel_web_fallback, 0)
             bagel_web_fallback.hide()
             self._bagel_web_fallback = bagel_web_fallback
+        bagel_outer.addWidget(self._bagel_web_container, 0)
+        self._bagel_web_container.hide()
 
         self._bagel_launcher = BagelAppLauncher(self)
         self._bagel_launcher.log_line.connect(self._append_bagel_log)
@@ -20077,8 +21270,6 @@ class CameraTopicWindow(QMainWindow):
         self.cad_log_edit = QTextEdit()
         self.cad_log_edit.setReadOnly(True)
         self.cad_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.cad_log_edit.setMinimumHeight(120)
-        self.cad_log_edit.setMaximumHeight(200)
         self.cad_log_edit.setPlaceholderText(
             "CAD 重建日志…\n"
             "建议：≥12 张照片、相邻约 60% 重叠；哑光非透明物体更稳。"
@@ -20087,7 +21278,14 @@ class CameraTopicWindow(QMainWindow):
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        cad_outer.addWidget(self.cad_log_edit)
+        self.cad_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            cad_outer,
+            self.cad_log_edit,
+            default_h=180,
+            min_h=100,
+            max_h=900,
+            label="拖动调整 CAD 日志高度",
+        )
 
         self._cad_launcher = CadMeshLauncher(self)
         self._on_cad_mode_changed()
@@ -20204,14 +21402,19 @@ class CameraTopicWindow(QMainWindow):
         self.train_log_edit = QTextEdit()
         self.train_log_edit.setReadOnly(True)
         self.train_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.train_log_edit.setMinimumHeight(140)
-        self.train_log_edit.setMaximumHeight(220)
         self.train_log_edit.setPlaceholderText("训练日志将在此实时显示…")
         self.train_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        train_outer.addWidget(self.train_log_edit)
+        self.train_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            train_outer,
+            self.train_log_edit,
+            default_h=200,
+            min_h=80,
+            max_h=900,
+            label="拖动调整训练日志高度",
+        )
 
         self._train_launcher = PsiPolicyTrainLauncher(self)
         self._update_train_path_ui()
@@ -20239,20 +21442,28 @@ class CameraTopicWindow(QMainWindow):
         self.sim_backend_mujoco_radio = QRadioButton("MuJoCo")
         self.sim_backend_spaces_radio = QRadioButton("MolmoSpaces")
         self.sim_backend_arena_radio = QRadioButton("IsaacLab-Arena")
+        self.sim_backend_libero_radio = QRadioButton("LIBERO")
+        self.sim_backend_robotwin_radio = QRadioButton("RoboTwin")
         self.sim_backend_isaac_radio.setChecked(True)
         self._sim_backend_group = QButtonGroup(self)
         self._sim_backend_group.addButton(self.sim_backend_isaac_radio, 0)
         self._sim_backend_group.addButton(self.sim_backend_mujoco_radio, 1)
         self._sim_backend_group.addButton(self.sim_backend_spaces_radio, 2)
         self._sim_backend_group.addButton(self.sim_backend_arena_radio, 3)
+        self._sim_backend_group.addButton(self.sim_backend_libero_radio, 4)
+        self._sim_backend_group.addButton(self.sim_backend_robotwin_radio, 5)
         self.sim_backend_isaac_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_mujoco_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_spaces_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_arena_radio.toggled.connect(self._on_sim_backend_changed)
+        self.sim_backend_libero_radio.toggled.connect(self._on_sim_backend_changed)
+        self.sim_backend_robotwin_radio.toggled.connect(self._on_sim_backend_changed)
         sim_backend_row.addWidget(self.sim_backend_isaac_radio)
         sim_backend_row.addWidget(self.sim_backend_mujoco_radio)
         sim_backend_row.addWidget(self.sim_backend_spaces_radio)
         sim_backend_row.addWidget(self.sim_backend_arena_radio)
+        sim_backend_row.addWidget(self.sim_backend_libero_radio)
+        sim_backend_row.addWidget(self.sim_backend_robotwin_radio)
         sim_backend_row.addStretch(1)
         sim_outer.addLayout(sim_backend_row)
 
@@ -20334,7 +21545,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_log_edit = QTextEdit()
         self.sim_log_edit.setReadOnly(True)
         self.sim_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.sim_log_edit.setFixedHeight(120)
+        self.sim_log_edit.setFixedHeight(160)
         self.sim_log_edit.setPlaceholderText("相机桥 / Isaac 评测日志…")
         self.sim_log_edit.setToolTip("拖动下方手柄可调整日志高度")
         self.sim_log_edit.setStyleSheet(
@@ -20574,7 +21785,7 @@ class CameraTopicWindow(QMainWindow):
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        self.sim_eval_detail_edit.setMinimumHeight(80)
+        self.sim_eval_detail_edit.setMinimumHeight(140)
         sim_eval_right_layout.addWidget(self.sim_eval_detail_edit, 1)
         self.sim_eval_files_list = QListWidget()
         self.sim_eval_files_list.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
@@ -20759,9 +21970,15 @@ class CameraTopicWindow(QMainWindow):
         self.molmospaces_policy_combo = ImeSafeComboBox()
         for label, policy_id in MOLMOSPACES_EVAL_POLICIES:
             self.molmospaces_policy_combo.addItem(label, policy_id)
+        # Default: Pi（本地已下载模型路径见下方 Pi模型）
+        idx_pi = self.molmospaces_policy_combo.findData(
+            "molmo_spaces.evaluation.configs.evaluation_configs:PiPolicyEvalConfig"
+        )
+        if idx_pi >= 0:
+            self.molmospaces_policy_combo.setCurrentIndex(idx_pi)
         self.molmospaces_policy_combo.setToolTip(
+            "默认 Pi：使用下方本地模型路径部署 openpi serve_policy（:8080）。"
             "Dummy 不需要外部策略服务。"
-            "Pi 会按下方路径启动/校验 openpi serve_policy（默认 :8080）。"
             "Teleop 需要对应遥控服务已启动。"
         )
         self.molmospaces_policy_combo.currentIndexChanged.connect(
@@ -20786,12 +22003,12 @@ class CameraTopicWindow(QMainWindow):
         self.molmospaces_pi_ckpt_edit = QLineEdit(MOLMOSPACES_PI_CKPT_DEFAULT)
         self.molmospaces_pi_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.molmospaces_pi_ckpt_edit.setPlaceholderText(
-            "本地 ckpt，或 gs://openpi-assets/checkpoints/pi05_droid_jointpos"
+            "本地 ckpt，如 models/pi05_droid_jointpos"
         )
         self.molmospaces_pi_ckpt_edit.setToolTip(
             "传给 openpi serve_policy 的 --policy.dir，并覆盖 eval --checkpoint_path。"
-            f"默认 {PI_CKPT_CONFIG_DEFAULT}（关节位置），优先 "
-            f"{PI_CKPT_HF_LOCAL_DEFAULT}。"
+            f"默认优先本机已下载目录（当前 {MOLMOSPACES_PI_CKPT_DEFAULT}）。"
+            "若权重仍是稀疏占位，部署时会尝试补全下载。"
         )
         pi_row.addWidget(self.molmospaces_pi_ckpt_edit, 1)
         self.molmospaces_pi_ckpt_browse_btn = QPushButton("…")
@@ -20938,7 +22155,349 @@ class CameraTopicWindow(QMainWindow):
         arena_page_l.addStretch(1)
         self.sim_backend_stack.addWidget(arena_page)
 
-        # Shared MuJoCo / MolmoSpaces / Arena run controls + 可拖动高度的日志
+        # --- page 4: LIBERO (RLinf / openpi) ---
+        libero_page = QWidget()
+        libero_page_l = QVBoxLayout(libero_page)
+        libero_page_l.setContentsMargins(0, 0, 0, 0)
+        libero_page_l.setSpacing(6)
+        libero_root_row = QHBoxLayout()
+        libero_root_row.setSpacing(6)
+        libero_root_row.addWidget(QLabel("RLinf"))
+        self.libero_rlinf_edit = QLineEdit(
+            os.environ.get("RLINF_ROOT", RLINF_ROOT_DEFAULT)
+        )
+        self.libero_rlinf_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.libero_rlinf_edit.setToolTip(
+            "RLinf 仓库（参考 toolkits/eval_scripts_openpi/libero_eval.py）"
+        )
+        libero_root_row.addWidget(self.libero_rlinf_edit, 1)
+        self.libero_rlinf_browse_btn = QPushButton("…")
+        self.libero_rlinf_browse_btn.setFixedWidth(28)
+        self.libero_rlinf_browse_btn.clicked.connect(self._on_libero_rlinf_browse)
+        libero_root_row.addWidget(self.libero_rlinf_browse_btn)
+        libero_page_l.addLayout(libero_root_row)
+
+        libero_task_row = QHBoxLayout()
+        libero_task_row.setSpacing(6)
+        libero_task_row.addWidget(QLabel("套件"))
+        self.libero_suite_combo = ImeSafeComboBox()
+        for label, suite_id in LIBERO_TASK_SUITES:
+            self.libero_suite_combo.addItem(label, suite_id)
+        self.libero_suite_combo.setToolTip(
+            "LIBERO task suite：spatial / object / goal / 10 / 90"
+        )
+        libero_task_row.addWidget(self.libero_suite_combo)
+        libero_task_row.addWidget(QLabel("配置"))
+        self.libero_config_combo = ImeSafeComboBox()
+        for label, cfg_id in LIBERO_POLICY_CONFIGS:
+            self.libero_config_combo.addItem(label, cfg_id)
+        self.libero_config_combo.setToolTip("openpi TrainConfig 名（pi05_libero / pi0_libero）")
+        libero_task_row.addWidget(self.libero_config_combo)
+        libero_task_row.addWidget(QLabel("模式"))
+        self.libero_mode_combo = ImeSafeComboBox()
+        self.libero_mode_combo.addItem("远程 Pi（websocket）", "remote")
+        self.libero_mode_combo.addItem("本地 ckpt（自动部署 serve）", "local")
+        self.libero_mode_combo.setToolTip(
+            "remote：连已部署的 :8080 serve_policy。\n"
+            "local：用下方 checkpoint 自动部署 openpi serve，再用客户端评测"
+            "（libero 环境无 jax，不能进程内加载 openpi）。"
+        )
+        self.libero_mode_combo.currentIndexChanged.connect(self._on_libero_mode_changed)
+        libero_task_row.addWidget(self.libero_mode_combo)
+        libero_page_l.addLayout(libero_task_row)
+
+        libero_ckpt_row = QHBoxLayout()
+        libero_ckpt_row.setSpacing(6)
+        libero_ckpt_row.addWidget(QLabel("Checkpoint"))
+        self.libero_ckpt_edit = QLineEdit(
+            os.environ.get("LIBERO_CKPT", LIBERO_CKPT_DEFAULT)
+        )
+        self.libero_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.libero_ckpt_edit.setToolTip(
+            "默认本地 pi05_libero（HF 镜像缓存）；缺失时部署会自动下载。"
+            "remote：serve_policy；local：自动改 remote 客户端评测。"
+        )
+        libero_ckpt_row.addWidget(self.libero_ckpt_edit, 1)
+        self.libero_ckpt_browse_btn = QPushButton("…")
+        self.libero_ckpt_browse_btn.setFixedWidth(28)
+        self.libero_ckpt_browse_btn.clicked.connect(self._on_libero_ckpt_browse)
+        libero_ckpt_row.addWidget(self.libero_ckpt_browse_btn)
+        self.libero_pi_start_btn = QPushButton("部署 Pi")
+        self.libero_pi_start_btn.setFocusPolicy(Qt.NoFocus)
+        self.libero_pi_start_btn.setToolTip("用上方 config/checkpoint 启动 openpi serve_policy :8080")
+        self.libero_pi_start_btn.clicked.connect(self._on_libero_pi_start_clicked)
+        libero_ckpt_row.addWidget(self.libero_pi_start_btn)
+        self.libero_pi_probe_btn = QPushButton("验证")
+        self.libero_pi_probe_btn.setFocusPolicy(Qt.NoFocus)
+        self.libero_pi_probe_btn.clicked.connect(self._on_molmospaces_pi_probe_clicked)
+        libero_ckpt_row.addWidget(self.libero_pi_probe_btn)
+        libero_page_l.addLayout(libero_ckpt_row)
+
+        libero_param_row = QHBoxLayout()
+        libero_param_row.setSpacing(6)
+        libero_param_row.addWidget(QLabel("任务数"))
+        self.libero_max_tasks_spin = QSpinBox()
+        self.libero_max_tasks_spin.setRange(0, 1000)
+        self.libero_max_tasks_spin.setValue(1)
+        self.libero_max_tasks_spin.setToolTip("0 = 跑完整个 suite；默认 1 便于冒烟")
+        libero_param_row.addWidget(self.libero_max_tasks_spin)
+        libero_param_row.addWidget(QLabel("每任务 trials"))
+        self.libero_trials_spin = QSpinBox()
+        self.libero_trials_spin.setRange(1, 100)
+        self.libero_trials_spin.setValue(1)
+        libero_param_row.addWidget(self.libero_trials_spin)
+        libero_param_row.addWidget(QLabel("action_chunk"))
+        self.libero_chunk_spin = QSpinBox()
+        self.libero_chunk_spin.setRange(1, 50)
+        self.libero_chunk_spin.setValue(5)
+        libero_param_row.addWidget(self.libero_chunk_spin)
+        libero_param_row.addWidget(QLabel("num_steps"))
+        self.libero_steps_spin = QSpinBox()
+        self.libero_steps_spin.setRange(1, 50)
+        self.libero_steps_spin.setValue(10)
+        self.libero_steps_spin.setToolTip("local 模式 flow denoise steps；需与训练配置一致")
+        libero_param_row.addWidget(self.libero_steps_spin)
+        self.libero_render_gui_check = QCheckBox("图形窗口")
+        self.libero_render_gui_check.setChecked(
+            bool((os.environ.get("DISPLAY") or "").strip())
+        )
+        self.libero_render_gui_check.setToolTip(
+            "勾选后弹出 robosuite/MuJoCo 实时窗口（MUJOCO_GL=glfw）。\n"
+            "无 DISPLAY 时可取消勾选，仅离屏渲染并保存视频。"
+        )
+        libero_param_row.addWidget(self.libero_render_gui_check)
+        self.libero_rynnvalue_hud_check = QCheckBox("RynnValue Live HUD")
+        self.libero_rynnvalue_hud_check.setChecked(False)
+        self.libero_rynnvalue_hud_check.setToolTip(
+            "按秒异步调用 RynnValue reward_server，弹出剩余时间 HUD。\n"
+            "勾选后自动探测 :8001；可用「部署 RynnValue」一键启动服务。"
+        )
+        libero_param_row.addWidget(self.libero_rynnvalue_hud_check)
+        libero_param_row.addWidget(QLabel("HUD刷新(s)"))
+        self.libero_rynnvalue_refresh_spin = QDoubleSpinBox()
+        self.libero_rynnvalue_refresh_spin.setRange(0.2, 30.0)
+        self.libero_rynnvalue_refresh_spin.setSingleStep(0.5)
+        self.libero_rynnvalue_refresh_spin.setDecimals(1)
+        self.libero_rynnvalue_refresh_spin.setValue(1.0)
+        self.libero_rynnvalue_refresh_spin.setToolTip(
+            "Live HUD 墙钟刷新间隔（秒），不绑定控制步频"
+        )
+        libero_param_row.addWidget(self.libero_rynnvalue_refresh_spin)
+        libero_param_row.addStretch(1)
+        libero_page_l.addLayout(libero_param_row)
+
+        libero_hud_row = QHBoxLayout()
+        libero_hud_row.setSpacing(6)
+        libero_hud_row.addWidget(QLabel("RynnValue URL"))
+        self.libero_rynnvalue_url_edit = QLineEdit("http://127.0.0.1:8001")
+        self.libero_rynnvalue_url_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.libero_rynnvalue_url_edit.setToolTip(
+            "reward_server 地址（POST /evaluate_batch_npy）"
+        )
+        libero_hud_row.addWidget(self.libero_rynnvalue_url_edit, 1)
+        libero_hud_row.addWidget(QLabel("num_frames"))
+        self.libero_rynnvalue_frames_spin = QSpinBox()
+        self.libero_rynnvalue_frames_spin.setRange(2, 64)
+        self.libero_rynnvalue_frames_spin.setValue(8)
+        self.libero_rynnvalue_frames_spin.setToolTip("每次打分从 ring buffer 均匀采样的帧数")
+        libero_hud_row.addWidget(self.libero_rynnvalue_frames_spin)
+        self.libero_rynnvalue_probe_btn = QPushButton("探测")
+        self.libero_rynnvalue_probe_btn.setFocusPolicy(Qt.NoFocus)
+        self.libero_rynnvalue_probe_btn.setToolTip("检查 reward_server /health 是否就绪")
+        self.libero_rynnvalue_probe_btn.clicked.connect(
+            self._on_libero_rynnvalue_probe_clicked
+        )
+        libero_hud_row.addWidget(self.libero_rynnvalue_probe_btn)
+        self.libero_rynnvalue_deploy_btn = QPushButton("部署 RynnValue")
+        self.libero_rynnvalue_deploy_btn.setFocusPolicy(Qt.NoFocus)
+        self.libero_rynnvalue_deploy_btn.setToolTip(
+            "启动 RynnValue reward_server（模型路径沿用「RynnValue」页配置）"
+        )
+        self.libero_rynnvalue_deploy_btn.clicked.connect(
+            self._on_libero_rynnvalue_deploy_clicked
+        )
+        libero_hud_row.addWidget(self.libero_rynnvalue_deploy_btn)
+        libero_page_l.addLayout(libero_hud_row)
+
+        libero_hud_status_row = QHBoxLayout()
+        libero_hud_status_row.setSpacing(6)
+        libero_hud_status_row.addWidget(QLabel("RynnValue 状态"))
+        self.libero_rynnvalue_status_label = QLabel("未检查（勾选 Live HUD 后自动探测）")
+        self.libero_rynnvalue_status_label.setFont(
+            QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
+        )
+        self.libero_rynnvalue_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.libero_rynnvalue_status_label.setWordWrap(True)
+        libero_hud_status_row.addWidget(self.libero_rynnvalue_status_label, 1)
+        libero_page_l.addLayout(libero_hud_status_row)
+
+        self.libero_rynnvalue_hud_check.toggled.connect(
+            self._on_libero_rynnvalue_hud_toggled
+        )
+        self.libero_rynnvalue_url_edit.editingFinished.connect(
+            self._on_libero_rynnvalue_url_changed
+        )
+        self._libero_rynnvalue_status_timer = QTimer(self)
+        self._libero_rynnvalue_status_timer.setInterval(5000)
+        self._libero_rynnvalue_status_timer.timeout.connect(
+            self._on_libero_rynnvalue_status_tick
+        )
+        self._update_libero_rynnvalue_hud_controls()
+
+        libero_hint = QLabel(
+            "对齐 RLinf toolkits/eval_scripts_openpi/libero_eval.py。"
+            "默认 remote：先「部署 Pi」（pi05_libero）再启动评测。"
+            "可勾选「图形窗口」实时观看得分过程；"
+            "「RynnValue Live HUD」按秒异步叠加剩余时间（可在此页探测/部署 reward_server）。"
+            "需 robosuite+libero（见日志安装提示）。与其它仿真后端互斥。"
+        )
+        libero_hint.setWordWrap(True)
+        libero_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        libero_page_l.addWidget(libero_hint)
+        libero_page_l.addStretch(1)
+        self.sim_backend_stack.addWidget(libero_page)
+
+        # --- page 5: RoboTwin (RLinf OpenPI / SAPIEN) ---
+        robotwin_page = QWidget()
+        robotwin_page_l = QVBoxLayout(robotwin_page)
+        robotwin_page_l.setContentsMargins(0, 0, 0, 0)
+        robotwin_page_l.setSpacing(6)
+
+        robotwin_root_row = QHBoxLayout()
+        robotwin_root_row.setSpacing(6)
+        robotwin_root_row.addWidget(QLabel("RLinf"))
+        self.robotwin_rlinf_edit = QLineEdit(
+            os.environ.get("RLINF_ROOT", RLINF_ROOT_DEFAULT)
+        )
+        self.robotwin_rlinf_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robotwin_rlinf_edit.setToolTip(
+            "RLinf 仓库（examples/embodiment/eval_embodiment.sh）"
+        )
+        robotwin_root_row.addWidget(self.robotwin_rlinf_edit, 1)
+        self.robotwin_rlinf_browse_btn = QPushButton("…")
+        self.robotwin_rlinf_browse_btn.setFixedWidth(28)
+        self.robotwin_rlinf_browse_btn.clicked.connect(self._on_robotwin_rlinf_browse)
+        robotwin_root_row.addWidget(self.robotwin_rlinf_browse_btn)
+        robotwin_root_row.addWidget(QLabel("RoboTwin"))
+        self.robotwin_root_edit = QLineEdit(
+            os.environ.get("ROBOTWIN_PATH", str(ROBOTWIN_ROOT_DEFAULT))
+        )
+        self.robotwin_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robotwin_root_edit.setToolTip(
+            "RoboTwin 仓库（需 RLinf_support 分支，含 robotwin.envs.vector_env）"
+        )
+        robotwin_root_row.addWidget(self.robotwin_root_edit, 1)
+        self.robotwin_root_browse_btn = QPushButton("…")
+        self.robotwin_root_browse_btn.setFixedWidth(28)
+        self.robotwin_root_browse_btn.clicked.connect(self._on_robotwin_root_browse)
+        robotwin_root_row.addWidget(self.robotwin_root_browse_btn)
+        robotwin_page_l.addLayout(robotwin_root_row)
+
+        robotwin_assets_row = QHBoxLayout()
+        robotwin_assets_row.setSpacing(6)
+        robotwin_assets_row.addWidget(QLabel("Assets"))
+        self.robotwin_assets_edit = QLineEdit(
+            os.environ.get(
+                "ROBOTWIN_ASSETS",
+                os.environ.get("ASSETS_PATH", resolve_robotwin_assets()),
+            )
+        )
+        self.robotwin_assets_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robotwin_assets_edit.setToolTip(
+            "ASSETS_PATH：含 assets/objects 的根目录（通常即 RoboTwin 仓库根），"
+            "不是内层 assets/。可用 script/_download_assets.sh 拉取。"
+        )
+        robotwin_assets_row.addWidget(self.robotwin_assets_edit, 1)
+        self.robotwin_assets_browse_btn = QPushButton("…")
+        self.robotwin_assets_browse_btn.setFixedWidth(28)
+        self.robotwin_assets_browse_btn.clicked.connect(self._on_robotwin_assets_browse)
+        robotwin_assets_row.addWidget(self.robotwin_assets_browse_btn)
+        robotwin_page_l.addLayout(robotwin_assets_row)
+
+        robotwin_task_row = QHBoxLayout()
+        robotwin_task_row.setSpacing(6)
+        robotwin_task_row.addWidget(QLabel("任务"))
+        self.robotwin_task_combo = ImeSafeComboBox()
+        for label, task_id in ROBOTWIN_TASKS:
+            self.robotwin_task_combo.addItem(label, task_id)
+        self.robotwin_task_combo.setToolTip(
+            "RLinf 已提供 Hydra env YAML 的 RoboTwin 任务"
+        )
+        robotwin_task_row.addWidget(self.robotwin_task_combo)
+        robotwin_task_row.addWidget(QLabel("配置"))
+        self.robotwin_config_combo = ImeSafeComboBox()
+        for label, cfg_id in ROBOTWIN_POLICY_CONFIGS:
+            self.robotwin_config_combo.addItem(label, cfg_id)
+        self.robotwin_config_combo.setToolTip(
+            "RLinf OpenPI dataconfig：pi05_aloha_robotwin / pi0_aloha_robotwin"
+        )
+        robotwin_task_row.addWidget(self.robotwin_config_combo)
+        robotwin_task_row.addWidget(QLabel("GPU"))
+        self.robotwin_gpu_spin = QSpinBox()
+        self.robotwin_gpu_spin.setRange(0, 15)
+        self.robotwin_gpu_spin.setValue(0)
+        self.robotwin_gpu_spin.setToolTip("CUDA 设备号（冒烟默认单卡）")
+        robotwin_task_row.addWidget(self.robotwin_gpu_spin)
+        robotwin_task_row.addStretch(1)
+        robotwin_page_l.addLayout(robotwin_task_row)
+
+        robotwin_ckpt_row = QHBoxLayout()
+        robotwin_ckpt_row.setSpacing(6)
+        robotwin_ckpt_row.addWidget(QLabel("Checkpoint"))
+        self.robotwin_ckpt_edit = QLineEdit(
+            os.environ.get("ROBOTWIN_CKPT", ROBOTWIN_CKPT_DEFAULT)
+        )
+        self.robotwin_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robotwin_ckpt_edit.setToolTip(
+            "actor.model.model_path；推荐 HF "
+            f"{ROBOTWIN_CKPT_HF_DEFAULT} 下载到本地目录"
+        )
+        robotwin_ckpt_row.addWidget(self.robotwin_ckpt_edit, 1)
+        self.robotwin_ckpt_browse_btn = QPushButton("…")
+        self.robotwin_ckpt_browse_btn.setFixedWidth(28)
+        self.robotwin_ckpt_browse_btn.clicked.connect(self._on_robotwin_ckpt_browse)
+        robotwin_ckpt_row.addWidget(self.robotwin_ckpt_browse_btn)
+        robotwin_page_l.addLayout(robotwin_ckpt_row)
+
+        robotwin_param_row = QHBoxLayout()
+        robotwin_param_row.setSpacing(6)
+        robotwin_param_row.addWidget(QLabel("并行环境"))
+        self.robotwin_num_envs_spin = QSpinBox()
+        self.robotwin_num_envs_spin.setRange(1, 256)
+        self.robotwin_num_envs_spin.setValue(1)
+        self.robotwin_num_envs_spin.setToolTip("GUI 冒烟默认 1；正式评测可加大")
+        robotwin_param_row.addWidget(self.robotwin_num_envs_spin)
+        robotwin_param_row.addWidget(QLabel("max_steps"))
+        self.robotwin_max_steps_spin = QSpinBox()
+        self.robotwin_max_steps_spin.setRange(10, 2000)
+        self.robotwin_max_steps_spin.setValue(200)
+        robotwin_param_row.addWidget(self.robotwin_max_steps_spin)
+        self.robotwin_render_gui_check = QCheckBox("图形窗口")
+        self.robotwin_render_gui_check.setChecked(
+            bool((os.environ.get("DISPLAY") or "").strip())
+        )
+        self.robotwin_render_gui_check.setToolTip(
+            "勾选后弹出 SAPIEN Viewer 实时观看评测（render_freq>0）。\n"
+            "评测结束后窗口会保持，需点击「停止」才退出。\n"
+            "图形模式强制并行环境=1；无 DISPLAY 时可取消勾选，仅离屏并保存 mp4。"
+        )
+        robotwin_param_row.addWidget(self.robotwin_render_gui_check)
+        robotwin_param_row.addStretch(1)
+        robotwin_page_l.addLayout(robotwin_param_row)
+
+        robotwin_hint = QLabel(
+            "对齐 RLinf examples/embodiment/eval_embodiment.sh（OpenPI + ALOHA）。"
+            "需 RoboTwin RLinf_support + SAPIEN assets；与其它仿真后端互斥。"
+            "可勾选「图形窗口」实时观看；结束后窗口保持直到点「停止」。"
+            "结果仍保存到 video/eval/*.mp4。默认单卡 1 env 冒烟。"
+        )
+        robotwin_hint.setWordWrap(True)
+        robotwin_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        robotwin_page_l.addWidget(robotwin_hint)
+        robotwin_page_l.addStretch(1)
+        self.sim_backend_stack.addWidget(robotwin_page)
+
+        # Shared MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin run controls + 可拖动高度的日志
         sim_outer.addWidget(self.sim_backend_stack, 1)
 
         self.mujoco_run_row_widget = QWidget()
@@ -20947,7 +22506,7 @@ class CameraTopicWindow(QMainWindow):
         mj_run_row.setSpacing(6)
         self.mujoco_start_btn = QPushButton("启动 MuJoCo")
         self.mujoco_start_btn.setToolTip(
-            "启动当前所选后端（MuJoCo / MolmoSpaces / IsaacLab-Arena）"
+            "启动当前所选后端（MuJoCo / MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin）"
         )
         self.mujoco_start_btn.clicked.connect(self._on_mujoco_unified_start_clicked)
         mj_run_row.addWidget(self.mujoco_start_btn)
@@ -20958,7 +22517,7 @@ class CameraTopicWindow(QMainWindow):
         mj_run_row.addWidget(self.mujoco_stop_btn)
         self.mujoco_open_model_btn = QPushButton("打开模型目录")
         self.mujoco_open_model_btn.setToolTip(
-            "MuJoCo：打开 model/；MolmoSpaces：打开仓库根目录"
+            "MuJoCo：打开 model/；MolmoSpaces / Arena / LIBERO / RoboTwin：打开仓库根目录"
         )
         self.mujoco_open_model_btn.clicked.connect(self._on_mujoco_open_selected_dir)
         mj_run_row.addWidget(self.mujoco_open_model_btn)
@@ -20970,15 +22529,17 @@ class CameraTopicWindow(QMainWindow):
         self.mujoco_log_edit = QTextEdit()
         self.mujoco_log_edit.setReadOnly(True)
         self.mujoco_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.mujoco_log_edit.setFixedHeight(160)
-        self.mujoco_log_edit.setPlaceholderText("MuJoCo / MolmoSpaces / Arena 日志…")
+        self.mujoco_log_edit.setFixedHeight(320)
+        self.mujoco_log_edit.setPlaceholderText(
+            "MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin 日志…"
+        )
         self.mujoco_log_edit.setToolTip("拖动上方手柄可调整日志高度")
         self.mujoco_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
         self.mujoco_log_resize_bar = _LogHeightDragBar(
-            self.mujoco_log_edit, grow_down=False, min_h=80, max_h=900
+            self.mujoco_log_edit, grow_down=False, min_h=120, max_h=1200
         )
         sim_outer.addWidget(self.mujoco_log_resize_bar)
         sim_outer.addWidget(self.mujoco_log_edit)
@@ -20995,6 +22556,9 @@ class CameraTopicWindow(QMainWindow):
         self._pi_policy_launcher.running_changed.connect(
             self._update_molmospaces_pi_deploy_ui
         )
+        self._pi_policy_ready_timer = QTimer(self)
+        self._pi_policy_ready_timer.setInterval(1500)
+        self._pi_policy_ready_timer.timeout.connect(self._update_molmospaces_pi_deploy_ui)
         self._sim_eval_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
         self._sim_bridge_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
         self._refresh_mujoco_models(
@@ -21002,6 +22566,8 @@ class CameraTopicWindow(QMainWindow):
         )
         self._refresh_molmospaces_tasks()
         self._refresh_arena_tasks()
+        if hasattr(self, "_on_libero_mode_changed"):
+            self._on_libero_mode_changed()
         self._on_sim_backend_changed()
 
         # 稍后 addTab：仿真评测 / 真机评测 放在末尾
@@ -21067,14 +22633,19 @@ class CameraTopicWindow(QMainWindow):
         self.real_eval_log_edit = QTextEdit()
         self.real_eval_log_edit.setReadOnly(True)
         self.real_eval_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.real_eval_log_edit.setMinimumHeight(120)
-        self.real_eval_log_edit.setMaximumHeight(200)
         self.real_eval_log_edit.setPlaceholderText("真机评测日志…")
         self.real_eval_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        real_outer.addWidget(self.real_eval_log_edit)
+        self.real_eval_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            real_outer,
+            self.real_eval_log_edit,
+            default_h=180,
+            min_h=80,
+            max_h=900,
+            label="拖动调整真机日志高度",
+        )
 
         self._real_eval_active = False
         self._real_eval_timer = QTimer(self)
@@ -21315,6 +22886,7 @@ class CameraTopicWindow(QMainWindow):
         self._update_move_offset_ui_visibility()
         control_layout.addLayout(target_row)
         control_tabs.addTab(control_tab, "手臂/手")
+        _boot_tick("构建界面：仿真评测…")
 
         skeleton_tab = QWidget()
         skeleton_layout = QVBoxLayout(skeleton_tab)
@@ -21559,14 +23131,19 @@ class CameraTopicWindow(QMainWindow):
         self.test_infer_log_edit = QTextEdit()
         self.test_infer_log_edit.setReadOnly(True)
         self.test_infer_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.test_infer_log_edit.setMinimumHeight(80)
-        self.test_infer_log_edit.setMaximumHeight(140)
         self.test_infer_log_edit.setPlaceholderText("推理服务日志…")
         self.test_infer_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        test_outer.addWidget(self.test_infer_log_edit)
+        self.test_infer_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            test_outer,
+            self.test_infer_log_edit,
+            default_h=140,
+            min_h=80,
+            max_h=900,
+            label="拖动调整推理日志高度",
+        )
         # 推理部署后端在 chat_panel 创建后由 QwenDeployController 统一接管
         self._qwen_deploy = None  # type: ignore
         # —— 上下文学习：演示视频 + 配对 RRD 同步驱臂 ——
@@ -21969,13 +23546,19 @@ class CameraTopicWindow(QMainWindow):
         self.reward_log_edit = QTextEdit()
         self.reward_log_edit.setReadOnly(True)
         self.reward_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.reward_log_edit.setMaximumHeight(140)
         self.reward_log_edit.setPlaceholderText("Reward 评测日志…")
         self.reward_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        reward_outer.addWidget(self.reward_log_edit)
+        self.reward_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            reward_outer,
+            self.reward_log_edit,
+            default_h=160,
+            min_h=80,
+            max_h=900,
+            label="拖动调整 Reward 日志高度",
+        )
 
         self._reward_launcher = RewardModelLauncher(self)
         self._reward_launcher.log_line.connect(self._append_reward_log)
@@ -22228,6 +23811,7 @@ class CameraTopicWindow(QMainWindow):
         self.reward_wf_log_edit = QTextEdit()
         self.reward_wf_log_edit.setReadOnly(True)
         self.reward_wf_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.reward_wf_log_edit.setMinimumHeight(180)
         self.reward_wf_log_edit.setPlaceholderText("Reward 工作流日志…")
         self.reward_wf_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
@@ -22420,6 +24004,7 @@ class CameraTopicWindow(QMainWindow):
         self.dojo_rl_log_edit = QTextEdit()
         self.dojo_rl_log_edit.setReadOnly(True)
         self.dojo_rl_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.dojo_rl_log_edit.setMinimumHeight(180)
         self.dojo_rl_log_edit.setPlaceholderText("仿真强化学习训练 训练日志…")
         self.dojo_rl_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
@@ -22445,13 +24030,467 @@ class CameraTopicWindow(QMainWindow):
                 f"[info] 预填奖励 ckpt: {_default_reward_ckpt}{note}"
             )
 
+        # --- RoboMeter policy learning ---
+        robometer_tab = QWidget()
+        robometer_tab.setObjectName("robometerPolicyTab")
+        rm_outer = QVBoxLayout(robometer_tab)
+        rm_outer.setContentsMargins(8, 6, 8, 6)
+        rm_outer.setSpacing(6)
+        rm_hint = QLabel(
+            "RoboMeter Policy Learning：在仓库中跑 SAC/IQL/BC、DSRL 或 Pi0 评测。"
+            "「图形窗口」对 eval 等有效；train/train_async（LIBERO 离屏）会强制 egl，"
+            "避免与本 GUI 的 OpenGL 冲突触发 cudnn Invalid handle。"
+            "默认仓库为 robometer-policy-learning；Python 优先 "
+            "miniconda3/envs/robometer-policy（勿用未同步完的仓库 .venv）。"
+            "额外参数写在 Hydra 一行，例: env.env_name=libero_90 env.task_id=28。"
+        )
+        rm_hint.setWordWrap(True)
+        rm_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        rm_outer.addWidget(rm_hint)
+
+        rm_path_row = QHBoxLayout()
+        rm_path_row.setSpacing(6)
+        rm_path_row.addWidget(QLabel("仓库"))
+        self.robometer_root_edit = QLineEdit(
+            os.environ.get("ROBOMETER_ROOT", ROBOMETER_ROOT_DEFAULT)
+        )
+        self.robometer_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_path_row.addWidget(self.robometer_root_edit, 1)
+        self.robometer_root_browse_btn = QPushButton("…")
+        self.robometer_root_browse_btn.setFixedWidth(28)
+        self.robometer_root_browse_btn.clicked.connect(
+            self._on_robometer_root_browse
+        )
+        rm_path_row.addWidget(self.robometer_root_browse_btn)
+        rm_path_row.addWidget(QLabel("Python"))
+        self.robometer_python_edit = QLineEdit(
+            resolve_robometer_python(self.robometer_root_edit.text())
+        )
+        self.robometer_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_path_row.addWidget(self.robometer_python_edit, 1)
+        rm_outer.addLayout(rm_path_row)
+
+        rm_job_row = QHBoxLayout()
+        rm_job_row.setSpacing(6)
+        rm_job_row.addWidget(QLabel("任务"))
+        self.robometer_job_combo = ImeSafeComboBox()
+        for label, job_id, default_cfg in ROBOMETER_JOBS:
+            self.robometer_job_combo.addItem(label, (job_id, default_cfg))
+        self.robometer_job_combo.setToolTip(
+            "选择 scripts 入口；切换后会填入对应默认 Hydra config"
+        )
+        self.robometer_job_combo.currentIndexChanged.connect(
+            self._on_robometer_job_changed
+        )
+        rm_job_row.addWidget(self.robometer_job_combo)
+        rm_job_row.addWidget(QLabel("config"))
+        self.robometer_config_combo = ImeSafeComboBox()
+        self.robometer_config_combo.setEditable(True)
+        self.robometer_config_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.robometer_config_combo.setMinimumWidth(180)
+        self.robometer_config_combo.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_job_row.addWidget(self.robometer_config_combo, 1)
+        self.robometer_refresh_btn = QPushButton("刷新")
+        self.robometer_refresh_btn.setToolTip(
+            "重新扫描 robometer_policy_learning/configs/*.yaml"
+        )
+        self.robometer_refresh_btn.clicked.connect(self._refresh_robometer_configs)
+        rm_job_row.addWidget(self.robometer_refresh_btn)
+        rm_job_row.addWidget(QLabel("GPU"))
+        self.robometer_cuda_edit = QLineEdit(
+            os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+        )
+        self.robometer_cuda_edit.setFixedWidth(72)
+        self.robometer_cuda_edit.setPlaceholderText("0")
+        self.robometer_cuda_edit.setToolTip("CUDA_VISIBLE_DEVICES，留空则用系统默认")
+        rm_job_row.addWidget(self.robometer_cuda_edit)
+        rm_outer.addLayout(rm_job_row)
+
+        rm_opt_row = QHBoxLayout()
+        rm_opt_row.setSpacing(6)
+        self.robometer_render_gui_check = QCheckBox("图形窗口")
+        self.robometer_render_gui_check.setChecked(
+            bool((os.environ.get("DISPLAY") or "").strip())
+        )
+        self.robometer_render_gui_check.setToolTip(
+            "对 eval 等任务：尝试弹出 MuJoCo/robosuite 窗口（MUJOCO_GL=glfw）。\n"
+            "train / train_async（LIBERO OffScreenRenderEnv）会强制 egl，"
+            "避免与 Qt 父进程冲突导致 cudnn 报 Invalid handle。"
+        )
+        rm_opt_row.addWidget(self.robometer_render_gui_check)
+        self.robometer_wandb_offline_check = QCheckBox("离线 wandb")
+        self.robometer_wandb_offline_check.setChecked(True)
+        self.robometer_wandb_offline_check.setToolTip(
+            "追加 logging.wandb_offline=true，避免未登录 wandb 时卡住"
+        )
+        rm_opt_row.addWidget(self.robometer_wandb_offline_check)
+        rm_opt_row.addStretch(1)
+        rm_outer.addLayout(rm_opt_row)
+
+        rm_ckpt_row = QHBoxLayout()
+        rm_ckpt_row.setSpacing(6)
+        rm_ckpt_row.addWidget(QLabel("ckpt"))
+        self.robometer_ckpt_edit = QLineEdit()
+        self.robometer_ckpt_edit.setPlaceholderText(
+            "可选。评测写入 policy_checkpoint=；训练写入 training.load_dir="
+        )
+        self.robometer_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_ckpt_row.addWidget(self.robometer_ckpt_edit, 1)
+        self.robometer_ckpt_browse_btn = QPushButton("…")
+        self.robometer_ckpt_browse_btn.setFixedWidth(28)
+        self.robometer_ckpt_browse_btn.clicked.connect(
+            self._on_robometer_ckpt_browse
+        )
+        rm_ckpt_row.addWidget(self.robometer_ckpt_browse_btn)
+        rm_outer.addLayout(rm_ckpt_row)
+
+        rm_ov_row = QHBoxLayout()
+        rm_ov_row.setSpacing(6)
+        rm_ov_row.addWidget(QLabel("Hydra"))
+        self.robometer_overrides_edit = QLineEdit()
+        self.robometer_overrides_edit.setPlaceholderText(
+            "可选覆盖。例: env.env_type=libero env.env_name=libero_spatial "
+            "eval.num_episodes=2"
+        )
+        self.robometer_overrides_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_ov_row.addWidget(self.robometer_overrides_edit, 1)
+        rm_outer.addLayout(rm_ov_row)
+
+        rm_run_row = QHBoxLayout()
+        rm_run_row.setSpacing(6)
+        self.robometer_start_btn = QPushButton("启动")
+        self.robometer_start_btn.setToolTip("启动 robometer-policy-learning")
+        self.robometer_start_btn.clicked.connect(self._on_robometer_start_clicked)
+        rm_run_row.addWidget(self.robometer_start_btn)
+        self.robometer_stop_btn = QPushButton("停止")
+        self.robometer_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.robometer_stop_btn.setEnabled(False)
+        self.robometer_stop_btn.clicked.connect(self._on_robometer_stop_clicked)
+        rm_run_row.addWidget(self.robometer_stop_btn)
+        self.robometer_status_label = QLabel("空闲")
+        self.robometer_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_run_row.addWidget(self.robometer_status_label, 1)
+        rm_outer.addLayout(rm_run_row)
+
+        rm_log_row = QHBoxLayout()
+        rm_log_row.setSpacing(6)
+        rm_log_row.addWidget(QLabel("日志目录"))
+        self.robometer_log_dir_edit = QLineEdit()
+        self.robometer_log_dir_edit.setReadOnly(True)
+        self.robometer_log_dir_edit.setPlaceholderText("启动后显示 outputs/")
+        self.robometer_log_dir_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rm_log_row.addWidget(self.robometer_log_dir_edit, 1)
+        self.robometer_open_log_btn = QPushButton("打开")
+        self.robometer_open_log_btn.setEnabled(False)
+        self.robometer_open_log_btn.clicked.connect(
+            self._on_robometer_open_log_clicked
+        )
+        rm_log_row.addWidget(self.robometer_open_log_btn)
+        rm_outer.addLayout(rm_log_row)
+
+        self.robometer_log_edit = QTextEdit()
+        self.robometer_log_edit.setReadOnly(True)
+        self.robometer_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robometer_log_edit.setMinimumHeight(180)
+        self.robometer_log_edit.setPlaceholderText("RoboMeter 运行日志…")
+        self.robometer_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        rm_outer.addWidget(self.robometer_log_edit, 1)
+
+        self._robometer_launcher = RoboMeterPolicyLauncher(self)
+        self._robometer_launcher.log_line.connect(self._append_robometer_log)
+        self._robometer_launcher.status_message.connect(self._on_robometer_status)
+        self._robometer_launcher.running_changed.connect(self._update_robometer_ui)
+        self._robometer_launcher.log_dir_ready.connect(self._on_robometer_log_dir)
+        self._on_robometer_job_changed()
+
+        # --- RynnValue ---
+        rynn_tab = QWidget()
+        rynn_tab.setObjectName("rynnValueTab")
+        rv_outer = QVBoxLayout(rynn_tab)
+        rv_outer.setContentsMargins(8, 6, 8, 6)
+        rv_outer.setSpacing(6)
+        rv_hint = QLabel(
+            "RynnValue：对机器人视频预测剩余完成时间，并生成 Analysis（描述 / Match / Success）。"
+            "勾选「图形窗口」时，推理结束后自动播放趋势视频；评测任务会开启 save_videos。"
+            "默认模型为本地缓存 RynnValue-4B；Python 优先 miniconda3/envs/rynnvalue。"
+        )
+        rv_hint.setWordWrap(True)
+        rv_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        rv_outer.addWidget(rv_hint)
+
+        rv_path_row = QHBoxLayout()
+        rv_path_row.setSpacing(6)
+        rv_path_row.addWidget(QLabel("仓库"))
+        self.rynnvalue_root_edit = QLineEdit(
+            os.environ.get("RYNNVALUE_ROOT", RYNNVALUE_ROOT_DEFAULT)
+        )
+        self.rynnvalue_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rv_path_row.addWidget(self.rynnvalue_root_edit, 1)
+        self.rynnvalue_root_browse_btn = QPushButton("…")
+        self.rynnvalue_root_browse_btn.setFixedWidth(28)
+        self.rynnvalue_root_browse_btn.clicked.connect(
+            self._on_rynnvalue_root_browse
+        )
+        rv_path_row.addWidget(self.rynnvalue_root_browse_btn)
+        rv_path_row.addWidget(QLabel("Python"))
+        self.rynnvalue_python_edit = QLineEdit(
+            resolve_rynnvalue_python(self.rynnvalue_root_edit.text())
+        )
+        self.rynnvalue_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rv_path_row.addWidget(self.rynnvalue_python_edit, 1)
+        rv_outer.addLayout(rv_path_row)
+
+        rv_job_row = QHBoxLayout()
+        rv_job_row.setSpacing(6)
+        rv_job_row.addWidget(QLabel("任务"))
+        self.rynnvalue_job_combo = ImeSafeComboBox()
+        for label, job_id in RYNNVALUE_JOBS:
+            self.rynnvalue_job_combo.addItem(label, job_id)
+        self.rynnvalue_job_combo.setToolTip(
+            "infer=视频推理；reward_server=HTTP 奖励服务；其余为 robometer 评测"
+        )
+        self.rynnvalue_job_combo.currentIndexChanged.connect(
+            self._on_rynnvalue_job_changed
+        )
+        rv_job_row.addWidget(self.rynnvalue_job_combo)
+        rv_job_row.addWidget(QLabel("GPU"))
+        self.rynnvalue_cuda_edit = QLineEdit(
+            os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+        )
+        self.rynnvalue_cuda_edit.setFixedWidth(72)
+        self.rynnvalue_cuda_edit.setPlaceholderText("0")
+        self.rynnvalue_cuda_edit.setToolTip("CUDA_VISIBLE_DEVICES")
+        rv_job_row.addWidget(self.rynnvalue_cuda_edit)
+        self.rynnvalue_render_gui_check = QCheckBox("图形窗口")
+        self.rynnvalue_render_gui_check.setChecked(
+            bool((os.environ.get("DISPLAY") or "").strip())
+        )
+        self.rynnvalue_render_gui_check.setToolTip(
+            "勾选后：推理完成自动播放 Remaining Time 趋势视频；\n"
+            "评测任务开启 save_videos。取消则仅写文件/日志。"
+        )
+        rv_job_row.addWidget(self.rynnvalue_render_gui_check)
+        rv_job_row.addStretch(1)
+        rv_outer.addLayout(rv_job_row)
+
+        rv_model_row = QHBoxLayout()
+        rv_model_row.setSpacing(6)
+        rv_model_row.addWidget(QLabel("模型"))
+        self.rynnvalue_model_edit = QLineEdit(resolve_rynnvalue_model())
+        self.rynnvalue_model_edit.setPlaceholderText(
+            "本地 HF 目录（默认 .cache/rynnvalue/RynnValue-4B）"
+        )
+        self.rynnvalue_model_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rv_model_row.addWidget(self.rynnvalue_model_edit, 1)
+        self.rynnvalue_model_browse_btn = QPushButton("…")
+        self.rynnvalue_model_browse_btn.setFixedWidth(28)
+        self.rynnvalue_model_browse_btn.clicked.connect(
+            self._on_rynnvalue_model_browse
+        )
+        rv_model_row.addWidget(self.rynnvalue_model_browse_btn)
+        rv_model_row.addWidget(QLabel("ckpt"))
+        self.rynnvalue_ckpt_edit = QLineEdit(resolve_rynnvalue_ckpt())
+        self.rynnvalue_ckpt_edit.setPlaceholderText(
+            "可选。训练 checkpoint（含 model.pt）；留空则只用上方 HF 模型"
+        )
+        self.rynnvalue_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rv_model_row.addWidget(self.rynnvalue_ckpt_edit, 1)
+        self.rynnvalue_ckpt_browse_btn = QPushButton("…")
+        self.rynnvalue_ckpt_browse_btn.setFixedWidth(28)
+        self.rynnvalue_ckpt_browse_btn.clicked.connect(
+            self._on_rynnvalue_ckpt_browse
+        )
+        rv_model_row.addWidget(self.rynnvalue_ckpt_browse_btn)
+        rv_outer.addLayout(rv_model_row)
+
+        rv_video_row = QHBoxLayout()
+        rv_video_row.setSpacing(6)
+        rv_video_row.addWidget(QLabel("视频"))
+        _default_video = (
+            RYNNVALUE_EXAMPLE_VIDEO
+            if os.path.isfile(RYNNVALUE_EXAMPLE_VIDEO)
+            else ""
+        )
+        self.rynnvalue_video_edit = QLineEdit(_default_video)
+        self.rynnvalue_video_edit.setPlaceholderText("infer 输入视频路径")
+        self.rynnvalue_video_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rv_video_row.addWidget(self.rynnvalue_video_edit, 1)
+        self.rynnvalue_video_browse_btn = QPushButton("…")
+        self.rynnvalue_video_browse_btn.setFixedWidth(28)
+        self.rynnvalue_video_browse_btn.clicked.connect(
+            self._on_rynnvalue_video_browse
+        )
+        rv_video_row.addWidget(self.rynnvalue_video_browse_btn)
+        rv_outer.addLayout(rv_video_row)
+
+        rv_instr_row = QHBoxLayout()
+        rv_instr_row.setSpacing(6)
+        rv_instr_row.addWidget(QLabel("指令"))
+        self.rynnvalue_instruction_edit = QLineEdit(RYNNVALUE_DEFAULT_INSTRUCTION)
+        self.rynnvalue_instruction_edit.setFont(
+            QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
+        )
+        rv_instr_row.addWidget(self.rynnvalue_instruction_edit, 1)
+        rv_outer.addLayout(rv_instr_row)
+
+        rv_meta_row = QHBoxLayout()
+        rv_meta_row.setSpacing(6)
+        rv_meta_row.addWidget(QLabel("机器人"))
+        self.rynnvalue_robot_edit = QLineEdit(RYNNVALUE_DEFAULT_ROBOT)
+        self.rynnvalue_robot_edit.setPlaceholderText(
+            "use_meta 必需，例: an ALOHA dual-arm robot"
+        )
+        self.rynnvalue_robot_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.rynnvalue_robot_edit.setToolTip("--robot_description")
+        rv_meta_row.addWidget(self.rynnvalue_robot_edit, 1)
+        rv_meta_row.addWidget(QLabel("相机"))
+        self.rynnvalue_camera_edit = QLineEdit(RYNNVALUE_DEFAULT_CAMERA)
+        self.rynnvalue_camera_edit.setPlaceholderText(
+            "use_meta 必需，例: the top-down camera"
+        )
+        self.rynnvalue_camera_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.rynnvalue_camera_edit.setToolTip("--camera_description")
+        rv_meta_row.addWidget(self.rynnvalue_camera_edit, 1)
+        rv_outer.addLayout(rv_meta_row)
+
+        rv_opt_row = QHBoxLayout()
+        rv_opt_row.setSpacing(6)
+        rv_opt_row.addWidget(QLabel("frames"))
+        self.rynnvalue_frames_spin = QSpinBox()
+        self.rynnvalue_frames_spin.setRange(1, 512)
+        self.rynnvalue_frames_spin.setValue(16)
+        self.rynnvalue_frames_spin.setToolTip(
+            "--num_frames：每个 prefix 采样帧数；64@640px 在 44GB 上约需 28GiB 注意力矩阵"
+        )
+        rv_opt_row.addWidget(self.rynnvalue_frames_spin)
+        rv_opt_row.addWidget(QLabel("steps"))
+        self.rynnvalue_steps_spin = QSpinBox()
+        self.rynnvalue_steps_spin.setRange(0, 4096)
+        self.rynnvalue_steps_spin.setValue(32)
+        self.rynnvalue_steps_spin.setToolTip(
+            "--num_steps：时间轴采样点数（0=每帧，易慢/OOM）"
+        )
+        rv_opt_row.addWidget(self.rynnvalue_steps_spin)
+        rv_opt_row.addWidget(QLabel("batch"))
+        self.rynnvalue_batch_spin = QSpinBox()
+        self.rynnvalue_batch_spin.setRange(1, 16)
+        self.rynnvalue_batch_spin.setValue(1)
+        self.rynnvalue_batch_spin.setToolTip(
+            "--batch_size：默认 1；>1 在 eager 注意力下易 OOM"
+        )
+        rv_opt_row.addWidget(self.rynnvalue_batch_spin)
+        rv_opt_row.addWidget(QLabel("tokens"))
+        self.rynnvalue_tokens_spin = QSpinBox()
+        self.rynnvalue_tokens_spin.setRange(16, 2048)
+        self.rynnvalue_tokens_spin.setValue(128)
+        self.rynnvalue_tokens_spin.setToolTip("--max_new_tokens")
+        rv_opt_row.addWidget(self.rynnvalue_tokens_spin)
+        rv_opt_row.addWidget(QLabel("fps"))
+        self.rynnvalue_fps_spin = QSpinBox()
+        self.rynnvalue_fps_spin.setRange(1, 60)
+        self.rynnvalue_fps_spin.setValue(30)
+        rv_opt_row.addWidget(self.rynnvalue_fps_spin)
+        rv_opt_row.addWidget(QLabel("port"))
+        self.rynnvalue_port_spin = QSpinBox()
+        self.rynnvalue_port_spin.setRange(1, 65535)
+        self.rynnvalue_port_spin.setValue(8001)
+        self.rynnvalue_port_spin.setToolTip("reward_server 端口")
+        rv_opt_row.addWidget(self.rynnvalue_port_spin)
+        rv_opt_row.addStretch(1)
+        rv_outer.addLayout(rv_opt_row)
+
+        rv_extra_row = QHBoxLayout()
+        rv_extra_row.setSpacing(6)
+        rv_extra_row.addWidget(QLabel("额外参数"))
+        self.rynnvalue_extra_edit = QLineEdit()
+        self.rynnvalue_extra_edit.setPlaceholderText(
+            "可选。透传给脚本，例: --num_steps 32 或 Hydra: model_config.stride=2"
+        )
+        self.rynnvalue_extra_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rv_extra_row.addWidget(self.rynnvalue_extra_edit, 1)
+        rv_outer.addLayout(rv_extra_row)
+
+        rv_run_row = QHBoxLayout()
+        rv_run_row.setSpacing(6)
+        self.rynnvalue_start_btn = QPushButton("启动")
+        self.rynnvalue_start_btn.setToolTip("启动 RynnValue")
+        self.rynnvalue_start_btn.clicked.connect(self._on_rynnvalue_start_clicked)
+        rv_run_row.addWidget(self.rynnvalue_start_btn)
+        self.rynnvalue_stop_btn = QPushButton("停止")
+        self.rynnvalue_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.rynnvalue_stop_btn.setEnabled(False)
+        self.rynnvalue_stop_btn.clicked.connect(self._on_rynnvalue_stop_clicked)
+        rv_run_row.addWidget(self.rynnvalue_stop_btn)
+        self.rynnvalue_open_video_btn = QPushButton("播放趋势视频")
+        self.rynnvalue_open_video_btn.setEnabled(True)
+        self.rynnvalue_open_video_btn.setToolTip(
+            "播放最近一次推理的 output_with_trend.mp4；\n"
+            "本会话无记录时会在输出目录 / RynnValue outputs 中查找最新文件。"
+        )
+        self.rynnvalue_open_video_btn.clicked.connect(
+            self._on_rynnvalue_open_video_clicked
+        )
+        rv_run_row.addWidget(self.rynnvalue_open_video_btn)
+        self.rynnvalue_status_label = QLabel("空闲")
+        self.rynnvalue_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rv_run_row.addWidget(self.rynnvalue_status_label, 1)
+        rv_outer.addLayout(rv_run_row)
+
+        rv_log_row = QHBoxLayout()
+        rv_log_row.setSpacing(6)
+        rv_log_row.addWidget(QLabel("输出目录"))
+        self.rynnvalue_log_dir_edit = QLineEdit()
+        self.rynnvalue_log_dir_edit.setReadOnly(True)
+        self.rynnvalue_log_dir_edit.setPlaceholderText("启动后显示 outputs/")
+        self.rynnvalue_log_dir_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rv_log_row.addWidget(self.rynnvalue_log_dir_edit, 1)
+        self.rynnvalue_open_log_btn = QPushButton("打开")
+        self.rynnvalue_open_log_btn.setEnabled(False)
+        self.rynnvalue_open_log_btn.clicked.connect(
+            self._on_rynnvalue_open_log_clicked
+        )
+        rv_log_row.addWidget(self.rynnvalue_open_log_btn)
+        rv_outer.addLayout(rv_log_row)
+
+        self.rynnvalue_log_edit = QTextEdit()
+        self.rynnvalue_log_edit.setReadOnly(True)
+        self.rynnvalue_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.rynnvalue_log_edit.setMinimumHeight(180)
+        self.rynnvalue_log_edit.setPlaceholderText("RynnValue 运行日志…")
+        self.rynnvalue_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        rv_outer.addWidget(self.rynnvalue_log_edit, 1)
+
+        self._rynnvalue_last_video = ""
+        self._rynnvalue_launcher = RynnValueLauncher(self)
+        self._rynnvalue_launcher.log_line.connect(self._append_rynnvalue_log)
+        self._rynnvalue_launcher.status_message.connect(self._on_rynnvalue_status)
+        self._rynnvalue_launcher.running_changed.connect(self._update_rynnvalue_ui)
+        self._rynnvalue_launcher.running_changed.connect(
+            self._on_rynnvalue_running_for_libero_hud
+        )
+        self._rynnvalue_launcher.log_dir_ready.connect(self._on_rynnvalue_log_dir)
+        self._rynnvalue_launcher.output_video_ready.connect(
+            self._on_rynnvalue_output_video
+        )
+        self._on_rynnvalue_job_changed()
+        if hasattr(self, "_update_libero_rynnvalue_hud_controls"):
+            self._update_libero_rynnvalue_hud_controls()
 
         control_tabs.addTab(sim_tab, "仿真评测")
         control_tabs.addTab(real_tab, "真机评测")
         control_tabs.addTab(reward_tab, "Reward评测")
         control_tabs.addTab(reward_wf_tab, "Reward训练")
         control_tabs.addTab(dojo_rl_tab, "仿真强化学习训练")
+        control_tabs.addTab(robometer_tab, "RoboMeter")
+        control_tabs.addTab(rynn_tab, "RynnValue")
         control_tabs.addTab(ctx_tab, "ICL")
+        _boot_tick("构建界面：收尾…")
         # sub task / sub image 挂在全部 tab 最后，见下方 addTab
 
         astra_tab = QWidget()
@@ -22498,47 +24537,38 @@ class CameraTopicWindow(QMainWindow):
         self.astra_open_btn.clicked.connect(self._on_astra_open_clicked)
         astra_tool_row.addWidget(self.astra_open_btn)
         astra_outer.addLayout(astra_tool_row)
+        self.astra_web_view = None
+        self._astra_web_container = QWidget()
+        self._astra_web_container_layout = QVBoxLayout(self._astra_web_container)
+        self._astra_web_container_layout.setContentsMargins(0, 0, 0, 0)
         if QWebEngineView is not None:
-            self.astra_web_view = QWebEngineView()
-            self.astra_web_view.setMinimumHeight(360)
-            self.astra_web_view.setStyleSheet(
-                "QWebEngineView { background-color: #111111; }"
+            # 延迟创建：启动时立刻 setUrl 会在无 GLX/GL 冲突下触发 SIP segfault。
+            self._astra_web_placeholder = QLabel(
+                "嵌入页按需加载：切到本页或点「前往」后创建 WebEngine。\n"
+                "若启动曾因 OpenGL 崩溃，也可用「浏览器打开」。"
             )
-            try:
-                self.astra_web_view.page().setBackgroundColor(QColor("#111111"))
-            except Exception:
-                pass
-            try:
-                settings = self.astra_web_view.settings()
-                if QWebEngineSettings is not None:
-                    settings.setAttribute(
-                        QWebEngineSettings.JavascriptEnabled, True
-                    )
-                    settings.setAttribute(
-                        QWebEngineSettings.LocalStorageEnabled, True
-                    )
-                    settings.setAttribute(
-                        QWebEngineSettings.PluginsEnabled, True
-                    )
-            except Exception:
-                pass
-            self.astra_web_view.setUrl(QUrl(ASTRA_ROBODOJO_URL))
-            astra_outer.addWidget(self.astra_web_view, 1)
+            self._astra_web_placeholder.setAlignment(Qt.AlignCenter)
+            self._astra_web_placeholder.setWordWrap(True)
+            self._astra_web_placeholder.setMinimumHeight(200)
+            self._astra_web_placeholder.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+            self._astra_web_container_layout.addWidget(self._astra_web_placeholder, 1)
         else:
-            self.astra_web_view = None
-            astra_fallback = QLabel(
+            self._astra_web_placeholder = QLabel(
                 "未安装 PyQtWebEngine，无法页内嵌入。\n"
                 f"请点「浏览器打开」查看：{ASTRA_ROBODOJO_URL}"
             )
-            astra_fallback.setAlignment(Qt.AlignCenter)
-            astra_fallback.setWordWrap(True)
-            astra_fallback.setMinimumHeight(200)
-            astra_fallback.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-            astra_outer.addWidget(astra_fallback, 1)
+            self._astra_web_placeholder.setAlignment(Qt.AlignCenter)
+            self._astra_web_placeholder.setWordWrap(True)
+            self._astra_web_placeholder.setMinimumHeight(200)
+            self._astra_web_placeholder.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+            self._astra_web_container_layout.addWidget(self._astra_web_placeholder, 1)
             self.astra_reload_btn.setEnabled(False)
             self.astra_go_btn.setEnabled(False)
             self.astra_page_combo.setEnabled(False)
+        astra_outer.addWidget(self._astra_web_container, 1)
         control_tabs.addTab(astra_tab, "Astra")
+        if QWebEngineView is not None and self._want_control_tab("Astra"):
+            QTimer.singleShot(1500, self._ensure_astra_web_view)
 
         humanego_tab = QWidget()
         humanego_tab.setObjectName("humanegoTab")
@@ -22692,7 +24722,7 @@ class CameraTopicWindow(QMainWindow):
         self.humanego_log_edit = QTextEdit()
         self.humanego_log_edit.setReadOnly(True)
         self.humanego_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.humanego_log_edit.setMinimumHeight(220)
+        self.humanego_log_edit.setMinimumHeight(240)
         self.humanego_log_edit.setPlaceholderText("HumanEgo 运行日志…")
         self.humanego_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
@@ -22802,14 +24832,19 @@ class CameraTopicWindow(QMainWindow):
         self.dataset_detail_edit = QTextEdit()
         self.dataset_detail_edit.setReadOnly(True)
         self.dataset_detail_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.dataset_detail_edit.setMinimumHeight(100)
-        self.dataset_detail_edit.setMaximumHeight(180)
         self.dataset_detail_edit.setPlaceholderText("条目详情…")
         self.dataset_detail_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
             f"border: 1px solid #555; }}"
         )
-        ds_right_layout.addWidget(self.dataset_detail_edit, 1)
+        self.dataset_detail_resize_bar = _add_text_edit_with_drag_bar(
+            ds_right_layout,
+            self.dataset_detail_edit,
+            default_h=160,
+            min_h=80,
+            max_h=600,
+            label="拖动调整详情高度",
+        )
         ds_action_row = QHBoxLayout()
         ds_action_row.setSpacing(6)
         self.dataset_open_dir_btn = QPushButton("打开目录")
@@ -22864,7 +24899,7 @@ class CameraTopicWindow(QMainWindow):
         self._right_arm_move_btn_idle_style = ""
         self._right_arm_move_btn_cancel_style = f"color: {UI_ACCENT_RED};"
 
-        root_layout.addWidget(control_tabs)
+        # control_tabs 已在空壳阶段加入 root_layout
 
         bridge.left_hand_preset_changed.connect(self._update_left_hand_toggle_ui)
         bridge.right_hand_preset_changed.connect(self._update_right_hand_toggle_ui)
@@ -22968,8 +25003,7 @@ class CameraTopicWindow(QMainWindow):
         root_layout.addWidget(workspace, stretch=1)
         self._toggle_workspace_panel()  # 默认折叠工作区，给上方 Tab 更多空间
 
-        self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
+        # status_bar 已在空壳阶段创建
         self.status_bar.showMessage("就绪")
         self._apply_only_tabs(self._only_tabs)
         self._restore_control_tabs_order()
@@ -23020,6 +25054,7 @@ class CameraTopicWindow(QMainWindow):
         self._update_local_ai_deploy_btn()
         self._update_train_ui()
         self._update_cad_ui()
+
 
     def _get_psi_policy_dir(self) -> Optional[str]:
         if self._psi_policy_dir_override:
@@ -23131,6 +25166,8 @@ class CameraTopicWindow(QMainWindow):
         if launcher is not None:
             running = bool(launcher.is_running())
         view = getattr(self, "bagel_web_view", None)
+        container = getattr(self, "_bagel_web_container", None)
+        embed = container if container is not None else view
         fallback = getattr(self, "_bagel_web_fallback", None)
         preview = getattr(self, "bagel_call_output_preview", None)
         tab = getattr(self, "bagel_tab", None)
@@ -23149,12 +25186,17 @@ class CameraTopicWindow(QMainWindow):
                     return
 
         if running:
+            if embed is not None:
+                embed.setMinimumHeight(280)
+                embed.setMaximumHeight(qmax)
+                embed.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                embed.show()
+                _set_item_stretch(embed, 1)
             if view is not None:
                 view.setMinimumHeight(280)
                 view.setMaximumHeight(qmax)
                 view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
                 view.show()
-                _set_item_stretch(view, 1)
             if fallback is not None:
                 fallback.setMinimumHeight(80)
                 fallback.show()
@@ -23169,7 +25211,11 @@ class CameraTopicWindow(QMainWindow):
                 view.hide()
                 view.setMinimumHeight(0)
                 view.setMaximumHeight(0)
-                _set_item_stretch(view, 0)
+            if embed is not None:
+                embed.hide()
+                embed.setMinimumHeight(0)
+                embed.setMaximumHeight(0)
+                _set_item_stretch(embed, 0)
             if fallback is not None:
                 fallback.hide()
                 fallback.setMinimumHeight(0)
@@ -23356,7 +25402,119 @@ class CameraTopicWindow(QMainWindow):
     def _on_bagel_clear_log_clicked(self) -> None:
         self.bagel_log_edit.clear()
 
+    def _want_control_tab(self, title: str) -> bool:
+        """--tab 过滤时是否需要构建/预热该控制区页。"""
+        only = getattr(self, "_only_tabs", None) or []
+        if not only:
+            return True
+        return title in only
+
+    def _ensure_bagel_web_view(self):
+        """按需创建 Bagel QWebEngineView（避免启动期 OpenGL/SIP 崩溃）。"""
+        if getattr(self, "bagel_web_view", None) is not None:
+            return self.bagel_web_view
+        if QWebEngineView is None:
+            return None
+        if not self._want_control_tab("sub image"):
+            return None
+        container = getattr(self, "_bagel_web_container", None)
+        layout = getattr(self, "_bagel_web_container_layout", None)
+        if container is None or layout is None:
+            return None
+        try:
+            view = QWebEngineView(container)
+            view.setMinimumHeight(0)
+            view.setStyleSheet("QWebEngineView { background-color: #1a1a1a; }")
+            try:
+                view.page().setBackgroundColor(QColor("#1a1a1a"))
+            except Exception:
+                pass
+            if BagelWebEnginePage is not None:
+                page = BagelWebEnginePage(view)
+                view.setPage(page)
+                self.bagel_web_page = page
+                try:
+                    page.setBackgroundColor(QColor("#1a1a1a"))
+                except Exception:
+                    pass
+                try:
+                    settings = view.settings()
+                    if QWebEngineSettings is not None:
+                        settings.setAttribute(
+                            QWebEngineSettings.LocalContentCanAccessRemoteUrls, True
+                        )
+                        settings.setAttribute(
+                            QWebEngineSettings.LocalContentCanAccessFileUrls, True
+                        )
+                        settings.setAttribute(
+                            QWebEngineSettings.JavascriptEnabled, True
+                        )
+                        settings.setAttribute(
+                            QWebEngineSettings.LocalStorageEnabled, True
+                        )
+                except Exception:
+                    pass
+            else:
+                self.bagel_web_page = None
+            placeholder = getattr(self, "_bagel_web_placeholder", None)
+            if placeholder is not None:
+                layout.removeWidget(placeholder)
+                placeholder.hide()
+                placeholder.deleteLater()
+                self._bagel_web_placeholder = None
+            layout.addWidget(view, 0)
+            self.bagel_web_view = view
+            container.show()
+            return view
+        except Exception as exc:
+            print(f"[warn] Bagel WebEngine 创建失败: {exc}", flush=True)
+            return None
+
+    def _ensure_astra_web_view(self):
+        """按需创建 Astra QWebEngineView（避免启动期 OpenGL/SIP 崩溃）。"""
+        if getattr(self, "astra_web_view", None) is not None:
+            return self.astra_web_view
+        if QWebEngineView is None:
+            return None
+        if not self._want_control_tab("Astra"):
+            return None
+        container = getattr(self, "_astra_web_container", None)
+        layout = getattr(self, "_astra_web_container_layout", None)
+        if container is None or layout is None:
+            return None
+        try:
+            view = QWebEngineView(container)
+            view.setMinimumHeight(360)
+            view.setStyleSheet("QWebEngineView { background-color: #111111; }")
+            try:
+                view.page().setBackgroundColor(QColor("#111111"))
+            except Exception:
+                pass
+            try:
+                settings = view.settings()
+                if QWebEngineSettings is not None:
+                    settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
+                    settings.setAttribute(QWebEngineSettings.LocalStorageEnabled, True)
+                    settings.setAttribute(QWebEngineSettings.PluginsEnabled, True)
+            except Exception:
+                pass
+            placeholder = getattr(self, "_astra_web_placeholder", None)
+            if placeholder is not None:
+                layout.removeWidget(placeholder)
+                placeholder.hide()
+                placeholder.deleteLater()
+                self._astra_web_placeholder = None
+            layout.addWidget(view, 1)
+            self.astra_web_view = view
+            url = self._astra_current_url()
+            view.setUrl(QUrl(url))
+            return view
+        except Exception as exc:
+            print(f"[warn] Astra WebEngine 创建失败: {exc}", flush=True)
+            return None
+
     def _astra_current_url(self) -> str:
+
         if hasattr(self, "astra_url_edit"):
             text = self.astra_url_edit.text().strip()
             if text:
@@ -23378,7 +25536,7 @@ class CameraTopicWindow(QMainWindow):
             if matched >= 0:
                 self.astra_page_combo.setCurrentIndex(matched)
             self.astra_page_combo.blockSignals(False)
-        view = getattr(self, "astra_web_view", None)
+        view = self._ensure_astra_web_view()
         if view is not None:
             view.setUrl(QUrl(url))
         tip = f"Astra: {url}"
@@ -23397,7 +25555,7 @@ class CameraTopicWindow(QMainWindow):
         self._load_astra_url(self._astra_current_url())
 
     def _on_astra_reload_clicked(self) -> None:
-        view = getattr(self, "astra_web_view", None)
+        view = self._ensure_astra_web_view()
         if view is None:
             return
         url = self._astra_current_url()
@@ -24188,7 +26346,7 @@ class CameraTopicWindow(QMainWindow):
                 QMessageBox.warning(self, "sub image", f"无法读取图像: {image_path}")
                 return
         if out_text:
-            self.bagel_call_prompt_edit.setText(out_text)
+            self.bagel_call_prompt_edit.setPlainText(out_text)
             preview = out_text.replace("\n", " ")
             if len(preview) > 60:
                 preview = preview[:57] + "…"
@@ -24233,7 +26391,7 @@ class CameraTopicWindow(QMainWindow):
         if not self._bagel_api_launcher.is_running():
             QMessageBox.information(self, "Bagel", "请先点「部署推理 API」并等待就绪。")
             return
-        prompt = self.bagel_call_prompt_edit.text().strip()
+        prompt = self.bagel_call_prompt_edit.toPlainText().strip()
         if not prompt:
             QMessageBox.information(self, "Bagel", "请填写提示词。")
             return
@@ -24640,7 +26798,7 @@ class CameraTopicWindow(QMainWindow):
             if idx >= 0:
                 self.bagel_call_task_combo.setCurrentIndex(idx)
         prompt = str(turn.get("prompt") or "")
-        self.bagel_call_prompt_edit.setText(prompt)
+        self.bagel_call_prompt_edit.setPlainText(prompt)
         ratio = str(turn.get("image_ratio") or "").strip()
         if ratio:
             ridx = self.bagel_image_size_combo.findData(ratio)
@@ -24752,18 +26910,20 @@ class CameraTopicWindow(QMainWindow):
             self._refresh_bagel_history_title_label()
 
     def _load_bagel_web(self, url: str) -> None:
-        if self.bagel_web_view is None:
+        view = self._ensure_bagel_web_view()
+        if view is None:
             return
         try:
-            page = self.bagel_web_view.page()
+            page = view.page()
             try:
                 page.setBackgroundColor(QColor("#1a1a1a"))
             except Exception:
                 pass
-            self.bagel_web_view.setUrl(QUrl(url))
+            view.setUrl(QUrl(url))
             # 页面加载后再强制深色，覆盖 Gradio 未覆盖到的白底块
             QTimer.singleShot(800, self._force_bagel_web_dark)
             QTimer.singleShot(2500, self._force_bagel_web_dark)
+            self._sync_bagel_gradio_embed()
         except Exception as exc:
             self._append_bagel_log(f"[warn] 嵌入页加载失败: {exc}")
 
@@ -26352,7 +28512,10 @@ class CameraTopicWindow(QMainWindow):
             name = str(entry.get("name") or os.path.basename(path.rstrip("/")))
             kind = str(entry.get("kind") or "")
             kind_label = deploy_model_kind_label(kind)
+            readable = str(entry.get("readable") or "1") != "0"
             item_label = f"{name} ({kind_label})"
+            if not readable:
+                item_label = f"{name} ({kind_label} · 不可读)"
             spec = {
                 "path": path,
                 "name": name,
@@ -26360,6 +28523,7 @@ class CameraTopicWindow(QMainWindow):
                 "label": str(entry.get("label") or name),
                 "kind": kind,
                 "root": str(entry.get("root") or root),
+                "readable": "1" if readable else "0",
             }
             self.test_qwen_model_combo.addItem(item_label, spec)
             idx = self.test_qwen_model_combo.count() - 1
@@ -26367,6 +28531,15 @@ class CameraTopicWindow(QMainWindow):
                 f"{name}\nmodel_id={spec['model_id']}\n"
                 f"路径: {path}\n类型: {kind_label}\n根目录: {spec['root']}"
             )
+            if not readable:
+                tip += (
+                    "\n权重不可读（多为 root 600）："
+                    "sudo chmod a+r <dir>/adapter_model.safetensors"
+                )
+                model = self.test_qwen_model_combo.model()
+                item = model.item(idx) if hasattr(model, "item") else None
+                if item is not None:
+                    item.setEnabled(False)
             self.test_qwen_model_combo.setItemData(idx, tip, Qt.ToolTipRole)
         if prev_path:
             for i in range(self.test_qwen_model_combo.count()):
@@ -27362,6 +29535,10 @@ class CameraTopicWindow(QMainWindow):
             self._reward_wf_launcher.shutdown()
         if getattr(self, "_dojo_rl_launcher", None) is not None:
             self._dojo_rl_launcher.shutdown()
+        if getattr(self, "_robometer_launcher", None) is not None:
+            self._robometer_launcher.shutdown()
+        if getattr(self, "_rynnvalue_launcher", None) is not None:
+            self._rynnvalue_launcher.shutdown()
         if getattr(self, "_mujoco_launcher", None) is not None:
             self._mujoco_launcher.shutdown()
         if getattr(self, "_lingbot_map_launcher", None) is not None:
@@ -29081,12 +31258,20 @@ class CameraTopicWindow(QMainWindow):
                     text = "空闲 · MolmoSpaces"
                 elif backend == "arena":
                     text = "空闲 · IsaacLab-Arena"
+                elif backend == "libero":
+                    text = "空闲 · LIBERO"
+                elif backend == "robotwin":
+                    text = "空闲 · RoboTwin"
             self.mujoco_status_label.setText(text)
         if hasattr(self, "status_bar") and self.status_bar is not None:
             self.status_bar.showMessage(msg)
 
     def _sim_backend_id(self) -> str:
-        """Return isaac | mujoco | molmospaces | arena."""
+        """Return isaac | mujoco | molmospaces | arena | libero | robotwin."""
+        if getattr(self, "sim_backend_robotwin_radio", None) is not None and self.sim_backend_robotwin_radio.isChecked():
+            return "robotwin"
+        if getattr(self, "sim_backend_libero_radio", None) is not None and self.sim_backend_libero_radio.isChecked():
+            return "libero"
         if getattr(self, "sim_backend_arena_radio", None) is not None and self.sim_backend_arena_radio.isChecked():
             return "arena"
         if getattr(self, "sim_backend_spaces_radio", None) is not None and self.sim_backend_spaces_radio.isChecked():
@@ -29100,7 +31285,14 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_sim_backend_changed(self, *_args) -> None:
         backend = self._sim_backend_id()
-        idx = {"isaac": 0, "mujoco": 1, "molmospaces": 2, "arena": 3}.get(backend, 0)
+        idx = {
+            "isaac": 0,
+            "mujoco": 1,
+            "molmospaces": 2,
+            "arena": 3,
+            "libero": 4,
+            "robotwin": 5,
+        }.get(backend, 0)
         if hasattr(self, "sim_backend_stack"):
             self.sim_backend_stack.setCurrentIndex(idx)
         hints = {
@@ -29120,21 +31312,46 @@ class CameraTopicWindow(QMainWindow):
                 "IsaacLab-Arena：列出已注册 environment，启动时只跑当前选中的一项。"
                 "与 Isaac / MuJoCo / MolmoSpaces 互斥；不接 /camera/* 预览。"
             ),
+            "libero": (
+                "LIBERO：对齐 RLinf openpi eval（libero_spatial/object/goal/10/90）。"
+                "默认 remote 连 Pi :8080；与其它仿真后端互斥。"
+            ),
+            "robotwin": (
+                "RoboTwin：对齐 RLinf eval_embodiment（OpenPI + ALOHA / SAPIEN）。"
+                "需 RLinf_support + assets；与其它仿真后端互斥。"
+            ),
         }
         if hasattr(self, "sim_hint_label"):
             self.sim_hint_label.setText(hints.get(backend, ""))
-        show_mj = backend in ("mujoco", "molmospaces", "arena")
+        show_mj = backend in ("mujoco", "molmospaces", "arena", "libero", "robotwin")
         if hasattr(self, "mujoco_run_row_widget"):
             self.mujoco_run_row_widget.setVisible(show_mj)
         if hasattr(self, "mujoco_log_edit"):
             self.mujoco_log_edit.setVisible(show_mj)
         if hasattr(self, "mujoco_log_resize_bar"):
             self.mujoco_log_resize_bar.setVisible(show_mj)
+        # RoboTwin / LIBERO logs are verbose — prefer a taller pane when switching in
+        # (respect a user-dragged height if already larger).
+        if (
+            show_mj
+            and backend in ("robotwin", "libero")
+            and hasattr(self, "mujoco_log_edit")
+            and hasattr(self, "mujoco_log_resize_bar")
+        ):
+            prefer_h = 420 if backend == "robotwin" else 360
+            if self.mujoco_log_edit.height() < prefer_h:
+                apply = getattr(self.mujoco_log_resize_bar, "_apply_height", None)
+                if callable(apply):
+                    apply(prefer_h)
+                else:
+                    self.mujoco_log_edit.setFixedHeight(prefer_h)
         if hasattr(self, "mujoco_start_btn"):
             start_labels = {
                 "mujoco": "启动 MuJoCo",
                 "molmospaces": "启动 MolmoSpaces",
                 "arena": "启动 Arena",
+                "libero": "启动 LIBERO",
+                "robotwin": "启动 RoboTwin",
             }
             self.mujoco_start_btn.setText(start_labels.get(backend, "启动"))
         if hasattr(self, "mujoco_open_model_btn"):
@@ -29151,6 +31368,10 @@ class CameraTopicWindow(QMainWindow):
                 self.mujoco_status_label.setText("空闲 · MolmoSpaces")
             elif backend == "arena":
                 self.mujoco_status_label.setText("空闲 · IsaacLab-Arena")
+            elif backend == "libero":
+                self.mujoco_status_label.setText("空闲 · LIBERO")
+            elif backend == "robotwin":
+                self.mujoco_status_label.setText("空闲 · RoboTwin")
         if backend != "isaac":
             # Stop Isaac-only preview timers / forced topic subscribe while on other backends.
             if getattr(self, "_sim_npy_preview_timer", None) is not None:
@@ -29194,6 +31415,8 @@ class CameraTopicWindow(QMainWindow):
             "sim_backend_mujoco_radio",
             "sim_backend_spaces_radio",
             "sim_backend_arena_radio",
+            "sim_backend_libero_radio",
+            "sim_backend_robotwin_radio",
         ):
             w = getattr(self, wname, None)
             if w is not None:
@@ -29204,7 +31427,7 @@ class CameraTopicWindow(QMainWindow):
             self.mujoco_start_btn.setEnabled(
                 (not mj_running)
                 and (not isaac_running)
-                and backend in ("mujoco", "molmospaces", "arena")
+                and backend in ("mujoco", "molmospaces", "arena", "libero", "robotwin")
             )
 
         if mj_running:
@@ -29234,7 +31457,8 @@ class CameraTopicWindow(QMainWindow):
         backend = self._sim_backend_id()
         if hasattr(self, "mujoco_start_btn"):
             self.mujoco_start_btn.setEnabled(
-                (not running) and backend in ("mujoco", "molmospaces", "arena")
+                (not running)
+                and backend in ("mujoco", "molmospaces", "arena", "libero", "robotwin")
             )
         if hasattr(self, "mujoco_stop_btn"):
             self.mujoco_stop_btn.setEnabled(running)
@@ -29275,6 +31499,34 @@ class CameraTopicWindow(QMainWindow):
             "arena_gpu_check",
             "arena_gpu_spin",
             "arena_extra_edit",
+            "libero_rlinf_edit",
+            "libero_rlinf_browse_btn",
+            "libero_suite_combo",
+            "libero_config_combo",
+            "libero_mode_combo",
+            "libero_ckpt_edit",
+            "libero_ckpt_browse_btn",
+            "libero_pi_start_btn",
+            "libero_pi_probe_btn",
+            "libero_max_tasks_spin",
+            "libero_trials_spin",
+            "libero_chunk_spin",
+            "libero_steps_spin",
+            "libero_render_gui_check",
+            "robotwin_rlinf_edit",
+            "robotwin_rlinf_browse_btn",
+            "robotwin_root_edit",
+            "robotwin_root_browse_btn",
+            "robotwin_assets_edit",
+            "robotwin_assets_browse_btn",
+            "robotwin_task_combo",
+            "robotwin_config_combo",
+            "robotwin_gpu_spin",
+            "robotwin_ckpt_edit",
+            "robotwin_ckpt_browse_btn",
+            "robotwin_num_envs_spin",
+            "robotwin_max_steps_spin",
+            "robotwin_render_gui_check",
             "mujoco_open_model_btn",
         ):
             w = getattr(self, wname, None)
@@ -29288,6 +31540,10 @@ class CameraTopicWindow(QMainWindow):
             self._on_molmospaces_run_clicked()
         elif backend == "arena":
             self._on_arena_run_clicked()
+        elif backend == "libero":
+            self._on_libero_run_clicked()
+        elif backend == "robotwin":
+            self._on_robotwin_run_clicked()
         else:
             self._on_mujoco_start_clicked()
 
@@ -29297,6 +31553,18 @@ class CameraTopicWindow(QMainWindow):
             root = self._resolve_molmospaces_root()
         elif backend == "arena":
             root = self._resolve_arena_root()
+        elif backend == "libero":
+            root = resolve_rlinf_root(
+                self.libero_rlinf_edit.text() if hasattr(self, "libero_rlinf_edit") else ""
+            )
+        elif backend == "robotwin":
+            root = str(
+                resolve_robotwin_root(
+                    self.robotwin_root_edit.text()
+                    if hasattr(self, "robotwin_root_edit")
+                    else ""
+                )
+            )
         else:
             self._on_mujoco_open_model_dir()
             return
@@ -29583,6 +31851,695 @@ class CameraTopicWindow(QMainWindow):
         )
         self._update_mujoco_ui()
 
+    def _libero_ckpt_text(self) -> str:
+        if hasattr(self, "libero_ckpt_edit"):
+            return self.libero_ckpt_edit.text().strip()
+        return LIBERO_CKPT_DEFAULT
+
+    def _libero_config_id(self) -> str:
+        if hasattr(self, "libero_config_combo"):
+            return str(self.libero_config_combo.currentData() or LIBERO_CONFIG_DEFAULT)
+        return LIBERO_CONFIG_DEFAULT
+
+    def _libero_mode_id(self) -> str:
+        if hasattr(self, "libero_mode_combo"):
+            return str(self.libero_mode_combo.currentData() or "remote")
+        return "remote"
+
+    def _on_libero_mode_changed(self, *_args) -> None:
+        # Both modes may need Pi deploy (local = auto-deploy serve + remote client).
+        for wname in ("libero_pi_start_btn", "libero_pi_probe_btn"):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(True)
+
+    def _on_libero_rlinf_browse(self) -> None:
+        start = ""
+        if hasattr(self, "libero_rlinf_edit"):
+            start = self.libero_rlinf_edit.text().strip()
+        start = start or RLINF_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 RLinf 仓库", start)
+        if selected and hasattr(self, "libero_rlinf_edit"):
+            self.libero_rlinf_edit.setText(selected)
+
+    def _on_libero_ckpt_browse(self) -> None:
+        start = self._libero_ckpt_text() or str(EAI_DIR)
+        if start.startswith("gs://"):
+            start = str(EAI_DIR / ".cache" / "openpi")
+        selected = QFileDialog.getExistingDirectory(self, "选择 LIBERO checkpoint 目录", start)
+        if selected and hasattr(self, "libero_ckpt_edit"):
+            self.libero_ckpt_edit.setText(selected)
+
+    def _on_libero_pi_start_clicked(self) -> None:
+        # Sync LIBERO ckpt into MolmoSpaces Pi field so shared deploy path works.
+        ckpt = self._libero_ckpt_text()
+        cfg = self._libero_config_id()
+        if hasattr(self, "molmospaces_pi_ckpt_edit") and ckpt:
+            self.molmospaces_pi_ckpt_edit.setText(ckpt)
+        try:
+            self._append_mujoco_log(f"[libero] 部署 Pi config={cfg} ckpt={ckpt}")
+            ok, msg = self._ensure_pi_policy_ready(
+                start_if_needed=True,
+                wait_s=900.0,
+                prefer_ckpt=ckpt,
+                prefer_config=cfg,
+            )
+        except Exception as exc:  # noqa: BLE001
+            msg = f"{type(exc).__name__}: {exc}"
+            self._append_mujoco_log(f"[libero] 部署异常: {msg}")
+            self._on_mujoco_status(f"Pi 部署失败: {msg}")
+            return
+        if ok:
+            self._on_mujoco_status(f"Pi 已部署: {msg}")
+        else:
+            self._on_mujoco_status(f"Pi 部署失败: {msg}")
+
+    def _libero_rynnvalue_server_url(self) -> str:
+        if hasattr(self, "libero_rynnvalue_url_edit"):
+            return (
+                self.libero_rynnvalue_url_edit.text().strip()
+                or "http://127.0.0.1:8001"
+            )
+        return "http://127.0.0.1:8001"
+
+    def _libero_rynnvalue_hud_enabled(self) -> bool:
+        return bool(
+            hasattr(self, "libero_rynnvalue_hud_check")
+            and self.libero_rynnvalue_hud_check.isChecked()
+        )
+
+    def _update_libero_rynnvalue_hud_controls(self) -> None:
+        enabled = self._libero_rynnvalue_hud_enabled()
+        for wname in (
+            "libero_rynnvalue_refresh_spin",
+            "libero_rynnvalue_url_edit",
+            "libero_rynnvalue_frames_spin",
+            "libero_rynnvalue_probe_btn",
+            "libero_rynnvalue_deploy_btn",
+        ):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(enabled)
+        timer = getattr(self, "_libero_rynnvalue_status_timer", None)
+        if timer is not None:
+            if enabled:
+                if not timer.isActive():
+                    timer.start()
+            else:
+                timer.stop()
+
+    def _set_libero_rynnvalue_status(self, text: str, *, level: str = "muted") -> None:
+        if not hasattr(self, "libero_rynnvalue_status_label"):
+            return
+        color = {
+            "ok": "#3dd68c",
+            "warn": "#e6a23c",
+            "err": "#f56c6c",
+            "muted": UI_TEXT_MUTED,
+        }.get(level, UI_TEXT_MUTED)
+        self.libero_rynnvalue_status_label.setText(text)
+        self.libero_rynnvalue_status_label.setStyleSheet(f"color: {color};")
+
+    def _probe_and_show_rynnvalue_reward_status(self, *, log: bool = False) -> Tuple[bool, str]:
+        url = self._libero_rynnvalue_server_url()
+        launcher_running = bool(
+            getattr(self, "_rynnvalue_launcher", None)
+            and self._rynnvalue_launcher.is_running()
+        )
+        ok, msg, info = probe_rynnvalue_reward_server(url)
+        if ok:
+            self._set_libero_rynnvalue_status(f"● {msg}", level="ok")
+            if hasattr(self, "libero_rynnvalue_deploy_btn"):
+                self.libero_rynnvalue_deploy_btn.setText("已部署")
+        elif info.get("listening") or launcher_running:
+            detail = msg
+            if launcher_running and not info.get("listening"):
+                detail = "RynnValue 进程已启动，等待 /health…"
+            self._set_libero_rynnvalue_status(f"◐ {detail}", level="warn")
+            if hasattr(self, "libero_rynnvalue_deploy_btn"):
+                self.libero_rynnvalue_deploy_btn.setText("部署中…")
+        else:
+            self._set_libero_rynnvalue_status(f"○ {msg}", level="err")
+            if hasattr(self, "libero_rynnvalue_deploy_btn"):
+                self.libero_rynnvalue_deploy_btn.setText("部署 RynnValue")
+        if log:
+            prev = getattr(self, "_libero_rynnvalue_last_logged_msg", "")
+            if msg != prev:
+                self._libero_rynnvalue_last_logged_msg = msg
+                self._append_mujoco_log(f"[rynnvalue] {msg}")
+        return ok, msg
+
+    def _on_libero_rynnvalue_hud_toggled(self, checked: bool) -> None:
+        self._update_libero_rynnvalue_hud_controls()
+        if checked:
+            self._append_mujoco_log(
+                f"[rynnvalue] Live HUD 已勾选，探测 {self._libero_rynnvalue_server_url()}"
+            )
+            ok, msg = self._probe_and_show_rynnvalue_reward_status(log=True)
+            if not ok:
+                self._on_mujoco_status(f"RynnValue 未就绪: {msg}")
+            else:
+                self._on_mujoco_status(msg)
+        else:
+            self._set_libero_rynnvalue_status(
+                "未启用 Live HUD", level="muted"
+            )
+            if hasattr(self, "libero_rynnvalue_deploy_btn"):
+                self.libero_rynnvalue_deploy_btn.setText("部署 RynnValue")
+
+    def _on_libero_rynnvalue_url_changed(self) -> None:
+        if self._libero_rynnvalue_hud_enabled():
+            self._probe_and_show_rynnvalue_reward_status(log=False)
+
+    def _on_libero_rynnvalue_status_tick(self) -> None:
+        if self._libero_rynnvalue_hud_enabled():
+            self._probe_and_show_rynnvalue_reward_status(log=False)
+
+    def _on_libero_rynnvalue_probe_clicked(self) -> None:
+        ok, msg = self._probe_and_show_rynnvalue_reward_status(log=True)
+        self._on_mujoco_status(msg if ok else f"RynnValue 未就绪: {msg}")
+
+    def _on_rynnvalue_running_for_libero_hud(self, *_args) -> None:
+        if self._libero_rynnvalue_hud_enabled():
+            self._probe_and_show_rynnvalue_reward_status(log=False)
+
+    def _rynnvalue_deploy_model_path(self) -> str:
+        if hasattr(self, "rynnvalue_model_edit"):
+            text = self.rynnvalue_model_edit.text().strip()
+            if text:
+                return text
+        return resolve_rynnvalue_model()
+
+    def _rynnvalue_deploy_ckpt_path(self) -> str:
+        if hasattr(self, "rynnvalue_ckpt_edit"):
+            return self.rynnvalue_ckpt_edit.text().strip()
+        return resolve_rynnvalue_ckpt()
+
+    def _start_rynnvalue_reward_server(self) -> Tuple[bool, str]:
+        if not hasattr(self, "_rynnvalue_launcher"):
+            return False, "RynnValue launcher 未初始化"
+        url = self._libero_rynnvalue_server_url()
+        if self._rynnvalue_launcher.is_running():
+            ok, msg, _info = probe_rynnvalue_reward_server(url)
+            if ok:
+                return True, msg
+            return (
+                False,
+                "RynnValue 进程已在运行，但 /health 未就绪。"
+                "若正在跑 infer/评测，请先在「RynnValue」页停止再部署 reward_server。",
+            )
+        _host, port = parse_rynnvalue_server_url(url)
+        model = self._rynnvalue_deploy_model_path()
+        ckpt = self._rynnvalue_deploy_ckpt_path()
+        if not model and not ckpt:
+            return False, "未找到 RynnValue 模型，请先在「RynnValue」页填写模型路径"
+        if model and not _rynnvalue_hf_model_ready(model) and not ckpt:
+            return False, f"模型目录不可用: {model}"
+
+        num_frames = 8
+        if hasattr(self, "libero_rynnvalue_frames_spin"):
+            num_frames = int(self.libero_rynnvalue_frames_spin.value())
+        cuda = "0"
+        if hasattr(self, "rynnvalue_cuda_edit"):
+            cuda = self.rynnvalue_cuda_edit.text().strip() or "0"
+        repo = ""
+        if hasattr(self, "rynnvalue_root_edit"):
+            repo = self.rynnvalue_root_edit.text().strip()
+        py = ""
+        if hasattr(self, "rynnvalue_python_edit"):
+            py = self.rynnvalue_python_edit.text().strip()
+        py = py or resolve_rynnvalue_python(repo)
+        # Fail fast if server deps missing (otherwise process exits immediately → Connection refused).
+        try:
+            import subprocess
+
+            chk = subprocess.run(
+                [
+                    py,
+                    "-c",
+                    "import fastapi, uvicorn, omegaconf, hydra, loguru; "
+                    "import robometer.evals.baseline_eval_server",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=os.path.join(resolve_rynnvalue_root(repo), "robometer"),
+                env={
+                    **os.environ,
+                    "PYTHONPATH": os.pathsep.join(
+                        [
+                            os.path.join(resolve_rynnvalue_root(repo), "robometer"),
+                            (os.environ.get("PYTHONPATH") or ""),
+                        ]
+                    ).strip(os.pathsep),
+                    "PYTHONNOUSERSITE": "1",
+                },
+            )
+            if chk.returncode != 0:
+                detail = (chk.stderr or chk.stdout or "").strip()[:400]
+                return (
+                    False,
+                    f"reward_server 依赖未就绪 ({py}). "
+                    f"缺少 fastapi/uvicorn/omegaconf 或 robometer 导入失败: {detail}",
+                )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"无法探测 RynnValue Python 依赖: {exc}"
+
+        # Keep RynnValue tab port in sync with LIBERO URL.
+        if hasattr(self, "rynnvalue_port_spin"):
+            self.rynnvalue_port_spin.setValue(int(port))
+        if hasattr(self, "rynnvalue_job_combo"):
+            for i in range(self.rynnvalue_job_combo.count()):
+                if str(self.rynnvalue_job_combo.itemData(i) or "") == "reward_server":
+                    self.rynnvalue_job_combo.setCurrentIndex(i)
+                    break
+
+        self._append_mujoco_log(
+            f"[rynnvalue] 部署 reward_server model={model or '(ckpt)'} "
+            f"ckpt={ckpt or '-'} port={port} num_frames={num_frames} cuda={cuda}"
+        )
+        self._rynnvalue_launcher.start(
+            job="reward_server",
+            repo_root=repo or resolve_rynnvalue_root(),
+            python_bin=py or resolve_rynnvalue_python(repo),
+            model_path=model,
+            checkpoint_path=ckpt,
+            num_frames=num_frames,
+            port=int(port),
+            cuda_devices=cuda,
+        )
+        if not self._rynnvalue_launcher.is_running():
+            return False, "启动 reward_server 失败（见 RynnValue 日志）"
+        self._set_libero_rynnvalue_status(
+            "◐ 正在加载 RynnValue 模型…", level="warn"
+        )
+        if hasattr(self, "libero_rynnvalue_deploy_btn"):
+            self.libero_rynnvalue_deploy_btn.setText("部署中…")
+        return True, "已启动 reward_server，等待健康检查"
+
+    def _ensure_rynnvalue_reward_server_ready(
+        self,
+        *,
+        start_if_needed: bool = True,
+        wait_s: float = 600.0,
+    ) -> Tuple[bool, str]:
+        ok, msg = self._probe_and_show_rynnvalue_reward_status(log=True)
+        if ok:
+            return True, msg
+
+        if not start_if_needed:
+            return False, msg
+
+        started_ok, start_msg = self._start_rynnvalue_reward_server()
+        if not started_ok:
+            self._probe_and_show_rynnvalue_reward_status(log=True)
+            return False, start_msg
+        self._append_mujoco_log(f"[rynnvalue] {start_msg}")
+
+        deadline = time.time() + max(30.0, float(wait_s))
+        last = start_msg
+        while time.time() < deadline:
+            QApplication.processEvents()
+            ok, last = self._probe_and_show_rynnvalue_reward_status(log=False)
+            if ok:
+                self._append_mujoco_log(f"[rynnvalue] {last}")
+                return True, last
+            launcher = getattr(self, "_rynnvalue_launcher", None)
+            if launcher is not None and not launcher.is_running():
+                # Process died; one more probe in case external server came up.
+                ok, last = self._probe_and_show_rynnvalue_reward_status(log=True)
+                if ok:
+                    return True, last
+                return False, f"reward_server 进程已退出: {last}"
+            time.sleep(2.0)
+        return False, f"等待 RynnValue reward_server 超时: {last}"
+
+    def _on_libero_rynnvalue_deploy_clicked(self) -> None:
+        if not self._libero_rynnvalue_hud_enabled():
+            self._on_mujoco_status("请先勾选 RynnValue Live HUD")
+            return
+        ok, msg = self._probe_and_show_rynnvalue_reward_status(log=True)
+        if ok:
+            self._on_mujoco_status(msg)
+            return
+        self._on_mujoco_status("正在部署 RynnValue reward_server…")
+        ok, msg = self._ensure_rynnvalue_reward_server_ready(
+            start_if_needed=True, wait_s=900.0
+        )
+        self._on_mujoco_status(msg if ok else f"部署失败: {msg}")
+
+    def _on_libero_run_clicked(self) -> None:
+        if (
+            self._sim_eval_launcher.is_running()
+            or self._sim_bridge_launcher.is_running()
+        ):
+            self._on_mujoco_status("Isaac 评测/相机桥正在运行，请先停止")
+            return
+        if self._sim_backend_id() != "libero":
+            self._on_mujoco_status("请先将仿真后端切换为 LIBERO")
+            return
+        if self._mujoco_launcher.is_running():
+            self._on_mujoco_status(
+                "MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin 正在运行，请先停止"
+            )
+            return
+
+        self.mujoco_log_edit.clear()
+        mode = self._libero_mode_id()
+        suite = "libero_spatial"
+        if hasattr(self, "libero_suite_combo"):
+            suite = str(self.libero_suite_combo.currentData() or suite)
+        cfg = self._libero_config_id()
+        ckpt = self._libero_ckpt_text()
+        rlinf = ""
+        if hasattr(self, "libero_rlinf_edit"):
+            rlinf = self.libero_rlinf_edit.text().strip()
+        py = resolve_libero_python()
+        ok_deps, dep_msg = probe_libero_deps(py)
+        if not ok_deps:
+            self._append_mujoco_log(f"[libero] 依赖探测失败: {dep_msg}")
+            self._append_mujoco_log(libero_install_hint(py))
+            self._on_mujoco_status("LIBERO 依赖未就绪（见日志）")
+            return
+
+        # libero 客户端环境无 jax/openpi；「local」改为自动部署 serve + remote 评测。
+        eval_mode = mode
+        if mode == "local":
+            self._append_mujoco_log(
+                "[libero] local：libero 环境无 jax，自动部署 openpi serve_policy，"
+                "再以 remote 客户端评测"
+            )
+            eval_mode = "remote"
+
+        self._append_mujoco_log(f"[libero] 确认 Pi serve（config={cfg}）…")
+        if hasattr(self, "molmospaces_pi_ckpt_edit") and ckpt:
+            self.molmospaces_pi_ckpt_edit.setText(ckpt)
+        ok, msg = self._ensure_pi_policy_ready(
+            start_if_needed=True,
+            wait_s=900.0,
+            prefer_ckpt=ckpt,
+            prefer_config=cfg,
+        )
+        if not ok:
+            self._append_mujoco_log(f"[libero] Pi 预检失败: {msg}")
+            self._on_mujoco_status(f"Pi 未就绪: {msg}")
+            return
+        self._append_mujoco_log(f"[libero] Pi 预检通过: {msg}")
+
+        max_tasks = 1
+        trials = 1
+        chunk = 5
+        num_steps = 10
+        if hasattr(self, "libero_max_tasks_spin"):
+            max_tasks = int(self.libero_max_tasks_spin.value())
+        if hasattr(self, "libero_trials_spin"):
+            trials = int(self.libero_trials_spin.value())
+        if hasattr(self, "libero_chunk_spin"):
+            chunk = int(self.libero_chunk_spin.value())
+        if hasattr(self, "libero_steps_spin"):
+            num_steps = int(self.libero_steps_spin.value())
+        render_gui = True
+        if hasattr(self, "libero_render_gui_check"):
+            render_gui = bool(self.libero_render_gui_check.isChecked())
+        rynnvalue_live_hud = False
+        rynnvalue_refresh_sec = 1.0
+        rynnvalue_server_url = "http://127.0.0.1:8001"
+        rynnvalue_num_frames = 8
+        if hasattr(self, "libero_rynnvalue_hud_check"):
+            rynnvalue_live_hud = bool(self.libero_rynnvalue_hud_check.isChecked())
+        if hasattr(self, "libero_rynnvalue_refresh_spin"):
+            rynnvalue_refresh_sec = float(self.libero_rynnvalue_refresh_spin.value())
+        if hasattr(self, "libero_rynnvalue_url_edit"):
+            rynnvalue_server_url = (
+                self.libero_rynnvalue_url_edit.text().strip() or rynnvalue_server_url
+            )
+        if hasattr(self, "libero_rynnvalue_frames_spin"):
+            rynnvalue_num_frames = int(self.libero_rynnvalue_frames_spin.value())
+
+        if rynnvalue_live_hud:
+            self._append_mujoco_log(
+                f"[libero] 确认 RynnValue reward_server（{rynnvalue_server_url}）…"
+            )
+            ok_rv, msg_rv = self._ensure_rynnvalue_reward_server_ready(
+                start_if_needed=True,
+                wait_s=900.0,
+            )
+            if not ok_rv:
+                self._append_mujoco_log(f"[libero] RynnValue 预检失败: {msg_rv}")
+                self._on_mujoco_status(f"RynnValue 未就绪: {msg_rv}")
+                return
+            self._append_mujoco_log(f"[libero] RynnValue 预检通过: {msg_rv}")
+
+        try:
+            argv, cwd, env_extra = build_libero_eval_argv(
+                mode=eval_mode,
+                task_suite=suite,
+                config_name=cfg,
+                checkpoint=ckpt,
+                host=LIBERO_HOST_DEFAULT,
+                port=LIBERO_PORT_DEFAULT,
+                num_trials_per_task=trials,
+                max_tasks=max_tasks,
+                action_chunk=chunk,
+                num_steps=num_steps,
+                python_bin=py,
+                rlinf_root=rlinf,
+                render_gui=render_gui,
+                rynnvalue_live_hud=rynnvalue_live_hud,
+                rynnvalue_server_url=rynnvalue_server_url,
+                rynnvalue_refresh_sec=rynnvalue_refresh_sec,
+                rynnvalue_num_frames=rynnvalue_num_frames,
+                rynnvalue_show_window=bool((os.environ.get("DISPLAY") or "").strip()),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._on_mujoco_status(f"无法组装 LIBERO 命令: {exc}")
+            return
+
+        self._append_mujoco_log(
+            f"[libero] mode={mode}"
+            + (f"→{eval_mode}" if eval_mode != mode else "")
+            + f" suite={suite} config={cfg} render_gui={render_gui}"
+            + f" rynnvalue_hud={rynnvalue_live_hud}"
+        )
+        self._append_mujoco_log(f"[libero] python={py}")
+        self._append_mujoco_log(f"[libero] ckpt={ckpt}")
+        self._append_mujoco_log(
+            f"[libero] max_tasks={max_tasks} trials={trials} "
+            f"chunk={chunk} num_steps={num_steps}"
+        )
+        if rynnvalue_live_hud:
+            self._append_mujoco_log(
+                f"[libero] RynnValue Live HUD url={rynnvalue_server_url} "
+                f"refresh={rynnvalue_refresh_sec}s num_frames={rynnvalue_num_frames}"
+            )
+        self._append_mujoco_log(f"[libero] out={LIBERO_EVAL_OUTPUT_DIR}")
+        if render_gui and not (os.environ.get("DISPLAY") or "").strip():
+            self._append_mujoco_log(
+                "[libero] 警告: DISPLAY 为空，图形窗口可能无法弹出"
+            )
+        clean_env = {k: v for k, v in env_extra.items() if v is not None}
+        self._mujoco_launcher.start_cwd_command(
+            cwd=str(cwd),
+            argv=argv,
+            label=f"libero {suite}",
+            env_extra=clean_env,
+        )
+        self._update_mujoco_ui()
+
+    def _robotwin_ckpt_text(self) -> str:
+        if hasattr(self, "robotwin_ckpt_edit"):
+            return self.robotwin_ckpt_edit.text().strip()
+        return ROBOTWIN_CKPT_DEFAULT
+
+    def _robotwin_config_id(self) -> str:
+        if hasattr(self, "robotwin_config_combo"):
+            return str(
+                self.robotwin_config_combo.currentData() or ROBOTWIN_CONFIG_DEFAULT
+            )
+        return ROBOTWIN_CONFIG_DEFAULT
+
+    def _robotwin_task_id(self) -> str:
+        if hasattr(self, "robotwin_task_combo"):
+            return str(self.robotwin_task_combo.currentData() or ROBOTWIN_TASK_DEFAULT)
+        return ROBOTWIN_TASK_DEFAULT
+
+    def _on_robotwin_rlinf_browse(self) -> None:
+        start = ""
+        if hasattr(self, "robotwin_rlinf_edit"):
+            start = self.robotwin_rlinf_edit.text().strip()
+        start = start or RLINF_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 RLinf 仓库", start)
+        if selected and hasattr(self, "robotwin_rlinf_edit"):
+            self.robotwin_rlinf_edit.setText(selected)
+
+    def _on_robotwin_root_browse(self) -> None:
+        start = ""
+        if hasattr(self, "robotwin_root_edit"):
+            start = self.robotwin_root_edit.text().strip()
+        start = start or str(ROBOTWIN_ROOT_DEFAULT)
+        selected = QFileDialog.getExistingDirectory(self, "选择 RoboTwin 仓库", start)
+        if selected and hasattr(self, "robotwin_root_edit"):
+            self.robotwin_root_edit.setText(selected)
+
+    def _on_robotwin_assets_browse(self) -> None:
+        start = ""
+        if hasattr(self, "robotwin_assets_edit"):
+            start = self.robotwin_assets_edit.text().strip()
+        start = start or resolve_robotwin_assets()
+        selected = QFileDialog.getExistingDirectory(self, "选择 RoboTwin assets", start)
+        if selected and hasattr(self, "robotwin_assets_edit"):
+            self.robotwin_assets_edit.setText(selected)
+
+    def _on_robotwin_ckpt_browse(self) -> None:
+        start = self._robotwin_ckpt_text() or str(EAI_DIR)
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 RoboTwin checkpoint 目录", start
+        )
+        if selected and hasattr(self, "robotwin_ckpt_edit"):
+            self.robotwin_ckpt_edit.setText(selected)
+
+    def _on_robotwin_run_clicked(self) -> None:
+        if (
+            self._sim_eval_launcher.is_running()
+            or self._sim_bridge_launcher.is_running()
+        ):
+            self._on_mujoco_status("Isaac 评测/相机桥正在运行，请先停止")
+            return
+        if self._sim_backend_id() != "robotwin":
+            self._on_mujoco_status("请先将仿真后端切换为 RoboTwin")
+            return
+        if self._mujoco_launcher.is_running():
+            self._on_mujoco_status(
+                "MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin 正在运行，请先停止"
+            )
+            return
+
+        self.mujoco_log_edit.clear()
+        task = self._robotwin_task_id()
+        cfg = self._robotwin_config_id()
+        ckpt = self._robotwin_ckpt_text()
+        rlinf = ""
+        if hasattr(self, "robotwin_rlinf_edit"):
+            rlinf = self.robotwin_rlinf_edit.text().strip()
+        rt = ""
+        if hasattr(self, "robotwin_root_edit"):
+            rt = self.robotwin_root_edit.text().strip()
+        assets = ""
+        if hasattr(self, "robotwin_assets_edit"):
+            assets = self.robotwin_assets_edit.text().strip()
+        gpu = 0
+        num_envs = 1
+        max_steps = 200
+        if hasattr(self, "robotwin_gpu_spin"):
+            gpu = int(self.robotwin_gpu_spin.value())
+        if hasattr(self, "robotwin_num_envs_spin"):
+            num_envs = int(self.robotwin_num_envs_spin.value())
+        if hasattr(self, "robotwin_max_steps_spin"):
+            max_steps = int(self.robotwin_max_steps_spin.value())
+        render_gui = True
+        if hasattr(self, "robotwin_render_gui_check"):
+            render_gui = bool(self.robotwin_render_gui_check.isChecked())
+        if render_gui and num_envs > 1:
+            self._append_mujoco_log(
+                f"[robotwin] 图形窗口开启：并行环境 {num_envs} -> 1"
+            )
+            num_envs = 1
+            if hasattr(self, "robotwin_num_envs_spin"):
+                self.robotwin_num_envs_spin.setValue(1)
+
+        py = resolve_robotwin_python()
+        ok_deps, dep_msg = probe_robotwin_deps(
+            py,
+            rlinf_root=None,
+            robotwin_root=resolve_robotwin_root(rt),
+        )
+        # Soft-fail: still allow launch so logs show install hints; hard-block only
+        # when python itself is missing.
+        if not ok_deps:
+            self._append_mujoco_log(f"[robotwin] 依赖探测失败: {dep_msg}")
+            self._append_mujoco_log(robotwin_install_hint(py))
+            # Continue if VectorEnv missing but user may have env almost ready;
+            # only abort when sapien/torch clearly missing.
+            if "MISSING" in str(dep_msg):
+                self._on_mujoco_status("RoboTwin 依赖未就绪（见日志）")
+                return
+            self._append_mujoco_log(
+                "[robotwin] 继续启动（VectorEnv 可能需切到 RLinf_support）…"
+            )
+
+        if not ckpt:
+            self._on_mujoco_status("请填写 RoboTwin checkpoint 路径")
+            return
+        if not os.path.isdir(os.path.expanduser(ckpt)):
+            self._append_mujoco_log(
+                f"[robotwin] checkpoint 目录不存在，尝试从 HF 拉取: "
+                f"{ROBOTWIN_CKPT_HF_DEFAULT}"
+            )
+            ok_dl, ckpt_or_err = ensure_robotwin_checkpoint(
+                ckpt,
+                cfg,
+                hf_repo=ROBOTWIN_CKPT_HF_DEFAULT,
+                log=self._append_mujoco_log,
+            )
+            if not ok_dl:
+                self._append_mujoco_log(f"[robotwin] {ckpt_or_err}")
+                self._on_mujoco_status(f"checkpoint 不可用: {ckpt}")
+                return
+            ckpt = ckpt_or_err
+            if hasattr(self, "robotwin_ckpt_edit"):
+                self.robotwin_ckpt_edit.setText(ckpt)
+
+        assets = resolve_robotwin_assets(assets, robotwin_root=resolve_robotwin_root(rt))
+        if hasattr(self, "robotwin_assets_edit"):
+            self.robotwin_assets_edit.setText(assets)
+        assets_objects = os.path.join(assets, "assets", "objects")
+        if not os.path.isdir(assets_objects):
+            self._append_mujoco_log(
+                f"[robotwin] 资产未就绪: {assets_objects}\n"
+                f"  请在 RoboTwin 根目录执行: bash script/_download_assets.sh"
+            )
+            self._on_mujoco_status("RoboTwin assets 未下载（见日志）")
+            return
+
+        try:
+            argv, cwd, env_extra = build_robotwin_eval_argv(
+                task=task,
+                policy_config=cfg,
+                checkpoint=ckpt,
+                assets_path=assets,
+                num_envs=num_envs,
+                max_episode_steps=max_steps,
+                python_bin=py,
+                rlinf_root=rlinf,
+                robotwin_root=rt,
+                gpu=str(gpu),
+                render_gui=render_gui,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._on_mujoco_status(f"无法组装 RoboTwin 命令: {exc}")
+            return
+
+        self._append_mujoco_log(
+            f"[robotwin] task={task} config={cfg} gpu={gpu} envs={num_envs}"
+            f" render_gui={render_gui}"
+        )
+        self._append_mujoco_log(f"[robotwin] python={py}")
+        self._append_mujoco_log(f"[robotwin] ckpt={ckpt}")
+        self._append_mujoco_log(f"[robotwin] assets={assets or resolve_robotwin_assets()}")
+        self._append_mujoco_log(f"[robotwin] out={ROBOTWIN_EVAL_OUTPUT_DIR}")
+        if render_gui and not (os.environ.get("DISPLAY") or "").strip():
+            self._append_mujoco_log(
+                "[robotwin] 警告: DISPLAY 为空，SAPIEN 图形窗口可能无法弹出"
+            )
+        clean_env = {k: v for k, v in env_extra.items() if v is not None}
+        self._mujoco_launcher.start_cwd_command(
+            cwd=str(cwd),
+            argv=argv,
+            label=f"robotwin {task}",
+            env_extra=clean_env,
+        )
+        self._update_mujoco_ui()
+
     def _resolve_molmospaces_root(self) -> str:
         raw = ""
         if hasattr(self, "molmospaces_root_edit"):
@@ -29797,14 +32754,30 @@ class CameraTopicWindow(QMainWindow):
             getattr(self, "_pi_policy_launcher", None)
             and self._pi_policy_launcher.is_running()
         )
-        listening = port_listening(PI_SERVER_HOST_DEFAULT, MOLMOSPACES_PI_PORT_DEFAULT)
+        host = PI_SERVER_HOST_DEFAULT
+        port = MOLMOSPACES_PI_PORT_DEFAULT
+        listening = port_listening(host, port)
+        # serve_policy 进程常驻 = 正常；端口已开就视为就绪，不要一直「部署中」。
+        if (
+            running
+            and listening
+            and hasattr(self, "_pi_policy_ready_timer")
+            and self._pi_policy_ready_timer.isActive()
+        ):
+            self._pi_policy_ready_timer.stop()
         if hasattr(self, "molmospaces_pi_start_btn"):
             self.molmospaces_pi_start_btn.setEnabled(not running)
-            self.molmospaces_pi_start_btn.setText(
-                "部署中…" if running else "部署启动"
-            )
+            if running and listening:
+                self.molmospaces_pi_start_btn.setText("已就绪")
+            elif running:
+                self.molmospaces_pi_start_btn.setText("部署中…")
+            elif listening:
+                self.molmospaces_pi_start_btn.setText("部署启动")
+            else:
+                self.molmospaces_pi_start_btn.setText("部署启动")
         if hasattr(self, "molmospaces_pi_stop_btn"):
             self.molmospaces_pi_stop_btn.setEnabled(running or listening)
+
 
     def _on_molmospaces_pi_ckpt_browse(self) -> None:
         cur = self._molmospaces_pi_ckpt_text()
@@ -29858,17 +32831,28 @@ class CameraTopicWindow(QMainWindow):
         *,
         start_if_needed: bool = True,
         wait_s: float = 600.0,
+        prefer_ckpt: str = "",
+        prefer_config: str = "",
     ) -> Tuple[bool, str]:
         """Validate Pi ckpt and confirm ws://host:port is callable."""
-        prefer = self._molmospaces_pi_ckpt_text()
+        prefer = (prefer_ckpt or "").strip() or self._molmospaces_pi_ckpt_text()
         # Force jointpos default config when path points at jointpos dirs / gs.
-        ckpt = resolve_pi_checkpoint(prefer, config=MOLMOSPACES_PI_CONFIG_DEFAULT)
+        default_cfg = (prefer_config or "").strip() or MOLMOSPACES_PI_CONFIG_DEFAULT
+        ckpt = resolve_pi_checkpoint(prefer, config=default_cfg)
         path = ckpt.path
-        config = ckpt.config or MOLMOSPACES_PI_CONFIG_DEFAULT
-        if "jointpos" in path.replace("\\", "/") and "polaris" not in os.path.basename(
+        config = ckpt.config or default_cfg
+        if prefer_config:
+            config = prefer_config.strip()
+        elif "jointpos" in path.replace("\\", "/") and "polaris" not in os.path.basename(
             path.rstrip("/")
         ):
             config = "pi05_droid_jointpos"
+        if "libero" in path.replace("\\", "/").lower() and not prefer_config:
+            # LIBERO checkpoints should not inherit droid jointpos default.
+            if "pi05" in path:
+                config = "pi05_libero"
+            elif "pi0" in path:
+                config = "pi0_libero"
         host = PI_SERVER_HOST_DEFAULT
         port = MOLMOSPACES_PI_PORT_DEFAULT
         status = checkpoint_status(path)
@@ -29906,16 +32890,48 @@ class CameraTopicWindow(QMainWindow):
 
         ok, msg = probe_pi_server(host, port, timeout_s=3.0)
         if ok:
-            self._append_mujoco_log(f"[pi] {msg}")
-            self._update_molmospaces_pi_deploy_ui()
-            return True, msg
+            match_ok, match_msg = pi_server_matches(
+                port=port, config=config, checkpoint=path
+            )
+            if match_ok:
+                self._append_mujoco_log(f"[pi] {msg} ({match_msg})")
+                self._update_molmospaces_pi_deploy_ui()
+                return True, msg
+            self._append_mujoco_log(
+                f"[pi] 已有服务与目标不匹配: {match_msg} → 停止并重部署 {config}"
+            )
+            if hasattr(self, "_pi_policy_launcher") and self._pi_policy_launcher.is_running():
+                self._pi_policy_launcher.stop()
+            stop_msg = stop_pi_server_on_port(port, log=self._append_mujoco_log)
+            self._append_mujoco_log(f"[pi] {stop_msg}")
+            # Fall through to start_if_needed redeploy below.
+            msg = match_msg
 
         if port_listening(host, port):
-            return (
-                False,
-                f"{host}:{port} 已占用但不是可用的 OpenPI 服务: {msg}。"
-                "请先点「部署停止」再启动。",
+            # Occupied but not a matching / probe-able openpi server.
+            match_ok, match_msg = pi_server_matches(
+                port=port, config=config, checkpoint=path
             )
+            if not match_ok and start_if_needed:
+                self._append_mujoco_log(
+                    f"[pi] 端口占用且不匹配: {match_msg} → 停止后重部署"
+                )
+                if hasattr(self, "_pi_policy_launcher") and self._pi_policy_launcher.is_running():
+                    self._pi_policy_launcher.stop()
+                stop_msg = stop_pi_server_on_port(port, log=self._append_mujoco_log)
+                self._append_mujoco_log(f"[pi] {stop_msg}")
+            elif not match_ok:
+                return (
+                    False,
+                    f"{host}:{port} 已占用但策略不匹配: {match_msg}。"
+                    "请先点「部署停止」再启动。",
+                )
+            elif not ok:
+                return (
+                    False,
+                    f"{host}:{port} 已占用但不是可用的 OpenPI 服务: {msg}。"
+                    "请先点「部署停止」再启动。",
+                )
 
         if not start_if_needed:
             return False, msg
@@ -29946,21 +32962,29 @@ class CameraTopicWindow(QMainWindow):
                 label=f"openpi serve_policy:{config}",
                 env_extra=env_extra,
             )
+            if hasattr(self, "_pi_policy_ready_timer"):
+                self._pi_policy_ready_timer.start()
             self._update_molmospaces_pi_deploy_ui()
 
         deadline = time.time() + max(30.0, float(wait_s))
         last = msg
         while time.time() < deadline:
             QApplication.processEvents()
+            self._update_molmospaces_pi_deploy_ui()
             if not self._pi_policy_launcher.is_running() and not port_listening(
                 host, port
             ):
                 return False, "serve_policy 进程已退出，请查看上方日志"
             ok, last = probe_pi_server(host, port, timeout_s=4.0)
             if ok:
-                self._append_mujoco_log(f"[pi] {last}")
-                self._update_molmospaces_pi_deploy_ui()
-                return True, last
+                match_ok, match_msg = pi_server_matches(
+                    port=port, config=config, checkpoint=path
+                )
+                if match_ok:
+                    self._append_mujoco_log(f"[pi] {last} ({match_msg})")
+                    self._update_molmospaces_pi_deploy_ui()
+                    return True, last
+                last = match_msg
             time.sleep(2.0)
         return False, f"等待策略服务超时: {last}"
 
@@ -30124,6 +33148,9 @@ class CameraTopicWindow(QMainWindow):
             self._append_mujoco_log(
                 f"[molmospaces] max_episodes={'全部' if max_eps <= 0 else max_eps}"
             )
+            self._append_mujoco_log(
+                "[molmospaces] 结束后保留窗口，点「停止」或关闭窗口再退出"
+            )
             self._mujoco_launcher.start_cwd_command(
                 cwd=root,
                 argv=argv,
@@ -30137,6 +33164,8 @@ class CameraTopicWindow(QMainWindow):
                     "MOLMOSPACES_VIEWER_CAM": "front",
                     # TurboVNC: force EGL+Tk window (GLFW often invisible here).
                     "MOLMOSPACES_FORCE_EGL": "1",
+                    # Keep last frame until GUI「停止」or window close.
+                    "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
                     "EAI_DIR": EAI_DIR,
                     "OPENPI_DATA_HOME": os.environ.get("OPENPI_DATA_HOME")
                     or OPENPI_DATA_HOME_DEFAULT,
@@ -30261,6 +33290,9 @@ class CameraTopicWindow(QMainWindow):
         self._append_mujoco_log(
             "[molmospaces] viewer cam: front third-person (机器人正面)"
         )
+        self._append_mujoco_log(
+            "[molmospaces] 结束后保留窗口，点「停止」或关闭窗口再退出"
+        )
         self._mujoco_launcher.start_cwd_command(
             cwd=root,
             argv=argv,
@@ -30271,6 +33303,7 @@ class CameraTopicWindow(QMainWindow):
                 "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
                 "MOLMOSPACES_VIEWER_CAM": "front",
                 "MOLMOSPACES_FORCE_EGL": "1",
+                "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
                 "EAI_DIR": EAI_DIR,
                 "PYTHONPATH": "",
                 "PYTHONNOUSERSITE": "1",
@@ -30521,6 +33554,451 @@ class CameraTopicWindow(QMainWindow):
         path = self.dojo_rl_log_dir_edit.text().strip()
         if path and os.path.isdir(path):
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _append_robometer_log(self, line: str) -> None:
+        if not hasattr(self, "robometer_log_edit"):
+            return
+        self.robometer_log_edit.append(line)
+        bar = self.robometer_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_robometer_status(self, msg: str) -> None:
+        if hasattr(self, "robometer_status_label"):
+            self.robometer_status_label.setText(msg or "空闲")
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.showMessage(msg)
+
+    def _update_robometer_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_robometer_launcher", None)
+            and self._robometer_launcher.is_running()
+        )
+        if hasattr(self, "robometer_start_btn"):
+            self.robometer_start_btn.setEnabled(not running)
+        if hasattr(self, "robometer_stop_btn"):
+            self.robometer_stop_btn.setEnabled(running)
+        for wname in (
+            "robometer_job_combo",
+            "robometer_config_combo",
+            "robometer_root_edit",
+            "robometer_python_edit",
+            "robometer_cuda_edit",
+            "robometer_overrides_edit",
+            "robometer_ckpt_edit",
+            "robometer_refresh_btn",
+            "robometer_render_gui_check",
+            "robometer_wandb_offline_check",
+            "robometer_root_browse_btn",
+            "robometer_ckpt_browse_btn",
+        ):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(not running)
+
+    def _on_robometer_log_dir(self, path: str) -> None:
+        if hasattr(self, "robometer_log_dir_edit"):
+            self.robometer_log_dir_edit.setText(path)
+        if hasattr(self, "robometer_open_log_btn"):
+            self.robometer_open_log_btn.setEnabled(
+                bool(path) and os.path.isdir(path)
+            )
+
+    def _on_robometer_root_browse(self) -> None:
+        cur = self.robometer_root_edit.text().strip() or ROBOMETER_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 robometer-policy-learning 仓库根目录", cur
+        )
+        if selected:
+            self.robometer_root_edit.setText(selected)
+            self.robometer_python_edit.setText(resolve_robometer_python(selected))
+            self._on_robometer_job_changed()
+
+    def _on_robometer_ckpt_browse(self) -> None:
+        cur = self.robometer_ckpt_edit.text().strip() or os.getcwd()
+        start = cur if os.path.isdir(cur) else os.path.dirname(cur) or os.getcwd()
+        selected, _ = QFileDialog.getOpenFileName(
+            self, "选择 checkpoint", start, "Checkpoint (*.pt *.pth *.ckpt *);;All (*)"
+        )
+        if selected:
+            self.robometer_ckpt_edit.setText(selected)
+
+    def _robometer_job_defaults(self) -> Tuple[str, str]:
+        data = self.robometer_job_combo.currentData()
+        if isinstance(data, tuple) and len(data) == 2:
+            return str(data[0]), str(data[1])
+        return "train", "libero_online_rl"
+
+    def _on_robometer_job_changed(self, *_args) -> None:
+        _job, default_cfg = self._robometer_job_defaults()
+        self._refresh_robometer_configs(prefer=default_cfg)
+        if hasattr(self, "robometer_start_btn"):
+            if _job.startswith("eval"):
+                self.robometer_start_btn.setText("启动评测")
+            elif _job == "relabel_server":
+                self.robometer_start_btn.setText("启动服务")
+            else:
+                self.robometer_start_btn.setText("启动训练")
+
+    def _refresh_robometer_configs(self, prefer: Optional[str] = None) -> None:
+        if not hasattr(self, "robometer_config_combo"):
+            return
+        root = self.robometer_root_edit.text().strip()
+        names = list_robometer_configs(root)
+        current = (
+            prefer
+            or self.robometer_config_combo.currentText().strip()
+            or "libero_online_rl"
+        )
+        self.robometer_config_combo.blockSignals(True)
+        self.robometer_config_combo.clear()
+        for name in names:
+            self.robometer_config_combo.addItem(name, name)
+        if not names:
+            self.robometer_config_combo.addItem(current, current)
+        idx = self.robometer_config_combo.findData(current)
+        if idx < 0:
+            idx = self.robometer_config_combo.findText(current)
+        if idx >= 0:
+            self.robometer_config_combo.setCurrentIndex(idx)
+        else:
+            self.robometer_config_combo.setEditText(current)
+        self.robometer_config_combo.blockSignals(False)
+
+    def _on_robometer_start_clicked(self) -> None:
+        if self._robometer_launcher.is_running():
+            self._on_robometer_status("RoboMeter 正在运行")
+            return
+        job, _default_cfg = self._robometer_job_defaults()
+        cfg = (
+            str(self.robometer_config_combo.currentData() or "").strip()
+            or self.robometer_config_combo.currentText().strip()
+        )
+        if not cfg:
+            self._append_robometer_log("[ERROR] 请选择 config")
+            self._on_robometer_status("请选择 config")
+            return
+        overrides_raw = self.robometer_overrides_edit.text().strip()
+        overrides = shlex.split(overrides_raw) if overrides_raw else []
+        ckpt = self.robometer_ckpt_edit.text().strip()
+        if ckpt:
+            if job.startswith("eval"):
+                overrides.append(f"policy_checkpoint={ckpt}")
+            else:
+                overrides.append(f"training.load_dir={ckpt}")
+        if bool(self.robometer_wandb_offline_check.isChecked()):
+            overrides.append("logging.wandb_offline=true")
+        render_gui = bool(self.robometer_render_gui_check.isChecked())
+        if render_gui and not (os.environ.get("DISPLAY") or "").strip():
+            self._append_robometer_log(
+                "[robometer] 警告: DISPLAY 为空，图形窗口可能无法弹出"
+            )
+        self.robometer_log_edit.clear()
+        self.robometer_log_dir_edit.clear()
+        self.robometer_open_log_btn.setEnabled(False)
+        self._robometer_launcher.start(
+            job=job,
+            config_name=cfg,
+            repo_root=self.robometer_root_edit.text().strip(),
+            python_bin=self.robometer_python_edit.text().strip(),
+            cuda_devices=self.robometer_cuda_edit.text().strip(),
+            render_gui=render_gui,
+            hydra_overrides=overrides,
+        )
+        self._update_robometer_ui()
+
+    def _on_robometer_stop_clicked(self) -> None:
+        self._append_robometer_log("--- 用户停止 RoboMeter ---")
+        self._robometer_launcher.stop()
+        self._update_robometer_ui()
+
+    def _on_robometer_open_log_clicked(self) -> None:
+        path = self.robometer_log_dir_edit.text().strip()
+        if path and os.path.isdir(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _append_rynnvalue_log(self, line: str) -> None:
+        if hasattr(self, "rynnvalue_log_edit"):
+            self.rynnvalue_log_edit.append(line)
+            bar = self.rynnvalue_log_edit.verticalScrollBar()
+            bar.setValue(bar.maximum())
+        # Mirror into sim log while deploying/using Live HUD so failures are visible.
+        if self._libero_rynnvalue_hud_enabled() and hasattr(self, "_append_mujoco_log"):
+            text = (line or "").rstrip()
+            if text:
+                self._append_mujoco_log(f"[rynnvalue] {text}")
+
+    def _on_rynnvalue_status(self, msg: str) -> None:
+        if hasattr(self, "rynnvalue_status_label"):
+            self.rynnvalue_status_label.setText(msg or "空闲")
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.showMessage(msg)
+
+    def _update_rynnvalue_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_rynnvalue_launcher", None)
+            and self._rynnvalue_launcher.is_running()
+        )
+        if hasattr(self, "rynnvalue_start_btn"):
+            self.rynnvalue_start_btn.setEnabled(not running)
+        if hasattr(self, "rynnvalue_stop_btn"):
+            self.rynnvalue_stop_btn.setEnabled(running)
+        job = ""
+        if hasattr(self, "rynnvalue_job_combo"):
+            job = str(self.rynnvalue_job_combo.currentData() or "").strip()
+        is_infer = job in ("infer", "inference", "demo", "")
+        is_server = job in ("reward_server", "server", "serve")
+        for wname in (
+            "rynnvalue_job_combo",
+            "rynnvalue_root_edit",
+            "rynnvalue_python_edit",
+            "rynnvalue_cuda_edit",
+            "rynnvalue_model_edit",
+            "rynnvalue_ckpt_edit",
+            "rynnvalue_extra_edit",
+            "rynnvalue_frames_spin",
+            "rynnvalue_steps_spin",
+            "rynnvalue_batch_spin",
+            "rynnvalue_tokens_spin",
+            "rynnvalue_fps_spin",
+            "rynnvalue_port_spin",
+            "rynnvalue_render_gui_check",
+            "rynnvalue_root_browse_btn",
+            "rynnvalue_model_browse_btn",
+            "rynnvalue_ckpt_browse_btn",
+        ):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(not running)
+        for wname in (
+            "rynnvalue_video_edit",
+            "rynnvalue_video_browse_btn",
+            "rynnvalue_instruction_edit",
+            "rynnvalue_robot_edit",
+            "rynnvalue_camera_edit",
+        ):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(not running and is_infer)
+        if hasattr(self, "rynnvalue_port_spin"):
+            self.rynnvalue_port_spin.setEnabled(not running and is_server)
+        if hasattr(self, "rynnvalue_open_video_btn"):
+            # Always clickable: click handler resolves last session path or scans disk.
+            self.rynnvalue_open_video_btn.setEnabled(True)
+
+    def _on_rynnvalue_log_dir(self, path: str) -> None:
+        if hasattr(self, "rynnvalue_log_dir_edit"):
+            self.rynnvalue_log_dir_edit.setText(path)
+        if hasattr(self, "rynnvalue_open_log_btn"):
+            self.rynnvalue_open_log_btn.setEnabled(
+                bool(path) and os.path.isdir(path)
+            )
+
+    def _on_rynnvalue_output_video(self, path: str) -> None:
+        path = (path or "").strip()
+        if not path:
+            return
+        self._rynnvalue_last_video = path
+        if hasattr(self, "rynnvalue_open_video_btn"):
+            self.rynnvalue_open_video_btn.setEnabled(os.path.isfile(path))
+        render_gui = bool(
+            getattr(self, "rynnvalue_render_gui_check", None)
+            and self.rynnvalue_render_gui_check.isChecked()
+        )
+        if render_gui and os.path.isfile(path):
+            self._play_rynnvalue_video(path)
+
+    def _play_rynnvalue_video(self, path: str) -> None:
+        try:
+            dlg = SimEvalVideoDialog(path, self)
+            dlg.setAttribute(Qt.WA_DeleteOnClose, True)
+            dlg.show()
+            self._on_rynnvalue_status(f"播放: {os.path.basename(path)}")
+            return
+        except Exception as exc:
+            self._append_rynnvalue_log(f"[rynnvalue] 内置播放失败: {exc}")
+        candidates: List[List[str]] = []
+        ffplay = shutil.which("ffplay")
+        if ffplay:
+            candidates.append(
+                [ffplay, "-autoexit", "-window_title", os.path.basename(path), path]
+            )
+        if shutil.which("xdg-open"):
+            candidates.append(["xdg-open", path])
+        for cmd in candidates:
+            try:
+                subprocess.Popen(cmd, start_new_session=True)
+                self._on_rynnvalue_status(f"已用 {cmd[0]} 打开视频")
+                return
+            except Exception:
+                continue
+        self._append_rynnvalue_log(f"[rynnvalue] 无法打开视频: {path}")
+
+    def _on_rynnvalue_root_browse(self) -> None:
+        cur = self.rynnvalue_root_edit.text().strip() or RYNNVALUE_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 RynnValue 仓库根目录", cur
+        )
+        if selected:
+            self.rynnvalue_root_edit.setText(selected)
+            self.rynnvalue_python_edit.setText(resolve_rynnvalue_python(selected))
+            example = os.path.join(
+                selected, "example", "Put_the_box_in_the_drawer_and_close_it.mp4"
+            )
+            if os.path.isfile(example) and not self.rynnvalue_video_edit.text().strip():
+                self.rynnvalue_video_edit.setText(example)
+
+    def _on_rynnvalue_model_browse(self) -> None:
+        cur = self.rynnvalue_model_edit.text().strip() or os.getcwd()
+        start = cur if os.path.isdir(cur) else os.path.dirname(cur) or os.getcwd()
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 RynnValue HuggingFace 模型目录", start
+        )
+        if selected:
+            self.rynnvalue_model_edit.setText(selected)
+
+    def _on_rynnvalue_ckpt_browse(self) -> None:
+        cur = self.rynnvalue_ckpt_edit.text().strip() or os.getcwd()
+        start = cur if os.path.isdir(cur) else os.path.dirname(cur) or os.getcwd()
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 checkpoint 目录（含 model.pt）", start
+        )
+        if selected:
+            self.rynnvalue_ckpt_edit.setText(selected)
+
+    def _on_rynnvalue_video_browse(self) -> None:
+        cur = self.rynnvalue_video_edit.text().strip() or os.getcwd()
+        start = cur if os.path.isdir(cur) else os.path.dirname(cur) or os.getcwd()
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择输入视频",
+            start,
+            "Video (*.mp4 *.avi *.mov *.mkv *.webm);;All (*)",
+        )
+        if selected:
+            self.rynnvalue_video_edit.setText(selected)
+
+    def _on_rynnvalue_job_changed(self, *_args) -> None:
+        job = str(self.rynnvalue_job_combo.currentData() or "infer").strip()
+        if hasattr(self, "rynnvalue_start_btn"):
+            if job in ("reward_server", "server", "serve"):
+                self.rynnvalue_start_btn.setText("启动服务")
+            elif job in ("policy_ranking", "confusion_matrix"):
+                self.rynnvalue_start_btn.setText("启动评测")
+            else:
+                self.rynnvalue_start_btn.setText("启动推理")
+        self._update_rynnvalue_ui()
+
+    def _on_rynnvalue_start_clicked(self) -> None:
+        if self._rynnvalue_launcher.is_running():
+            self._on_rynnvalue_status("RynnValue 正在运行")
+            return
+        job = str(self.rynnvalue_job_combo.currentData() or "infer").strip()
+        model = self.rynnvalue_model_edit.text().strip()
+        if not model and job not in ("reward_server",):
+            self._append_rynnvalue_log("[ERROR] 请填写模型路径")
+            self._on_rynnvalue_status("请填写模型路径")
+            return
+        if job in ("reward_server",) and not model and not self.rynnvalue_ckpt_edit.text().strip():
+            self._append_rynnvalue_log("[ERROR] 请填写 model 或 checkpoint")
+            self._on_rynnvalue_status("请填写 model 或 checkpoint")
+            return
+        render_gui = bool(self.rynnvalue_render_gui_check.isChecked())
+        if render_gui and not (os.environ.get("DISPLAY") or "").strip():
+            self._append_rynnvalue_log(
+                "[rynnvalue] 警告: DISPLAY 为空，图形窗口可能无法弹出"
+            )
+        extras_raw = self.rynnvalue_extra_edit.text().strip()
+        extras = shlex.split(extras_raw) if extras_raw else []
+        self.rynnvalue_log_edit.clear()
+        self.rynnvalue_log_dir_edit.clear()
+        self.rynnvalue_open_log_btn.setEnabled(False)
+        self._rynnvalue_launcher.start(
+            job=job,
+            repo_root=self.rynnvalue_root_edit.text().strip(),
+            python_bin=self.rynnvalue_python_edit.text().strip(),
+            model_path=model,
+            checkpoint_path=self.rynnvalue_ckpt_edit.text().strip(),
+            video_path=self.rynnvalue_video_edit.text().strip(),
+            instruction=self.rynnvalue_instruction_edit.text().strip(),
+            robot_description=self.rynnvalue_robot_edit.text().strip(),
+            camera_description=self.rynnvalue_camera_edit.text().strip(),
+            num_frames=int(self.rynnvalue_frames_spin.value()),
+            num_steps=int(self.rynnvalue_steps_spin.value()),
+            batch_size=int(self.rynnvalue_batch_spin.value()),
+            max_image_side=640,
+            max_new_tokens=int(self.rynnvalue_tokens_spin.value()),
+            fps=int(self.rynnvalue_fps_spin.value()),
+            port=int(self.rynnvalue_port_spin.value()),
+            cuda_devices=self.rynnvalue_cuda_edit.text().strip(),
+            render_gui=render_gui,
+            extra_args=extras,
+        )
+        self._update_rynnvalue_ui()
+
+    def _on_rynnvalue_stop_clicked(self) -> None:
+        self._append_rynnvalue_log("--- 用户停止 RynnValue ---")
+        self._rynnvalue_launcher.stop()
+        self._update_rynnvalue_ui()
+
+    def _on_rynnvalue_open_log_clicked(self) -> None:
+        path = self.rynnvalue_log_dir_edit.text().strip()
+        if path and os.path.isdir(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _find_newest_rynnvalue_trend_video(self) -> str:
+        """Locate newest output_with_trend.mp4 under known output roots."""
+        roots: List[str] = []
+        log_dir = ""
+        if hasattr(self, "rynnvalue_log_dir_edit"):
+            log_dir = self.rynnvalue_log_dir_edit.text().strip()
+        if log_dir:
+            roots.append(log_dir)
+        roots.append(RYNNVALUE_CACHE_DIR)
+        repo = ""
+        if hasattr(self, "rynnvalue_root_edit"):
+            repo = self.rynnvalue_root_edit.text().strip()
+        if not repo:
+            repo = resolve_rynnvalue_root()
+        if repo:
+            roots.append(os.path.join(repo, "rynn_infer", "outputs"))
+            roots.append(os.path.join(repo, "outputs"))
+        newest = ""
+        newest_mtime = -1.0
+        seen = set()
+        for root in roots:
+            root = os.path.abspath(os.path.expanduser(root or ""))
+            if not root or root in seen or not os.path.isdir(root):
+                continue
+            seen.add(root)
+            for dirpath, _dirs, files in os.walk(root):
+                for name in files:
+                    if name != "output_with_trend.mp4" and not name.endswith(
+                        "_with_trend.mp4"
+                    ):
+                        continue
+                    cand = os.path.join(dirpath, name)
+                    try:
+                        mtime = os.path.getmtime(cand)
+                    except OSError:
+                        continue
+                    if mtime > newest_mtime:
+                        newest_mtime = mtime
+                        newest = cand
+        return newest
+
+    def _on_rynnvalue_open_video_clicked(self) -> None:
+        path = getattr(self, "_rynnvalue_last_video", "") or ""
+        if path and os.path.isfile(path):
+            self._play_rynnvalue_video(path)
+            return
+        newest = self._find_newest_rynnvalue_trend_video()
+        if newest:
+            self._rynnvalue_last_video = newest
+            if hasattr(self, "rynnvalue_log_dir_edit") and not self.rynnvalue_log_dir_edit.text().strip():
+                self.rynnvalue_log_dir_edit.setText(os.path.dirname(newest))
+            self._play_rynnvalue_video(newest)
+            return
+        self._on_rynnvalue_status("暂无趋势视频可播放（请先跑一次 infer）")
 
     def _append_lingbot_map_log(self, line: str) -> None:
         if not hasattr(self, "lingbot_map_log_edit"):
@@ -32836,19 +36314,34 @@ class CameraTopicWindow(QMainWindow):
             return 0
 
     def _discover_local_webcam_indices(self, max_index: int = 5) -> List[int]:
-        """探测本机可用摄像头；探测失败时仍提供 index=0。"""
+        """探测本机可用摄像头。
+
+        无 ``/dev/video*`` 时绝不调用 ``VideoCapture(i)``：OpenCV 的 V4L2/obsensor
+        回退探测在部分环境会直接 SIGSEGV（本机远程桌面常见）。
+        """
         if self._skeleton_tracking and self._skeleton_local_cap is not None:
             cur = self.skeleton_cam_combo.currentData()
             if self._skeleton_source_is_local(cur):
                 return [self._skeleton_local_cam_index(cur)]
             return [0]
-        found: List[int] = []
+
+        candidates: List[int] = []
         for i in range(max_index + 1):
+            if os.path.exists(f"/dev/video{i}"):
+                candidates.append(i)
+        if not candidates:
+            return []
+
+        found: List[int] = []
+        for i in candidates:
             cap = None
             try:
                 cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
                 if not cap.isOpened():
-                    cap.release()
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
                     cap = cv2.VideoCapture(i)
                 if not cap.isOpened():
                     continue
@@ -32863,7 +36356,8 @@ class CameraTopicWindow(QMainWindow):
                         cap.release()
                     except Exception:
                         pass
-        return found if found else [0]
+        # Device nodes exist but none readable — still list them so user can try.
+        return found if found else candidates
 
     def _close_skeleton_local_cam(self) -> None:
         cap = self._skeleton_local_cap
@@ -32877,14 +36371,18 @@ class CameraTopicWindow(QMainWindow):
 
     def _open_skeleton_local_cam(self, index: int) -> Tuple[bool, str]:
         self._close_skeleton_local_cam()
+        index = int(index)
+        dev = f"/dev/video{index}"
+        if not os.path.exists(dev):
+            return False, f"本机无摄像头设备 {dev}"
         cap = None
         try:
-            cap = cv2.VideoCapture(int(index), cv2.CAP_V4L2)
+            cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
             if not cap.isOpened():
                 cap.release()
-                cap = cv2.VideoCapture(int(index))
+                cap = cv2.VideoCapture(index)
             if not cap.isOpened():
-                return False, f"无法打开本地摄像头 {index}（/dev/video{index}）"
+                return False, f"无法打开本地摄像头 {index}（{dev}）"
             try:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
@@ -33681,14 +37179,17 @@ def apply_viewer_theme(app: QApplication) -> None:
 
 
 def configure_qt_webengine_for_remote_display() -> None:
-    """远程 X / 无 GLX 时避免 WebEngine GPU 进程崩溃刷屏。
+    """降低 WebEngine 对 GPU/GLX 的依赖，避免启动刷屏。
 
     须在创建 QApplication 之前调用。已有 QTWEBENGINE_CHROMIUM_FLAGS 时不覆盖。
+
+    注意：不要默认设置 QT_XCB_GL_INTEGRATION=none。该值会禁用 GLX/EGL，
+    与 AA_ShareOpenGLContexts 组合时常见
+    “Cannot create platform OpenGL context” 并在创建 QWebEngineView
+    时触发 SIP segfault。无 GLX 的远程桌面请自行 export QT_XCB_GL_INTEGRATION=none。
     """
-    os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
     if os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip():
         return
-    # 无 GLX 时 Chromium GPU 进程会退出；改走软件合成，减少 ANGLE/GLX 报错。
     # Gallery 等含 H.264 的页面仍建议用「浏览器打开」（Qt5 WebEngine 常无专有编解码）。
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = " ".join(
         [
@@ -33696,17 +37197,49 @@ def configure_qt_webengine_for_remote_display() -> None:
             "--disable-gpu-compositing",
             "--disable-webgl",
             "--disable-dev-shm-usage",
-            "--in-process-gpu",
             "--num-raster-threads=2",
         ]
     )
 
 
+def _resolve_utf8_locale() -> str:
+    """选一个本机已安装的 UTF-8 locale。
+
+    硬编码 zh_CN.UTF-8 在未安装该 locale 的机器上会让 LC_CTYPE 失效，
+    X11/Qt 剪贴板字符集转换失败，粘贴中文就会乱码。
+    """
+    import locale as _locale
+
+    candidates = (
+        "zh_CN.UTF-8",
+        "zh_CN.utf8",
+        "C.UTF-8",
+        "C.utf8",
+        "en_US.UTF-8",
+        "en_US.utf8",
+    )
+    for name in candidates:
+        try:
+            _locale.setlocale(_locale.LC_ALL, name)
+            return name
+        except _locale.Error:
+            continue
+    # 最后兜底：保持进程当前可用 locale（通常已是 UTF-8）
+    try:
+        cur = _locale.setlocale(_locale.LC_ALL, "")
+        if cur:
+            return cur
+    except _locale.Error:
+        pass
+    return "C.UTF-8"
+
+
 def configure_qt_ime_for_chinese() -> None:
     """为 Docker/本机启用 fcitx 中文输入（须在创建 QApplication 之前调用）。"""
     os.environ.setdefault("QT_X11_NO_MITSHM", "1")
-    os.environ["LANG"] = "zh_CN.UTF-8"
-    os.environ["LC_ALL"] = "zh_CN.UTF-8"
+    utf8_loc = _resolve_utf8_locale()
+    os.environ["LANG"] = utf8_loc
+    os.environ["LC_ALL"] = utf8_loc
     os.environ["QT_IM_MODULE"] = "fcitx"
     os.environ["XMODIFIERS"] = "@im=fcitx"
     os.environ["GTK_IM_MODULE"] = "fcitx"
@@ -33740,23 +37273,54 @@ def configure_qt_ime_for_chinese() -> None:
         pass
 
 
-def main() -> int:
+def main(
+    existing_app: Optional[QApplication] = None,
+    splash: Optional[QWidget] = None,
+) -> int:
+    def _splash(msg: str) -> None:
+        if splash is None:
+            return
+        try:
+            label = getattr(splash, "_boot_status", None)
+            t0 = getattr(splash, "_boot_t0", None)
+            if label is not None:
+                if t0 is not None:
+                    label.setText(f"{msg}  ({time.perf_counter() - t0:.1f}s)")
+                else:
+                    label.setText(msg)
+            app_inst = QApplication.instance()
+            if app_inst is not None:
+                app_inst.processEvents()
+        except Exception:
+            pass
+
+    global _boot_progress
+    _boot_progress = _splash if splash is not None else None
+
     args = parse_args()
     only_tabs = parse_only_tabs(args.tab)
-    configure_qt_ime_for_chinese()
-    configure_qt_webengine_for_remote_display()
-    rclpy.init()
 
-    # QWebEngineView 需要在创建 QApplication 前设置
-    from PyQt5.QtCore import QCoreApplication
+    if existing_app is None:
+        configure_qt_ime_for_chinese()
+        configure_qt_webengine_for_remote_display()
+        # QWebEngineView 需要在创建 QApplication 前设置
+        from PyQt5.QtCore import QCoreApplication
 
-    QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+        QCoreApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+        app = QApplication(sys.argv)
+    else:
+        app = existing_app
 
-    app = QApplication(sys.argv)
     app.setStyle("Fusion")
     apply_viewer_theme(app)
     install_chinese_ime_guards(app)
     app.setQuitOnLastWindowClosed(True)
+
+    _splash("加载 OpenCV…")
+    _ensure_cv2_numpy()
+
+    _splash("初始化 ROS…")
+    rclpy.init()
 
     bridge = RosBridge()
     node = CameraTopicNode(bridge, prefix=args.prefix)
@@ -33766,6 +37330,7 @@ def main() -> int:
         api_key=os.environ.get(LLM_API_KEY_ENV, "").strip(),
     )
 
+    _splash("构建主界面…")
     window = CameraTopicWindow(
         node,
         bridge,
@@ -33775,8 +37340,19 @@ def main() -> int:
     )
     window.setAttribute(Qt.WA_QuitOnClose, True)
     window.show()
+    if splash is not None:
+        try:
+            splash.close()
+            splash.deleteLater()
+        except Exception:
+            pass
+    app.processEvents()
+    window.build_heavy_ui()
+    _boot_progress = None
     # UI 重启后若共享 .npy 仍在，自动恢复图像预览（不依赖本窗口是否拥有评测进程）
     QTimer.singleShot(800, window._maybe_resume_sim_npy_preview)
+    # 勿在后台线程预热 OpenGL：Qt/GL context 非主线程初始化易 SIP segfault。
+    # 首次点「启用 3D」时再 import pyqtgraph.opengl。
 
     shutdown_flag = {"value": False}
     cleaned_up = {"value": False}

@@ -182,17 +182,27 @@ def deploy_scan_roots(host_id: Optional[str] = None) -> List[Tuple[str, str]]:
     return out
 
 
+def _lora_weight_status(path: str) -> str:
+    """Return 'ok' | 'unreadable' | 'missing' for LoRA adapter weights."""
+    found_unreadable = False
+    for name in ("adapter_model.safetensors", "adapter_model.bin"):
+        weight = os.path.join(path, name)
+        if not os.path.isfile(weight):
+            continue
+        if os.access(weight, os.R_OK):
+            return "ok"
+        found_unreadable = True
+    return "unreadable" if found_unreadable else "missing"
+
+
 def _is_deployable_model_dir(path: str) -> bool:
     if os.path.isfile(os.path.join(path, "config.json")):
         return True
     if not os.path.isfile(os.path.join(path, "adapter_config.json")):
         return False
-    # LoRA: require readable adapter weights so the UI does not list broken dirs
-    for name in ("adapter_model.safetensors", "adapter_model.bin"):
-        weight = os.path.join(path, name)
-        if os.path.isfile(weight) and os.access(weight, os.R_OK):
-            return True
-    return False
+    # List LoRA dirs that have weight files (even if currently unreadable),
+    # so permission issues are visible in the UI instead of silently hidden.
+    return _lora_weight_status(path) != "missing"
 
 
 def _model_entry_from_path(path: str, root: str = "") -> Dict[str, str]:
@@ -202,6 +212,9 @@ def _model_entry_from_path(path: str, root: str = "") -> Dict[str, str]:
         if os.path.isfile(os.path.join(path, "adapter_config.json"))
         else "full"
     )
+    readable = "1"
+    if kind == "lora" and _lora_weight_status(path) == "unreadable":
+        readable = "0"
     return {
         "path": path,
         "name": name,
@@ -209,6 +222,7 @@ def _model_entry_from_path(path: str, root: str = "") -> Dict[str, str]:
         "label": name,
         "kind": kind,
         "root": root or os.path.dirname(path),
+        "readable": readable,
     }
 
 

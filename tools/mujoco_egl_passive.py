@@ -84,6 +84,7 @@ class EglPassiveHandle:
         self._ready = threading.Event()
         self._closed = threading.Event()
         self._lock = threading.Lock()
+        self._status_msg: Optional[str] = None
 
         off_w = int(getattr(model.vis.global_, "offwidth", 640) or 640)
         off_h = int(getattr(model.vis.global_, "offheight", 480) or 480)
@@ -134,6 +135,16 @@ class EglPassiveHandle:
         # Ask UI thread to redraw; do not block physics long.
         try:
             self._cmd_q.put_nowait("sync")
+        except queue.Full:
+            pass
+
+    def set_status(self, message: str) -> None:
+        """Update the status bar text on the Tk viewer (thread-safe)."""
+        self._status_msg = str(message or "")
+        if not self._running:
+            return
+        try:
+            self._cmd_q.put_nowait(("status", self._status_msg))
         except queue.Full:
             pass
 
@@ -232,6 +243,11 @@ class EglPassiveHandle:
                         return
                     if cmd == "sync":
                         _render_once()
+                    elif isinstance(cmd, tuple) and cmd and cmd[0] == "status":
+                        try:
+                            status.set(str(cmd[1]))
+                        except Exception:
+                            pass
             except queue.Empty:
                 pass
             if self._running:

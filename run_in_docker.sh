@@ -224,11 +224,19 @@ if [[ ! -f "${SCRIPT_DIR}/show_camera_topics.py" ]]; then
     echo "错误: 未找到 ${SCRIPT_DIR}/show_camera_topics.py" >&2
     exit 1
 fi
+if [[ ! -f "${SCRIPT_DIR}/show_camera_boot.py" ]]; then
+    echo "错误: 未找到 ${SCRIPT_DIR}/show_camera_boot.py" >&2
+    exit 1
+fi
 
 # 必须能看到完整工程（含 images/）；勿回退到只 cp 单个 py（会导致预览图缺失）
 if ! docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -f "${REMOTE_DIR}/show_camera_topics.py"; then
     echo "错误: 容器内未看到 ${REMOTE_DIR}/show_camera_topics.py" >&2
     echo "请确认该路径已挂载进容器（当前依赖 share_data 挂载）" >&2
+    exit 1
+fi
+if ! docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -f "${REMOTE_DIR}/show_camera_boot.py"; then
+    echo "错误: 容器内未看到 ${REMOTE_DIR}/show_camera_boot.py" >&2
     exit 1
 fi
 if ! docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -d "${REMOTE_DIR}/images"; then
@@ -631,5 +639,5 @@ n.destroy_node()
 rclpy.shutdown()
 PY
 
-exec python3 ${REMOTE_DIR}/show_camera_topics.py \"\$@\"
+exec python3 ${REMOTE_DIR}/show_camera_boot.py \"\$@\"
 " -- "$@"

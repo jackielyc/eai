@@ -135,6 +135,12 @@ export LANG="${LANG:-C.UTF-8}"
 export LC_ALL="${LC_ALL:-${LANG}}"
 export QT_X11_NO_MITSHM=1
 
+# 大文件在 share_data 上冷编译很慢；pycache 写到本地盘
+if [[ -z "${PYTHONPYCACHEPREFIX:-}" ]]; then
+    export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-${HOME}/.cache}/eai_pycache"
+    mkdir -p "${PYTHONPYCACHEPREFIX}" 2>/dev/null || true
+fi
+
 if [[ -f "${HOST_DDS_XML}" ]]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE="${HOST_DDS_XML}"
 elif [[ -f "${A2D_DDS_XML}" ]]; then
@@ -230,9 +236,10 @@ if [[ "${ROS_MODE}" == "conda_humble" ]]; then
     _conda_pyqt_root="${CONDA_PREFIX}/lib/python3.11/site-packages/PyQt5/Qt5"
     _apply_qt_paths "${_conda_pyqt_root}/lib" "${_conda_pyqt_root}/plugins/platforms"
 fi
-# 远程 X 常无 GLX：提前关掉 WebEngine GPU，避免 ANGLE/GLX 刷屏
+# WebEngine：关 GPU 合成，减少无加速/远程 X 刷屏。勿默认 QT_XCB_GL_INTEGRATION=none
+# （会与 AA_ShareOpenGLContexts 冲突，启动时 SIP segfault）。无 GLX 时再显式：
+#   export QT_XCB_GL_INTEGRATION=none
 if [[ -z "${QTWEBENGINE_CHROMIUM_FLAGS:-}" ]]; then
-    export QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu --disable-gpu-compositing --disable-webgl --disable-dev-shm-usage --in-process-gpu"
+    export QTWEBENGINE_CHROMIUM_FLAGS="--disable-gpu --disable-gpu-compositing --disable-webgl --disable-dev-shm-usage --num-raster-threads=2"
 fi
-export QT_XCB_GL_INTEGRATION="${QT_XCB_GL_INTEGRATION:-none}"
-exec "${PYTHON}" "${EAI_DIR}/show_camera_topics.py" "$@"
+exec "${PYTHON}" "${EAI_DIR}/show_camera_boot.py" "$@"

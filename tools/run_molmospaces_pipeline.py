@@ -21,6 +21,7 @@ def main() -> int:
     os.environ.setdefault("MOLMOSPACES_VIEWER_CAM", "front")
     # TurboVNC / software GLX: prefer EGL+Tk so a window actually appears.
     os.environ.setdefault("MOLMOSPACES_FORCE_EGL", "1")
+    os.environ.setdefault("MOLMOSPACES_VIEWER_KEEP_OPEN", "1")
     os.environ.setdefault("EAI_DIR", str(Path(__file__).resolve().parent.parent))
 
     here = Path(__file__).resolve().parent

@@ -69,4 +69,9 @@ unset QT_PLUGIN_PATH
 QT5_PLATFORMS=$("${PYTHON}" -c "import PyQt5, os; print(os.path.join(os.path.dirname(PyQt5.__file__), 'Qt5', 'plugins', 'platforms'))")
 export QT_QPA_PLATFORM_PLUGIN_PATH="${QT5_PLATFORMS}"
 
-exec "${PYTHON}" "${SCRIPT_DIR}/show_camera_topics.py" "$@"
+if [[ -z "${PYTHONPYCACHEPREFIX:-}" ]]; then
+    export PYTHONPYCACHEPREFIX="${XDG_CACHE_HOME:-${HOME}/.cache}/eai_pycache"
+    mkdir -p "${PYTHONPYCACHEPREFIX}" 2>/dev/null || true
+fi
+
+exec "${PYTHON}" "${SCRIPT_DIR}/show_camera_boot.py" "$@"

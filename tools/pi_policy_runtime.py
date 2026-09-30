@@ -9,6 +9,7 @@ MolmoSpaces PiPolicy connects to ws://localhost:8080 by default. This module:
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import signal
 import socket
@@ -17,7 +18,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 EAI_DIR = Path(__file__).resolve().parent.parent
 OPENPI_ROOT_DEFAULT = Path(
@@ -33,17 +34,21 @@ PI_CKPT_CONFIG_DEFAULT = "pi05_droid_jointpos"
 PI_CKPT_GS_DEFAULT = "gs://openpi-assets/checkpoints/pi05_droid_jointpos"
 PI_CKPT_HF_DEFAULT = "Kovavavvavava/pi05_droid_jointpos"
 PI_CKPT_HF_LOCAL_DEFAULT = str(EAI_DIR / ".cache" / "openpi" / "hf" / "pi05_droid_jointpos")
+# openpi JAX pi05_libero mirror (GCS often fails without gsutil/anon).
+PI05_LIBERO_HF_DEFAULT = "bf-jeon/pi05_libero"
+PI05_LIBERO_HF_LOCAL_DEFAULT = str(EAI_DIR / ".cache" / "openpi" / "hf" / "pi05_libero")
 PI_SERVER_HOST_DEFAULT = "localhost"
 PI_SERVER_PORT_DEFAULT = 8080
 # Local dirs that look like Pi ckpts (may be sparse / incomplete on this host).
+# Prefer models/ then eai HF/GCS cache; UI defaults to first present local.
 PI_CKPT_LOCAL_CANDIDATES: Tuple[str, ...] = (
+    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_droid_jointpos",
+    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_droid_jointpos_polaris",
     str(EAI_DIR / ".cache" / "openpi" / "hf" / "pi05_droid_jointpos"),
     str(EAI_DIR / ".cache" / "openpi" / "openpi-assets" / "checkpoints" / "pi05_droid_jointpos"),
-    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_droid_jointpos",
+    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_droid",
     str(EAI_DIR / ".cache" / "openpi" / "hf" / "pi05_droid"),
     str(EAI_DIR / ".cache" / "openpi" / "openpi-assets" / "checkpoints" / "pi05_droid"),
-    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_droid",
-    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_droid_jointpos_polaris",
 )
 # Require this much allocated data before treating a local dir as usable.
 _MIN_ALLOCATED_BYTES = 512 * (1 << 20)  # 512 MiB
@@ -53,7 +58,7 @@ _MIN_ALLOCATED_BYTES = 512 * (1 << 20)  # 512 MiB
 class PiCheckpoint:
     path: str
     config: str
-    source: str  # env | cache | local | gs
+    source: str  # env | cache | local | local_present | gs | fallback
 
 
 def _allocated_and_size(root: Path) -> Tuple[int, int]:
@@ -89,21 +94,27 @@ def _has_incomplete_hf_download(root: Path) -> bool:
     return False
 
 
-def is_local_checkpoint_usable(path: str) -> bool:
-    """True if path is a local OpenPI ckpt with real (non-sparse) weights."""
+def is_local_checkpoint_present(path: str) -> bool:
+    """True if path looks like an OpenPI ckpt dir (weights may still be sparse)."""
     raw = (path or "").strip()
     if not raw or raw.startswith("gs://") or "://" in raw:
         return False
     root = Path(os.path.expanduser(raw)).resolve()
     if not root.is_dir():
         return False
-    if _has_incomplete_hf_download(root):
-        return False
     has_jax = (root / "params" / "_CHECKPOINT_METADATA").is_file() or (
         root / "params"
     ).is_dir()
     has_pt = (root / "model.safetensors").is_file()
-    if not (has_jax or has_pt):
+    return bool(has_jax or has_pt)
+
+
+def is_local_checkpoint_usable(path: str) -> bool:
+    """True if path is a local OpenPI ckpt with real (non-sparse) weights."""
+    if not is_local_checkpoint_present(path):
+        return False
+    root = Path(os.path.expanduser((path or "").strip())).resolve()
+    if _has_incomplete_hf_download(root):
         return False
     alloc, size = _allocated_and_size(root)
     if alloc < _MIN_ALLOCATED_BYTES:
@@ -162,10 +173,11 @@ def resolve_pi_checkpoint(
     *,
     config: str = "",
     allow_gs: bool = True,
+    prefer_present_local: bool = True,
 ) -> PiCheckpoint:
     """Pick the best available Pi checkpoint.
 
-    Priority: prefer arg → env → usable local/cache dirs → gs:// default.
+    Priority: prefer arg → env → usable local/cache → present local (UI) → gs://.
     """
     env_path = (
         os.environ.get("MOLMOSPACES_PI_CKPT") or os.environ.get("OPENPI_PI_CKPT") or ""
@@ -177,28 +189,39 @@ def resolve_pi_checkpoint(
         candidates.append((env_path, "env"))
     for p in PI_CKPT_LOCAL_CANDIDATES:
         candidates.append((p, "local"))
-    if allow_gs:
-        candidates.append((PI_CKPT_GS_DEFAULT, "gs"))
 
     seen = set()
+    present: Optional[PiCheckpoint] = None
     for path, source in candidates:
         if path in seen:
             continue
         seen.add(path)
-        if path.startswith("gs://"):
-            if allow_gs:
-                return PiCheckpoint(
-                    path=path,
-                    config=infer_policy_config(path, config),
-                    source=source,
-                )
+        if path.startswith("gs://") or "://" in path:
             continue
-        if is_local_checkpoint_usable(path):
+        abs_path = os.path.abspath(os.path.expanduser(path))
+        if is_local_checkpoint_usable(abs_path):
             return PiCheckpoint(
-                path=os.path.abspath(os.path.expanduser(path)),
-                config=infer_policy_config(path, config),
+                path=abs_path,
+                config=infer_policy_config(abs_path, config),
                 source=source,
             )
+        if prefer_present_local and present is None and is_local_checkpoint_present(abs_path):
+            present = PiCheckpoint(
+                path=abs_path,
+                config=infer_policy_config(abs_path, config),
+                source="local_present",
+            )
+
+    if present is not None:
+        return present
+
+    if allow_gs:
+        return PiCheckpoint(
+            path=PI_CKPT_GS_DEFAULT,
+            config=infer_policy_config(PI_CKPT_GS_DEFAULT, config),
+            source="gs",
+        )
+
     fallback = (
         prefer or env_path or PI_CKPT_LOCAL_CANDIDATES[0] or PI_CKPT_GS_DEFAULT
     ).strip()
@@ -379,6 +402,18 @@ def ensure_checkpoint_materialized(
             )
             if ok_hf:
                 return _finish(hf_path)
+        if (
+            os.path.abspath(abs_local) == os.path.abspath(PI05_LIBERO_HF_LOCAL_DEFAULT)
+            or Path(abs_local).name == "pi05_libero"
+        ):
+            ok_hf, hf_path = _download_hf_repo(
+                PI05_LIBERO_HF_DEFAULT,
+                PI05_LIBERO_HF_LOCAL_DEFAULT,
+                log=log,
+                openpi_python=openpi_python,
+            )
+            if ok_hf:
+                return _finish(hf_path)
         return False, checkpoint_status(raw)
 
     name = raw.rstrip("/").split("/")[-1]
@@ -395,6 +430,15 @@ def ensure_checkpoint_materialized(
         ok_hf, hf_path = _download_hf_repo(
             "ankile/openpi-pi05-droid-pretrained",
             str(EAI_DIR / ".cache" / "openpi" / "hf" / "pi05_droid"),
+            log=log,
+            openpi_python=openpi_python,
+        )
+        if ok_hf:
+            return _finish(hf_path)
+    elif name == "pi05_libero" or "pi05_libero" in raw:
+        ok_hf, hf_path = _download_hf_repo(
+            PI05_LIBERO_HF_DEFAULT,
+            PI05_LIBERO_HF_LOCAL_DEFAULT,
             log=log,
             openpi_python=openpi_python,
         )
@@ -521,10 +565,17 @@ def build_serve_policy_argv(
     openpi_python: str = "",
     openpi_root: str = "",
 ) -> Tuple[List[str], Path, dict]:
-    """Return (argv, cwd, env_extra) for serve_policy."""
+    """Return (argv, cwd, env_extra) for serve_policy.
+
+    Uses ``tools/run_openpi_serve_policy.py`` so first infer does not run
+    ``torch.compile(mode=max-autotune)`` (that blocks long enough for the
+    MolmoSpaces websocket keepalive to drop and the arm never moves).
+    """
     py = resolve_openpi_python(openpi_python)
     root = resolve_openpi_root(openpi_root)
-    script = root / "scripts" / "serve_policy.py"
+    wrapper = Path(__file__).resolve().parent / "run_openpi_serve_policy.py"
+    stock = root / "scripts" / "serve_policy.py"
+    script = wrapper if wrapper.is_file() else stock
     cfg = infer_policy_config(checkpoint, config)
     ckpt = (checkpoint or "").strip()
     argv = [
@@ -536,6 +587,12 @@ def build_serve_policy_argv(
         f"--policy.dir={ckpt}",
     ]
     env_extra = openpi_child_env(openpi_python=py, openpi_root=str(root))
+    env_extra["OPENPI_ROOT"] = str(root)
+    env_extra["OPENPI_SERVE_POLICY_SCRIPT"] = str(stock)
+    # Default on; allow override from parent env if explicitly set.
+    env_extra["OPENPI_DISABLE_TORCH_COMPILE"] = os.environ.get(
+        "OPENPI_DISABLE_TORCH_COMPILE", "1"
+    )
     return argv, root, env_extra
 
 
@@ -627,6 +684,109 @@ def stop_pi_server_on_port(
     if port_listening("127.0.0.1", port):
         return f"端口 {port} 仍被占用，请手动结束进程"
     return f"已停止端口 {port} 上的服务"
+
+
+def _pids_on_tcp_port(port: int) -> List[int]:
+    pids: List[int] = []
+    try:
+        out = subprocess.check_output(
+            ["fuser", f"{int(port)}/tcp"],
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=5,
+        )
+        for tok in out.replace("\n", " ").split():
+            if tok.isdigit():
+                pids.append(int(tok))
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return pids
+
+
+def inspect_pi_server_on_port(port: int = PI_SERVER_PORT_DEFAULT) -> Dict[str, str]:
+    """Inspect openpi serve_policy process on ``port`` via /proc cmdline.
+
+    Returns keys: pid, config, dir, cmdline (empty strings when unknown).
+    """
+    info = {"pid": "", "config": "", "dir": "", "cmdline": ""}
+    for pid in _pids_on_tcp_port(port):
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            continue
+        cmdline = raw.replace(b"\0", b" ").decode("utf-8", errors="replace").strip()
+        if not cmdline:
+            continue
+        # Prefer the serve_policy / run_openpi_serve_policy process.
+        if "serve_policy" not in cmdline and "run_openpi_serve_policy" not in cmdline:
+            # Keep scanning — fuser may list children / wrappers first.
+            if not info["pid"]:
+                info["pid"] = str(pid)
+                info["cmdline"] = cmdline
+            continue
+        info["pid"] = str(pid)
+        info["cmdline"] = cmdline
+        # Tyro-style: --policy.config=NAME or --policy.config NAME
+        m = re.search(r"--policy\.config(?:=|\s+)(\S+)", cmdline)
+        if m:
+            info["config"] = m.group(1).strip().strip("'\"")
+        m = re.search(r"--policy\.dir(?:=|\s+)(\S+)", cmdline)
+        if m:
+            info["dir"] = m.group(1).strip().strip("'\"")
+        break
+    return info
+
+
+def pi_server_matches(
+    *,
+    port: int,
+    config: str = "",
+    checkpoint: str = "",
+) -> Tuple[bool, str]:
+    """True if listener on ``port`` looks like the requested config/checkpoint."""
+    want_cfg = (config or "").strip()
+    raw_ckpt = (checkpoint or "").strip()
+    want_dir = ""
+    if raw_ckpt and not raw_ckpt.startswith("gs://"):
+        want_dir = os.path.abspath(os.path.expanduser(raw_ckpt))
+    elif raw_ckpt:
+        want_dir = raw_ckpt
+
+    info = inspect_pi_server_on_port(port)
+    if not info.get("pid"):
+        return False, "端口无 openpi serve 进程"
+    have_cfg = (info.get("config") or "").strip()
+    have_dir = (info.get("dir") or "").strip()
+    if have_dir and not have_dir.startswith("gs://"):
+        have_dir = os.path.abspath(os.path.expanduser(have_dir))
+
+    parts = [f"pid={info['pid']}"]
+    if have_cfg:
+        parts.append(f"config={have_cfg}")
+    if have_dir:
+        parts.append(f"dir={have_dir}")
+    detail = " ".join(parts)
+
+    if want_cfg and have_cfg and want_cfg != have_cfg:
+        return False, f"策略不匹配（需要 {want_cfg}，当前 {have_cfg}）; {detail}"
+    if want_cfg and not have_cfg:
+        return False, f"无法确认策略配置（需要 {want_cfg}）; {detail}"
+
+    if want_dir and have_dir and not want_dir.startswith("gs://"):
+        same = want_dir.rstrip("/") == have_dir.rstrip("/")
+        if not same:
+            try:
+                same = os.path.realpath(want_dir) == os.path.realpath(have_dir)
+            except OSError:
+                same = False
+        if not same:
+            wb = os.path.basename(want_dir.rstrip("/"))
+            hb = os.path.basename(have_dir.rstrip("/"))
+            same = bool(wb and hb and wb == hb)
+        if not same:
+            return False, f"权重不匹配（需要 {want_dir}，当前 {have_dir}）; {detail}"
+    return True, detail
+
 
 
 def probe_pi_server(
@@ -740,6 +900,8 @@ __all__ = [
     "PI_CKPT_GS_DEFAULT",
     "PI_CKPT_HF_DEFAULT",
     "PI_CKPT_HF_LOCAL_DEFAULT",
+    "PI05_LIBERO_HF_DEFAULT",
+    "PI05_LIBERO_HF_LOCAL_DEFAULT",
     "PI_SERVER_HOST_DEFAULT",
     "PI_SERVER_PORT_DEFAULT",
     "OPENPI_DATA_HOME_DEFAULT",
@@ -748,10 +910,13 @@ __all__ = [
     "build_serve_policy_argv",
     "checkpoint_status",
     "infer_policy_config",
+    "is_local_checkpoint_present",
     "is_local_checkpoint_usable",
     "is_pi_policy_id",
     "port_listening",
     "probe_pi_server",
+    "inspect_pi_server_on_port",
+    "pi_server_matches",
     "resolve_openpi_python",
     "resolve_openpi_root",
     "resolve_pi_checkpoint",
