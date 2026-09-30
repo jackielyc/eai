@@ -61,13 +61,24 @@ def _parse_args() -> argparse.Namespace:
         default=[],
         help="Extra Hydra overrides appended as-is",
     )
-    return p.parse_args()
+    # Shared RynnValue Live HUD flags (same names as LIBERO / other sims).
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+    from rynnvalue_sim_bridge import (  # noqa: E402
+        add_rynnvalue_live_hud_args,
+        finalize_rynnvalue_live_hud_args,
+    )
+
+    add_rynnvalue_live_hud_args(p, profile="robotwin")
+    args = p.parse_args()
+    finalize_rynnvalue_live_hud_args(args)
+    return args
 
 
 def main() -> int:
     args = _parse_args()
     here = pathlib.Path(__file__).resolve().parent
-    sys.path.insert(0, str(here))
+    if str(here) not in sys.path:
+        sys.path.insert(0, str(here))
 
     from robotwin_policy_runtime import (  # noqa: E402
         hydra_config_for,
@@ -82,8 +93,9 @@ def main() -> int:
     assets = resolve_robotwin_assets(args.assets_path, robotwin_root=rt)
     embodied = rlinf / "examples" / "embodiment"
     render_gui = bool(args.render_gui) and not bool(args.no_render_gui)
-    # GUI mode: EAI agent holds SAPIEN Viewer until「停止」; else stock RLinf entry.
-    if render_gui:
+    live_hud = bool(getattr(args, "rynnvalue_live_hud", False))
+    # GUI hold / Live HUD both need the EAI agent entry (not stock RLinf).
+    if render_gui or live_hud:
         src = here / "robotwin_eval_agent.py"
     else:
         src = embodied / "eval_embodied_agent.py"
@@ -105,6 +117,9 @@ def main() -> int:
         or (here.parent / ".cache" / "robotwin_eval" / (args.exp_name or task))
     ).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
+    bus_dir = log_dir / "rynnvalue_frame_bus"
+    if live_hud:
+        bus_dir.mkdir(parents=True, exist_ok=True)
 
     gpu = (args.gpu or "0").strip()
     n_envs = max(1, int(args.num_envs))
@@ -189,7 +204,38 @@ def main() -> int:
             child_env["XAUTHORITY"] = xauth
         # Keep viewer after eval until EAI「停止」(SIGTERM on process group).
         child_env["ROBOTWIN_HOLD_VIEWER"] = "1"
-    # Pin visible GPUs for GUI smoke (Hydra placement still set above).
+    if live_hud:
+        child_env["RYNNVALUE_LIVE_HUD"] = "1"
+        child_env["RYNNVALUE_FRAME_BUS"] = str(bus_dir)
+        child_env["RYNNVALUE_SERVER_URL"] = str(
+            getattr(args, "rynnvalue_server_url", "") or "http://127.0.0.1:8001"
+        )
+        child_env["RYNNVALUE_REFRESH_SEC"] = str(
+            float(getattr(args, "rynnvalue_refresh_sec", 1.0) or 1.0)
+        )
+        child_env["RYNNVALUE_NUM_FRAMES"] = str(
+            int(getattr(args, "rynnvalue_num_frames", 8) or 8)
+        )
+        child_env["RYNNVALUE_TIMEOUT_S"] = str(
+            float(getattr(args, "rynnvalue_timeout_s", 60.0) or 60.0)
+        )
+        child_env["RYNNVALUE_STATUS_PATH"] = str(log_dir / "rynnvalue_live.json")
+        robot_desc = str(getattr(args, "rynnvalue_robot_description", "") or "").strip()
+        camera_desc = str(
+            getattr(args, "rynnvalue_camera_description", "") or ""
+        ).strip()
+        if robot_desc:
+            child_env["RYNNVALUE_ROBOT_DESCRIPTION"] = robot_desc
+        if camera_desc:
+            child_env["RYNNVALUE_CAMERA_DESCRIPTION"] = camera_desc
+        if not bool(getattr(args, "rynnvalue_show_window", True)):
+            child_env["RYNNVALUE_NO_SHOW_WINDOW"] = "1"
+        display = (os.environ.get("DISPLAY") or "").strip()
+        if display and "DISPLAY" not in child_env:
+            child_env["DISPLAY"] = display
+        xauth = (os.environ.get("XAUTHORITY") or "").strip()
+        if xauth and "XAUTHORITY" not in child_env:
+            child_env["XAUTHORITY"] = xauth
     if gpu and "CUDA_VISIBLE_DEVICES" not in os.environ:
         # Use first id when user passes "0" / "0-0" / "0,1"
         first = gpu.replace("-", ",").split(",")[0].strip()
@@ -202,8 +248,8 @@ def main() -> int:
                 else o.rsplit("=", 1)[0] + "=0"
                 for o in overrides
             ]
-    # Ensure RoboTwin + RLinf on PYTHONPATH (eval_embodiment.sh pattern).
-    py_path = [str(rlinf), str(rt)]
+    # Ensure RoboTwin + RLinf + EAI tools on PYTHONPATH.
+    py_path = [str(here), str(rlinf), str(rt)]
     existing = child_env.get("PYTHONPATH") or ""
     for part in existing.split(os.pathsep):
         if part and part not in py_path:
@@ -226,6 +272,12 @@ def main() -> int:
         f"[robotwin] render_gui={render_gui} render_freq={render_freq} n_envs={n_envs}",
         flush=True,
     )
+    if live_hud:
+        print(
+            f"[robotwin] rynnvalue_live_hud=1 bus={bus_dir} "
+            f"url={child_env.get('RYNNVALUE_SERVER_URL')}",
+            flush=True,
+        )
     print("[robotwin] cmd=", " ".join(cmd), flush=True)
 
     proc = subprocess.run(cmd, cwd=str(embodied), env=child_env)

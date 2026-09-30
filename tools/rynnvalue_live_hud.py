@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Async RynnValue Live HUD for sim rollouts (LIBERO first).
+"""Async RynnValue Live HUD for sim rollouts.
 
-Keeps a frame ring, scores via reward_server on a wall-clock interval
-(not control-rate), and draws an OpenCV overlay of remaining time.
+Env-agnostic scoring / overlay layer: push RGB frames from any sim loop,
+score via reward_server on a wall-clock interval (not control-rate), and
+draw an OpenCV overlay of remaining time.
+
+Per-sim observation adapters live in ``rynnvalue_sim_bridge`` (LIBERO first;
+RoboTwin / MolmoSpaces / MuJoCo profiles stubbed for the same CLI).
 """
 from __future__ import annotations
 
@@ -23,6 +27,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_SERVER_URL = "http://127.0.0.1:8001"
 DEFAULT_ROBOT_DESCRIPTION = "a Franka single-arm robot"
 DEFAULT_CAMERA_DESCRIPTION = "the third-person agentview camera"
+# OpenCV window defaults (WINDOW_NORMAL + free resize).
+DEFAULT_WINDOW_WIDTH = 960
+DEFAULT_WINDOW_HEIGHT = 720
+# Upscale tiny sim frames before drawing HUD so text/plot stay readable.
+HUD_DRAW_MIN_SIDE = 720
 
 
 @dataclass
@@ -189,6 +198,35 @@ def score_frames(
     return arr, latency
 
 
+def _fit_put_text(
+    img: np.ndarray,
+    text: str,
+    org: Tuple[int, int],
+    font_scale: float,
+    color: Tuple[int, int, int],
+    thickness: int,
+    max_width: int,
+) -> None:
+    """Draw text clipped to ``max_width`` (ellipsis when truncated)."""
+    import cv2
+
+    if max_width <= 8 or not text:
+        return
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    shown = text
+    while shown:
+        (tw, _th), _ = cv2.getTextSize(shown, font, font_scale, thickness)
+        if tw <= max_width:
+            break
+        if len(shown) <= 1:
+            shown = ""
+            break
+        cut = max(1, len(shown) - 2)
+        shown = shown[:cut] + ("…" if cut < len(text) else "")
+    if shown:
+        cv2.putText(img, shown, org, font, font_scale, color, thickness, cv2.LINE_AA)
+
+
 def draw_hud_overlay(
     frame: np.ndarray,
     snap: HudSnapshot,
@@ -199,54 +237,115 @@ def draw_hud_overlay(
     import cv2
 
     img = _as_uint8_rgb(frame)
+    h0, w0 = img.shape[:2]
+    # Upscale tiny sim frames so panel text / curve stay readable in the window.
+    side = max(h0, w0)
+    if side < HUD_DRAW_MIN_SIDE:
+        scale = HUD_DRAW_MIN_SIDE / float(side)
+        img = cv2.resize(
+            img,
+            (max(1, int(round(w0 * scale))), max(1, int(round(h0 * scale)))),
+            interpolation=cv2.INTER_LINEAR,
+        )
     bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
     h, w = bgr.shape[:2]
+
+    # Top panel: left text column + right curve plot (no overlap).
+    panel_h = min(160, max(108, h // 5))
+    plot_w = max(160, min(280, w // 3))
+    plot_pad = 10
+    plot_x0 = w - plot_w - plot_pad
+    text_max_w = max(40, plot_x0 - 20)
+
     overlay = bgr.copy()
-    panel_h = min(110, max(72, h // 4))
     cv2.rectangle(overlay, (0, 0), (w, panel_h), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.65, bgr, 0.35, 0, bgr)
 
     age = (time.time() - snap.scored_at) if snap.scored_at else float("nan")
     if snap.remaining_s is not None:
-        title = f"RynnValue  rem={snap.remaining_s:.2f}s  Phi={-(snap.remaining_s):.2f}"
+        title = f"RynnValue  rem={snap.remaining_s:.2f}s"
+        phi_line = f"Phi={-(snap.remaining_s):.2f}"
         color = (80, 220, 120)
     elif snap.error:
-        title = f"RynnValue  ERR: {snap.error[:48]}"
+        title = f"RynnValue  ERR: {snap.error[:64]}"
+        phi_line = ""
         color = (60, 60, 220)
     else:
         title = "RynnValue  waiting…"
+        phi_line = ""
         color = (180, 180, 180)
 
-    cv2.putText(bgr, title, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA)
+    _fit_put_text(bgr, title, (12, 32), 0.7, color, 2, text_max_w)
+    if phi_line:
+        _fit_put_text(bgr, phi_line, (12, 58), 0.6, color, 2, text_max_w)
+        meta_y = 82
+    else:
+        meta_y = 58
     meta = f"step={snap.step}  latency={snap.latency_s:.2f}s  age={age:.1f}s"
-    cv2.putText(bgr, meta, (10, 54), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1, cv2.LINE_AA)
+    _fit_put_text(bgr, meta, (12, meta_y), 0.5, (220, 220, 220), 1, text_max_w)
     if snap.instruction:
-        cv2.putText(
+        _fit_put_text(
             bgr,
-            snap.instruction[:72],
-            (10, 76),
-            cv2.FONT_HERSHEY_SIMPLEX,
+            snap.instruction,
+            (12, min(panel_h - 12, meta_y + 24)),
             0.45,
             (200, 200, 200),
             1,
-            cv2.LINE_AA,
+            text_max_w,
         )
 
     hist = list(history or [])
     if len(hist) >= 2:
-        plot_x0, plot_y0 = w - 170, 12
-        plot_w, plot_h = 155, panel_h - 24
-        cv2.rectangle(bgr, (plot_x0, plot_y0), (plot_x0 + plot_w, plot_y0 + plot_h), (40, 40, 40), -1)
+        plot_y0 = 10
+        plot_h = panel_h - 20
+        cv2.rectangle(
+            bgr,
+            (plot_x0, plot_y0),
+            (plot_x0 + plot_w, plot_y0 + plot_h),
+            (40, 40, 40),
+            -1,
+        )
+        cv2.rectangle(
+            bgr,
+            (plot_x0, plot_y0),
+            (plot_x0 + plot_w, plot_y0 + plot_h),
+            (90, 90, 90),
+            1,
+        )
         vals = np.asarray(hist[-64:], dtype=np.float32)
         vmin, vmax = float(vals.min()), float(vals.max())
         if abs(vmax - vmin) < 1e-6:
             vmax = vmin + 1.0
-        xs = np.linspace(plot_x0 + 2, plot_x0 + plot_w - 2, num=len(vals))
+        # Leave a small right margin inside the plot for the latest value label.
+        label_w = 56
+        xs = np.linspace(plot_x0 + 4, plot_x0 + plot_w - label_w - 4, num=len(vals))
         pts = []
         for x, v in zip(xs, vals):
-            y = plot_y0 + plot_h - 2 - (float(v) - vmin) / (vmax - vmin) * (plot_h - 4)
+            y = plot_y0 + plot_h - 4 - (float(v) - vmin) / (vmax - vmin) * (plot_h - 8)
             pts.append([int(x), int(y)])
-        cv2.polylines(bgr, [np.asarray(pts, dtype=np.int32)], False, (80, 200, 255), 2, cv2.LINE_AA)
+        cv2.polylines(
+            bgr,
+            [np.asarray(pts, dtype=np.int32)],
+            False,
+            (80, 200, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        last_v = float(vals[-1])
+        last_y = int(
+            plot_y0 + plot_h - 4 - (last_v - vmin) / (vmax - vmin) * (plot_h - 8)
+        )
+        last_y = max(plot_y0 + 14, min(plot_y0 + plot_h - 6, last_y))
+        cv2.putText(
+            bgr,
+            f"{last_v:.2f}",
+            (plot_x0 + plot_w - label_w + 2, last_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (80, 200, 255),
+            1,
+            cv2.LINE_AA,
+        )
 
     return bgr
 
@@ -304,7 +403,20 @@ class RynnValueLiveHud:
                 import cv2
 
                 self._cv2 = cv2
+                # WINDOW_NORMAL allows drag-resize; FREERATIO unlocks aspect.
                 cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+                cv2.resizeWindow(
+                    self.window_name, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
+                )
+                prop = getattr(cv2, "WND_PROP_ASPECT_RATIO", None)
+                free_ratio = getattr(cv2, "WINDOW_FREERATIO", None)
+                if prop is not None and free_ratio is not None:
+                    try:
+                        cv2.setWindowProperty(
+                            self.window_name, prop, float(free_ratio)
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Live HUD window unavailable: %s", exc)
                 self.show_window = False
@@ -347,8 +459,23 @@ class RynnValueLiveHud:
             self._last_overlay_bgr = None
             self._dirty = False
 
-    def push_frame(self, frame: np.ndarray, *, step: Optional[int] = None) -> HudSnapshot:
+    def push_frame(
+        self,
+        frame: np.ndarray,
+        *,
+        step: Optional[int] = None,
+        display_frame: Optional[np.ndarray] = None,
+    ) -> HudSnapshot:
+        """Push a frame for scoring; optionally show a different image in the window.
+
+        ``frame`` goes to the score buffer (e.g. openpi-flipped LIBERO agentview).
+        ``display_frame`` (if set) is used only for the OpenCV overlay / saved HUD
+        video so the window can match the sim viewer orientation.
+        """
         rgb = _as_uint8_rgb(frame)
+        display_rgb = (
+            _as_uint8_rgb(display_frame) if display_frame is not None else rgb
+        )
         with self._lock:
             self._frames.append(rgb)
             if step is not None:
@@ -368,7 +495,7 @@ class RynnValueLiveHud:
             )
             history = list(self._history)
 
-        overlay = draw_hud_overlay(rgb, snap, history=history)
+        overlay = draw_hud_overlay(display_rgb, snap, history=history)
         with self._lock:
             self._last_overlay_bgr = overlay
 

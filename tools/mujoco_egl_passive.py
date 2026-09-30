@@ -227,6 +227,12 @@ class EglPassiveHandle:
                 except Exception as exc:
                     status.set(f"EGL viewer render skip: {exc}")
                     return
+            try:
+                from rynnvalue_hud_attach import push_rgb
+
+                push_rgb(rgb)
+            except Exception:
+                pass
             img = Image.fromarray(np.asarray(rgb))
             photo = ImageTk.PhotoImage(img)
             photo_box["img"] = photo

@@ -88,6 +88,7 @@ def main() -> int:
 
     os.environ.setdefault("MUJOCO_GL", "egl")
     os.environ.setdefault("QT_XCB_GL_INTEGRATION", "none")
+    os.environ.setdefault("RYNNVALUE_HUD_BACKEND", "mujoco")
 
     import mujoco
     import numpy as np
@@ -313,6 +314,12 @@ def main() -> int:
             mujoco.mj_forward(model, data)
         renderer.update_scene(data, camera=cam)
         rgb = renderer.render()
+        try:
+            from rynnvalue_hud_attach import push_rgb
+
+            push_rgb(rgb)
+        except Exception:
+            pass
         img = Image.fromarray(rgb)
         # Resize to panel if needed for display only
         photo = ImageTk.PhotoImage(image=img)

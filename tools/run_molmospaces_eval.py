@@ -27,6 +27,7 @@ def main() -> int:
     # Keep last frame after run until window close / GUI stop.
     os.environ.setdefault("MOLMOSPACES_VIEWER_KEEP_OPEN", "1")
     os.environ.setdefault("EAI_DIR", str(Path(__file__).resolve().parent.parent))
+    os.environ.setdefault("RYNNVALUE_HUD_BACKEND", "molmospaces")
 
     here = Path(__file__).resolve().parent
     eai_root = here.parent

@@ -1206,10 +1206,12 @@ ASTRA_GALLERY_FOLD_CLOTHES_URL = (
     "https://anonymous-report-421.github.io/public-website/"
     "gallery.html?id=mix__fold_clothes__random__g0__l2"
 )
+ASTRA_PHYSICAL_RSI_URL = "https://mmlab.hk/research/PhysicalRSI"
 ASTRA_PAGE_PRESETS: Tuple[Tuple[str, str], ...] = (
     ("English", ASTRA_ROBODOJO_URL),
     ("中文解读", ASTRA_ROBODOJO_ZH_URL),
     ("Gallery · fold_clothes", ASTRA_GALLERY_FOLD_CLOTHES_URL),
+    ("PhysicalRSI", ASTRA_PHYSICAL_RSI_URL),
 )
 HUMANOGO_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/HumanEgo"
@@ -18659,6 +18661,7 @@ class MuJoCoViewerLauncher(QObject):
         python_bin: str = "",
         mode: str = "auto",
         install: bool = False,
+        env_extra: Optional[Dict[str, str]] = None,
     ) -> None:
         if self.is_running():
             self.status_message.emit("MuJoCo 正在运行")
@@ -18700,6 +18703,11 @@ class MuJoCoViewerLauncher(QObject):
         qenv.insert("PYTHONUNBUFFERED", "1")
         qenv.insert("MUJOCO_ROOT", root)
         qenv.insert("MUJOCO_PYTHON", py)
+        if env_extra:
+            for k, v in env_extra.items():
+                if v is None:
+                    continue
+                qenv.insert(str(k), str(v))
         # Prefer VirtualGL → NVIDIA for interactive viewer (TurboVNC has no GPU GLX).
         if mode_norm != "egl":
             qenv.insert("MUJOCO_GL", "glfw")
@@ -22263,92 +22271,18 @@ class CameraTopicWindow(QMainWindow):
         )
         self.libero_render_gui_check.setToolTip(
             "勾选后弹出 robosuite/MuJoCo 实时窗口（MUJOCO_GL=glfw）。\n"
+            "评测结束后窗口仍保持打开，点击「停止」才关闭。\n"
             "无 DISPLAY 时可取消勾选，仅离屏渲染并保存视频。"
         )
         libero_param_row.addWidget(self.libero_render_gui_check)
-        self.libero_rynnvalue_hud_check = QCheckBox("RynnValue Live HUD")
-        self.libero_rynnvalue_hud_check.setChecked(False)
-        self.libero_rynnvalue_hud_check.setToolTip(
-            "按秒异步调用 RynnValue reward_server，弹出剩余时间 HUD。\n"
-            "勾选后自动探测 :8001；可用「部署 RynnValue」一键启动服务。"
-        )
-        libero_param_row.addWidget(self.libero_rynnvalue_hud_check)
-        libero_param_row.addWidget(QLabel("HUD刷新(s)"))
-        self.libero_rynnvalue_refresh_spin = QDoubleSpinBox()
-        self.libero_rynnvalue_refresh_spin.setRange(0.2, 30.0)
-        self.libero_rynnvalue_refresh_spin.setSingleStep(0.5)
-        self.libero_rynnvalue_refresh_spin.setDecimals(1)
-        self.libero_rynnvalue_refresh_spin.setValue(1.0)
-        self.libero_rynnvalue_refresh_spin.setToolTip(
-            "Live HUD 墙钟刷新间隔（秒），不绑定控制步频"
-        )
-        libero_param_row.addWidget(self.libero_rynnvalue_refresh_spin)
         libero_param_row.addStretch(1)
         libero_page_l.addLayout(libero_param_row)
-
-        libero_hud_row = QHBoxLayout()
-        libero_hud_row.setSpacing(6)
-        libero_hud_row.addWidget(QLabel("RynnValue URL"))
-        self.libero_rynnvalue_url_edit = QLineEdit("http://127.0.0.1:8001")
-        self.libero_rynnvalue_url_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.libero_rynnvalue_url_edit.setToolTip(
-            "reward_server 地址（POST /evaluate_batch_npy）"
-        )
-        libero_hud_row.addWidget(self.libero_rynnvalue_url_edit, 1)
-        libero_hud_row.addWidget(QLabel("num_frames"))
-        self.libero_rynnvalue_frames_spin = QSpinBox()
-        self.libero_rynnvalue_frames_spin.setRange(2, 64)
-        self.libero_rynnvalue_frames_spin.setValue(8)
-        self.libero_rynnvalue_frames_spin.setToolTip("每次打分从 ring buffer 均匀采样的帧数")
-        libero_hud_row.addWidget(self.libero_rynnvalue_frames_spin)
-        self.libero_rynnvalue_probe_btn = QPushButton("探测")
-        self.libero_rynnvalue_probe_btn.setFocusPolicy(Qt.NoFocus)
-        self.libero_rynnvalue_probe_btn.setToolTip("检查 reward_server /health 是否就绪")
-        self.libero_rynnvalue_probe_btn.clicked.connect(
-            self._on_libero_rynnvalue_probe_clicked
-        )
-        libero_hud_row.addWidget(self.libero_rynnvalue_probe_btn)
-        self.libero_rynnvalue_deploy_btn = QPushButton("部署 RynnValue")
-        self.libero_rynnvalue_deploy_btn.setFocusPolicy(Qt.NoFocus)
-        self.libero_rynnvalue_deploy_btn.setToolTip(
-            "启动 RynnValue reward_server（模型路径沿用「RynnValue」页配置）"
-        )
-        self.libero_rynnvalue_deploy_btn.clicked.connect(
-            self._on_libero_rynnvalue_deploy_clicked
-        )
-        libero_hud_row.addWidget(self.libero_rynnvalue_deploy_btn)
-        libero_page_l.addLayout(libero_hud_row)
-
-        libero_hud_status_row = QHBoxLayout()
-        libero_hud_status_row.setSpacing(6)
-        libero_hud_status_row.addWidget(QLabel("RynnValue 状态"))
-        self.libero_rynnvalue_status_label = QLabel("未检查（勾选 Live HUD 后自动探测）")
-        self.libero_rynnvalue_status_label.setFont(
-            QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
-        )
-        self.libero_rynnvalue_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        self.libero_rynnvalue_status_label.setWordWrap(True)
-        libero_hud_status_row.addWidget(self.libero_rynnvalue_status_label, 1)
-        libero_page_l.addLayout(libero_hud_status_row)
-
-        self.libero_rynnvalue_hud_check.toggled.connect(
-            self._on_libero_rynnvalue_hud_toggled
-        )
-        self.libero_rynnvalue_url_edit.editingFinished.connect(
-            self._on_libero_rynnvalue_url_changed
-        )
-        self._libero_rynnvalue_status_timer = QTimer(self)
-        self._libero_rynnvalue_status_timer.setInterval(5000)
-        self._libero_rynnvalue_status_timer.timeout.connect(
-            self._on_libero_rynnvalue_status_tick
-        )
-        self._update_libero_rynnvalue_hud_controls()
 
         libero_hint = QLabel(
             "对齐 RLinf toolkits/eval_scripts_openpi/libero_eval.py。"
             "默认 remote：先「部署 Pi」（pi05_libero）再启动评测。"
-            "可勾选「图形窗口」实时观看得分过程；"
-            "「RynnValue Live HUD」按秒异步叠加剩余时间（可在此页探测/部署 reward_server）。"
+            "可勾选「图形窗口」实时观看；"
+            "下方共用「RynnValue Live HUD」可异步叠加剩余时间。"
             "需 robosuite+libero（见日志安装提示）。与其它仿真后端互斥。"
         )
         libero_hint.setWordWrap(True)
@@ -22489,6 +22423,7 @@ class CameraTopicWindow(QMainWindow):
             "对齐 RLinf examples/embodiment/eval_embodiment.sh（OpenPI + ALOHA）。"
             "需 RoboTwin RLinf_support + SAPIEN assets；与其它仿真后端互斥。"
             "可勾选「图形窗口」实时观看；结束后窗口保持直到点「停止」。"
+            "下方共用「RynnValue Live HUD」经 frame bus 异步叠加剩余时间。"
             "结果仍保存到 video/eval/*.mp4。默认单卡 1 env 冒烟。"
         )
         robotwin_hint.setWordWrap(True)
@@ -22499,6 +22434,93 @@ class CameraTopicWindow(QMainWindow):
 
         # Shared MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin run controls + 可拖动高度的日志
         sim_outer.addWidget(self.sim_backend_stack, 1)
+
+        # Shared RynnValue Live HUD (LIBERO / RoboTwin / future sims)
+        self.sim_rynnvalue_hud_panel = QWidget()
+        _rv_panel_l = QVBoxLayout(self.sim_rynnvalue_hud_panel)
+        _rv_panel_l.setContentsMargins(0, 4, 0, 0)
+        _rv_panel_l.setSpacing(4)
+        _rv_row1 = QHBoxLayout()
+        _rv_row1.setSpacing(6)
+        self.sim_rynnvalue_hud_check = QCheckBox("RynnValue Live HUD")
+        self.sim_rynnvalue_hud_check.setChecked(False)
+        self.sim_rynnvalue_hud_check.setToolTip(
+            "按秒异步调用 RynnValue reward_server，弹出剩余时间 HUD。\n"
+            "LIBERO：评测进程内 push_frame；RoboTwin：EnvWorker→frame bus；\n"
+            "MuJoCo/Molmo：EGL 渲染帧；Arena：policy_runner obs；Isaac：cam_head.npy。\n"
+            "勾选后自动探测 :8001；可用「部署 RynnValue」一键启动服务。"
+        )
+        _rv_row1.addWidget(self.sim_rynnvalue_hud_check)
+        _rv_row1.addWidget(QLabel("HUD刷新(s)"))
+        self.sim_rynnvalue_refresh_spin = QDoubleSpinBox()
+        self.sim_rynnvalue_refresh_spin.setRange(0.2, 30.0)
+        self.sim_rynnvalue_refresh_spin.setSingleStep(0.5)
+        self.sim_rynnvalue_refresh_spin.setDecimals(1)
+        self.sim_rynnvalue_refresh_spin.setValue(1.0)
+        self.sim_rynnvalue_refresh_spin.setToolTip(
+            "Live HUD 墙钟刷新间隔（秒），不绑定控制步频"
+        )
+        _rv_row1.addWidget(self.sim_rynnvalue_refresh_spin)
+        _rv_row1.addStretch(1)
+        _rv_panel_l.addLayout(_rv_row1)
+
+        _rv_row2 = QHBoxLayout()
+        _rv_row2.setSpacing(6)
+        _rv_row2.addWidget(QLabel("RynnValue URL"))
+        self.sim_rynnvalue_url_edit = QLineEdit("http://127.0.0.1:8001")
+        self.sim_rynnvalue_url_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_rynnvalue_url_edit.setToolTip(
+            "reward_server 地址（POST /evaluate_batch_npy）"
+        )
+        _rv_row2.addWidget(self.sim_rynnvalue_url_edit, 1)
+        _rv_row2.addWidget(QLabel("num_frames"))
+        self.sim_rynnvalue_frames_spin = QSpinBox()
+        self.sim_rynnvalue_frames_spin.setRange(2, 64)
+        self.sim_rynnvalue_frames_spin.setValue(8)
+        self.sim_rynnvalue_frames_spin.setToolTip("每次打分从 ring buffer 均匀采样的帧数")
+        _rv_row2.addWidget(self.sim_rynnvalue_frames_spin)
+        self.sim_rynnvalue_probe_btn = QPushButton("探测")
+        self.sim_rynnvalue_probe_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_rynnvalue_probe_btn.setToolTip("检查 reward_server /health 是否就绪")
+        self.sim_rynnvalue_probe_btn.clicked.connect(
+            self._on_sim_rynnvalue_probe_clicked
+        )
+        _rv_row2.addWidget(self.sim_rynnvalue_probe_btn)
+        self.sim_rynnvalue_deploy_btn = QPushButton("部署 RynnValue")
+        self.sim_rynnvalue_deploy_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_rynnvalue_deploy_btn.setToolTip(
+            "启动 RynnValue reward_server（模型路径沿用「RynnValue」页配置）"
+        )
+        self.sim_rynnvalue_deploy_btn.clicked.connect(
+            self._on_sim_rynnvalue_deploy_clicked
+        )
+        _rv_row2.addWidget(self.sim_rynnvalue_deploy_btn)
+        _rv_panel_l.addLayout(_rv_row2)
+
+        _rv_row3 = QHBoxLayout()
+        _rv_row3.setSpacing(6)
+        _rv_row3.addWidget(QLabel("RynnValue 状态"))
+        self.sim_rynnvalue_status_label = QLabel("未检查（勾选 Live HUD 后自动探测）")
+        self.sim_rynnvalue_status_label.setFont(
+            QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
+        )
+        self.sim_rynnvalue_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.sim_rynnvalue_status_label.setWordWrap(True)
+        _rv_row3.addWidget(self.sim_rynnvalue_status_label, 1)
+        _rv_panel_l.addLayout(_rv_row3)
+
+        self.sim_rynnvalue_hud_check.toggled.connect(self._on_sim_rynnvalue_hud_toggled)
+        self.sim_rynnvalue_url_edit.editingFinished.connect(
+            self._on_sim_rynnvalue_url_changed
+        )
+        self._sim_rynnvalue_status_timer = QTimer(self)
+        self._sim_rynnvalue_status_timer.setInterval(5000)
+        self._sim_rynnvalue_status_timer.timeout.connect(
+            self._on_sim_rynnvalue_status_tick
+        )
+        self._update_sim_rynnvalue_hud_controls()
+        self.sim_rynnvalue_hud_panel.setVisible(False)
+        sim_outer.addWidget(self.sim_rynnvalue_hud_panel)
 
         self.mujoco_run_row_widget = QWidget()
         mj_run_row = QHBoxLayout(self.mujoco_run_row_widget)
@@ -24479,8 +24501,13 @@ class CameraTopicWindow(QMainWindow):
             self._on_rynnvalue_output_video
         )
         self._on_rynnvalue_job_changed()
-        if hasattr(self, "_update_libero_rynnvalue_hud_controls"):
-            self._update_libero_rynnvalue_hud_controls()
+        if hasattr(self, "_update_sim_rynnvalue_hud_controls"):
+            self._update_sim_rynnvalue_hud_controls()
+        # Show shared Live HUD panel when current backend supports it.
+        if hasattr(self, "sim_rynnvalue_hud_panel") and hasattr(
+            self, "_sim_rynnvalue_hud_supported"
+        ):
+            self.sim_rynnvalue_hud_panel.setVisible(self._sim_rynnvalue_hud_supported())
 
         control_tabs.addTab(sim_tab, "仿真评测")
         control_tabs.addTab(real_tab, "真机评测")
@@ -27530,7 +27557,10 @@ class CameraTopicWindow(QMainWindow):
                 )
                 self._activate_sim_camera_preview(force=False)
                 self._update_sim_eval_run_ui()
-            return
+                if self._sim_rynnvalue_hud_enabled():
+                    if self._ensure_live_hud_reward_or_abort("isaac"):
+                        self._start_isaac_rynnvalue_npy_hud(bridge_dir)
+                return
 
         # 本窗口未管理，但系统里可能已有 Isaac / eval_client → 先复用
         existing = RoboDojoEvalLauncher.list_running_eval_clients()
@@ -27549,6 +27579,9 @@ class CameraTopicWindow(QMainWindow):
                 self._append_sim_log(
                     f"已复用仿真进程（{result}），任务目标={task}；未重头启动 Isaac"
                 )
+                if self._sim_rynnvalue_hud_enabled():
+                    if self._ensure_live_hud_reward_or_abort("isaac"):
+                        self._start_isaac_rynnvalue_npy_hud(bridge_dir)
                 return
             self._append_sim_log("复用失败，将尝试新启动评测…")
 
@@ -27703,6 +27736,11 @@ class CameraTopicWindow(QMainWindow):
             "/camera/{left_wrist,head,right_wrist}_{color,depth}"
             "（优先共享 .npy，忽略同名真机 ROS 流）"
         )
+        # RynnValue Live HUD: poll cam_head.npy written by Isaac cam bridge.
+        if self._sim_rynnvalue_hud_enabled():
+            if not self._ensure_live_hud_reward_or_abort("isaac"):
+                return
+            self._start_isaac_rynnvalue_npy_hud(bridge_dir)
 
     def _on_sim_policy_deploy_running_changed(self, running: bool = False) -> None:
         if running:
@@ -27921,6 +27959,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_sim_eval_stop_run_clicked(self) -> None:
         self._append_sim_log("--- 用户点击停止评测（停止全部仿真）---")
+        self._stop_isaac_rynnvalue_npy_hud()
         self._sim_eval_launcher.stop()
         if self._sim_eval_auto_bridge and self._sim_bridge_launcher.is_running():
             self._append_sim_log("--- 一并停止自动启动的相机桥 ---")
@@ -31330,6 +31369,12 @@ class CameraTopicWindow(QMainWindow):
             self.mujoco_log_edit.setVisible(show_mj)
         if hasattr(self, "mujoco_log_resize_bar"):
             self.mujoco_log_resize_bar.setVisible(show_mj)
+        if hasattr(self, "sim_rynnvalue_hud_panel"):
+            self.sim_rynnvalue_hud_panel.setVisible(
+                self._sim_rynnvalue_hud_supported()
+            )
+            if hasattr(self, "_update_sim_rynnvalue_hud_controls"):
+                self._update_sim_rynnvalue_hud_controls()
         # RoboTwin / LIBERO logs are verbose — prefer a taller pane when switching in
         # (respect a user-dragged height if already larger).
         if (
@@ -31770,10 +31815,7 @@ class CameraTopicWindow(QMainWindow):
         if not os.path.isdir(root):
             self._on_mujoco_status(f"IsaacLab-Arena 目录不存在: {root}")
             return
-        script = os.path.join(root, "isaaclab_arena", "evaluation", "policy_runner.py")
-        if not os.path.isfile(script):
-            self._on_mujoco_status(f"未找到: {script}")
-            return
+        # policy_runner is invoked via tools/run_arena_eval.py (Live HUD hook).
         env_name = ""
         if hasattr(self, "arena_task_combo"):
             env_name = str(self.arena_task_combo.currentData() or "").strip()
@@ -31787,9 +31829,19 @@ class CameraTopicWindow(QMainWindow):
         if hasattr(self, "arena_steps_spin"):
             steps = int(self.arena_steps_spin.value())
         py = resolve_isaaclab_arena_python()
+        runner = os.path.join(root, "isaaclab_arena", "evaluation", "policy_runner.py")
+        wrapper = os.path.join(EAI_DIR, "tools", "run_arena_eval.py")
+        if not os.path.isfile(runner):
+            self._on_mujoco_status(f"未找到: {runner}")
+            return
+        if not self._ensure_live_hud_reward_or_abort("arena"):
+            return
+        hud_env = self._rynnvalue_live_hud_child_env("arena")
         argv = [
             py,
-            script,
+            wrapper,
+            f"--arena-root={root}",
+            "--",
             "--policy_type",
             policy,
             "--num_steps",
@@ -31841,13 +31893,24 @@ class CameraTopicWindow(QMainWindow):
             f"[arena] task={env_name} policy={policy} steps={steps} "
             f"device={device_label} viz={viz_label}"
         )
+        env_extra = isaaclab_arena_child_env(
+            root, py, cuda_visible=str(gpu_id) if use_gpu else ""
+        )
+        if hud_env:
+            env_extra = {**(env_extra or {}), **hud_env}
+            # Ensure EAI tools importable inside Arena python
+            tools = os.path.join(EAI_DIR, "tools")
+            prev = (env_extra.get("PYTHONPATH") or os.environ.get("PYTHONPATH") or "")
+            parts = [tools] + [p for p in prev.split(os.pathsep) if p and p != tools]
+            env_extra["PYTHONPATH"] = os.pathsep.join(parts)
+            self._append_mujoco_log(
+                f"[arena] RynnValue Live HUD url={hud_env.get('RYNNVALUE_SERVER_URL')}"
+            )
         self._mujoco_launcher.start_cwd_command(
             cwd=root,
             argv=argv,
             label=f"arena {env_name}",
-            env_extra=isaaclab_arena_child_env(
-                root, py, cuda_visible=str(gpu_id) if use_gpu else ""
-            ),
+            env_extra=env_extra,
         )
         self._update_mujoco_ui()
 
@@ -31914,33 +31977,202 @@ class CameraTopicWindow(QMainWindow):
         else:
             self._on_mujoco_status(f"Pi 部署失败: {msg}")
 
-    def _libero_rynnvalue_server_url(self) -> str:
-        if hasattr(self, "libero_rynnvalue_url_edit"):
+
+    def _sim_rynnvalue_hud_supported(self) -> bool:
+        """All 仿真评测 backends can feed Live HUD (per-backend adapters)."""
+        return self._sim_backend_id() in (
+            "isaac",
+            "mujoco",
+            "molmospaces",
+            "arena",
+            "libero",
+            "robotwin",
+        )
+
+    def _sim_rynnvalue_server_url(self) -> str:
+        if hasattr(self, "sim_rynnvalue_url_edit"):
             return (
-                self.libero_rynnvalue_url_edit.text().strip()
-                or "http://127.0.0.1:8001"
+                self.sim_rynnvalue_url_edit.text().strip() or "http://127.0.0.1:8001"
             )
         return "http://127.0.0.1:8001"
 
-    def _libero_rynnvalue_hud_enabled(self) -> bool:
+    def _sim_rynnvalue_hud_enabled(self) -> bool:
         return bool(
-            hasattr(self, "libero_rynnvalue_hud_check")
-            and self.libero_rynnvalue_hud_check.isChecked()
+            hasattr(self, "sim_rynnvalue_hud_check")
+            and self.sim_rynnvalue_hud_check.isChecked()
         )
 
-    def _update_libero_rynnvalue_hud_controls(self) -> None:
-        enabled = self._libero_rynnvalue_hud_enabled()
+    def _sim_rynnvalue_hud_settings(self) -> dict:
+        """Shared Live HUD knobs for any sim backend launcher."""
+        return {
+            "enabled": self._sim_rynnvalue_hud_enabled(),
+            "server_url": self._sim_rynnvalue_server_url(),
+            "refresh_sec": float(
+                self.sim_rynnvalue_refresh_spin.value()
+                if hasattr(self, "sim_rynnvalue_refresh_spin")
+                else 1.0
+            ),
+            "num_frames": int(
+                self.sim_rynnvalue_frames_spin.value()
+                if hasattr(self, "sim_rynnvalue_frames_spin")
+                else 8
+            ),
+            "show_window": bool((os.environ.get("DISPLAY") or "").strip()),
+        }
+
+    def _rynnvalue_live_hud_child_env(self, backend: str) -> Dict[str, str]:
+        """Env vars injected into sim child processes for Live HUD."""
+        settings = self._sim_rynnvalue_hud_settings()
+        if not settings.get("enabled"):
+            return {}
+        try:
+            from rynnvalue_hud_attach import child_env_from_settings
+        except Exception:
+            # show_camera_topics may not have tools/ on sys.path yet
+            tools = os.path.join(EAI_DIR, "tools")
+            if tools not in sys.path:
+                sys.path.insert(0, tools)
+            from rynnvalue_hud_attach import child_env_from_settings
+        status = os.path.join(
+            EAI_DIR, ".cache", "rynnvalue_live", f"{backend}_rynnvalue_live.json"
+        )
+        try:
+            os.makedirs(os.path.dirname(status), exist_ok=True)
+        except Exception:
+            pass
+        return child_env_from_settings(
+            settings, backend=backend, status_path=status
+        )
+
+    def _ensure_live_hud_reward_or_abort(self, tag: str) -> bool:
+        """If Live HUD checked, ensure reward_server; return False to abort start."""
+        if not self._sim_rynnvalue_hud_enabled():
+            return True
+        url = self._sim_rynnvalue_server_url()
+        line = f"[{tag}] 确认 RynnValue reward_server（{url}）…"
+        if hasattr(self, "_append_mujoco_log"):
+            self._append_mujoco_log(line)
+        if tag == "isaac" and hasattr(self, "_append_sim_log"):
+            self._append_sim_log(line)
+        ok, msg = self._ensure_rynnvalue_reward_server_ready(
+            start_if_needed=True, wait_s=900.0
+        )
+        if not ok:
+            err = f"[{tag}] RynnValue 预检失败: {msg}"
+            if hasattr(self, "_append_mujoco_log"):
+                self._append_mujoco_log(err)
+            if tag == "isaac" and hasattr(self, "_append_sim_log"):
+                self._append_sim_log(err)
+            if hasattr(self, "_on_mujoco_status"):
+                self._on_mujoco_status(f"RynnValue 未就绪: {msg}")
+            return False
+        ok_line = f"[{tag}] RynnValue 预检通过: {msg}"
+        if hasattr(self, "_append_mujoco_log"):
+            self._append_mujoco_log(ok_line)
+        if tag == "isaac" and hasattr(self, "_append_sim_log"):
+            self._append_sim_log(ok_line)
+        return True
+
+    def _start_isaac_rynnvalue_npy_hud(self, bridge_dir: str) -> None:
+        """Poll Isaac cam_head.npy into Live HUD (GUI-side sidecar)."""
+        self._stop_isaac_rynnvalue_npy_hud()
+        if not self._sim_rynnvalue_hud_enabled():
+            return
+        settings = self._sim_rynnvalue_hud_settings()
+        try:
+            tools = os.path.join(EAI_DIR, "tools")
+            if tools not in sys.path:
+                sys.path.insert(0, tools)
+            from rynnvalue_live_hud import RynnValueLiveHud
+            from rynnvalue_sim_bridge import get_hud_profile
+        except Exception as exc:
+            self._append_sim_log(f"[rynnvalue] Isaac HUD import failed: {exc}")
+            return
+        prof = get_hud_profile("isaac")
+        status = os.path.join(
+            EAI_DIR, ".cache", "rynnvalue_live", "isaac_rynnvalue_live.json"
+        )
+        try:
+            os.makedirs(os.path.dirname(status), exist_ok=True)
+        except Exception:
+            pass
+        hud = RynnValueLiveHud(
+            server_url=str(settings["server_url"]),
+            refresh_sec=float(settings["refresh_sec"]),
+            num_frames=int(settings["num_frames"]),
+            robot_description=prof.robot_description,
+            camera_description=prof.camera_description,
+            show_window=bool(settings.get("show_window", True)),
+            status_path=status,
+        )
+        hud.start()
+        self._isaac_rynnvalue_hud = hud
+        self._isaac_rynnvalue_bridge_dir = os.path.abspath(
+            os.path.expanduser(bridge_dir or ISAAC_CAM_BRIDGE_DIR_DEFAULT)
+        )
+        self._isaac_rynnvalue_last_mtime = 0.0
+        if not hasattr(self, "_isaac_rynnvalue_timer"):
+            self._isaac_rynnvalue_timer = QTimer(self)
+            self._isaac_rynnvalue_timer.setInterval(120)
+            self._isaac_rynnvalue_timer.timeout.connect(self._poll_isaac_rynnvalue_npy)
+        self._isaac_rynnvalue_timer.start()
+        self._append_sim_log(
+            f"[rynnvalue] Isaac Live HUD polling "
+            f"{self._isaac_rynnvalue_bridge_dir}/cam_head.npy"
+        )
+
+    def _stop_isaac_rynnvalue_npy_hud(self) -> None:
+        timer = getattr(self, "_isaac_rynnvalue_timer", None)
+        if timer is not None and timer.isActive():
+            timer.stop()
+        hud = getattr(self, "_isaac_rynnvalue_hud", None)
+        if hud is not None:
+            try:
+                hud.stop()
+            except Exception:
+                pass
+        self._isaac_rynnvalue_hud = None
+
+    def _poll_isaac_rynnvalue_npy(self) -> None:
+        hud = getattr(self, "_isaac_rynnvalue_hud", None)
+        if hud is None:
+            return
+        bridge = getattr(self, "_isaac_rynnvalue_bridge_dir", "") or ""
+        npy = os.path.join(bridge, "cam_head.npy")
+        if not os.path.isfile(npy):
+            return
+        try:
+            mtime = os.path.getmtime(npy)
+            if mtime <= float(getattr(self, "_isaac_rynnvalue_last_mtime", 0.0) or 0.0):
+                return
+            import numpy as _np
+
+            arr = _np.load(npy)
+            self._isaac_rynnvalue_last_mtime = mtime
+            hud.push_frame(arr)
+        except Exception:
+            pass
+
+    # Backward-compatible aliases (older call sites / signal names).
+    def _libero_rynnvalue_server_url(self) -> str:
+        return self._sim_rynnvalue_server_url()
+
+    def _libero_rynnvalue_hud_enabled(self) -> bool:
+        return self._sim_rynnvalue_hud_enabled()
+
+    def _update_sim_rynnvalue_hud_controls(self) -> None:
+        enabled = self._sim_rynnvalue_hud_enabled()
         for wname in (
-            "libero_rynnvalue_refresh_spin",
-            "libero_rynnvalue_url_edit",
-            "libero_rynnvalue_frames_spin",
-            "libero_rynnvalue_probe_btn",
-            "libero_rynnvalue_deploy_btn",
+            "sim_rynnvalue_refresh_spin",
+            "sim_rynnvalue_url_edit",
+            "sim_rynnvalue_frames_spin",
+            "sim_rynnvalue_probe_btn",
+            "sim_rynnvalue_deploy_btn",
         ):
             w = getattr(self, wname, None)
             if w is not None:
                 w.setEnabled(enabled)
-        timer = getattr(self, "_libero_rynnvalue_status_timer", None)
+        timer = getattr(self, "_sim_rynnvalue_status_timer", None)
         if timer is not None:
             if enabled:
                 if not timer.isActive():
@@ -31948,8 +32180,11 @@ class CameraTopicWindow(QMainWindow):
             else:
                 timer.stop()
 
-    def _set_libero_rynnvalue_status(self, text: str, *, level: str = "muted") -> None:
-        if not hasattr(self, "libero_rynnvalue_status_label"):
+    def _update_libero_rynnvalue_hud_controls(self) -> None:
+        self._update_sim_rynnvalue_hud_controls()
+
+    def _set_sim_rynnvalue_status(self, text: str, *, level: str = "muted") -> None:
+        if not hasattr(self, "sim_rynnvalue_status_label"):
             return
         color = {
             "ok": "#3dd68c",
@@ -31957,43 +32192,51 @@ class CameraTopicWindow(QMainWindow):
             "err": "#f56c6c",
             "muted": UI_TEXT_MUTED,
         }.get(level, UI_TEXT_MUTED)
-        self.libero_rynnvalue_status_label.setText(text)
-        self.libero_rynnvalue_status_label.setStyleSheet(f"color: {color};")
+        self.sim_rynnvalue_status_label.setText(text)
+        self.sim_rynnvalue_status_label.setStyleSheet(f"color: {color};")
 
-    def _probe_and_show_rynnvalue_reward_status(self, *, log: bool = False) -> Tuple[bool, str]:
-        url = self._libero_rynnvalue_server_url()
+    def _set_libero_rynnvalue_status(self, text: str, *, level: str = "muted") -> None:
+        self._set_sim_rynnvalue_status(text, level=level)
+
+    def _probe_and_show_rynnvalue_reward_status(
+        self, *, log: bool = False, prefix: str = ""
+    ) -> Tuple[bool, str]:
+        # ``prefix`` kept for call-site compatibility; shared panel ignores it.
+        _ = prefix
+        url = self._sim_rynnvalue_server_url()
         launcher_running = bool(
             getattr(self, "_rynnvalue_launcher", None)
             and self._rynnvalue_launcher.is_running()
         )
         ok, msg, info = probe_rynnvalue_reward_server(url)
+        deploy_btn = getattr(self, "sim_rynnvalue_deploy_btn", None)
         if ok:
-            self._set_libero_rynnvalue_status(f"● {msg}", level="ok")
-            if hasattr(self, "libero_rynnvalue_deploy_btn"):
-                self.libero_rynnvalue_deploy_btn.setText("已部署")
+            self._set_sim_rynnvalue_status(f"● {msg}", level="ok")
+            if deploy_btn is not None:
+                deploy_btn.setText("已部署")
         elif info.get("listening") or launcher_running:
             detail = msg
             if launcher_running and not info.get("listening"):
                 detail = "RynnValue 进程已启动，等待 /health…"
-            self._set_libero_rynnvalue_status(f"◐ {detail}", level="warn")
-            if hasattr(self, "libero_rynnvalue_deploy_btn"):
-                self.libero_rynnvalue_deploy_btn.setText("部署中…")
+            self._set_sim_rynnvalue_status(f"◐ {detail}", level="warn")
+            if deploy_btn is not None:
+                deploy_btn.setText("部署中…")
         else:
-            self._set_libero_rynnvalue_status(f"○ {msg}", level="err")
-            if hasattr(self, "libero_rynnvalue_deploy_btn"):
-                self.libero_rynnvalue_deploy_btn.setText("部署 RynnValue")
+            self._set_sim_rynnvalue_status(f"○ {msg}", level="err")
+            if deploy_btn is not None:
+                deploy_btn.setText("部署 RynnValue")
         if log:
-            prev = getattr(self, "_libero_rynnvalue_last_logged_msg", "")
+            prev = getattr(self, "_sim_rynnvalue_last_logged_msg", "")
             if msg != prev:
-                self._libero_rynnvalue_last_logged_msg = msg
+                self._sim_rynnvalue_last_logged_msg = msg
                 self._append_mujoco_log(f"[rynnvalue] {msg}")
         return ok, msg
 
-    def _on_libero_rynnvalue_hud_toggled(self, checked: bool) -> None:
-        self._update_libero_rynnvalue_hud_controls()
+    def _on_sim_rynnvalue_hud_toggled(self, checked: bool) -> None:
+        self._update_sim_rynnvalue_hud_controls()
         if checked:
             self._append_mujoco_log(
-                f"[rynnvalue] Live HUD 已勾选，探测 {self._libero_rynnvalue_server_url()}"
+                f"[rynnvalue] Live HUD 已勾选，探测 {self._sim_rynnvalue_server_url()}"
             )
             ok, msg = self._probe_and_show_rynnvalue_reward_status(log=True)
             if not ok:
@@ -32001,27 +32244,72 @@ class CameraTopicWindow(QMainWindow):
             else:
                 self._on_mujoco_status(msg)
         else:
-            self._set_libero_rynnvalue_status(
-                "未启用 Live HUD", level="muted"
-            )
-            if hasattr(self, "libero_rynnvalue_deploy_btn"):
-                self.libero_rynnvalue_deploy_btn.setText("部署 RynnValue")
+            self._set_sim_rynnvalue_status("未启用 Live HUD", level="muted")
+            if hasattr(self, "sim_rynnvalue_deploy_btn"):
+                self.sim_rynnvalue_deploy_btn.setText("部署 RynnValue")
 
-    def _on_libero_rynnvalue_url_changed(self) -> None:
-        if self._libero_rynnvalue_hud_enabled():
+    def _on_sim_rynnvalue_url_changed(self) -> None:
+        if self._sim_rynnvalue_hud_enabled():
             self._probe_and_show_rynnvalue_reward_status(log=False)
 
-    def _on_libero_rynnvalue_status_tick(self) -> None:
-        if self._libero_rynnvalue_hud_enabled():
+    def _on_sim_rynnvalue_status_tick(self) -> None:
+        if self._sim_rynnvalue_hud_enabled():
             self._probe_and_show_rynnvalue_reward_status(log=False)
 
-    def _on_libero_rynnvalue_probe_clicked(self) -> None:
+    def _on_sim_rynnvalue_probe_clicked(self) -> None:
         ok, msg = self._probe_and_show_rynnvalue_reward_status(log=True)
         self._on_mujoco_status(msg if ok else f"RynnValue 未就绪: {msg}")
 
     def _on_rynnvalue_running_for_libero_hud(self, *_args) -> None:
-        if self._libero_rynnvalue_hud_enabled():
+        if self._sim_rynnvalue_hud_enabled():
             self._probe_and_show_rynnvalue_reward_status(log=False)
+
+    def _on_sim_rynnvalue_deploy_clicked(self) -> None:
+        if not self._sim_rynnvalue_hud_enabled():
+            self._on_mujoco_status("请先勾选 RynnValue Live HUD")
+            return
+        ok, msg = self._probe_and_show_rynnvalue_reward_status(log=True)
+        if ok:
+            self._on_mujoco_status(msg)
+            return
+        backend = self._sim_backend_id()
+        self._append_mujoco_log(f"[{backend}] 部署 RynnValue reward_server…")
+        ok, msg = self._ensure_rynnvalue_reward_server_ready(
+            start_if_needed=True,
+            wait_s=900.0,
+        )
+        self._on_mujoco_status(msg if ok else f"RynnValue 部署失败: {msg}")
+
+    # Aliases kept so old connect(...) / call sites do not break mid-refactor.
+    def _on_libero_rynnvalue_hud_toggled(self, checked: bool) -> None:
+        self._on_sim_rynnvalue_hud_toggled(checked)
+
+    def _on_libero_rynnvalue_url_changed(self) -> None:
+        self._on_sim_rynnvalue_url_changed()
+
+    def _on_libero_rynnvalue_status_tick(self) -> None:
+        self._on_sim_rynnvalue_status_tick()
+
+    def _on_libero_rynnvalue_probe_clicked(self) -> None:
+        self._on_sim_rynnvalue_probe_clicked()
+
+    def _on_libero_rynnvalue_deploy_clicked(self) -> None:
+        self._on_sim_rynnvalue_deploy_clicked()
+
+    def _on_robotwin_rynnvalue_hud_toggled(self, checked: bool) -> None:
+        self._on_sim_rynnvalue_hud_toggled(checked)
+
+    def _on_robotwin_rynnvalue_url_changed(self) -> None:
+        self._on_sim_rynnvalue_url_changed()
+
+    def _on_robotwin_rynnvalue_status_tick(self) -> None:
+        self._on_sim_rynnvalue_status_tick()
+
+    def _on_robotwin_rynnvalue_probe_clicked(self) -> None:
+        self._on_sim_rynnvalue_probe_clicked()
+
+    def _on_robotwin_rynnvalue_deploy_clicked(self) -> None:
+        self._on_sim_rynnvalue_deploy_clicked()
 
     def _rynnvalue_deploy_model_path(self) -> str:
         if hasattr(self, "rynnvalue_model_edit"):
@@ -32035,10 +32323,11 @@ class CameraTopicWindow(QMainWindow):
             return self.rynnvalue_ckpt_edit.text().strip()
         return resolve_rynnvalue_ckpt()
 
+
     def _start_rynnvalue_reward_server(self) -> Tuple[bool, str]:
         if not hasattr(self, "_rynnvalue_launcher"):
             return False, "RynnValue launcher 未初始化"
-        url = self._libero_rynnvalue_server_url()
+        url = self._sim_rynnvalue_server_url()
         if self._rynnvalue_launcher.is_running():
             ok, msg, _info = probe_rynnvalue_reward_server(url)
             if ok:
@@ -32057,8 +32346,8 @@ class CameraTopicWindow(QMainWindow):
             return False, f"模型目录不可用: {model}"
 
         num_frames = 8
-        if hasattr(self, "libero_rynnvalue_frames_spin"):
-            num_frames = int(self.libero_rynnvalue_frames_spin.value())
+        if hasattr(self, "sim_rynnvalue_frames_spin"):
+            num_frames = int(self.sim_rynnvalue_frames_spin.value())
         cuda = "0"
         if hasattr(self, "rynnvalue_cuda_edit"):
             cuda = self.rynnvalue_cuda_edit.text().strip() or "0"
@@ -32105,7 +32394,7 @@ class CameraTopicWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             return False, f"无法探测 RynnValue Python 依赖: {exc}"
 
-        # Keep RynnValue tab port in sync with LIBERO URL.
+        # Keep RynnValue tab port in sync with shared Live HUD URL.
         if hasattr(self, "rynnvalue_port_spin"):
             self.rynnvalue_port_spin.setValue(int(port))
         if hasattr(self, "rynnvalue_job_combo"):
@@ -32130,11 +32419,9 @@ class CameraTopicWindow(QMainWindow):
         )
         if not self._rynnvalue_launcher.is_running():
             return False, "启动 reward_server 失败（见 RynnValue 日志）"
-        self._set_libero_rynnvalue_status(
-            "◐ 正在加载 RynnValue 模型…", level="warn"
-        )
-        if hasattr(self, "libero_rynnvalue_deploy_btn"):
-            self.libero_rynnvalue_deploy_btn.setText("部署中…")
+        self._set_sim_rynnvalue_status("◐ 正在加载 RynnValue 模型…", level="warn")
+        if hasattr(self, "sim_rynnvalue_deploy_btn"):
+            self.sim_rynnvalue_deploy_btn.setText("部署中…")
         return True, "已启动 reward_server，等待健康检查"
 
     def _ensure_rynnvalue_reward_server_ready(
@@ -32142,7 +32429,9 @@ class CameraTopicWindow(QMainWindow):
         *,
         start_if_needed: bool = True,
         wait_s: float = 600.0,
+        prefix: str = "",
     ) -> Tuple[bool, str]:
+        _ = prefix  # compatibility with older call sites
         ok, msg = self._probe_and_show_rynnvalue_reward_status(log=True)
         if ok:
             return True, msg
@@ -32166,27 +32455,12 @@ class CameraTopicWindow(QMainWindow):
                 return True, last
             launcher = getattr(self, "_rynnvalue_launcher", None)
             if launcher is not None and not launcher.is_running():
-                # Process died; one more probe in case external server came up.
                 ok, last = self._probe_and_show_rynnvalue_reward_status(log=True)
                 if ok:
                     return True, last
                 return False, f"reward_server 进程已退出: {last}"
             time.sleep(2.0)
         return False, f"等待 RynnValue reward_server 超时: {last}"
-
-    def _on_libero_rynnvalue_deploy_clicked(self) -> None:
-        if not self._libero_rynnvalue_hud_enabled():
-            self._on_mujoco_status("请先勾选 RynnValue Live HUD")
-            return
-        ok, msg = self._probe_and_show_rynnvalue_reward_status(log=True)
-        if ok:
-            self._on_mujoco_status(msg)
-            return
-        self._on_mujoco_status("正在部署 RynnValue reward_server…")
-        ok, msg = self._ensure_rynnvalue_reward_server_ready(
-            start_if_needed=True, wait_s=900.0
-        )
-        self._on_mujoco_status(msg if ok else f"部署失败: {msg}")
 
     def _on_libero_run_clicked(self) -> None:
         if (
@@ -32261,20 +32535,11 @@ class CameraTopicWindow(QMainWindow):
         render_gui = True
         if hasattr(self, "libero_render_gui_check"):
             render_gui = bool(self.libero_render_gui_check.isChecked())
-        rynnvalue_live_hud = False
-        rynnvalue_refresh_sec = 1.0
-        rynnvalue_server_url = "http://127.0.0.1:8001"
-        rynnvalue_num_frames = 8
-        if hasattr(self, "libero_rynnvalue_hud_check"):
-            rynnvalue_live_hud = bool(self.libero_rynnvalue_hud_check.isChecked())
-        if hasattr(self, "libero_rynnvalue_refresh_spin"):
-            rynnvalue_refresh_sec = float(self.libero_rynnvalue_refresh_spin.value())
-        if hasattr(self, "libero_rynnvalue_url_edit"):
-            rynnvalue_server_url = (
-                self.libero_rynnvalue_url_edit.text().strip() or rynnvalue_server_url
-            )
-        if hasattr(self, "libero_rynnvalue_frames_spin"):
-            rynnvalue_num_frames = int(self.libero_rynnvalue_frames_spin.value())
+        _rv = self._sim_rynnvalue_hud_settings()
+        rynnvalue_live_hud = bool(_rv["enabled"])
+        rynnvalue_refresh_sec = float(_rv["refresh_sec"])
+        rynnvalue_server_url = str(_rv["server_url"])
+        rynnvalue_num_frames = int(_rv["num_frames"])
 
         if rynnvalue_live_hud:
             self._append_mujoco_log(
@@ -32283,6 +32548,7 @@ class CameraTopicWindow(QMainWindow):
             ok_rv, msg_rv = self._ensure_rynnvalue_reward_server_ready(
                 start_if_needed=True,
                 wait_s=900.0,
+                prefix="libero",
             )
             if not ok_rv:
                 self._append_mujoco_log(f"[libero] RynnValue 预检失败: {msg_rv}")
@@ -32309,7 +32575,7 @@ class CameraTopicWindow(QMainWindow):
                 rynnvalue_server_url=rynnvalue_server_url,
                 rynnvalue_refresh_sec=rynnvalue_refresh_sec,
                 rynnvalue_num_frames=rynnvalue_num_frames,
-                rynnvalue_show_window=bool((os.environ.get("DISPLAY") or "").strip()),
+                rynnvalue_show_window=bool(_rv["show_window"]),
             )
         except Exception as exc:  # noqa: BLE001
             self._on_mujoco_status(f"无法组装 LIBERO 命令: {exc}")
@@ -32439,6 +32705,11 @@ class CameraTopicWindow(QMainWindow):
         render_gui = True
         if hasattr(self, "robotwin_render_gui_check"):
             render_gui = bool(self.robotwin_render_gui_check.isChecked())
+        _rv = self._sim_rynnvalue_hud_settings()
+        rynnvalue_live_hud = bool(_rv["enabled"])
+        rynnvalue_refresh_sec = float(_rv["refresh_sec"])
+        rynnvalue_server_url = str(_rv["server_url"])
+        rynnvalue_num_frames = int(_rv["num_frames"])
         if render_gui and num_envs > 1:
             self._append_mujoco_log(
                 f"[robotwin] 图形窗口开启：并行环境 {num_envs} -> 1"
@@ -32501,6 +32772,21 @@ class CameraTopicWindow(QMainWindow):
             self._on_mujoco_status("RoboTwin assets 未下载（见日志）")
             return
 
+        if rynnvalue_live_hud:
+            self._append_mujoco_log(
+                f"[robotwin] 确认 RynnValue reward_server（{rynnvalue_server_url}）…"
+            )
+            ok_rv, msg_rv = self._ensure_rynnvalue_reward_server_ready(
+                start_if_needed=True,
+                wait_s=900.0,
+                prefix="robotwin",
+            )
+            if not ok_rv:
+                self._append_mujoco_log(f"[robotwin] RynnValue 预检失败: {msg_rv}")
+                self._on_mujoco_status(f"RynnValue 未就绪: {msg_rv}")
+                return
+            self._append_mujoco_log(f"[robotwin] RynnValue 预检通过: {msg_rv}")
+
         try:
             argv, cwd, env_extra = build_robotwin_eval_argv(
                 task=task,
@@ -32514,6 +32800,11 @@ class CameraTopicWindow(QMainWindow):
                 robotwin_root=rt,
                 gpu=str(gpu),
                 render_gui=render_gui,
+                rynnvalue_live_hud=rynnvalue_live_hud,
+                rynnvalue_server_url=rynnvalue_server_url,
+                rynnvalue_refresh_sec=rynnvalue_refresh_sec,
+                rynnvalue_num_frames=rynnvalue_num_frames,
+                rynnvalue_show_window=bool(_rv["show_window"]),
             )
         except Exception as exc:  # noqa: BLE001
             self._on_mujoco_status(f"无法组装 RoboTwin 命令: {exc}")
@@ -32521,12 +32812,17 @@ class CameraTopicWindow(QMainWindow):
 
         self._append_mujoco_log(
             f"[robotwin] task={task} config={cfg} gpu={gpu} envs={num_envs}"
-            f" render_gui={render_gui}"
+            f" render_gui={render_gui} rynnvalue_hud={rynnvalue_live_hud}"
         )
         self._append_mujoco_log(f"[robotwin] python={py}")
         self._append_mujoco_log(f"[robotwin] ckpt={ckpt}")
         self._append_mujoco_log(f"[robotwin] assets={assets or resolve_robotwin_assets()}")
         self._append_mujoco_log(f"[robotwin] out={ROBOTWIN_EVAL_OUTPUT_DIR}")
+        if rynnvalue_live_hud:
+            self._append_mujoco_log(
+                f"[robotwin] RynnValue Live HUD url={rynnvalue_server_url} "
+                f"refresh={rynnvalue_refresh_sec}s num_frames={rynnvalue_num_frames}"
+            )
         if render_gui and not (os.environ.get("DISPLAY") or "").strip():
             self._append_mujoco_log(
                 "[robotwin] 警告: DISPLAY 为空，SAPIEN 图形窗口可能无法弹出"
@@ -33151,28 +33447,38 @@ class CameraTopicWindow(QMainWindow):
             self._append_mujoco_log(
                 "[molmospaces] 结束后保留窗口，点「停止」或关闭窗口再退出"
             )
+            if not self._ensure_live_hud_reward_or_abort("molmospaces"):
+                return
+            hud_env = self._rynnvalue_live_hud_child_env("molmospaces")
+            env_extra = {
+                "MUJOCO_GL": "glfw",
+                "MOLMOSPACES_ROOT": root,
+                "MOLMOSPACES_EVAL_VIEWER": "1",
+                # Front third-person by default; set FIRST_PERSON=1 for head/exo.
+                "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
+                "MOLMOSPACES_VIEWER_CAM": "front",
+                # TurboVNC: force EGL+Tk window (GLFW often invisible here).
+                "MOLMOSPACES_FORCE_EGL": "1",
+                # Keep last frame until GUI「停止」or window close.
+                "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
+                "EAI_DIR": EAI_DIR,
+                "OPENPI_DATA_HOME": os.environ.get("OPENPI_DATA_HOME")
+                or OPENPI_DATA_HOME_DEFAULT,
+                "PYTHONPATH": "",
+                "PYTHONNOUSERSITE": "1",
+                **molmospaces_cache_env(),
+            }
+            if hud_env:
+                env_extra.update(hud_env)
+                self._append_mujoco_log(
+                    f"[molmospaces] RynnValue Live HUD "
+                    f"url={hud_env.get('RYNNVALUE_SERVER_URL')}"
+                )
             self._mujoco_launcher.start_cwd_command(
                 cwd=root,
                 argv=argv,
                 label=label,
-                env_extra={
-                    "MUJOCO_GL": "glfw",
-                    "MOLMOSPACES_ROOT": root,
-                    "MOLMOSPACES_EVAL_VIEWER": "1",
-                    # Front third-person by default; set FIRST_PERSON=1 for head/exo.
-                    "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
-                    "MOLMOSPACES_VIEWER_CAM": "front",
-                    # TurboVNC: force EGL+Tk window (GLFW often invisible here).
-                    "MOLMOSPACES_FORCE_EGL": "1",
-                    # Keep last frame until GUI「停止」or window close.
-                    "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
-                    "EAI_DIR": EAI_DIR,
-                    "OPENPI_DATA_HOME": os.environ.get("OPENPI_DATA_HOME")
-                    or OPENPI_DATA_HOME_DEFAULT,
-                    "PYTHONPATH": "",
-                    "PYTHONNOUSERSITE": "1",
-                    **molmospaces_cache_env(),
-                },
+                env_extra=env_extra,
             )
             self._update_mujoco_ui()
             return
@@ -33293,22 +33599,32 @@ class CameraTopicWindow(QMainWindow):
         self._append_mujoco_log(
             "[molmospaces] 结束后保留窗口，点「停止」或关闭窗口再退出"
         )
+        if not self._ensure_live_hud_reward_or_abort("molmospaces"):
+            return
+        hud_env = self._rynnvalue_live_hud_child_env("molmospaces")
+        env_extra = {
+            "MUJOCO_GL": "glfw",
+            "MOLMOSPACES_ROOT": root,
+            "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
+            "MOLMOSPACES_VIEWER_CAM": "front",
+            "MOLMOSPACES_FORCE_EGL": "1",
+            "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
+            "EAI_DIR": EAI_DIR,
+            "PYTHONPATH": "",
+            "PYTHONNOUSERSITE": "1",
+            **molmospaces_cache_env(),
+        }
+        if hud_env:
+            env_extra.update(hud_env)
+            self._append_mujoco_log(
+                f"[molmospaces] RynnValue Live HUD "
+                f"url={hud_env.get('RYNNVALUE_SERVER_URL')}"
+            )
         self._mujoco_launcher.start_cwd_command(
             cwd=root,
             argv=argv,
             label=label,
-            env_extra={
-                "MUJOCO_GL": "glfw",
-                "MOLMOSPACES_ROOT": root,
-                "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
-                "MOLMOSPACES_VIEWER_CAM": "front",
-                "MOLMOSPACES_FORCE_EGL": "1",
-                "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
-                "EAI_DIR": EAI_DIR,
-                "PYTHONPATH": "",
-                "PYTHONNOUSERSITE": "1",
-                **molmospaces_cache_env(),
-            },
+            env_extra=env_extra,
         )
         self._update_mujoco_ui()
 
@@ -33348,13 +33664,32 @@ class CameraTopicWindow(QMainWindow):
             self._append_mujoco_log(
                 "[warn] DISPLAY 为空，若窗口未弹出请检查本机图形环境"
             )
+        if not self._ensure_live_hud_reward_or_abort("mujoco"):
+            return
         self.mujoco_log_edit.clear()
+        hud_env = self._rynnvalue_live_hud_child_env("mujoco")
+        if hud_env:
+            # Force EGL path when Live HUD needs RGB frames from renderer.
+            mode = str(self.mujoco_mode_combo.currentData() or "auto")
+            if mode in ("auto", "python"):
+                mode = "egl"
+                self._append_mujoco_log(
+                    "[mujoco] Live HUD 开启：改用 EGL viewer 以便推送 RGB 帧"
+                )
+            else:
+                mode = str(self.mujoco_mode_combo.currentData() or "auto")
+            self._append_mujoco_log(
+                f"[mujoco] RynnValue Live HUD url={hud_env.get('RYNNVALUE_SERVER_URL')}"
+            )
+        else:
+            mode = str(self.mujoco_mode_combo.currentData() or "auto")
         self._mujoco_launcher.start(
             mjcf_path=mjcf,
             mujoco_root=self.mujoco_root_edit.text().strip(),
             python_bin=self.mujoco_python_edit.text().strip(),
-            mode=str(self.mujoco_mode_combo.currentData() or "auto"),
+            mode=mode,
             install=False,
+            env_extra=hud_env or None,
         )
         self._update_mujoco_ui()
 
@@ -33722,7 +34057,7 @@ class CameraTopicWindow(QMainWindow):
             bar = self.rynnvalue_log_edit.verticalScrollBar()
             bar.setValue(bar.maximum())
         # Mirror into sim log while deploying/using Live HUD so failures are visible.
-        if self._libero_rynnvalue_hud_enabled() and hasattr(self, "_append_mujoco_log"):
+        if self._sim_rynnvalue_hud_enabled() and hasattr(self, "_append_mujoco_log"):
             text = (line or "").rstrip()
             if text:
                 self._append_mujoco_log(f"[rynnvalue] {text}")

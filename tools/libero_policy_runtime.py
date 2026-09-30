@@ -407,15 +407,16 @@ def build_libero_eval_argv(
         argv.append("--render_gui")
     else:
         argv.append("--no_render_gui")
-    if rynnvalue_live_hud:
-        argv.append("--rynnvalue_live_hud")
-        argv.append(f"--rynnvalue_server_url={rynnvalue_server_url}")
-        argv.append(f"--rynnvalue_refresh_sec={float(rynnvalue_refresh_sec)}")
-        argv.append(f"--rynnvalue_num_frames={int(rynnvalue_num_frames)}")
-        if rynnvalue_show_window:
-            argv.append("--rynnvalue_show_window")
-        else:
-            argv.append("--no_rynnvalue_show_window")
+    from rynnvalue_sim_bridge import append_rynnvalue_live_hud_argv
+
+    append_rynnvalue_live_hud_argv(
+        argv,
+        enabled=bool(rynnvalue_live_hud),
+        server_url=rynnvalue_server_url,
+        refresh_sec=rynnvalue_refresh_sec,
+        num_frames=rynnvalue_num_frames,
+        show_window=rynnvalue_show_window,
+    )
     env_extra = libero_child_env(
         python_bin=py,
         rlinf_root=str(rlinf),

@@ -127,6 +127,31 @@ def _render_gui_frame(env) -> None:
             logging.debug("render skipped: %s", exc)
 
 
+def _hold_gui_until_stop(env) -> None:
+    """Keep the on-screen viewer open until SIGINT/SIGTERM (UI「停止」)."""
+    import signal
+    import time
+
+    stop = {"flag": False}
+
+    def _on_signal(signum, _frame) -> None:
+        stop["flag"] = True
+        logging.info("received signal %s — closing GUI", signum)
+
+    prev_int = signal.signal(signal.SIGINT, _on_signal)
+    prev_term = signal.signal(signal.SIGTERM, _on_signal)
+    logging.info(
+        "评测完成，图形窗口保持打开；点击 UI「停止」或 Ctrl+C 后关闭"
+    )
+    try:
+        while not stop["flag"]:
+            _render_gui_frame(env)
+            time.sleep(0.05)
+    finally:
+        signal.signal(signal.SIGINT, prev_int)
+        signal.signal(signal.SIGTERM, prev_term)
+
+
 def _max_steps_for_suite(name: str) -> int:
     return {
         "libero_spatial": 220,
@@ -241,27 +266,14 @@ def main(args: argparse.Namespace) -> int:
         ],
         force=True,
     )
-    live_hud = None
-    if bool(getattr(args, "rynnvalue_live_hud", False)):
-        from rynnvalue_live_hud import RynnValueLiveHud
+    from rynnvalue_sim_bridge import LiberoHudBridge, maybe_create_live_hud
 
-        live_hud = RynnValueLiveHud(
-            server_url=str(getattr(args, "rynnvalue_server_url", "") or "http://127.0.0.1:8001"),
-            refresh_sec=float(getattr(args, "rynnvalue_refresh_sec", 1.0) or 1.0),
-            num_frames=int(getattr(args, "rynnvalue_num_frames", 8) or 8),
-            robot_description=str(
-                getattr(args, "rynnvalue_robot_description", "")
-                or "a Franka single-arm robot"
-            ),
-            camera_description=str(
-                getattr(args, "rynnvalue_camera_description", "")
-                or "the third-person agentview camera"
-            ),
-            show_window=bool(getattr(args, "rynnvalue_show_window", True)),
-            status_path=str(log_dir / "rynnvalue_live.json"),
-            timeout_s=float(getattr(args, "rynnvalue_timeout_s", 60.0) or 60.0),
-        )
-        live_hud.start()
+    hud_bridge = LiberoHudBridge()
+    live_hud = maybe_create_live_hud(
+        args,
+        bridge=hud_bridge,
+        status_path=log_dir / "rynnvalue_live.json",
+    )
 
     logging.info(
         "LIBERO eval mode=%s suite=%s trials/task=%s max_tasks=%s render_gui=%s live_hud=%s",
@@ -298,9 +310,13 @@ def main(args: argparse.Namespace) -> int:
     total_episodes = 0
     total_successes = 0
     results_per_task: dict[str, float] = {}
+    env = None
 
     try:
         for task_id in tqdm(range(num_tasks)):
+            if env is not None:
+                env.close()
+                env = None
             task = task_suite.get_task(task_id)
             initial_states = task_suite.get_task_init_states(task_id)
             env, task_description = _get_libero_env(
@@ -321,7 +337,7 @@ def main(args: argparse.Namespace) -> int:
                 hud_images = []
                 done = False
                 if live_hud is not None:
-                    live_hud.reset_episode(str(task_description))
+                    live_hud.reset_episode(hud_bridge.instruction(task_description))
 
                 for t in range(max_steps + args.num_steps_wait):
                     if t < args.num_steps_wait:
@@ -330,7 +346,8 @@ def main(args: argparse.Namespace) -> int:
                             _render_gui_frame(env)
                         continue
 
-                    img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+                    # openpi/LIBERO policy expects 180°-flipped agentview.
+                    img = hud_bridge.extract_rgb(obs, apply_flip=True)
                     wrist_img = np.ascontiguousarray(
                         obs["robot0_eye_in_hand_image"][::-1, ::-1]
                     )
@@ -350,7 +367,11 @@ def main(args: argparse.Namespace) -> int:
 
                     replay_images.append(img_in)
                     if live_hud is not None:
-                        live_hud.push_frame(img, step=t - args.num_steps_wait)
+                        # Unflipped: score + display match sim viewer.
+                        hud_img = hud_bridge.extract_rgb(obs, apply_flip=False)
+                        live_hud.push_frame(
+                            hud_img, step=t - args.num_steps_wait
+                        )
                         overlay_rgb = live_hud.last_overlay_rgb()
                         if overlay_rgb is not None:
                             hud_images.append(overlay_rgb)
@@ -418,7 +439,6 @@ def main(args: argparse.Namespace) -> int:
                     100.0 * total_successes / max(1, total_episodes),
                 )
 
-            env.close()
             rate = task_successes / task_episodes if task_episodes else 0.0
             results_per_task[task_description] = rate
             logging.info(
@@ -439,8 +459,17 @@ def main(args: argparse.Namespace) -> int:
             total_episodes,
             100.0 * overall,
         )
+        # Keep last scene visible until UI「停止」sends SIGTERM.
+        if bool(getattr(args, "render_gui", False)) and env is not None:
+            _hold_gui_until_stop(env)
         return 0
     finally:
+        if env is not None:
+            try:
+                env.close()
+            except Exception as exc:  # noqa: BLE001
+                logging.debug("env.close skipped: %s", exc)
+            env = None
         if live_hud is not None:
             live_hud.stop()
 
@@ -471,53 +500,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force headless OffScreenRenderEnv (default when --render_gui omitted)",
     )
-    p.add_argument(
-        "--rynnvalue_live_hud",
-        action="store_true",
-        help="Enable async RynnValue Live HUD (needs reward_server on --rynnvalue_server_url)",
-    )
-    p.add_argument(
-        "--rynnvalue_server_url",
-        default="http://127.0.0.1:8001",
-        help="RynnValue reward_server base URL",
-    )
-    p.add_argument(
-        "--rynnvalue_refresh_sec",
-        type=float,
-        default=1.0,
-        help="Live HUD wall-clock refresh interval in seconds",
-    )
-    p.add_argument(
-        "--rynnvalue_num_frames",
-        type=int,
-        default=8,
-        help="Frames subsampled per Live HUD score request",
-    )
-    p.add_argument(
-        "--rynnvalue_timeout_s",
-        type=float,
-        default=60.0,
-        help="HTTP timeout for each Live HUD score request",
-    )
-    p.add_argument(
-        "--rynnvalue_robot_description",
-        default="a Franka single-arm robot",
-    )
-    p.add_argument(
-        "--rynnvalue_camera_description",
-        default="the third-person agentview camera",
-    )
-    p.add_argument(
-        "--rynnvalue_show_window",
-        action="store_true",
-        default=True,
-        help="Show OpenCV Live HUD window (default on)",
-    )
-    p.add_argument(
-        "--no_rynnvalue_show_window",
-        action="store_true",
-        help="Disable OpenCV Live HUD window (still scores + writes status/video)",
-    )
+    from rynnvalue_sim_bridge import add_rynnvalue_live_hud_args
+
+    add_rynnvalue_live_hud_args(p, profile="libero")
     p.add_argument("--exp_name", default="libero_eval")
     p.add_argument("--log_dir", default=str(pathlib.Path.cwd() / "logs"))
     p.add_argument("--rlinf_root", default="")
@@ -526,9 +511,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
+    from rynnvalue_sim_bridge import finalize_rynnvalue_live_hud_args
+
     _args = build_parser().parse_args()
     if _args.no_render_gui:
         _args.render_gui = False
-    if _args.no_rynnvalue_show_window:
-        _args.rynnvalue_show_window = False
+    finalize_rynnvalue_live_hud_args(_args)
     raise SystemExit(main(_args))

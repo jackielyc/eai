@@ -436,6 +436,11 @@ def build_robotwin_eval_argv(
     hydra_config: str = "",
     gpu: str = "0",
     render_gui: bool = False,
+    rynnvalue_live_hud: bool = False,
+    rynnvalue_server_url: str = "http://127.0.0.1:8001",
+    rynnvalue_refresh_sec: float = 1.0,
+    rynnvalue_num_frames: int = 8,
+    rynnvalue_show_window: bool = True,
 ) -> Tuple[List[str], Path, Dict[str, Optional[str]]]:
     """Return (argv, cwd, env_extra) for RoboTwin RLinf eval.
 
@@ -444,6 +449,9 @@ def build_robotwin_eval_argv(
 
     ``render_gui=True`` sets ``task_config.render_freq>0`` (SAPIEN Viewer) and
     forces ``num_envs=1``.
+
+    ``rynnvalue_live_hud=True`` uses ``robotwin_eval_agent`` + frame bus so
+    EnvWorker publishes RGB while the driver shows Live HUD.
     """
     py = resolve_robotwin_python(python_bin)
     rlinf = resolve_rlinf_root(rlinf_root)
@@ -482,13 +490,23 @@ def build_robotwin_eval_argv(
         f"--robotwin_root={rt}",
         "--render_gui" if render_gui else "--no_render_gui",
     ]
+    from rynnvalue_sim_bridge import append_rynnvalue_live_hud_argv
+
+    append_rynnvalue_live_hud_argv(
+        argv,
+        enabled=bool(rynnvalue_live_hud),
+        server_url=rynnvalue_server_url,
+        refresh_sec=rynnvalue_refresh_sec,
+        num_frames=rynnvalue_num_frames,
+        show_window=rynnvalue_show_window,
+    )
     env_extra = robotwin_child_env(
         python_bin=py,
         rlinf_root=str(rlinf),
         robotwin_root=str(rt),
         assets_path=assets,
     )
-    if render_gui:
+    if render_gui or rynnvalue_live_hud:
         display = (os.environ.get("DISPLAY") or "").strip()
         if display:
             env_extra["DISPLAY"] = display
