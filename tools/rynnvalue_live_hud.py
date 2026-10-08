@@ -368,6 +368,7 @@ class RynnValueLiveHud:
         window_name: str = "RynnValue Live HUD",
         status_path: Optional[str] = None,
         use_frame_steps: bool = False,
+        flip_ud: bool = True,
     ) -> None:
         self.server_url = (server_url or DEFAULT_SERVER_URL).rstrip("/")
         self.instruction = instruction or ""
@@ -381,6 +382,9 @@ class RynnValueLiveHud:
         self.window_name = window_name
         self.status_path = Path(status_path) if status_path else None
         self.use_frame_steps = bool(use_frame_steps)
+        # Offscreen MuJoCo / robosuite RGB is OpenGL origin (first row = bottom).
+        # OpenCV HUD uses top-left origin, so default to a vertical flip.
+        self.flip_ud = bool(flip_ud)
 
         self._frames: Deque[np.ndarray] = deque(maxlen=self.max_buffer)
         self._lock = threading.Lock()
@@ -390,15 +394,17 @@ class RynnValueLiveHud:
         self._snap = HudSnapshot(instruction=self.instruction)
         self._history: Deque[float] = deque(maxlen=256)
         self._last_overlay_bgr: Optional[np.ndarray] = None
+        self._last_display_rgb: Optional[np.ndarray] = None
         self._inflight = False
         self._dirty = False
         self._step = 0
         self._cv2 = None
+        self._window_dismissed = False  # user closed window / pressed Esc
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        if self.show_window:
+        if self.show_window and not self._window_dismissed:
             try:
                 import cv2
 
@@ -431,17 +437,70 @@ class RynnValueLiveHud:
             self.num_frames,
         )
 
+    def dismiss_window(self, reason: str = "") -> None:
+        """Close the OpenCV window and stop scoring.
+
+        After dismiss, ``imshow`` is skipped so the window does not pop back open
+        on the next frame (OpenCV recreates windows on imshow otherwise).
+        """
+        if self._window_dismissed:
+            return
+        self._window_dismissed = True
+        self.show_window = False
+        # Stop the scoring worker immediately; drop buffered frames so an
+        # in-flight HTTP reply is the last possible score (and is discarded).
+        with self._lock:
+            self._frames.clear()
+            self._dirty = False
+        self._stop.set()
+        self._wake.set()
+        if self._cv2 is not None:
+            try:
+                self._cv2.destroyWindow(self.window_name)
+            except Exception:  # noqa: BLE001
+                try:
+                    self._cv2.destroyAllWindows()
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                self._cv2.waitKey(1)
+            except Exception:  # noqa: BLE001
+                pass
+        extra = f" ({reason})" if reason else ""
+        logger.info("Live HUD window closed%s; scoring stopped", extra)
+        print(f"[rynnvalue] Live HUD window closed{extra}; scoring stopped", flush=True)
+
+    def window_is_open(self) -> bool:
+        if self._window_dismissed or not self.show_window or self._cv2 is None:
+            return False
+        try:
+            visible = self._cv2.getWindowProperty(
+                self.window_name, self._cv2.WND_PROP_VISIBLE
+            )
+            # Closed window reports < 1 (Qt often -1).
+            return float(visible) >= 1.0
+        except Exception:  # noqa: BLE001
+            return False
+
+    def user_closed_window(self) -> bool:
+        return bool(self._window_dismissed)
+
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2.0)
         self._thread = None
-        if self.show_window and self._cv2 is not None:
+        if self._cv2 is not None:
             try:
                 self._cv2.destroyWindow(self.window_name)
             except Exception:  # noqa: BLE001
                 pass
+            try:
+                self._cv2.waitKey(1)
+            except Exception:  # noqa: BLE001
+                pass
+        self.show_window = False
 
     def set_instruction(self, instruction: str) -> None:
         self.instruction = instruction or ""
@@ -472,10 +531,19 @@ class RynnValueLiveHud:
         ``display_frame`` (if set) is used only for the OpenCV overlay / saved HUD
         video so the window can match the sim viewer orientation.
         """
+        if self._window_dismissed or self._stop.is_set():
+            return self.snapshot()
         rgb = _as_uint8_rgb(frame)
         display_rgb = (
             _as_uint8_rgb(display_frame) if display_frame is not None else rgb
         )
+        if self.flip_ud:
+            rgb = np.ascontiguousarray(rgb[::-1])
+            display_rgb = (
+                rgb
+                if display_frame is None
+                else np.ascontiguousarray(display_rgb[::-1])
+            )
         with self._lock:
             self._frames.append(rgb)
             if step is not None:
@@ -498,15 +566,58 @@ class RynnValueLiveHud:
         overlay = draw_hud_overlay(display_rgb, snap, history=history)
         with self._lock:
             self._last_overlay_bgr = overlay
+            self._last_display_rgb = display_rgb
 
-        if self.show_window and self._cv2 is not None:
-            try:
-                self._cv2.imshow(self.window_name, overlay)
-                self._cv2.waitKey(1)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("imshow failed: %s", exc)
-
+        self.pump_window(force_overlay=overlay)
         return snap
+
+    def pump_window(self, force_overlay: Optional[np.ndarray] = None) -> None:
+        """Refresh OpenCV window (call from the process/thread that owns the GUI).
+
+        Qt/HighGUI is not thread-safe: RoboTwin should run the frame-bus sidecar
+        in a dedicated process so ``imshow`` / ``waitKey`` stay on that main thread.
+
+        Closing the window (X) or pressing Esc/q stops the GUI and scoring.
+        Subsequent ``imshow`` calls are skipped so the window does not pop back open.
+        """
+        if self._window_dismissed or not self.show_window or self._cv2 is None:
+            return
+        overlay = force_overlay
+        if overlay is None:
+            # Rebuild overlay when score snapshot advanced since last push.
+            with self._lock:
+                display_rgb = self._last_display_rgb
+                snap = HudSnapshot(
+                    remaining_s=self._snap.remaining_s,
+                    reward_phi=self._snap.reward_phi,
+                    progress_curve=list(self._snap.progress_curve),
+                    step=self._snap.step,
+                    scored_at=self._snap.scored_at,
+                    latency_s=self._snap.latency_s,
+                    error=self._snap.error,
+                    instruction=self._snap.instruction,
+                )
+                history = list(self._history)
+                cached = self._last_overlay_bgr
+            if display_rgb is not None:
+                overlay = draw_hud_overlay(display_rgb, snap, history=history)
+                with self._lock:
+                    self._last_overlay_bgr = overlay
+            else:
+                overlay = cached
+        try:
+            if overlay is not None:
+                self._cv2.imshow(self.window_name, overlay)
+            key = int(self._cv2.waitKey(1) & 0xFF)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("imshow failed: %s", exc)
+            self.dismiss_window("imshow error")
+            return
+        if key in (27, ord("q"), ord("Q")):  # Esc / q
+            self.dismiss_window("Esc/q")
+            return
+        if not self.window_is_open():
+            self.dismiss_window("title-bar X")
 
     def snapshot(self) -> HudSnapshot:
         with self._lock:
@@ -559,7 +670,7 @@ class RynnValueLiveHud:
             wait_s = max(0.05, next_due - now)
             self._wake.wait(timeout=wait_s)
             self._wake.clear()
-            if self._stop.is_set():
+            if self._stop.is_set() or self._window_dismissed:
                 break
             now = time.time()
             if now < next_due:
@@ -567,7 +678,12 @@ class RynnValueLiveHud:
             next_due = now + self.refresh_sec
 
             with self._lock:
-                if not self._frames or self._inflight:
+                if (
+                    not self._frames
+                    or self._inflight
+                    or self._window_dismissed
+                    or self._stop.is_set()
+                ):
                     continue
                 frames_copy = list(self._frames)
                 instruction = self.instruction
@@ -586,6 +702,8 @@ class RynnValueLiveHud:
                     timeout_s=self.timeout_s,
                     use_frame_steps=self.use_frame_steps,
                 )
+                if self._stop.is_set() or self._window_dismissed:
+                    break
                 rem = float(progress[-1]) if progress.size else None
                 snap = HudSnapshot(
                     remaining_s=rem,
@@ -610,6 +728,8 @@ class RynnValueLiveHud:
                     batch.shape[0],
                 )
             except Exception as exc:  # noqa: BLE001
+                if self._stop.is_set() or self._window_dismissed:
+                    break
                 err = f"{type(exc).__name__}: {exc}"
                 snap = HudSnapshot(
                     remaining_s=None,

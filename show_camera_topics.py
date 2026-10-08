@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / ICL / Astra / HumanEgo / 数据集 / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / HumanEgo / 数据集 / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -1413,6 +1413,59 @@ def resolve_rynnvalue_python(repo: str = "") -> str:
     return which or "python3"
 
 
+def resolve_roboicl_root(path: str = "") -> str:
+    raw = (
+        (path or "").strip()
+        or os.environ.get("ROBOICL_ROOT", "")
+        or ROBOICL_ROOT_DEFAULT
+    )
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def resolve_roboicl_policy_python(repo: str = "") -> str:
+    root = resolve_roboicl_root(repo)
+    for path in (
+        (os.environ.get("ROBOICL_POLICY_PYTHON") or "").strip(),
+        *ROBOICL_POLICY_PYTHON_CANDIDATES,
+        os.path.join(root, ".venv", "bin", "python"),
+        os.path.join(root, "venv", "bin", "python"),
+    ):
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return os.path.abspath(os.path.expanduser(path))
+    which = shutil.which("python3") or shutil.which("python")
+    return which or "python3"
+
+
+def resolve_roboicl_sim_python(repo: str = "") -> str:
+    root = resolve_roboicl_root(repo)
+    for path in (
+        (os.environ.get("ROBOICL_SIM_PYTHON") or "").strip(),
+        *ROBOICL_SIM_PYTHON_CANDIDATES,
+        os.path.join(root, ".venv", "bin", "python"),
+        os.path.join(root, "venv", "bin", "python"),
+    ):
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return os.path.abspath(os.path.expanduser(path))
+    return resolve_roboicl_policy_python(root)
+
+
+def list_roboicl_tasks(repo: str = "") -> List[str]:
+    """扫描 RoboICL configs/tasks/*.json。"""
+    root = resolve_roboicl_root(repo)
+    tasks_dir = os.path.join(root, "configs", "tasks")
+    if not os.path.isdir(tasks_dir):
+        return []
+    names: List[str] = []
+    try:
+        for fname in os.listdir(tasks_dir):
+            if not fname.endswith(".json"):
+                continue
+            names.append(fname[: -len(".json")])
+    except OSError:
+        return []
+    return sorted(names)
+
+
 def _rynnvalue_hf_model_ready(path: str) -> bool:
     """True if path looks like a usable RynnValue HuggingFace export."""
     root = os.path.abspath(os.path.expanduser((path or "").strip()))
@@ -2048,6 +2101,30 @@ RYNNVALUE_JOBS: Tuple[Tuple[str, str], ...] = (
     ("Policy Ranking 评测", "policy_ranking"),
     ("Confusion Matrix 评测", "confusion_matrix"),
 )
+ROBOICL_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/RoboICL"
+)
+ROBOICL_SIM_PYTHON_CANDIDATES: Tuple[str, ...] = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/env_isaaclab/bin/python",
+    "/home/psibot/miniconda3/envs/env_isaaclab/bin/python",
+)
+ROBOICL_POLICY_PYTHON_CANDIDATES: Tuple[str, ...] = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/env_isaaclab/bin/python",
+    "/home/psibot/miniconda3/envs/env_isaaclab/bin/python",
+)
+ROBOICL_RUN_SCRIPT = os.path.join(EAI_DIR, "run_roboicl.sh")
+ROBOICL_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "roboicl")
+# (label, mode_id)
+ROBOICL_MODES: Tuple[Tuple[str, str], ...] = (
+    ("准备 Assets（软链本地）", "prepare_assets"),
+    ("预检 dry-run（不启仿真）", "dry_run"),
+    ("相机探针 capture-only", "capture_only"),
+    ("完整 rollout", "run"),
+)
+ROBOICL_PROTOCOLS: Tuple[Tuple[str, str, int], ...] = (
+    ("Zero-shot B25", "configs/protocols/zero_shot_b25.json", 0),
+    ("One-shot J12/B12", "configs/protocols/one_shot_j12_b12.json", 1),
+)
 MUJOCO_VIEWER_SCRIPT = os.path.join(EAI_DIR, "run_mujoco_viewer.sh")
 MUJOCO_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/mujoco"
@@ -2255,8 +2332,10 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "仿真强化学习训练",
     "RoboMeter",
     "RynnValue",
+    "RoboICL",
     "ICL",
     "Astra",
+    "PhysicalRSI",
     "HumanEgo",
     "数据集",
     "sub task",
@@ -2343,6 +2422,11 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "rynn_value": "RynnValue",
     "rynn-value": "RynnValue",
     "rynn": "RynnValue",
+    "roboicl": "RoboICL",
+    "RoboICL": "RoboICL",
+    "robo_icl": "RoboICL",
+    "robo-icl": "RoboICL",
+    "gpt6_astra": "RoboICL",
     "mujoco": "仿真评测",
     "MuJoCo": "仿真评测",
     "mj": "仿真评测",
@@ -2366,6 +2450,11 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "上下文学习": "ICL",
     "astra": "Astra",
     "Astra": "Astra",
+    "physicalrsi": "PhysicalRSI",
+    "physical_rsi": "PhysicalRSI",
+    "physical-rsi": "PhysicalRSI",
+    "rsi": "PhysicalRSI",
+    "PhysicalRSI": "PhysicalRSI",
     "gpt-6": "Astra",
     "gpt6": "Astra",
     "robodojo": "Astra",
@@ -18635,6 +18724,289 @@ class RynnValueLauncher(QObject):
             self.running_changed.emit(False)
 
 
+class RoboICLLauncher(QObject):
+    """启动 RoboICL dry-run / capture-only / 完整 rollout。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+    log_dir_ready = pyqtSignal(str)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+        self._log_dir: str = ""
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() in (
+            QProcess.Starting,
+            QProcess.Running,
+        )
+
+    def start(
+        self,
+        *,
+        mode: str,
+        task: str,
+        shots: int,
+        seed: int = 0,
+        layout: int = 0,
+        gpu: int = 0,
+        repo_root: str = "",
+        policy_python: str = "",
+        sim_python: str = "",
+        profile: str = "",
+        data_root: str = "",
+        results_root: str = "",
+        reference: str = "",
+        model: str = "",
+        api_key: str = "",
+        render_gui: bool = False,
+        extra_args: Sequence[str] = (),
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("RoboICL 正在运行")
+            return
+        script = ROBOICL_RUN_SCRIPT
+        if not os.path.isfile(script):
+            self.status_message.emit(f"未找到脚本: {script}")
+            return
+        root = resolve_roboicl_root(repo_root)
+        if not os.path.isfile(os.path.join(root, "roboicl", "run.py")):
+            self.status_message.emit(f"无效仓库: {root}")
+            return
+        mode_norm = (mode or "run").strip().lower().replace("-", "_")
+        if mode_norm not in ("dry_run", "capture_only", "run", "prepare_assets"):
+            self.status_message.emit(f"未知 mode: {mode}")
+            return
+        task_name = (task or "").strip()
+        if mode_norm == "prepare_assets":
+            task_name = task_name or "deposit_coin"
+        elif not task_name:
+            self.status_message.emit("请选择任务")
+            return
+        policy_py = (policy_python or "").strip() or resolve_roboicl_policy_python(root)
+        sim_py = (sim_python or "").strip() or resolve_roboicl_sim_python(root)
+        os.makedirs(ROBOICL_CACHE_DIR, exist_ok=True)
+
+        results = (results_root or "").strip() or os.path.join(root, "results")
+        data = (data_root or "").strip() or os.path.join(root, "data")
+        self._log_dir = results if mode_norm != "prepare_assets" else data
+
+        args = [
+            "--mode",
+            mode_norm,
+            "--task",
+            task_name,
+            "--shots",
+            str(int(shots)),
+            "--seed",
+            str(max(0, int(seed))),
+            "--layout",
+            str(max(0, int(layout))),
+            "--gpu",
+            str(max(0, int(gpu))),
+            "--root",
+            root,
+            "--policy-python",
+            policy_py,
+            "--sim-python",
+            sim_py,
+            "--data-root",
+            data,
+            "--results-root",
+            results,
+        ]
+        key = (api_key or "").strip()
+        if mode_norm != "prepare_assets":
+            prof = (profile or "").strip()
+            if prof:
+                args.extend(["--profile", prof])
+            ref = (reference or "").strip()
+            if ref:
+                args.extend(["--reference", ref])
+            mdl = (model or "").strip()
+            if mdl:
+                args.extend(["--model", mdl])
+            if key:
+                args.extend(["--api-key", key])
+            if render_gui:
+                args.append("--gui")
+        extras = [str(x).strip() for x in extra_args if str(x).strip()]
+        if extras:
+            args.append("--")
+            args.extend(extras)
+
+        qenv = QProcessEnvironment.systemEnvironment()
+        qenv.remove("PYTHONPATH")
+        qenv.remove("PYTHONHOME")
+        qenv.insert("PYTHONNOUSERSITE", "1")
+        qenv.insert("PYTHONUNBUFFERED", "1")
+        qenv.insert("ROBOICL_ROOT", root)
+        qenv.insert("ROBOICL_CODE_ROOT", root)
+        qenv.insert("ROBOICL_POLICY_PYTHON", policy_py)
+        qenv.insert("ROBOICL_SIM_PYTHON", sim_py)
+        qenv.insert("ROBOICL_DATA_ROOT", data)
+        qenv.insert("ROBOICL_RESULTS_ROOT", results)
+        qenv.insert("CUDA_VISIBLE_DEVICES", str(max(0, int(gpu))))
+        # Avoid shared /tmp/isaaclab/logs PermissionError (root-owned / contested).
+        tmpdir = os.path.join(results, ".tmpdir")
+        try:
+            os.makedirs(os.path.join(tmpdir, "isaaclab", "logs"), exist_ok=True)
+        except OSError:
+            tmpdir = os.path.join(ROBOICL_CACHE_DIR, "tmpdir")
+            os.makedirs(os.path.join(tmpdir, "isaaclab", "logs"), exist_ok=True)
+        qenv.insert("ROBOICL_TMPDIR", tmpdir)
+        qenv.insert("TMPDIR", tmpdir)
+        qenv.insert("TEMP", tmpdir)
+        qenv.insert("TMP", tmpdir)
+        if key:
+            qenv.insert("ASTRA_API_KEY", key)
+        # Clash Verge Sidecar mixed-port（本机无 systemd，TUN/系统代理对子进程不可靠）
+        if not (
+            qenv.value("HTTPS_PROXY")
+            or qenv.value("https_proxy")
+            or qenv.value("ALL_PROXY")
+            or qenv.value("all_proxy")
+        ):
+            clash_host = os.environ.get("CLASH_PROXY_HOST", "127.0.0.1").strip() or "127.0.0.1"
+            clash_port = os.environ.get("CLASH_MIXED_PORT", "7897").strip() or "7897"
+            listening = False
+            try:
+                import socket
+
+                with socket.create_connection((clash_host, int(clash_port)), timeout=0.35):
+                    listening = True
+            except OSError:
+                listening = False
+            if listening:
+                proxy_url = f"http://{clash_host}:{clash_port}"
+                for env_name in (
+                    "http_proxy",
+                    "https_proxy",
+                    "HTTP_PROXY",
+                    "HTTPS_PROXY",
+                    "all_proxy",
+                    "ALL_PROXY",
+                ):
+                    qenv.insert(env_name, proxy_url)
+                no_proxy = (
+                    "localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.local"
+                )
+                qenv.insert("no_proxy", no_proxy)
+                qenv.insert("NO_PROXY", no_proxy)
+                self.log_line.emit(f"[roboicl] proxy={proxy_url}")
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(root)
+        proc.setProcessEnvironment(qenv)
+        proc.start("setsid", ["bash", script, *args])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_dir_ready.emit(self._log_dir)
+        gui_flag = " --gui" if render_gui else ""
+        self.log_line.emit(
+            f"$ bash run_roboicl.sh --mode {mode_norm} --task {task_name}"
+            f" --shots {int(shots)}{gui_flag}"
+        )
+        self.status_message.emit(
+            f"正在启动 RoboICL（{mode_norm} / {task_name}）…"
+        )
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的 RoboICL")
+            return
+        self.status_message.emit("正在停止 RoboICL…")
+        if self._process is not None:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            QTimer.singleShot(4000, self._force_kill)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.terminate()
+            else:
+                self._process.terminate()
+            self._process.waitForFinished(2000)
+        if self._process is not None and self._process.state() != QProcess.NotRunning:
+            pid = int(self._process.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    self._process.kill()
+            else:
+                self._process.kill()
+            self._process.waitForFinished(800)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _force_kill(self) -> None:
+        if self._process is None or self._process.state() == QProcess.NotRunning:
+            return
+        pid = int(self._process.processId())
+        if pid > 0:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+        self._process.kill()
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode(
+            "utf-8", errors="replace"
+        )
+        for line in data.splitlines():
+            text = line.rstrip()
+            if not text:
+                continue
+            if text.startswith("[roboicl] log_dir="):
+                self._log_dir = text.split("=", 1)[-1].strip()
+                if self._log_dir:
+                    self.log_dir_ready.emit(self._log_dir)
+            if text.startswith("Run: "):
+                run_dir = text[len("Run: ") :].strip()
+                if run_dir and os.path.isdir(run_dir):
+                    self._log_dir = run_dir
+                    self.log_dir_ready.emit(self._log_dir)
+            self.log_line.emit(text)
+
+    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- RoboICL 正常退出 ---")
+            self.status_message.emit("RoboICL 已完成")
+        else:
+            self.log_line.emit(f"--- RoboICL 退出 (code={exit_code}) ---")
+            self.status_message.emit(f"RoboICL 异常退出 (code={exit_code})")
+        self._process = None
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.log_line.emit("[ERROR] 无法启动 RoboICL 进程")
+            self.status_message.emit("无法启动 RoboICL")
+            self.running_changed.emit(False)
+
+
 class MuJoCoViewerLauncher(QObject):
     """启动 MuJoCo 交互式图形界面（viewer / simulate）。"""
 
@@ -24509,6 +24881,255 @@ class CameraTopicWindow(QMainWindow):
         ):
             self.sim_rynnvalue_hud_panel.setVisible(self._sim_rynnvalue_hud_supported())
 
+        # --- RoboICL ---
+        roboicl_tab = QWidget()
+        roboicl_tab.setObjectName("roboiclTab")
+        ricl_outer = QVBoxLayout(roboicl_tab)
+        ricl_outer.setContentsMargins(8, 6, 8, 6)
+        ricl_outer.setSpacing(6)
+        ricl_hint = QLabel(
+            "RoboICL：在 RoboDojo 上跑 GPT-6 Astra 的 in-context 控制。"
+            "勾选「图形窗口」会去掉 Isaac --headless，弹出仿真窗口。"
+            "完整 rollout 需要 ASTRA_API_KEY；dry-run / capture-only 可不填。"
+            "默认仓库 "
+            f"{ROBOICL_ROOT_DEFAULT}；sim/policy Python 优先 env_isaaclab。"
+            "首次使用请先 submodule + fetch_assets。"
+        )
+        ricl_hint.setWordWrap(True)
+        ricl_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        ricl_outer.addWidget(ricl_hint)
+
+        ricl_path_row = QHBoxLayout()
+        ricl_path_row.setSpacing(6)
+        ricl_path_row.addWidget(QLabel("仓库"))
+        self.roboicl_root_edit = QLineEdit(
+            os.environ.get("ROBOICL_ROOT", ROBOICL_ROOT_DEFAULT)
+        )
+        self.roboicl_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_path_row.addWidget(self.roboicl_root_edit, 1)
+        self.roboicl_root_browse_btn = QPushButton("…")
+        self.roboicl_root_browse_btn.setFixedWidth(28)
+        self.roboicl_root_browse_btn.clicked.connect(self._on_roboicl_root_browse)
+        ricl_path_row.addWidget(self.roboicl_root_browse_btn)
+        ricl_outer.addLayout(ricl_path_row)
+
+        ricl_py_row = QHBoxLayout()
+        ricl_py_row.setSpacing(6)
+        ricl_py_row.addWidget(QLabel("Policy Py"))
+        self.roboicl_policy_python_edit = QLineEdit(
+            resolve_roboicl_policy_python(self.roboicl_root_edit.text())
+        )
+        self.roboicl_policy_python_edit.setFont(
+            QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
+        )
+        ricl_py_row.addWidget(self.roboicl_policy_python_edit, 1)
+        ricl_py_row.addWidget(QLabel("Sim Py"))
+        self.roboicl_sim_python_edit = QLineEdit(
+            resolve_roboicl_sim_python(self.roboicl_root_edit.text())
+        )
+        self.roboicl_sim_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_py_row.addWidget(self.roboicl_sim_python_edit, 1)
+        ricl_outer.addLayout(ricl_py_row)
+
+        ricl_job_row = QHBoxLayout()
+        ricl_job_row.setSpacing(6)
+        ricl_job_row.addWidget(QLabel("模式"))
+        self.roboicl_mode_combo = ImeSafeComboBox()
+        for label, mode_id in ROBOICL_MODES:
+            self.roboicl_mode_combo.addItem(label, mode_id)
+        self.roboicl_mode_combo.setToolTip(
+            "dry_run=只校验配置；capture_only=起场景验相机；run=完整评测"
+        )
+        self.roboicl_mode_combo.currentIndexChanged.connect(
+            self._on_roboicl_mode_changed
+        )
+        ricl_job_row.addWidget(self.roboicl_mode_combo)
+        ricl_job_row.addWidget(QLabel("任务"))
+        self.roboicl_task_combo = ImeSafeComboBox()
+        self.roboicl_task_combo.setEditable(True)
+        self.roboicl_task_combo.setInsertPolicy(QComboBox.NoInsert)
+        self.roboicl_task_combo.setMinimumWidth(180)
+        self.roboicl_task_combo.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_job_row.addWidget(self.roboicl_task_combo, 1)
+        self.roboicl_refresh_btn = QPushButton("刷新")
+        self.roboicl_refresh_btn.setToolTip("重新扫描 configs/tasks/*.json")
+        self.roboicl_refresh_btn.clicked.connect(self._refresh_roboicl_tasks)
+        ricl_job_row.addWidget(self.roboicl_refresh_btn)
+        ricl_outer.addLayout(ricl_job_row)
+
+        ricl_proto_row = QHBoxLayout()
+        ricl_proto_row.setSpacing(6)
+        ricl_proto_row.addWidget(QLabel("协议"))
+        self.roboicl_protocol_combo = ImeSafeComboBox()
+        for label, rel_path, shots in ROBOICL_PROTOCOLS:
+            self.roboicl_protocol_combo.addItem(label, (rel_path, shots))
+        self.roboicl_protocol_combo.setToolTip(
+            "切换后自动设置 shots，并填入对应 protocol json"
+        )
+        self.roboicl_protocol_combo.currentIndexChanged.connect(
+            self._on_roboicl_protocol_changed
+        )
+        ricl_proto_row.addWidget(self.roboicl_protocol_combo)
+        ricl_proto_row.addWidget(QLabel("shots"))
+        self.roboicl_shots_spin = QSpinBox()
+        self.roboicl_shots_spin.setRange(0, 1)
+        self.roboicl_shots_spin.setValue(0)
+        self.roboicl_shots_spin.setToolTip("0=zero-shot，1=one-shot")
+        ricl_proto_row.addWidget(self.roboicl_shots_spin)
+        ricl_proto_row.addWidget(QLabel("seed"))
+        self.roboicl_seed_spin = QSpinBox()
+        self.roboicl_seed_spin.setRange(0, 99999)
+        self.roboicl_seed_spin.setValue(0)
+        ricl_proto_row.addWidget(self.roboicl_seed_spin)
+        ricl_proto_row.addWidget(QLabel("layout"))
+        self.roboicl_layout_spin = QSpinBox()
+        self.roboicl_layout_spin.setRange(0, 999)
+        self.roboicl_layout_spin.setValue(0)
+        ricl_proto_row.addWidget(self.roboicl_layout_spin)
+        ricl_proto_row.addWidget(QLabel("GPU"))
+        self.roboicl_gpu_spin = QSpinBox()
+        self.roboicl_gpu_spin.setRange(0, 15)
+        self.roboicl_gpu_spin.setValue(0)
+        ricl_proto_row.addWidget(self.roboicl_gpu_spin)
+        self.roboicl_render_gui_check = QCheckBox("图形窗口")
+        self.roboicl_render_gui_check.setChecked(
+            bool((os.environ.get("DISPLAY") or "").strip())
+        )
+        self.roboicl_render_gui_check.setToolTip(
+            "勾选后 Isaac Sim 不以 headless 启动，弹出图形窗口。\n"
+            "dry-run 不启仿真，此选项无效。"
+        )
+        ricl_proto_row.addWidget(self.roboicl_render_gui_check)
+        ricl_proto_row.addStretch(1)
+        ricl_outer.addLayout(ricl_proto_row)
+
+        ricl_data_row = QHBoxLayout()
+        ricl_data_row.setSpacing(6)
+        ricl_data_row.addWidget(QLabel("data"))
+        self.roboicl_data_edit = QLineEdit(
+            os.environ.get(
+                "ROBOICL_DATA_ROOT",
+                os.path.join(ROBOICL_ROOT_DEFAULT, "data"),
+            )
+        )
+        self.roboicl_data_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_data_row.addWidget(self.roboicl_data_edit, 1)
+        self.roboicl_data_browse_btn = QPushButton("…")
+        self.roboicl_data_browse_btn.setFixedWidth(28)
+        self.roboicl_data_browse_btn.clicked.connect(self._on_roboicl_data_browse)
+        ricl_data_row.addWidget(self.roboicl_data_browse_btn)
+        ricl_data_row.addWidget(QLabel("results"))
+        self.roboicl_results_edit = QLineEdit(
+            os.environ.get(
+                "ROBOICL_RESULTS_ROOT",
+                os.path.join(ROBOICL_ROOT_DEFAULT, "results"),
+            )
+        )
+        self.roboicl_results_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_data_row.addWidget(self.roboicl_results_edit, 1)
+        self.roboicl_results_browse_btn = QPushButton("…")
+        self.roboicl_results_browse_btn.setFixedWidth(28)
+        self.roboicl_results_browse_btn.clicked.connect(
+            self._on_roboicl_results_browse
+        )
+        ricl_data_row.addWidget(self.roboicl_results_browse_btn)
+        ricl_outer.addLayout(ricl_data_row)
+
+        ricl_ref_row = QHBoxLayout()
+        ricl_ref_row.setSpacing(6)
+        ricl_ref_row.addWidget(QLabel("reference"))
+        self.roboicl_reference_edit = QLineEdit()
+        self.roboicl_reference_edit.setPlaceholderText(
+            "可选。one-shot 无内置 bundle 时指定 reference 目录"
+        )
+        self.roboicl_reference_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_ref_row.addWidget(self.roboicl_reference_edit, 1)
+        self.roboicl_reference_browse_btn = QPushButton("…")
+        self.roboicl_reference_browse_btn.setFixedWidth(28)
+        self.roboicl_reference_browse_btn.clicked.connect(
+            self._on_roboicl_reference_browse
+        )
+        ricl_ref_row.addWidget(self.roboicl_reference_browse_btn)
+        ricl_ref_row.addWidget(QLabel("model"))
+        self.roboicl_model_edit = QLineEdit(os.environ.get("ASTRA_MODEL", ""))
+        self.roboicl_model_edit.setPlaceholderText("可选。覆盖 ASTRA_MODEL")
+        self.roboicl_model_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_ref_row.addWidget(self.roboicl_model_edit, 1)
+        ricl_outer.addLayout(ricl_ref_row)
+
+        ricl_key_row = QHBoxLayout()
+        ricl_key_row.setSpacing(6)
+        ricl_key_row.addWidget(QLabel("API Key"))
+        self.roboicl_api_key_edit = QLineEdit(os.environ.get("ASTRA_API_KEY", ""))
+        self.roboicl_api_key_edit.setEchoMode(QLineEdit.Password)
+        self.roboicl_api_key_edit.setPlaceholderText(
+            "完整 rollout 需要；也可事先 export ASTRA_API_KEY"
+        )
+        self.roboicl_api_key_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_key_row.addWidget(self.roboicl_api_key_edit, 1)
+        ricl_outer.addLayout(ricl_key_row)
+
+        ricl_extra_row = QHBoxLayout()
+        ricl_extra_row.setSpacing(6)
+        ricl_extra_row.addWidget(QLabel("额外参数"))
+        self.roboicl_extra_edit = QLineEdit()
+        self.roboicl_extra_edit.setPlaceholderText(
+            "可选。透传给 roboicl.run，例: --reasoning-effort high"
+        )
+        self.roboicl_extra_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_extra_row.addWidget(self.roboicl_extra_edit, 1)
+        ricl_outer.addLayout(ricl_extra_row)
+
+        ricl_run_row = QHBoxLayout()
+        ricl_run_row.setSpacing(6)
+        self.roboicl_start_btn = QPushButton("启动")
+        self.roboicl_start_btn.setToolTip("启动 RoboICL")
+        self.roboicl_start_btn.clicked.connect(self._on_roboicl_start_clicked)
+        ricl_run_row.addWidget(self.roboicl_start_btn)
+        self.roboicl_stop_btn = QPushButton("停止")
+        self.roboicl_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.roboicl_stop_btn.setEnabled(False)
+        self.roboicl_stop_btn.clicked.connect(self._on_roboicl_stop_clicked)
+        ricl_run_row.addWidget(self.roboicl_stop_btn)
+        self.roboicl_status_label = QLabel("空闲")
+        self.roboicl_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_run_row.addWidget(self.roboicl_status_label, 1)
+        ricl_outer.addLayout(ricl_run_row)
+
+        ricl_log_row = QHBoxLayout()
+        ricl_log_row.setSpacing(6)
+        ricl_log_row.addWidget(QLabel("结果目录"))
+        self.roboicl_log_dir_edit = QLineEdit()
+        self.roboicl_log_dir_edit.setReadOnly(True)
+        self.roboicl_log_dir_edit.setPlaceholderText("启动后显示 results/ 或本次 Run 目录")
+        self.roboicl_log_dir_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ricl_log_row.addWidget(self.roboicl_log_dir_edit, 1)
+        self.roboicl_open_log_btn = QPushButton("打开")
+        self.roboicl_open_log_btn.setEnabled(False)
+        self.roboicl_open_log_btn.clicked.connect(self._on_roboicl_open_log_clicked)
+        ricl_log_row.addWidget(self.roboicl_open_log_btn)
+        ricl_outer.addLayout(ricl_log_row)
+
+        self.roboicl_log_edit = QTextEdit()
+        self.roboicl_log_edit.setReadOnly(True)
+        self.roboicl_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.roboicl_log_edit.setMinimumHeight(180)
+        self.roboicl_log_edit.setPlaceholderText("RoboICL 运行日志…")
+        self.roboicl_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
+            f"border: 1px solid #555; }}"
+        )
+        ricl_outer.addWidget(self.roboicl_log_edit, 1)
+
+        self._roboicl_launcher = RoboICLLauncher(self)
+        self._roboicl_launcher.log_line.connect(self._append_roboicl_log)
+        self._roboicl_launcher.status_message.connect(self._on_roboicl_status)
+        self._roboicl_launcher.running_changed.connect(self._update_roboicl_ui)
+        self._roboicl_launcher.log_dir_ready.connect(self._on_roboicl_log_dir)
+        self._refresh_roboicl_tasks(prefer="deposit_coin")
+        self._on_roboicl_protocol_changed()
+        self._on_roboicl_mode_changed()
+
         control_tabs.addTab(sim_tab, "仿真评测")
         control_tabs.addTab(real_tab, "真机评测")
         control_tabs.addTab(reward_tab, "Reward评测")
@@ -24516,6 +25137,7 @@ class CameraTopicWindow(QMainWindow):
         control_tabs.addTab(dojo_rl_tab, "仿真强化学习训练")
         control_tabs.addTab(robometer_tab, "RoboMeter")
         control_tabs.addTab(rynn_tab, "RynnValue")
+        control_tabs.addTab(roboicl_tab, "RoboICL")
         control_tabs.addTab(ctx_tab, "ICL")
         _boot_tick("构建界面：收尾…")
         # sub task / sub image 挂在全部 tab 最后，见下方 addTab
@@ -24596,6 +25218,10 @@ class CameraTopicWindow(QMainWindow):
         control_tabs.addTab(astra_tab, "Astra")
         if QWebEngineView is not None and self._want_control_tab("Astra"):
             QTimer.singleShot(1500, self._ensure_astra_web_view)
+
+        from physical_rsi.tab import PhysicalRsiTab
+
+        control_tabs.addTab(PhysicalRsiTab(), "PhysicalRSI")
 
         humanego_tab = QWidget()
         humanego_tab.setObjectName("humanegoTab")
@@ -29578,6 +30204,8 @@ class CameraTopicWindow(QMainWindow):
             self._robometer_launcher.shutdown()
         if getattr(self, "_rynnvalue_launcher", None) is not None:
             self._rynnvalue_launcher.shutdown()
+        if getattr(self, "_roboicl_launcher", None) is not None:
+            self._roboicl_launcher.shutdown()
         if getattr(self, "_mujoco_launcher", None) is not None:
             self._mujoco_launcher.shutdown()
         if getattr(self, "_lingbot_map_launcher", None) is not None:
@@ -32104,6 +32732,7 @@ class CameraTopicWindow(QMainWindow):
             camera_description=prof.camera_description,
             show_window=bool(settings.get("show_window", True)),
             status_path=status,
+            flip_ud=False,
         )
         hud.start()
         self._isaac_rynnvalue_hud = hud
@@ -34334,6 +34963,225 @@ class CameraTopicWindow(QMainWindow):
             self._play_rynnvalue_video(newest)
             return
         self._on_rynnvalue_status("暂无趋势视频可播放（请先跑一次 infer）")
+
+    def _append_roboicl_log(self, line: str) -> None:
+        if not hasattr(self, "roboicl_log_edit"):
+            return
+        self.roboicl_log_edit.append(line)
+        bar = self.roboicl_log_edit.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+    def _on_roboicl_status(self, msg: str) -> None:
+        if hasattr(self, "roboicl_status_label"):
+            self.roboicl_status_label.setText(msg or "空闲")
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.showMessage(msg)
+
+    def _update_roboicl_ui(self, *_args) -> None:
+        running = bool(
+            getattr(self, "_roboicl_launcher", None)
+            and self._roboicl_launcher.is_running()
+        )
+        if hasattr(self, "roboicl_start_btn"):
+            self.roboicl_start_btn.setEnabled(not running)
+        if hasattr(self, "roboicl_stop_btn"):
+            self.roboicl_stop_btn.setEnabled(running)
+        for wname in (
+            "roboicl_mode_combo",
+            "roboicl_task_combo",
+            "roboicl_protocol_combo",
+            "roboicl_root_edit",
+            "roboicl_policy_python_edit",
+            "roboicl_sim_python_edit",
+            "roboicl_shots_spin",
+            "roboicl_seed_spin",
+            "roboicl_layout_spin",
+            "roboicl_gpu_spin",
+            "roboicl_data_edit",
+            "roboicl_results_edit",
+            "roboicl_reference_edit",
+            "roboicl_model_edit",
+            "roboicl_api_key_edit",
+            "roboicl_extra_edit",
+            "roboicl_render_gui_check",
+            "roboicl_refresh_btn",
+            "roboicl_root_browse_btn",
+            "roboicl_data_browse_btn",
+            "roboicl_results_browse_btn",
+            "roboicl_reference_browse_btn",
+        ):
+            w = getattr(self, wname, None)
+            if w is not None:
+                w.setEnabled(not running)
+
+    def _on_roboicl_log_dir(self, path: str) -> None:
+        if hasattr(self, "roboicl_log_dir_edit"):
+            self.roboicl_log_dir_edit.setText(path)
+        if hasattr(self, "roboicl_open_log_btn"):
+            self.roboicl_open_log_btn.setEnabled(
+                bool(path) and os.path.isdir(path)
+            )
+
+    def _on_roboicl_root_browse(self) -> None:
+        cur = self.roboicl_root_edit.text().strip() or ROBOICL_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 RoboICL 仓库根目录", cur
+        )
+        if selected:
+            self.roboicl_root_edit.setText(selected)
+            self.roboicl_policy_python_edit.setText(
+                resolve_roboicl_policy_python(selected)
+            )
+            self.roboicl_sim_python_edit.setText(
+                resolve_roboicl_sim_python(selected)
+            )
+            if not self.roboicl_data_edit.text().strip():
+                self.roboicl_data_edit.setText(os.path.join(selected, "data"))
+            if not self.roboicl_results_edit.text().strip():
+                self.roboicl_results_edit.setText(os.path.join(selected, "results"))
+            self._refresh_roboicl_tasks()
+            self._on_roboicl_protocol_changed()
+
+    def _on_roboicl_data_browse(self) -> None:
+        cur = self.roboicl_data_edit.text().strip() or ROBOICL_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(self, "选择 RoboICL data 根目录", cur)
+        if selected:
+            self.roboicl_data_edit.setText(selected)
+
+    def _on_roboicl_results_browse(self) -> None:
+        cur = self.roboicl_results_edit.text().strip() or ROBOICL_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 RoboICL results 目录", cur
+        )
+        if selected:
+            self.roboicl_results_edit.setText(selected)
+
+    def _on_roboicl_reference_browse(self) -> None:
+        cur = self.roboicl_reference_edit.text().strip() or self.roboicl_data_edit.text().strip()
+        start = cur if os.path.isdir(cur) else ROBOICL_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 one-shot reference 目录", start
+        )
+        if selected:
+            self.roboicl_reference_edit.setText(selected)
+
+    def _on_roboicl_mode_changed(self, *_args) -> None:
+        mode = str(self.roboicl_mode_combo.currentData() or "run").strip()
+        if hasattr(self, "roboicl_start_btn"):
+            if mode == "prepare_assets":
+                self.roboicl_start_btn.setText("准备 Assets")
+            elif mode == "dry_run":
+                self.roboicl_start_btn.setText("启动预检")
+            elif mode == "capture_only":
+                self.roboicl_start_btn.setText("启动相机探针")
+            else:
+                self.roboicl_start_btn.setText("启动 rollout")
+
+    def _on_roboicl_protocol_changed(self, *_args) -> None:
+        data = self.roboicl_protocol_combo.currentData()
+        if not isinstance(data, tuple) or len(data) != 2:
+            return
+        rel_path, shots = data
+        if hasattr(self, "roboicl_shots_spin"):
+            self.roboicl_shots_spin.setValue(int(shots))
+        root = (
+            self.roboicl_root_edit.text().strip()
+            if hasattr(self, "roboicl_root_edit")
+            else ROBOICL_ROOT_DEFAULT
+        )
+        # profile path is resolved at start; keep relative hint in status only
+        _ = os.path.join(root, str(rel_path))
+
+    def _refresh_roboicl_tasks(self, prefer: Optional[str] = None) -> None:
+        if not hasattr(self, "roboicl_task_combo"):
+            return
+        root = self.roboicl_root_edit.text().strip()
+        names = list_roboicl_tasks(root)
+        current = (
+            prefer
+            or self.roboicl_task_combo.currentText().strip()
+            or "deposit_coin"
+        )
+        self.roboicl_task_combo.blockSignals(True)
+        self.roboicl_task_combo.clear()
+        for name in names:
+            self.roboicl_task_combo.addItem(name, name)
+        if not names:
+            self.roboicl_task_combo.addItem(current, current)
+        idx = self.roboicl_task_combo.findData(current)
+        if idx < 0:
+            idx = self.roboicl_task_combo.findText(current)
+        if idx >= 0:
+            self.roboicl_task_combo.setCurrentIndex(idx)
+        else:
+            self.roboicl_task_combo.setEditText(current)
+        self.roboicl_task_combo.blockSignals(False)
+
+    def _on_roboicl_start_clicked(self) -> None:
+        if self._roboicl_launcher.is_running():
+            self._on_roboicl_status("RoboICL 正在运行")
+            return
+        mode = str(self.roboicl_mode_combo.currentData() or "run").strip()
+        task = (
+            str(self.roboicl_task_combo.currentData() or "").strip()
+            or self.roboicl_task_combo.currentText().strip()
+        )
+        if not task:
+            self._append_roboicl_log("[ERROR] 请选择任务")
+            self._on_roboicl_status("请选择任务")
+            return
+        proto = self.roboicl_protocol_combo.currentData()
+        profile = ""
+        root = self.roboicl_root_edit.text().strip() or ROBOICL_ROOT_DEFAULT
+        if isinstance(proto, tuple) and len(proto) == 2:
+            profile = os.path.join(root, str(proto[0]))
+        render_gui = bool(self.roboicl_render_gui_check.isChecked())
+        if render_gui and mode != "dry_run" and not (os.environ.get("DISPLAY") or "").strip():
+            self._append_roboicl_log(
+                "[roboicl] 警告: DISPLAY 为空，图形窗口可能无法弹出"
+            )
+        if mode == "run" and not (
+            self.roboicl_api_key_edit.text().strip()
+            or os.environ.get("ASTRA_API_KEY", "").strip()
+        ):
+            self._append_roboicl_log(
+                "[roboicl] 警告: 未设置 ASTRA_API_KEY，完整 rollout 可能失败"
+            )
+        extras_raw = self.roboicl_extra_edit.text().strip()
+        extras = shlex.split(extras_raw) if extras_raw else []
+        self.roboicl_log_edit.clear()
+        self.roboicl_log_dir_edit.clear()
+        self.roboicl_open_log_btn.setEnabled(False)
+        self._roboicl_launcher.start(
+            mode=mode,
+            task=task,
+            shots=int(self.roboicl_shots_spin.value()),
+            seed=int(self.roboicl_seed_spin.value()),
+            layout=int(self.roboicl_layout_spin.value()),
+            gpu=int(self.roboicl_gpu_spin.value()),
+            repo_root=root,
+            policy_python=self.roboicl_policy_python_edit.text().strip(),
+            sim_python=self.roboicl_sim_python_edit.text().strip(),
+            profile=profile,
+            data_root=self.roboicl_data_edit.text().strip(),
+            results_root=self.roboicl_results_edit.text().strip(),
+            reference=self.roboicl_reference_edit.text().strip(),
+            model=self.roboicl_model_edit.text().strip(),
+            api_key=self.roboicl_api_key_edit.text().strip(),
+            render_gui=render_gui,
+            extra_args=extras,
+        )
+        self._update_roboicl_ui()
+
+    def _on_roboicl_stop_clicked(self) -> None:
+        self._append_roboicl_log("--- 用户停止 RoboICL ---")
+        self._roboicl_launcher.stop()
+        self._update_roboicl_ui()
+
+    def _on_roboicl_open_log_clicked(self) -> None:
+        path = self.roboicl_log_dir_edit.text().strip()
+        if path and os.path.isdir(path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _append_lingbot_map_log(self, line: str) -> None:
         if not hasattr(self, "lingbot_map_log_edit"):

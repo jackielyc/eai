@@ -37,13 +37,46 @@ class HudEnvWorker(EnvWorker):
     """EnvWorker that publishes RoboTwin RGB frames to ``RYNNVALUE_FRAME_BUS``."""
 
     def init_worker(self):
+        self._rynnvalue_bus_writer = None
         try:
-            from rynnvalue_frame_bus import maybe_install_robotwin_hook_from_env
+            from rynnvalue_frame_bus import (
+                FrameBusWriter,
+                maybe_install_robotwin_hook_from_env,
+            )
 
-            maybe_install_robotwin_hook_from_env()
+            bus = (os.environ.get("RYNNVALUE_FRAME_BUS") or "").strip()
+            ok = maybe_install_robotwin_hook_from_env()
+            if bus:
+                # Backup publisher if class monkeypatch missed a code path.
+                self._rynnvalue_bus_writer = FrameBusWriter(bus)
+            print(
+                f"[robotwin] RynnValue frame hook ok={ok} bus={bus or '(unset)'}",
+                flush=True,
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[robotwin] RynnValue frame hook skipped: {exc}", flush=True)
         return super().init_worker()
+
+    def _push_rynnvalue_obs(self, obs) -> None:
+        writer = getattr(self, "_rynnvalue_bus_writer", None)
+        if writer is None or obs is None:
+            return
+        try:
+            from rynnvalue_frame_bus import push_obs_to_frame_bus
+
+            push_obs_to_frame_bus(writer, obs)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[robotwin] RynnValue obs push skipped: {exc}", flush=True)
+
+    def env_evaluate_step(self, raw_actions, stage_id):
+        env_output, env_info = super().env_evaluate_step(raw_actions, stage_id)
+        self._push_rynnvalue_obs(getattr(env_output, "obs", None))
+        return env_output, env_info
+
+    def env_interact_step(self, raw_actions, stage_id):
+        env_output, env_info = super().env_interact_step(raw_actions, stage_id)
+        self._push_rynnvalue_obs(getattr(env_output, "obs", None))
+        return env_output, env_info
 
 
 def _truthy(name: str) -> bool:

@@ -345,6 +345,7 @@ def maybe_create_live_hud(
         show_window=bool(getattr(args, "rynnvalue_show_window", True)),
         status_path=str(status_path) if status_path else None,
         timeout_s=float(getattr(args, "rynnvalue_timeout_s", 60.0) or 60.0),
+        flip_ud=bool(getattr(args, "rynnvalue_flip_ud", True)),
     )
     hud.start()
     return hud

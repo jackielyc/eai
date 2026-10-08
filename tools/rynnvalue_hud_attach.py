@@ -112,6 +112,8 @@ def ensure_started() -> Any:
         robot, camera = _profile_meta()
         status = (os.environ.get("RYNNVALUE_STATUS_PATH") or "").strip() or None
         _instruction = (os.environ.get("RYNNVALUE_INSTRUCTION") or "").strip()
+        flip_env = (os.environ.get("RYNNVALUE_FLIP_UD") or "1").strip().lower()
+        flip_ud = flip_env not in ("0", "false", "no", "off")
         _hud = RynnValueLiveHud(
             server_url=(
                 os.environ.get("RYNNVALUE_SERVER_URL") or "http://127.0.0.1:8001"
@@ -124,6 +126,7 @@ def ensure_started() -> Any:
             show_window=not _truthy("RYNNVALUE_NO_SHOW_WINDOW"),
             status_path=status,
             timeout_s=float(os.environ.get("RYNNVALUE_TIMEOUT_S") or 60.0),
+            flip_ud=flip_ud,
         )
         _hud.start()
         logger.info("RynnValue Live HUD attached url=%s", _hud.server_url)
