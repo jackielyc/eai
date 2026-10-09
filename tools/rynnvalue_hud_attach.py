@@ -36,8 +36,24 @@ _last_push_t = 0.0
 _instruction = ""
 
 
+# mujoco.Renderer / Isaac npy / Arena obs are already top-left origin.
+# LIBERO robosuite offscreen RGB is OpenGL (first row = bottom) and needs a flip.
+_FLIP_UD_DEFAULT_OFF = frozenset({"mujoco", "molmospaces", "isaac", "arena"})
+
+
 def _truthy(name: str) -> bool:
     return os.environ.get(name, "").strip() in ("1", "true", "True", "yes", "YES")
+
+
+def _backend_flip_ud(backend: str = "") -> bool:
+    """Vertical flip for HUD: env override, else per-backend default."""
+    raw = os.environ.get("RYNNVALUE_FLIP_UD")
+    if raw is not None and str(raw).strip() != "":
+        return str(raw).strip().lower() not in ("0", "false", "no", "off")
+    key = (
+        backend or os.environ.get("RYNNVALUE_HUD_BACKEND") or "mujoco"
+    ).strip().lower()
+    return key not in _FLIP_UD_DEFAULT_OFF
 
 
 def enabled() -> bool:
@@ -112,8 +128,7 @@ def ensure_started() -> Any:
         robot, camera = _profile_meta()
         status = (os.environ.get("RYNNVALUE_STATUS_PATH") or "").strip() or None
         _instruction = (os.environ.get("RYNNVALUE_INSTRUCTION") or "").strip()
-        flip_env = (os.environ.get("RYNNVALUE_FLIP_UD") or "1").strip().lower()
-        flip_ud = flip_env not in ("0", "false", "no", "off")
+        flip_ud = _backend_flip_ud()
         _hud = RynnValueLiveHud(
             server_url=(
                 os.environ.get("RYNNVALUE_SERVER_URL") or "http://127.0.0.1:8001"
@@ -301,13 +316,18 @@ def child_env_from_settings(
     """Build env dict for QProcess / subprocess from GUI HUD settings."""
     if not settings.get("enabled"):
         return {}
+    backend_key = str(backend or "mujoco")
     env = {
         "RYNNVALUE_LIVE_HUD": "1",
         "RYNNVALUE_SERVER_URL": str(settings.get("server_url") or "http://127.0.0.1:8001"),
         "RYNNVALUE_REFRESH_SEC": str(float(settings.get("refresh_sec") or 1.0)),
         "RYNNVALUE_NUM_FRAMES": str(int(settings.get("num_frames") or 8)),
-        "RYNNVALUE_HUD_BACKEND": str(backend or "mujoco"),
+        "RYNNVALUE_HUD_BACKEND": backend_key,
     }
+    if "flip_ud" in settings:
+        env["RYNNVALUE_FLIP_UD"] = "1" if settings.get("flip_ud") else "0"
+    elif backend_key.strip().lower() in _FLIP_UD_DEFAULT_OFF:
+        env["RYNNVALUE_FLIP_UD"] = "0"
     if not settings.get("show_window", True):
         env["RYNNVALUE_NO_SHOW_WINDOW"] = "1"
     if status_path:

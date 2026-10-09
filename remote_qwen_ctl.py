@@ -2,13 +2,15 @@
 """远程 Qwen 推理部署控制（SSH + 本地端口转发）。
 
 支持多台远程机（Host Profile）。默认:
-  psi_motus_2_for_liyichao  — 既有 8×A800
-  tione-develop             — 新机（SSH Port 10666）
+  psi_motus_2_for_liyichao              — 既有 8×A800
+  tione-develop                         — 新机（SSH Port 10666）
+  nb-1668047664206989312-cp0nfah4b37k   — TI-ONE notebook（集群内网 :22）
 
 用法:
   python3 remote_qwen_ctl.py --host tione-develop sync
   python3 remote_qwen_ctl.py --host tione-develop deploy --model-key qwen3.5-35b-a3b
   python3 remote_qwen_ctl.py --host psi_motus_2_for_liyichao status
+  python3 remote_qwen_ctl.py --host nb-1668047664206989312-cp0nfah4b37k status
   python3 remote_qwen_ctl.py --host tione-develop stop
 """
 
@@ -83,6 +85,22 @@ HOST_PROFILES: Dict[str, Dict[str, Any]] = {
         "python": "/opt/conda/envs/eai-qwen/bin/python",
         "remote_port": 8100,
         "local_port": 18102,
+    },
+    "nb-1668047664206989312-cp0nfah4b37k": {
+        "id": "nb-1668047664206989312-cp0nfah4b37k",
+        "label": "nb-cp0nfah4b37k（1×80GB）",
+        "ssh_host": "nb-1668047664206989312-cp0nfah4b37k",
+        "remote_work": "/root/eai_qwen_runtime",
+        "model_root": (
+            "/share_data/projects/mahjong/share/personal/liyichao/models/Qwen"
+        ),
+        # CFS 共享 env；远端需已挂载同一 /share_data
+        "python": (
+            "/share_data/projects/mahjong/share/personal/liyichao/"
+            "miniconda3/envs/eai/bin/python"
+        ),
+        "remote_port": 8100,
+        "local_port": 18104,
     },
 }
 

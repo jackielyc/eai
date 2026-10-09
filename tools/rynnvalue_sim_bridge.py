@@ -334,6 +334,11 @@ def maybe_create_live_hud(
     """Build + start Live HUD from parsed args + bridge defaults; None if disabled."""
     if not bool(getattr(args, "rynnvalue_live_hud", False)):
         return None
+    import os
+
+    # eai GUI injects RYNNVALUE_STATUS_PATH so overlay lands in workspace cache.
+    env_status = (os.environ.get("RYNNVALUE_STATUS_PATH") or "").strip()
+    resolved_status = env_status or (str(status_path) if status_path else None)
     robot = str(getattr(args, "rynnvalue_robot_description", "") or "").strip()
     camera = str(getattr(args, "rynnvalue_camera_description", "") or "").strip()
     hud = RynnValueLiveHud(
@@ -343,7 +348,7 @@ def maybe_create_live_hud(
         robot_description=robot or bridge.robot_description(),
         camera_description=camera or bridge.camera_description(),
         show_window=bool(getattr(args, "rynnvalue_show_window", True)),
-        status_path=str(status_path) if status_path else None,
+        status_path=resolved_status,
         timeout_s=float(getattr(args, "rynnvalue_timeout_s", 60.0) or 60.0),
         flip_ud=bool(getattr(args, "rynnvalue_flip_ud", True)),
     )

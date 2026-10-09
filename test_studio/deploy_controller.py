@@ -444,15 +444,15 @@ class QwenDeployController(QObject):
             path = spec.get("path") or ""
             if (
                 path
-                and sct.LAKE_QWEN35_OUTPUT_ROOT in path
-                and host_id != "psi_motus_2_for_liyichao"
+                and not path.startswith("/share_data")
+                and host_id
+                in (
+                    "tione-develop",
+                    "nb-1668047664206989312-cp0nfah4b37k",
+                )
             ):
-                self.append_log("Lake 训练 output 目前仅在远程 psi_motus 可访问。")
-                view.show_message("请切换部署位置为 psi_motus")
-                return
-            if path and not path.startswith("/share_data") and host_id == "tione-develop":
                 self.append_log(
-                    "提示: 所选目录若不在 tione-develop 本机/共享盘，部署可能失败。"
+                    f"提示: 所选目录若不在 {host_id} 本机/共享盘，部署可能失败。"
                 )
             api = sct.remote_qwen_api_base_for_host(host_id)
             label = spec.get("label") or key

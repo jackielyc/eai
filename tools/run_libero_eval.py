@@ -116,6 +116,106 @@ def _get_libero_env(task, resolution, seed, *, render_gui: bool = False):
     return env, task_description
 
 
+# robosuite OpenCVRenderer window (utils/opencv_renderer.py).
+_LIBERO_GUI_WINDOW = "offscreen render"
+_gui_center_state = {"left": 0, "moved": 0}
+_opencv_renderer_close_patched = False
+
+
+def _patch_opencv_renderer_close() -> None:
+    """Stop robosuite from ``destroyAllWindows()`` (that also kills Live HUD)."""
+    global _opencv_renderer_close_patched
+    if _opencv_renderer_close_patched:
+        return
+    try:
+        from robosuite.utils.opencv_renderer import OpenCVRenderer
+    except Exception as exc:  # noqa: BLE001
+        logging.debug("OpenCVRenderer patch skipped: %s", exc)
+        return
+
+    def _close(self) -> None:  # noqa: ANN001
+        self.sim = None
+        try:
+            import cv2
+
+            cv2.destroyWindow(_LIBERO_GUI_WINDOW)
+            cv2.waitKey(1)
+        except Exception:  # noqa: BLE001
+            pass
+
+    OpenCVRenderer.close = _close  # type: ignore[method-assign]
+    _opencv_renderer_close_patched = True
+    logging.info(
+        "Patched OpenCVRenderer.close to destroy only %r (keep Live HUD)",
+        _LIBERO_GUI_WINDOW,
+    )
+
+
+def _arm_libero_gui_center() -> None:
+    """Recenter after the next show. hard_reset destroys and recreates the window."""
+    _gui_center_state["left"] = 30
+    _gui_center_state["moved"] = 0
+
+
+def _primary_monitor_rect() -> tuple[int, int, int, int]:
+    """Return (x, y, width, height) of the primary monitor in virtual-screen coords."""
+    try:
+        import glfw
+
+        if glfw.init():
+            mon = glfw.get_primary_monitor()
+            mode = glfw.get_video_mode(mon) if mon else None
+            if mon is not None and mode is not None and mode.size.width > 0:
+                ox, oy = glfw.get_monitor_pos(mon)
+                return int(ox), int(oy), int(mode.size.width), int(mode.size.height)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        sw = int(root.winfo_screenwidth())
+        sh = int(root.winfo_screenheight())
+        root.destroy()
+        if sw > 0 and sh > 0:
+            return 0, 0, sw, sh
+    except Exception:  # noqa: BLE001
+        pass
+    return 0, 0, 1920, 1080
+
+
+def _maybe_center_libero_gui() -> None:
+    """Place the robosuite on-screen viewer at the center of the primary monitor."""
+    if _gui_center_state["left"] <= 0 or _gui_center_state["moved"] >= 2:
+        return
+    _gui_center_state["left"] -= 1
+    try:
+        import cv2
+    except Exception:  # noqa: BLE001
+        return
+    name = _LIBERO_GUI_WINDOW
+    width, height = 1280, 800
+    try:
+        rect = cv2.getWindowImageRect(name)
+        if rect is not None and int(rect[2]) > 0 and int(rect[3]) > 0:
+            width, height = int(rect[2]), int(rect[3])
+    except Exception:  # noqa: BLE001
+        pass
+    ox, oy, sw, sh = _primary_monitor_rect()
+    x = int(ox + max(0, (sw - width) // 2))
+    y = int(oy + max(0, (sh - height) // 2))
+    try:
+        cv2.moveWindow(name, x, y)
+        cv2.waitKey(1)
+    except Exception as exc:  # noqa: BLE001
+        logging.debug("center libero window skipped: %s", exc)
+        return
+    _gui_center_state["moved"] += 1
+    if _gui_center_state["moved"] >= 2:
+        logging.info("LIBERO 图形窗口已置于屏幕中央 (%s, %s)", x, y)
+
+
 def _render_gui_frame(env) -> None:
     """Best-effort on-screen robosuite/mujoco render."""
     inner = getattr(env, "env", env)
@@ -125,6 +225,8 @@ def _render_gui_frame(env) -> None:
             render()
         except Exception as exc:  # noqa: BLE001
             logging.debug("render skipped: %s", exc)
+            return
+    _maybe_center_libero_gui()
 
 
 def _hold_gui_until_stop(env) -> None:
@@ -183,6 +285,14 @@ class _RemotePolicy:
                     "(服务端未返回详情。常见原因：:8080 上部署的不是 pi05_libero，"
                     "而是其它策略如 pi05_droid_jointpos。请在 GUI 重新「部署 Pi」"
                     "或停止旧 serve_policy 后再评测。)"
+                ) from exc
+            if "BLAS" in text or "cublas" in text.lower():
+                raise RuntimeError(
+                    f"{text.rstrip()}\n"
+                    "(Pi JAX 无法初始化 cuBLAS。单卡上 Pi05≈31G 与 RynnValue≈14G "
+                    "几乎占满 46G：必须先完成一次 Pi 推理再加载 RynnValue。"
+                    "请停 Live HUD/reward_server 后重新部署 Pi，或再点一次评测"
+                    "（界面会先停 RynnValue、预热 Pi、再拉起 HUD）。)"
                 ) from exc
             raise
 
@@ -268,6 +378,9 @@ def main(args: argparse.Namespace) -> int:
     )
     from rynnvalue_sim_bridge import LiberoHudBridge, maybe_create_live_hud
 
+    # robosuite hard_reset used destroyAllWindows() which also killed Live HUD.
+    _patch_opencv_renderer_close()
+
     hud_bridge = LiberoHudBridge()
     live_hud = maybe_create_live_hud(
         args,
@@ -331,6 +444,9 @@ def main(args: argparse.Namespace) -> int:
                 logging.info("Starting episode %s...", task_episodes + 1)
                 policy.reset()
                 env.reset()
+                if args.render_gui:
+                    # hard_reset closes the OpenCV viewer; recenter the new window.
+                    _arm_libero_gui_center()
                 action_plan: Deque[Any] = collections.deque()
                 obs = env.set_init_state(initial_states[episode_idx])
                 replay_images = []

@@ -34,6 +34,143 @@ DEFAULT_WINDOW_HEIGHT = 720
 HUD_DRAW_MIN_SIDE = 720
 
 
+def _primary_monitor_rect() -> Tuple[int, int, int, int]:
+    """Return (origin_x, origin_y, width, height) of the primary monitor."""
+    try:
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        sw = int(root.winfo_screenwidth())
+        sh = int(root.winfo_screenheight())
+        root.destroy()
+        if sw > 0 and sh > 0:
+            return 0, 0, sw, sh
+    except Exception:  # noqa: BLE001
+        pass
+    return 0, 0, 1920, 1080
+
+
+# OpenCV QT5 HighGUI persists geometry by window title; bumping a zero-width
+# suffix makes each open a fresh window so restore cannot yank it off-center.
+_WINDOW_NAME_SEQ = 0
+
+
+def _fresh_window_name(base: str) -> str:
+    global _WINDOW_NAME_SEQ
+    _WINDOW_NAME_SEQ += 1
+    # Title bar still reads as ``base``; ZWSP count is invisible.
+    # Keep the escape outside the f-string expr (SyntaxError on Python < 3.12).
+    zwsp = "\u200b"
+    return f"{base}{zwsp * _WINDOW_NAME_SEQ}"
+
+
+def _center_opencv_window(
+    cv2_mod: Any,
+    window_name: str,
+    width: int = DEFAULT_WINDOW_WIDTH,
+    height: int = DEFAULT_WINDOW_HEIGHT,
+) -> bool:
+    """Place an OpenCV window near the center of the primary screen."""
+    w, h = max(1, int(width)), max(1, int(height))
+    try:
+        rect = cv2_mod.getWindowImageRect(window_name)
+        if rect is not None and int(rect[2]) > 0 and int(rect[3]) > 0:
+            w, h = int(rect[2]), int(rect[3])
+    except Exception:  # noqa: BLE001
+        pass
+    ox, oy, sw, sh = _primary_monitor_rect()
+    x = int(ox + max(0, (sw - w) // 2))
+    y = int(oy + max(0, (sh - h) // 2))
+    try:
+        cv2_mod.moveWindow(window_name, x, y)
+        cv2_mod.waitKey(1)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _set_opencv_window_topmost(cv2_mod: Any, window_name: str) -> None:
+    """Keep the Live HUD above other windows (sim viewer, main UI)."""
+    prop = getattr(cv2_mod, "WND_PROP_TOPMOST", None)
+    if prop is not None:
+        try:
+            cv2_mod.setWindowProperty(window_name, prop, 1.0)
+        except Exception:  # noqa: BLE001
+            pass
+    # QT HighGUI often ignores / cannot report TOPMOST; pin via EWMH as well.
+    _x11_set_window_above(window_name)
+
+
+def _x11_set_window_above(window_name: str) -> None:
+    """Best-effort ``_NET_WM_STATE_ABOVE`` for the OpenCV window title."""
+    want = window_name or ""
+    want_plain = want.replace("\u200b", "").strip()
+    if not want_plain:
+        return
+    try:
+        from Xlib import X, display
+        from Xlib.protocol import event
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        dpy = display.Display()
+        root = dpy.screen().root
+        net_client_list = dpy.intern_atom("_NET_CLIENT_LIST")
+        net_wm_name = dpy.intern_atom("_NET_WM_NAME")
+        wm_name = dpy.intern_atom("WM_NAME")
+        net_wm_state = dpy.intern_atom("_NET_WM_STATE")
+        net_wm_state_above = dpy.intern_atom("_NET_WM_STATE_ABOVE")
+        prop = root.get_full_property(net_client_list, X.AnyPropertyType)
+        if prop is None:
+            dpy.close()
+            return
+
+        def _title(win: Any) -> str:
+            for atom in (net_wm_name, wm_name):
+                try:
+                    p = win.get_full_property(atom, 0)
+                except Exception:  # noqa: BLE001
+                    continue
+                if not p or p.value is None:
+                    continue
+                raw = p.value
+                text = (
+                    raw.decode("utf-8", "ignore")
+                    if isinstance(raw, (bytes, bytearray))
+                    else str(raw)
+                )
+                return text.replace("\x1b%G", "").replace("\x1b%@", "")
+            return ""
+
+        exact = None
+        fuzzy = None
+        # Prefer the last matching client (most recently mapped).
+        for wid in prop.value:
+            win = dpy.create_resource_object("window", wid)
+            text = _title(win)
+            if not text:
+                continue
+            if text == want or text.replace("\u200b", "") == want_plain:
+                exact = win
+            elif want_plain in text.replace("\u200b", ""):
+                fuzzy = win
+        target = exact if exact is not None else fuzzy
+        if target is not None:
+            # data: action=1 (add), first property=ABOVE, source=1 (application)
+            ev = event.ClientMessage(
+                window=target,
+                client_type=net_wm_state,
+                data=(32, [1, int(net_wm_state_above), 0, 1, 0]),
+            )
+            mask = X.SubstructureRedirectMask | X.SubstructureNotifyMask
+            root.send_event(ev, event_mask=mask)
+            dpy.flush()
+        dpy.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @dataclass
 class HudSnapshot:
     remaining_s: Optional[float] = None
@@ -379,11 +516,12 @@ class RynnValueLiveHud:
         self.robot_description = robot_description
         self.camera_description = camera_description
         self.show_window = bool(show_window)
-        self.window_name = window_name
+        self._window_name_base = window_name or "RynnValue Live HUD"
+        self.window_name = self._window_name_base
         self.status_path = Path(status_path) if status_path else None
         self.use_frame_steps = bool(use_frame_steps)
-        # Offscreen MuJoCo / robosuite RGB is OpenGL origin (first row = bottom).
-        # OpenCV HUD uses top-left origin, so default to a vertical flip.
+        # LIBERO/robosuite offscreen RGB is OpenGL origin (first row = bottom).
+        # mujoco.Renderer already returns top-left origin — do not flip that path.
         self.flip_ud = bool(flip_ud)
 
         self._frames: Deque[np.ndarray] = deque(maxlen=self.max_buffer)
@@ -400,29 +538,93 @@ class RynnValueLiveHud:
         self._step = 0
         self._cv2 = None
         self._window_dismissed = False  # user closed window / pressed Esc
+        self._last_err_log_at = 0.0
+        self._last_err_text = ""
+        self._last_overlay_write_at = 0.0
+        self._overlay_write_min_interval_s = 0.1  # ~10 Hz for eai workspace preview
+        # Keep recentering for a few frames after (re)create.
+        self._center_attempts_left = 0
+        self._window_seen_open = False
+        self._window_missing_streak = 0
+
+    def _arm_window_center(self, attempts: int = 20) -> None:
+        """Schedule recenter on subsequent pump_window calls."""
+        self._center_attempts_left = max(0, int(attempts))
+
+    def _maybe_center_window(self, overlay: Optional[np.ndarray] = None) -> None:
+        """Retry moveWindow for a few frames after create / recreate."""
+        if self._center_attempts_left <= 0 or self._cv2 is None:
+            return
+        self._center_attempts_left -= 1
+        if overlay is not None:
+            h, w = int(overlay.shape[0]), int(overlay.shape[1])
+        else:
+            w, h = DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
+        try:
+            _center_opencv_window(self._cv2, self.window_name, w, h)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _ensure_window(self) -> bool:
+        """Create the OpenCV window if needed. Deferred until first frame.
+
+        Deferring avoids robosuite ``destroyAllWindows()`` during env reset
+        wiping a blank HUD that was opened too early in ``start()``.
+        """
+        if self._window_dismissed or not self.show_window:
+            return False
+        try:
+            import cv2
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Live HUD window unavailable: %s", exc)
+            self.show_window = False
+            self._cv2 = None
+            return False
+        self._cv2 = cv2
+        if not self.window_name or self.window_name == self._window_name_base:
+            self.window_name = _fresh_window_name(self._window_name_base)
+        try:
+            # If already open, leave it.
+            if self.window_is_open():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(
+                self.window_name, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
+            )
+            prop = getattr(cv2, "WND_PROP_ASPECT_RATIO", None)
+            free_ratio = getattr(cv2, "WINDOW_FREERATIO", None)
+            if prop is not None and free_ratio is not None:
+                try:
+                    cv2.setWindowProperty(
+                        self.window_name, prop, float(free_ratio)
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            _set_opencv_window_topmost(cv2, self.window_name)
+            self._arm_window_center()
+            self._window_seen_open = False
+            self._window_missing_streak = 0
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Live HUD window unavailable: %s", exc)
+            self.show_window = False
+            self._cv2 = None
+            return False
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        # Import cv2 early; actual namedWindow waits until first pump_window so
+        # sim backends that call destroyAllWindows on reset cannot wipe it.
         if self.show_window and not self._window_dismissed:
             try:
                 import cv2
 
                 self._cv2 = cv2
-                # WINDOW_NORMAL allows drag-resize; FREERATIO unlocks aspect.
-                cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-                cv2.resizeWindow(
-                    self.window_name, DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT
-                )
-                prop = getattr(cv2, "WND_PROP_ASPECT_RATIO", None)
-                free_ratio = getattr(cv2, "WINDOW_FREERATIO", None)
-                if prop is not None and free_ratio is not None:
-                    try:
-                        cv2.setWindowProperty(
-                            self.window_name, prop, float(free_ratio)
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
+                self.window_name = _fresh_window_name(self._window_name_base)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Live HUD window unavailable: %s", exc)
                 self.show_window = False
@@ -456,12 +658,10 @@ class RynnValueLiveHud:
         self._wake.set()
         if self._cv2 is not None:
             try:
+                # Never destroyAllWindows — that would kill sibling sim viewers.
                 self._cv2.destroyWindow(self.window_name)
             except Exception:  # noqa: BLE001
-                try:
-                    self._cv2.destroyAllWindows()
-                except Exception:  # noqa: BLE001
-                    pass
+                pass
             try:
                 self._cv2.waitKey(1)
             except Exception:  # noqa: BLE001
@@ -567,6 +767,7 @@ class RynnValueLiveHud:
         with self._lock:
             self._last_overlay_bgr = overlay
             self._last_display_rgb = display_rgb
+        self._write_overlay_image(overlay)
 
         self.pump_window(force_overlay=overlay)
         return snap
@@ -580,7 +781,9 @@ class RynnValueLiveHud:
         Closing the window (X) or pressing Esc/q stops the GUI and scoring.
         Subsequent ``imshow`` calls are skipped so the window does not pop back open.
         """
-        if self._window_dismissed or not self.show_window or self._cv2 is None:
+        if self._window_dismissed or not self.show_window:
+            return
+        if self._cv2 is None or not self._ensure_window():
             return
         overlay = force_overlay
         if overlay is None:
@@ -603,11 +806,19 @@ class RynnValueLiveHud:
                 overlay = draw_hud_overlay(display_rgb, snap, history=history)
                 with self._lock:
                     self._last_overlay_bgr = overlay
+                self._write_overlay_image(overlay)
             else:
                 overlay = cached
         try:
             if overlay is not None:
+                # Recreate if a sim backend wiped HighGUI windows.
+                if not self.window_is_open():
+                    self._ensure_window()
                 self._cv2.imshow(self.window_name, overlay)
+                # Re-assert topmost while recentering (not every frame — X11 is heavy).
+                if self._center_attempts_left > 0:
+                    _set_opencv_window_topmost(self._cv2, self.window_name)
+                self._maybe_center_window(overlay)
             key = int(self._cv2.waitKey(1) & 0xFF)
         except Exception as exc:  # noqa: BLE001
             logger.warning("imshow failed: %s", exc)
@@ -616,8 +827,18 @@ class RynnValueLiveHud:
         if key in (27, ord("q"), ord("Q")):  # Esc / q
             self.dismiss_window("Esc/q")
             return
-        if not self.window_is_open():
-            self.dismiss_window("title-bar X")
+        if self.window_is_open():
+            self._window_seen_open = True
+            self._window_missing_streak = 0
+        else:
+            # QT reports -1 during create/move; only treat as user-X after the
+            # window was stably open, and only after several consecutive misses.
+            # If never seen open (e.g. destroyAllWindows mid-reset), recreate.
+            self._window_missing_streak += 1
+            if not self._window_seen_open:
+                self._ensure_window()
+            elif self._window_missing_streak >= 8:
+                self.dismiss_window("title-bar X")
 
     def snapshot(self) -> HudSnapshot:
         with self._lock:
@@ -640,11 +861,43 @@ class RynnValueLiveHud:
 
             return cv2.cvtColor(self._last_overlay_bgr, cv2.COLOR_BGR2RGB)
 
+    def overlay_image_path(self) -> Optional[Path]:
+        """Sibling JPEG path for eai workspace preview (``*_overlay.jpg``)."""
+        if self.status_path is None:
+            return None
+        return self.status_path.with_name(self.status_path.stem + "_overlay.jpg")
+
+    def _write_overlay_image(self, overlay_bgr: Optional[np.ndarray]) -> None:
+        """Atomically write BGR overlay JPEG next to status_path for GUI embedding."""
+        path = self.overlay_image_path()
+        if path is None or overlay_bgr is None:
+            return
+        now = time.time()
+        if now - self._last_overlay_write_at < self._overlay_write_min_interval_s:
+            return
+        self._last_overlay_write_at = now
+        try:
+            import cv2
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            ok = cv2.imwrite(str(tmp), overlay_bgr)
+            if ok:
+                tmp.replace(path)
+            elif tmp.is_file():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("overlay write failed: %s", exc)
+
     def _write_status(self, snap: HudSnapshot) -> None:
         if self.status_path is None:
             return
         try:
             self.status_path.parent.mkdir(parents=True, exist_ok=True)
+            overlay_path = self.overlay_image_path()
             payload = {
                 "remaining_s": snap.remaining_s,
                 "reward_phi": snap.reward_phi,
@@ -656,6 +909,7 @@ class RynnValueLiveHud:
                 "progress_curve": snap.progress_curve,
                 "server_url": self.server_url,
                 "refresh_sec": self.refresh_sec,
+                "overlay_path": str(overlay_path) if overlay_path else "",
             }
             tmp = self.status_path.with_suffix(self.status_path.suffix + ".tmp")
             tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -719,8 +973,16 @@ class RynnValueLiveHud:
                     self._snap = snap
                     if rem is not None:
                         self._history.append(rem)
+                    display_rgb = self._last_display_rgb
+                    history = list(self._history)
                 self._write_status(snap)
-                logger.info(
+                if display_rgb is not None:
+                    overlay = draw_hud_overlay(display_rgb, snap, history=history)
+                    with self._lock:
+                        self._last_overlay_bgr = overlay
+                    self._write_overlay_image(overlay)
+                # Status is on the HUD window / status JSON. Do not print every score.
+                logger.debug(
                     "Live HUD score step=%s rem=%s latency=%.2fs frames=%s",
                     step,
                     f"{rem:.3f}" if rem is not None else "n/a",
@@ -744,7 +1006,13 @@ class RynnValueLiveHud:
                 with self._lock:
                     self._snap = snap
                 self._write_status(snap)
-                logger.warning("Live HUD score failed: %s", err)
+                now = time.monotonic()
+                if err != self._last_err_text or now - self._last_err_log_at >= 15.0:
+                    self._last_err_text = err
+                    self._last_err_log_at = now
+                    logger.warning("Live HUD score failed: %s", err)
+                else:
+                    logger.debug("Live HUD score failed: %s", err)
             finally:
                 with self._lock:
                     self._inflight = False

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 启动 MuJoCo 交互式图形界面（python -m mujoco.viewer / simulate / EGL 回退）。
+# 启动 MuJoCo 官方交互界面（python -m mujoco.viewer / simulate）。
 # 由 eai viewer「MuJoCo」页调用；也可手动：
 #   bash run_mujoco_viewer.sh --mjcf /path/to/model.xml
 #   bash run_mujoco_viewer.sh --mjcf model/humanoid/humanoid.xml --mujoco-root /path/to/mujoco
@@ -26,8 +26,9 @@ Options:
   --mujoco-root DIR     MuJoCo 源码/模型仓库（默认: ${MUJOCO_ROOT_DEFAULT}）
   --python PATH         带 mujoco 包的 Python
   --mode auto|python|simulate|egl
-                        auto: 有 GLX 时用 GLFW viewer（默认经 VirtualGL→NVIDIA），
-                              无 GLX 时走 EGL+Tk 回退
+                        auto/python: 官方 mujoco.viewer（默认 VirtualGL→NVIDIA）
+                        simulate: 官方 simulate 可执行文件
+                        egl: 仅此时才用 EGL+Tk 回退（非官方界面）
   --install             用所选 Python 执行: pip install -U mujoco
   -h, --help
 
@@ -35,7 +36,7 @@ Environment:
   MUJOCO_ROOT / MUJOCO_PYTHON / DISPLAY
   MUJOCO_USE_VGL=0|1    是否用 vglrun（默认: 有 vglrun 则为 1）
   MUJOCO_VGL_DEVICE     传给 vglrun -d（默认 egl → NVIDIA，无需本机 :0）
-  MUJOCO_VIEWER_FORCE=1 强制走 GLFW viewer（即使 GLX 实测不可用）
+  MUJOCO_ALLOW_EGL=1    GLFW 失败后才回退 EGL+Tk（默认不回退）
 
 Notes:
   TurboVNC 本身无 GPU GLX，原生会落 Mesa llvmpipe。硬件加速需 VirtualGL：
@@ -202,7 +203,7 @@ has_glx || GLX_ST=$?
 if [[ "${GLX_ST}" -eq 0 ]]; then
   echo "[mujoco] GLX=yes (usable OpenGL visual)"
 else
-  echo "[mujoco] GLX=no/unusable (nodri 或无 RGB GLX visual；GLFW 会失败 → 用 EGL)"
+  echo "[mujoco] GLX=no/unusable（仍优先官方 viewer，经 VirtualGL；--mode egl 才用 Tk 回退）"
 fi
 
 run_egl_viewer() {
@@ -257,8 +258,12 @@ run_python_viewer() {
     exit 0
   fi
   local rc=$?
-  echo "[mujoco] GLFW viewer 退出 code=${rc}，回退 EGL viewer" >&2
-  run_egl_viewer
+  if [[ "${MUJOCO_ALLOW_EGL:-0}" == "1" ]]; then
+    echo "[mujoco] GLFW viewer 退出 code=${rc}，MUJOCO_ALLOW_EGL=1 → EGL 回退" >&2
+    run_egl_viewer
+  fi
+  echo "[mujoco] GLFW viewer 退出 code=${rc}（未回退 EGL；需要 Tk 界面请 --mode egl）" >&2
+  exit "${rc}"
 }
 
 run_simulate() {
@@ -276,6 +281,8 @@ run_simulate() {
   exec "${SIM_BIN}" "${MJCF}"
 }
 
+# Official mujoco.viewer / simulate by default. EGL+Tk only with --mode egl
+# (or MUJOCO_ALLOW_EGL=1 after GLFW failure inside run_python_viewer).
 case "${MODE}" in
   egl)
     run_egl_viewer
@@ -286,10 +293,6 @@ case "${MODE}" in
       echo "  ${PY} -m pip install -U mujoco" >&2
       exit 1
     fi
-    if [[ "${GLX_ST}" -ne 0 && "${MUJOCO_VIEWER_FORCE:-0}" != "1" ]]; then
-      echo "[mujoco] 无 GLX：GLFW viewer 会失败，改用 EGL 回退（--mode egl）。" >&2
-      run_egl_viewer
-    fi
     run_python_viewer
     ;;
   simulate)
@@ -297,27 +300,15 @@ case "${MODE}" in
       echo "[mujoco] 未找到 simulate 可执行文件" >&2
       exit 1
     fi
-    if [[ "${GLX_ST}" -ne 0 && "${MUJOCO_VIEWER_FORCE:-0}" != "1" ]]; then
-      echo "[mujoco] 无 GLX：simulate 会失败，改用 EGL 回退。" >&2
-      run_egl_viewer
-    fi
     run_simulate
     ;;
   auto|*)
     if [[ "${HAS_PY}" -eq 1 ]]; then
-      if [[ "${GLX_ST}" -eq 0 || "${MUJOCO_VIEWER_FORCE:-0}" == "1" ]]; then
-        run_python_viewer
-      else
-        echo "[mujoco] auto: 无可用 GLX → EGL+Tkinter viewer（非 GLFW）"
-        run_egl_viewer
-      fi
+      echo "[mujoco] auto: 官方 python -m mujoco.viewer"
+      run_python_viewer
     elif [[ -n "${SIM_BIN}" ]]; then
-      if [[ "${GLX_ST}" -eq 0 || "${MUJOCO_VIEWER_FORCE:-0}" == "1" ]]; then
-        run_simulate
-      else
-        echo "[mujoco] auto: 无 GLX 且无 Python mujoco，无法启动" >&2
-        exit 1
-      fi
+      echo "[mujoco] auto: 官方 simulate"
+      run_simulate
     else
       echo "[mujoco] 未找到 mujoco Python 包或 simulate。" >&2
       echo "  安装: ${PY} -m pip install -U mujoco" >&2

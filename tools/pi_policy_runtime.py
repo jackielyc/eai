@@ -554,6 +554,10 @@ def openpi_child_env(
         "AMENT_PREFIX_PATH": None,
         "ROS_DISTRO": None,
         "ROS_VERSION": None,
+        # Leave room for a sibling GPU process (RynnValue Live HUD).
+        "XLA_PYTHON_CLIENT_PREALLOCATE": os.environ.get(
+            "XLA_PYTHON_CLIENT_PREALLOCATE", "false"
+        ),
     }
 
 
@@ -865,6 +869,82 @@ def probe_pi_server(
     return False, f"握手失败 {uri}: {blob[-240:]}"
 
 
+def warmup_pi_server_infer(
+    host: str = PI_SERVER_HOST_DEFAULT,
+    port: int = PI_SERVER_PORT_DEFAULT,
+    *,
+    timeout_s: float = 180.0,
+    openpi_python: str = "",
+) -> Tuple[bool, str]:
+    """Force first JAX/cuBLAS init on serve_policy with a dummy observation.
+
+    Pi05 JAX compiles / creates cuBLAS on the first ``infer``. If RynnValue is
+    already occupying the same GPU, that step often fails with
+    ``Failed to initialize BLAS support``. Call this while the GPU still has
+    headroom (after serve is up, before loading reward_server).
+    """
+    host = (host or PI_SERVER_HOST_DEFAULT).strip() or PI_SERVER_HOST_DEFAULT
+    port = int(port)
+    uri = f"ws://{host}:{port}"
+    py = resolve_openpi_python(openpi_python)
+    code = (
+        "import sys\n"
+        "import numpy as np\n"
+        "host, port = sys.argv[1], int(sys.argv[2])\n"
+        "from openpi_client import websocket_client_policy as wcp\n"
+        "client = wcp.WebsocketClientPolicy(host=host, port=port)\n"
+        "obs = {\n"
+        "    'observation/image': np.zeros((224, 224, 3), dtype=np.uint8),\n"
+        "    'observation/wrist_image': np.zeros((224, 224, 3), dtype=np.uint8),\n"
+        "    'observation/state': np.zeros((8,), dtype=np.float32),\n"
+        "    'prompt': 'warmup',\n"
+        "}\n"
+        "out = client.infer(obs)\n"
+        "actions = out.get('actions') if isinstance(out, dict) else None\n"
+        "n = int(getattr(actions, 'shape', [0])[0]) if actions is not None else 0\n"
+        "print('OK', f'actions={n}')\n"
+    )
+    clean = {k: v for k, v in openpi_child_env(openpi_python=py).items() if v is not None}
+    base = {
+        k: v
+        for k, v in os.environ.items()
+        if k
+        not in (
+            "PYTHONHOME",
+            "PYTHONPATH",
+            "LD_LIBRARY_PATH",
+            "AMENT_PREFIX_PATH",
+        )
+    }
+    try:
+        proc = subprocess.run(
+            [py, "-c", code, host, str(port)],
+            capture_output=True,
+            text=True,
+            timeout=max(30.0, float(timeout_s)),
+            env={**base, **clean},
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"首次推理预热超时 {uri}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"首次推理预热异常 {uri}: {type(exc).__name__}: {exc}"
+
+    out = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    blob = ((err or "") + "\n" + (out or "")).strip()
+    if proc.returncode == 0 and out.startswith("OK"):
+        return True, f"首次推理预热完成 {uri} {out[2:].strip()}".rstrip()
+    if "BLAS" in blob or "cublas" in blob.lower() or "out of memory" in blob.lower():
+        return (
+            False,
+            "Pi 首次推理无法初始化 cuBLAS（显存不足）。"
+            "单卡上 Pi05 与 RynnValue 不能同时冷启动：请先停 RynnValue，"
+            "完成一次 Pi 推理后再开 Live HUD。 "
+            f"{blob[-280:].replace(chr(10), ' ')}",
+        )
+    return False, f"首次推理预热失败 {uri}: {blob[-280:].replace(chr(10), ' ')}"
+
+
 def wait_for_pi_server(
     host: str = PI_SERVER_HOST_DEFAULT,
     port: int = PI_SERVER_PORT_DEFAULT,
@@ -915,6 +995,7 @@ __all__ = [
     "is_pi_policy_id",
     "port_listening",
     "probe_pi_server",
+    "warmup_pi_server_infer",
     "inspect_pi_server_on_port",
     "pi_server_matches",
     "resolve_openpi_python",

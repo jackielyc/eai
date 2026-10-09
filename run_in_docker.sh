@@ -371,7 +371,7 @@ ensure_remote_qwen_hostctl() {
 }
 ensure_remote_qwen_hostctl
 
-# 清理旧版错误 SSH 隧道（进程在但 18100/18102 未监听），勿调用 stop（会停远程模型）
+# 清理旧版错误 SSH 隧道（进程在但 18100/18102/18104 未监听），勿调用 stop（会停远程模型）
 cleanup_stale_remote_qwen_tunnels() {
     if curl -fsS --max-time 1 "http://127.0.0.1:18100/health" >/dev/null 2>&1; then
         echo ">>> 远程 Qwen 隧道已可用 (:18100)"
@@ -381,11 +381,17 @@ cleanup_stale_remote_qwen_tunnels() {
         echo ">>> 远程 Qwen 隧道已可用 (:18102)"
         return 0
     fi
+    if curl -fsS --max-time 1 "http://127.0.0.1:18104/health" >/dev/null 2>&1; then
+        echo ">>> 远程 Qwen 隧道已可用 (:18104)"
+        return 0
+    fi
     echo ">>> 清理无效 SSH 隧道进程"
     pkill -f 'ssh .* -L 18100:127.0.0.1:8100' 2>/dev/null || true
     pkill -f 'ssh .* -L 18102:127.0.0.1:8100' 2>/dev/null || true
+    pkill -f 'ssh .* -L 18104:127.0.0.1:8100' 2>/dev/null || true
     fuser -k 18100/tcp 2>/dev/null || true
     fuser -k 18102/tcp 2>/dev/null || true
+    fuser -k 18104/tcp 2>/dev/null || true
 }
 cleanup_stale_remote_qwen_tunnels
 

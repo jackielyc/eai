@@ -120,7 +120,9 @@ export PYTHONUNBUFFERED=1
 export PYTHONNOUSERSITE=1
 export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-3}"
-unset PYTHONHOME || true
+# Viewer/RoboStack injects ros-humble into PYTHONPATH; rynnvalue (3.10) must not
+# import that env's numpy/site-packages (3.11) or imports abort.
+unset PYTHONHOME PYTHONPATH AMENT_PREFIX_PATH ROS_DISTRO ROS_VERSION COLCON_PREFIX_PATH || true
 # 始终 Agg：趋势视频离屏渲染；「图形化」由 UI 播放输出 mp4
 export MPLBACKEND=Agg
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
