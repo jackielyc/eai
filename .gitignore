@@ -323,3 +323,11 @@ cam_left_wrist.npy.stamp
 cam_right_wrist.npy
 cam_right_wrist.npy.stamp
 MUJOCO_LOG.TXT
+assets/videos/artist_placing_cup.mp4
+assets/videos/coffee_green_mug_place.mp4
+assets/videos/hand_place_bowl_in_drawer.mp4
+assets/videos/hand_place_box_on_table.mp4
+assets/videos/hand_place_cookies_on_board.mp4
+assets/videos/hand_place_cup_on_table.mp4
+assets/videos/hand_place_dish_in_drawer.mp4
+assets/videos/recommended_place_cup.mp4

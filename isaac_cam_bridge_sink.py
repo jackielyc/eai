@@ -298,6 +298,7 @@ def write_sim_robot_state(
     right_ee_pose: Any = None,
     left_gripper: Any = None,
     right_gripper: Any = None,
+    objects: Any = None,
 ) -> bool:
     d = (root or bridge_dir() or "").strip()
     if not d:
@@ -315,6 +316,40 @@ def write_sim_robot_state(
         out["left_gripper"] = lg
     if rg is not None:
         out["right_gripper"] = rg
+    if isinstance(objects, dict) and objects:
+        # 只保留可 JSON 序列化的简单位姿字段
+        clean: dict = {}
+        for name, meta in objects.items():
+            if not isinstance(meta, dict):
+                continue
+            entry: dict = {}
+            pos = meta.get("pos")
+            quat = meta.get("quat")
+            joint = meta.get("joint")
+            if isinstance(pos, (list, tuple)) and len(pos) >= 3:
+                try:
+                    entry["pos"] = [float(pos[0]), float(pos[1]), float(pos[2])]
+                except (TypeError, ValueError):
+                    pass
+            if isinstance(quat, (list, tuple)) and len(quat) >= 4:
+                try:
+                    entry["quat"] = [
+                        float(quat[0]),
+                        float(quat[1]),
+                        float(quat[2]),
+                        float(quat[3]),
+                    ]
+                except (TypeError, ValueError):
+                    pass
+            if joint is not None:
+                try:
+                    entry["joint"] = float(joint)
+                except (TypeError, ValueError):
+                    pass
+            if entry:
+                clean[str(name)] = entry
+        if clean:
+            out["objects"] = clean
     try:
         _atomic_json_write(os.path.join(d, SIM_ROBOT_STATE_NAME), out)
     except Exception as exc:

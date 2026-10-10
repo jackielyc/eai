@@ -66,6 +66,7 @@ class DetectedHand:
     score: float
     landmarks_norm: np.ndarray  # (21, 3)
     joints: Tuple[float, float, float, float, float, float]  # 6 关节 0~1
+    landmarks_world: Optional[np.ndarray] = None  # (21, 3) 米制，相对手几何中心
 
 
 def mediapipe_available() -> bool:
@@ -187,10 +188,20 @@ class HandSkeletonDetector:
         if not result.multi_hand_landmarks:
             return out
         handedness_list = result.multi_handedness or []
+        world_list = getattr(result, "multi_hand_world_landmarks", None) or []
         for i, hand_lms in enumerate(result.multi_hand_landmarks):
             pts = np.array(
                 [[lm.x, lm.y, lm.z] for lm in hand_lms.landmark], dtype=np.float64
             )
+            world_pts: Optional[np.ndarray] = None
+            if i < len(world_list) and world_list[i] is not None:
+                try:
+                    world_pts = np.array(
+                        [[lm.x, lm.y, lm.z] for lm in world_list[i].landmark],
+                        dtype=np.float64,
+                    )
+                except Exception:
+                    world_pts = None
             label = "Right"
             score = 0.0
             if i < len(handedness_list):
@@ -207,6 +218,7 @@ class HandSkeletonDetector:
                     score=score,
                     landmarks_norm=pts,
                     joints=tuple(joints),  # type: ignore[arg-type]
+                    landmarks_world=world_pts,
                 )
             )
         return out

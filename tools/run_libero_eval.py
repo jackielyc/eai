@@ -507,6 +507,7 @@ def _main_viewer_only(args: argparse.Namespace) -> int:
     from sim_gui_teleop import (
         GuiTeleopSession,
         libero_action_from_cmd,
+        libero_objects_to_state,
         libero_obs_to_state,
     )
 
@@ -514,8 +515,10 @@ def _main_viewer_only(args: argparse.Namespace) -> int:
     args.render_gui = True
     np.random.seed(args.seed)
     task_suite = benchmark.get_benchmark_dict()[args.task_suite_name]()
-    task = task_suite.get_task(0)
-    initial_states = task_suite.get_task_init_states(0)
+    task_id = int(getattr(args, "task_id", 0) or 0)
+    task_id = max(0, min(task_id, int(task_suite.n_tasks) - 1))
+    task = task_suite.get_task(task_id)
+    initial_states = task_suite.get_task_init_states(task_id)
     # ignore_done: horizon (~1000 steps) must not terminate the episode —
     # otherwise viewer_only hard-resets and the OpenCV window repeatedly pops.
     # hard_reset=False: if we do reset, keep the same window (soft sim.reset).
@@ -531,9 +534,10 @@ def _main_viewer_only(args: argparse.Namespace) -> int:
     teleop = GuiTeleopSession(label="libero")
     hold = [0.0] * 6 + [-1.0]
     logging.info(
-        "LIBERO viewer_only suite=%s task=%s (no policy; GUI teleop on; "
+        "LIBERO viewer_only suite=%s task_id=%s task=%s (no policy; GUI teleop on; "
         "ignore_done, soft reset)",
         args.task_suite_name,
+        task_id,
         task_description,
     )
     try:
@@ -574,7 +578,13 @@ def _main_viewer_only(args: argparse.Namespace) -> int:
         try:
             while not stop["flag"] and not _libero_gui_dismissed():
                 pose7, grip = libero_obs_to_state(obs)
-                teleop.write_state(left_ee_pose=pose7, left_gripper=grip)
+                try:
+                    objs = libero_objects_to_state(env)
+                except Exception:
+                    objs = {}
+                teleop.write_state(
+                    left_ee_pose=pose7, left_gripper=grip, objects=objs or None
+                )
                 cmd = teleop.read_cmd()
                 action = libero_action_from_cmd(obs, cmd) if cmd else hold
                 try:
@@ -656,9 +666,15 @@ def main(args: argparse.Namespace) -> int:
 
     np.random.seed(args.seed)
     task_suite = benchmark.get_benchmark_dict()[args.task_suite_name]()
-    num_tasks = task_suite.n_tasks
-    if args.max_tasks > 0:
-        num_tasks = min(num_tasks, int(args.max_tasks))
+    n_suite = int(task_suite.n_tasks)
+    want_task = int(getattr(args, "task_id", -1))
+    if want_task >= 0:
+        task_ids = [max(0, min(want_task, n_suite - 1))]
+    else:
+        num_tasks = n_suite
+        if args.max_tasks > 0:
+            num_tasks = min(num_tasks, int(args.max_tasks))
+        task_ids = list(range(num_tasks))
     max_steps = _max_steps_for_suite(args.task_suite_name)
     resolution = 256
     dummy = [0.0] * 6 + [-1.0]
@@ -683,7 +699,7 @@ def main(args: argparse.Namespace) -> int:
 
     try:
         gui_closed = False
-        for task_id in tqdm(range(num_tasks)):
+        for task_id in tqdm(task_ids):
             if env is not None:
                 env.close()
                 env = None
@@ -878,6 +894,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--config_name", default="pi05_libero")
     p.add_argument("--pretrained_path", default="")
     p.add_argument("--task_suite_name", default="libero_spatial")
+    p.add_argument(
+        "--task_id",
+        type=int,
+        default=-1,
+        help="Run a single suite task index (>=0). Default -1 = use max_tasks range from 0",
+    )
     p.add_argument("--num_trials_per_task", type=int, default=1)
     p.add_argument("--max_tasks", type=int, default=1, help="0 = all tasks in suite")
     p.add_argument("--action_chunk", type=int, default=5)

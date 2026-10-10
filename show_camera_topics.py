@@ -20,6 +20,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
 仿真评测（策略=无 / 只开界面）时，「手臂/手」页通过共享目录 gui_robot_cmd.json
 遥控各仿真后端（Isaac / MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin / 扩展评测）双臂与夹爪。
 「手臂/手」页可输入文本指挥手臂相对移动和手部开合，例如「左臂向前5cm；右手张开」。
+「手臂/手」页也可选择人类演示视频，经 MediaPipe 分析后让机器人复现手部开合与手腕相对运动。
 """
 
 from __future__ import annotations
@@ -3036,6 +3037,11 @@ CTX_DEFAULT_VIDEO_PATH = (
     "gui_starvla_20260907_122225_pack_objects_into_box/"
     "episode_0000000_cam_head_fail.mp4"
 )
+# 人类演示视频分析缓存（手臂/手 Tab）
+HUMAN_DEMO_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "human_demo")
+HUMAN_DEMO_VIDEO_FILTER = (
+    "视频 (*.mp4 *.avi *.mkv *.webm *.mov);;所有文件 (*)"
+)
 REPLAY_STATE_FINISHED = 3
 REPLAY_STATE_LABELS = {
     0: "空闲",
@@ -3961,6 +3967,13 @@ class RemoteQwenDeployBridge(QObject):
 
 class DeployModelListBridge(QObject):
     finished = pyqtSignal(object)
+
+
+class HumanDemoAnalyzeBridge(QObject):
+    """后台分析人类演示视频：progress(pct, msg) / finished(ok, traj_or_none, error)。"""
+
+    progress = pyqtSignal(float, str)
+    finished = pyqtSignal(bool, object, str)
 
 
 class RemoteQwenServiceLauncher(QObject):
@@ -23298,7 +23311,19 @@ class CameraTopicWindow(QMainWindow):
         self.libero_suite_combo.setToolTip(
             "LIBERO task suite：spatial / object / goal / 10 / 90"
         )
+        self.libero_suite_combo.currentIndexChanged.connect(
+            self._on_libero_suite_changed
+        )
         libero_task_row.addWidget(self.libero_suite_combo)
+        libero_task_row.addWidget(QLabel("任务序号"))
+        self.libero_task_id_spin = QSpinBox()
+        self.libero_task_id_spin.setRange(0, 99)
+        self.libero_task_id_spin.setValue(0)
+        self.libero_task_id_spin.setToolTip(
+            "suite 内任务下标；只开界面 / 单任务评测都会用到"
+        )
+        self.libero_task_id_spin.valueChanged.connect(self._on_libero_suite_changed)
+        libero_task_row.addWidget(self.libero_task_id_spin)
         libero_task_row.addWidget(QLabel("配置"))
         self.libero_config_combo = ImeSafeComboBox()
         for label, cfg_id in LIBERO_POLICY_CONFIGS:
@@ -23858,6 +23883,8 @@ class CameraTopicWindow(QMainWindow):
         self._refresh_arena_tasks()
         if hasattr(self, "_on_libero_mode_changed"):
             self._on_libero_mode_changed()
+        if hasattr(self, "_on_libero_suite_changed"):
+            self._on_libero_suite_changed()
         self._on_sim_backend_changed()
         if hasattr(self, "_pi_policy_ready_timer"):
             self._pi_policy_ready_timer.start()
@@ -23950,6 +23977,18 @@ class CameraTopicWindow(QMainWindow):
         control_layout.setContentsMargins(8, 6, 8, 6)
         control_layout.setSpacing(6)
 
+        # 上半：手动控制（紧凑，不抢演示预览高度）
+        manual_group = QGroupBox("手动控制")
+        manual_group.setStyleSheet(
+            f"QGroupBox {{ color: {UI_TEXT_PRIMARY}; border: 1px solid {UI_BORDER}; "
+            f"margin-top: 6px; padding-top: 4px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; "
+            f"color: {UI_TEXT_SECONDARY}; }}"
+        )
+        manual_layout = QVBoxLayout(manual_group)
+        manual_layout.setContentsMargins(8, 8, 8, 4)
+        manual_layout.setSpacing(4)
+
         text_cmd_row = QHBoxLayout()
         text_cmd_row.setSpacing(6)
         text_cmd_row.addWidget(QLabel("文本指挥"))
@@ -23962,34 +24001,36 @@ class CameraTopicWindow(QMainWindow):
         self.arm_text_cmd_btn.setToolTip(ARM_TEXT_CMD_HELP)
         self.arm_text_cmd_btn.clicked.connect(self._on_arm_text_command)
         text_cmd_row.addWidget(self.arm_text_cmd_btn)
-        control_layout.addLayout(text_cmd_row)
+        manual_layout.addLayout(text_cmd_row)
 
         hand_row = QHBoxLayout()
-        hand_row.setSpacing(6)
+        hand_row.setSpacing(4)
         hand_row.addWidget(QLabel("左手 A:"))
         self.left_hand_slider_a = QSlider(Qt.Horizontal)
         self.left_hand_slider_a.setRange(0, 100)
         self.left_hand_slider_a.setValue(LEFT_HAND_ANGLE_A_DEFAULT)
-        self.left_hand_slider_a.setFixedWidth(120)
+        self.left_hand_slider_a.setMinimumWidth(72)
+        self.left_hand_slider_a.setMaximumWidth(140)
         self.left_hand_slider_a.setToolTip("左手状态 A 的角度 (0=张, 100=合)")
         self.left_hand_slider_a.valueChanged.connect(self._on_left_hand_sliders_changed)
-        hand_row.addWidget(self.left_hand_slider_a)
+        hand_row.addWidget(self.left_hand_slider_a, 1)
         self.left_hand_label_a = QLabel(format_hand_angle_label(LEFT_HAND_ANGLE_A_DEFAULT))
         self.left_hand_label_a.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.left_hand_label_a.setMinimumWidth(56)
+        self.left_hand_label_a.setMinimumWidth(48)
         hand_row.addWidget(self.left_hand_label_a)
 
         hand_row.addWidget(QLabel("B:"))
         self.left_hand_slider_b = QSlider(Qt.Horizontal)
         self.left_hand_slider_b.setRange(0, 100)
         self.left_hand_slider_b.setValue(LEFT_HAND_ANGLE_B_DEFAULT)
-        self.left_hand_slider_b.setFixedWidth(120)
+        self.left_hand_slider_b.setMinimumWidth(72)
+        self.left_hand_slider_b.setMaximumWidth(140)
         self.left_hand_slider_b.setToolTip("左手状态 B 的角度 (0=张, 100=合)")
         self.left_hand_slider_b.valueChanged.connect(self._on_left_hand_sliders_changed)
-        hand_row.addWidget(self.left_hand_slider_b)
+        hand_row.addWidget(self.left_hand_slider_b, 1)
         self.left_hand_label_b = QLabel(format_hand_angle_label(LEFT_HAND_ANGLE_B_DEFAULT))
         self.left_hand_label_b.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.left_hand_label_b.setMinimumWidth(56)
+        self.left_hand_label_b.setMinimumWidth(48)
         hand_row.addWidget(self.left_hand_label_b)
 
         self.left_hand_toggle_btn = QPushButton("切换")
@@ -23997,39 +24038,40 @@ class CameraTopicWindow(QMainWindow):
         self.left_hand_toggle_btn.clicked.connect(self._on_left_hand_toggle)
         hand_row.addWidget(self.left_hand_toggle_btn)
 
-        self.left_hand_apply_btn = QPushButton("应用当前")
+        self.left_hand_apply_btn = QPushButton("应用")
         self.left_hand_apply_btn.setToolTip("将主游标（当前激活状态 A 或 B）的角度立即发送")
         self.left_hand_apply_btn.clicked.connect(self._on_left_hand_apply_active)
         hand_row.addWidget(self.left_hand_apply_btn)
-        hand_row.addStretch()
-        control_layout.addLayout(hand_row)
+        manual_layout.addLayout(hand_row)
 
         right_hand_row = QHBoxLayout()
-        right_hand_row.setSpacing(6)
+        right_hand_row.setSpacing(4)
         right_hand_row.addWidget(QLabel("右手 A:"))
         self.right_hand_slider_a = QSlider(Qt.Horizontal)
         self.right_hand_slider_a.setRange(0, 100)
         self.right_hand_slider_a.setValue(RIGHT_HAND_ANGLE_A_DEFAULT)
-        self.right_hand_slider_a.setFixedWidth(120)
+        self.right_hand_slider_a.setMinimumWidth(72)
+        self.right_hand_slider_a.setMaximumWidth(140)
         self.right_hand_slider_a.setToolTip("右手状态 A 的角度 (0=张, 100=合)")
         self.right_hand_slider_a.valueChanged.connect(self._on_right_hand_sliders_changed)
-        right_hand_row.addWidget(self.right_hand_slider_a)
+        right_hand_row.addWidget(self.right_hand_slider_a, 1)
         self.right_hand_label_a = QLabel(format_hand_angle_label(RIGHT_HAND_ANGLE_A_DEFAULT))
         self.right_hand_label_a.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.right_hand_label_a.setMinimumWidth(56)
+        self.right_hand_label_a.setMinimumWidth(48)
         right_hand_row.addWidget(self.right_hand_label_a)
 
         right_hand_row.addWidget(QLabel("B:"))
         self.right_hand_slider_b = QSlider(Qt.Horizontal)
         self.right_hand_slider_b.setRange(0, 100)
         self.right_hand_slider_b.setValue(RIGHT_HAND_ANGLE_B_DEFAULT)
-        self.right_hand_slider_b.setFixedWidth(120)
+        self.right_hand_slider_b.setMinimumWidth(72)
+        self.right_hand_slider_b.setMaximumWidth(140)
         self.right_hand_slider_b.setToolTip("右手状态 B 的角度 (0=张, 100=合)")
         self.right_hand_slider_b.valueChanged.connect(self._on_right_hand_sliders_changed)
-        right_hand_row.addWidget(self.right_hand_slider_b)
+        right_hand_row.addWidget(self.right_hand_slider_b, 1)
         self.right_hand_label_b = QLabel(format_hand_angle_label(RIGHT_HAND_ANGLE_B_DEFAULT))
         self.right_hand_label_b.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.right_hand_label_b.setMinimumWidth(56)
+        self.right_hand_label_b.setMinimumWidth(48)
         right_hand_row.addWidget(self.right_hand_label_b)
 
         self.right_hand_toggle_btn = QPushButton("切换")
@@ -24037,12 +24079,11 @@ class CameraTopicWindow(QMainWindow):
         self.right_hand_toggle_btn.clicked.connect(self._on_right_hand_toggle)
         right_hand_row.addWidget(self.right_hand_toggle_btn)
 
-        self.right_hand_apply_btn = QPushButton("应用当前")
+        self.right_hand_apply_btn = QPushButton("应用")
         self.right_hand_apply_btn.setToolTip("将主游标（当前激活状态 A 或 B）的角度立即发送")
         self.right_hand_apply_btn.clicked.connect(self._on_right_hand_apply_active)
         right_hand_row.addWidget(self.right_hand_apply_btn)
-        right_hand_row.addStretch()
-        control_layout.addLayout(right_hand_row)
+        manual_layout.addLayout(right_hand_row)
 
         enable_row = QHBoxLayout()
         enable_row.setSpacing(6)
@@ -24082,7 +24123,7 @@ class CameraTopicWindow(QMainWindow):
         self.mode0_btn.clicked.connect(self._on_model_mode_clicked)
         enable_row.addWidget(self.mode0_btn)
         enable_row.addStretch()
-        control_layout.addLayout(enable_row)
+        manual_layout.addLayout(enable_row)
 
         arm_row1 = QHBoxLayout()
         arm_row1.setSpacing(6)
@@ -24098,23 +24139,20 @@ class CameraTopicWindow(QMainWindow):
             + 10
         )
         self.arm_move_speed_slider.setValue(default_speed_slider)
-        self.arm_move_speed_slider.setFixedWidth(140)
+        self.arm_move_speed_slider.setMinimumWidth(100)
+        self.arm_move_speed_slider.setMaximumWidth(160)
         self.arm_move_speed_slider.setToolTip(
             f"关节空间最大角速度：{ARM_MOVE_SPEED_MIN_RAD_S:.2f}~"
             f"{ARM_MOVE_SPEED_MAX_RAD_S:.2f} rad/s（左慢右快）"
         )
         self.arm_move_speed_slider.valueChanged.connect(self._on_arm_move_speed_changed)
-        arm_row1.addWidget(self.arm_move_speed_slider)
+        arm_row1.addWidget(self.arm_move_speed_slider, 1)
         self.arm_move_speed_label = QLabel(format_arm_move_speed_label(default_speed_slider))
         self.arm_move_speed_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.arm_move_speed_label.setMinimumWidth(72)
         arm_row1.addWidget(self.arm_move_speed_label)
-        arm_row1.addStretch()
-        control_layout.addLayout(arm_row1)
 
-        arm_row2 = QHBoxLayout()
-        arm_row2.setSpacing(6)
-        self.left_arm_move_btn = QPushButton("左臂: 移动")
+        self.left_arm_move_btn = QPushButton("左臂移动")
         self.left_arm_move_btn.setEnabled(False)
         self.left_arm_move_btn.setToolTip(
             "将左臂 TCP 移动到目标位姿（时长随距离与「移动速度」滑块自适应）。\n"
@@ -24124,9 +24162,9 @@ class CameraTopicWindow(QMainWindow):
         self.left_arm_move_btn.clicked.connect(
             lambda: self._on_arm_move_clicked("left")
         )
-        arm_row2.addWidget(self.left_arm_move_btn)
+        arm_row1.addWidget(self.left_arm_move_btn)
 
-        self.right_arm_move_btn = QPushButton("右臂: 移动")
+        self.right_arm_move_btn = QPushButton("右臂移动")
         self.right_arm_move_btn.setEnabled(False)
         self.right_arm_move_btn.setToolTip(
             "将右臂 TCP 移动到目标位姿（时长随距离与「移动速度」滑块自适应）。\n"
@@ -24136,21 +24174,23 @@ class CameraTopicWindow(QMainWindow):
         self.right_arm_move_btn.clicked.connect(
             lambda: self._on_arm_move_clicked("right")
         )
-        arm_row2.addWidget(self.right_arm_move_btn)
+        arm_row1.addWidget(self.right_arm_move_btn)
+        arm_row1.addStretch(1)
+        manual_layout.addLayout(arm_row1)
 
-        pose_info_box = QVBoxLayout()
-        pose_info_box.setSpacing(0)
-        pose_info_box.setContentsMargins(6, 0, 0, 0)
-        self.arm_pose_current_label = QLabel("当前  左臂/右臂 TCP: --")
+        pose_info_box = QHBoxLayout()
+        pose_info_box.setSpacing(12)
+        self.arm_pose_current_label = QLabel("当前 TCP: --")
         self.arm_pose_current_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.arm_pose_current_label.setStyleSheet(f"color: {UI_ACCENT_BLUE};")
-        self.arm_pose_target_label = QLabel("目标  TCP: --")
+        self.arm_pose_current_label.setWordWrap(True)
+        self.arm_pose_target_label = QLabel("目标 TCP: --")
         self.arm_pose_target_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.arm_pose_target_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
-        pose_info_box.addWidget(self.arm_pose_current_label)
-        pose_info_box.addWidget(self.arm_pose_target_label)
-        arm_row2.addLayout(pose_info_box, 1)
-        control_layout.addLayout(arm_row2)
+        self.arm_pose_target_label.setWordWrap(True)
+        pose_info_box.addWidget(self.arm_pose_current_label, 1)
+        pose_info_box.addWidget(self.arm_pose_target_label, 1)
+        manual_layout.addLayout(pose_info_box)
 
         target_row = QHBoxLayout()
         target_row.setSpacing(6)
@@ -24191,7 +24231,166 @@ class CameraTopicWindow(QMainWindow):
         for spin in (self.offset_x_spin, self.offset_y_spin, self.offset_z_spin):
             spin.valueChanged.connect(self._on_move_target_params_changed)
         self._update_move_offset_ui_visibility()
-        control_layout.addLayout(target_row)
+        manual_layout.addLayout(target_row)
+        manual_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        manual_group.setMinimumHeight(0)
+        manual_group.setMaximumHeight(260)
+
+        # —— 人类演示视频：分析 → 手/臂复现（分割条下半，可拖大）——
+        demo_group = QGroupBox("人类演示模仿")
+        demo_group.setStyleSheet(
+            f"QGroupBox {{ color: {UI_TEXT_PRIMARY}; border: 1px solid {UI_BORDER}; "
+            f"margin-top: 8px; padding-top: 6px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; "
+            f"color: {UI_ACCENT_BLUE}; }}"
+        )
+        demo_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        demo_layout = QVBoxLayout(demo_group)
+        demo_layout.setContentsMargins(8, 10, 8, 8)
+        demo_layout.setSpacing(6)
+        demo_hint = QLabel(
+            "选视频 → 分析 → 执行/场景对齐/跑策略。拖动中间分隔条可放大预览。"
+        )
+        demo_hint.setWordWrap(True)
+        demo_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        demo_layout.addWidget(demo_hint)
+
+        demo_path_row = QHBoxLayout()
+        demo_path_row.setSpacing(6)
+        self.human_demo_select_btn = QPushButton("选择视频")
+        self.human_demo_select_btn.setFocusPolicy(Qt.NoFocus)
+        self.human_demo_select_btn.setToolTip(
+            "选择人类演示 mp4/avi/mkv/webm/mov。\n"
+            f"分析结果缓存到 {HUMAN_DEMO_CACHE_DIR}"
+        )
+        self.human_demo_select_btn.clicked.connect(self._on_human_demo_select_clicked)
+        demo_path_row.addWidget(self.human_demo_select_btn)
+        self.human_demo_path_edit = QLineEdit()
+        self.human_demo_path_edit.setReadOnly(True)
+        self.human_demo_path_edit.setPlaceholderText("人类演示视频路径…")
+        self.human_demo_path_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        demo_path_row.addWidget(self.human_demo_path_edit, 1)
+        demo_layout.addLayout(demo_path_row)
+
+        demo_opt_row = QHBoxLayout()
+        demo_opt_row.setSpacing(8)
+        self.human_demo_mirror_check = QCheckBox("镜像映射")
+        self.human_demo_mirror_check.setChecked(True)
+        self.human_demo_mirror_check.setToolTip(
+            "开启：人物左手→机器人右手（面对演示更自然）"
+        )
+        demo_opt_row.addWidget(self.human_demo_mirror_check)
+        self.human_demo_ctrl_left_check = QCheckBox("控左手")
+        self.human_demo_ctrl_left_check.setChecked(True)
+        demo_opt_row.addWidget(self.human_demo_ctrl_left_check)
+        self.human_demo_ctrl_right_check = QCheckBox("控右手")
+        self.human_demo_ctrl_right_check.setChecked(True)
+        demo_opt_row.addWidget(self.human_demo_ctrl_right_check)
+        self.human_demo_move_arm_check = QCheckBox("驱动手臂")
+        self.human_demo_move_arm_check.setChecked(True)
+        self.human_demo_move_arm_check.setToolTip(
+            "按手腕相对首帧位移移动 TCP；关闭则只复现手部开合"
+        )
+        demo_opt_row.addWidget(self.human_demo_move_arm_check)
+        demo_opt_row.addWidget(QLabel("尺度"))
+        self.human_demo_scale_spin = QDoubleSpinBox()
+        self.human_demo_scale_spin.setRange(0.05, 0.80)
+        self.human_demo_scale_spin.setSingleStep(0.05)
+        self.human_demo_scale_spin.setDecimals(2)
+        self.human_demo_scale_spin.setValue(0.30)
+        self.human_demo_scale_spin.setSuffix(" m")
+        self.human_demo_scale_spin.setFixedWidth(90)
+        self.human_demo_scale_spin.setToolTip(
+            "图像归一化位移映射到 base_link 的尺度（全图宽约对应此米数）"
+        )
+        demo_opt_row.addWidget(self.human_demo_scale_spin)
+        demo_opt_row.addStretch(1)
+        demo_layout.addLayout(demo_opt_row)
+
+        demo_ctrl_row = QHBoxLayout()
+        demo_ctrl_row.setSpacing(6)
+        self.human_demo_analyze_btn = QPushButton("分析")
+        self.human_demo_analyze_btn.setFocusPolicy(Qt.NoFocus)
+        self.human_demo_analyze_btn.setToolTip(
+            "用 MediaPipe Hands 离线分析视频，提取双手关节与手腕轨迹"
+        )
+        self.human_demo_analyze_btn.clicked.connect(self._on_human_demo_analyze_clicked)
+        demo_ctrl_row.addWidget(self.human_demo_analyze_btn)
+        self.human_demo_run_btn = QPushButton("执行复现")
+        self.human_demo_run_btn.setFocusPolicy(Qt.NoFocus)
+        self.human_demo_run_btn.setEnabled(False)
+        self.human_demo_run_btn.setToolTip(
+            "模式A：手腕相对轨迹（含 MediaPipe world 深度）驱动手/臂。\n"
+            "仿真时写 gui_robot_cmd。"
+        )
+        self.human_demo_run_btn.clicked.connect(self._on_human_demo_run_clicked)
+        demo_ctrl_row.addWidget(self.human_demo_run_btn)
+        self.human_demo_align_btn = QPushButton("场景对齐复现")
+        self.human_demo_align_btn.setFocusPolicy(Qt.NoFocus)
+        self.human_demo_align_btn.setEnabled(False)
+        self.human_demo_align_btn.setToolTip(
+            "模式B：把手腕轨迹标定到 LIBERO 物体→抽屉。\n"
+            "需先开匹配任务的「只开界面」，且 state 含 objects。"
+        )
+        self.human_demo_align_btn.clicked.connect(
+            self._on_human_demo_scene_align_clicked
+        )
+        demo_ctrl_row.addWidget(self.human_demo_align_btn)
+        self.human_demo_policy_btn = QPushButton("用匹配任务跑策略")
+        self.human_demo_policy_btn.setFocusPolicy(Qt.NoFocus)
+        self.human_demo_policy_btn.setToolTip(
+            "模式C：按视频匹配 LIBERO 任务，部署 Pi 后跑 pi05_libero 单任务评测。"
+        )
+        self.human_demo_policy_btn.clicked.connect(
+            self._on_human_demo_policy_clicked
+        )
+        demo_ctrl_row.addWidget(self.human_demo_policy_btn)
+        self.human_demo_stop_btn = QPushButton("停止")
+        self.human_demo_stop_btn.setFocusPolicy(Qt.NoFocus)
+        self.human_demo_stop_btn.setObjectName("dangerAction")
+        self.human_demo_stop_btn.setEnabled(False)
+        self.human_demo_stop_btn.clicked.connect(self._on_human_demo_stop_clicked)
+        demo_ctrl_row.addWidget(self.human_demo_stop_btn)
+        demo_ctrl_row.addStretch(1)
+        demo_layout.addLayout(demo_ctrl_row)
+
+        demo_status_row = QHBoxLayout()
+        demo_status_row.setSpacing(8)
+        self.human_demo_status_label = QLabel("演示: 未选择")
+        self.human_demo_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.human_demo_status_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        self.human_demo_status_label.setWordWrap(True)
+        demo_status_row.addWidget(self.human_demo_status_label, 1)
+        self.human_demo_match_label = QLabel("匹配任务: —")
+        self.human_demo_match_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.human_demo_match_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.human_demo_match_label.setWordWrap(True)
+        demo_status_row.addWidget(self.human_demo_match_label, 1)
+        demo_layout.addLayout(demo_status_row)
+
+        self.human_demo_preview_label = QLabel("分析/执行时显示带骨架的预览")
+        self.human_demo_preview_label.setAlignment(Qt.AlignCenter)
+        self.human_demo_preview_label.setMinimumHeight(420)
+        self.human_demo_preview_label.setMinimumWidth(520)
+        self.human_demo_preview_label.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        self.human_demo_preview_label.setScaledContents(False)
+        self.human_demo_preview_label.setStyleSheet(
+            f"QLabel {{ background-color: #111; color: {UI_TEXT_MUTED}; "
+            f"border: 1px solid {UI_BORDER}; }}"
+        )
+        demo_layout.addWidget(self.human_demo_preview_label, 1)
+        demo_group.setMinimumHeight(420)
+
+        self._arm_hand_splitter = _always_visible_splitter(Qt.Vertical)
+        self._arm_hand_splitter.addWidget(manual_group)
+        self._arm_hand_splitter.addWidget(demo_group)
+        self._arm_hand_splitter.setStretchFactor(0, 0)
+        self._arm_hand_splitter.setStretchFactor(1, 1)
+        self._arm_hand_splitter.setSizes([200, 720])
+        control_layout.addWidget(self._arm_hand_splitter, 1)
+
         control_tabs.addTab(control_tab, "手臂/手")
         _boot_tick("构建界面：仿真评测…")
 
@@ -26464,6 +26663,30 @@ class CameraTopicWindow(QMainWindow):
         self._skeleton_timer.setInterval(66)  # ~15 Hz
         self._skeleton_timer.timeout.connect(self._on_skeleton_tick)
         self._refresh_skeleton_camera_list()
+
+        self._human_demo_path = ""
+        self._human_demo_traj = None
+        self._human_demo_analyzing = False
+        self._human_demo_playing = False
+        self._human_demo_play_idx = 0
+        self._human_demo_origins: Dict[str, Tuple[float, float, float]] = {}
+        self._human_demo_world_origins: Dict[str, Tuple[float, float, float]] = {}
+        self._human_demo_play_mode: str = "wrist"  # wrist | aligned
+        self._human_demo_aligned_waypoints: List[Any] = []
+        self._human_demo_task_match: Any = None
+        # 复现过程中各臂最近一次目标位姿（避免无手帧把目标打回起点）
+        self._human_demo_last_pose: Dict[
+            str, Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]
+        ] = {}
+        self._human_demo_tcp_base: Dict[            str, Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]
+        ] = {}
+        self._human_demo_video_cap = None
+        self._human_demo_bridge = HumanDemoAnalyzeBridge()
+        self._human_demo_bridge.progress.connect(self._on_human_demo_analyze_progress)
+        self._human_demo_bridge.finished.connect(self._on_human_demo_analyze_finished)
+        self._human_demo_timer = QTimer(self)
+        self._human_demo_timer.setInterval(80)
+        self._human_demo_timer.timeout.connect(self._on_human_demo_play_tick)
 
         self._left_arm_move_btn_idle_style = ""
         self._left_arm_move_btn_cancel_style = f"color: {UI_ACCENT_RED};"
@@ -31162,6 +31385,7 @@ class CameraTopicWindow(QMainWindow):
         except Exception as exc:
             print(f"[viewer_ui_state] save failed: {exc}", flush=True)
         self._stop_skeleton_tracking()
+        self._stop_human_demo_playback()
         self._ui_timer.stop()
         self._sam3_health_timer.stop()
         self._fp_health_timer.stop()
@@ -33676,6 +33900,7 @@ class CameraTopicWindow(QMainWindow):
             "libero_rlinf_edit",
             "libero_rlinf_browse_btn",
             "libero_suite_combo",
+            "libero_task_id_spin",
             "libero_config_combo",
             "libero_mode_combo",
             "libero_ckpt_edit",
@@ -34249,6 +34474,39 @@ class CameraTopicWindow(QMainWindow):
         if hasattr(self, "libero_mode_combo"):
             return str(self.libero_mode_combo.currentData() or "local")
         return "local"
+
+    def _on_libero_suite_changed(self, *_args) -> None:
+        suite = "libero_spatial"
+        if hasattr(self, "libero_suite_combo"):
+            suite = str(self.libero_suite_combo.currentData() or suite)
+        try:
+            from human_demo_task_match import list_suite_tasks
+
+            tasks = list_suite_tasks(suite)
+        except Exception:
+            tasks = []
+        spin = getattr(self, "libero_task_id_spin", None)
+        if spin is None:
+            return
+        n = max(1, len(tasks)) if tasks else 100
+        cur = int(spin.value())
+        spin.setRange(0, max(0, n - 1))
+        spin.setValue(min(cur, max(0, n - 1)))
+        tip = "suite 内任务下标"
+        if tasks:
+            lines = [f"[{i}] {lang}" for i, _name, lang in tasks[:12]]
+            if len(tasks) > 12:
+                lines.append(f"… 共 {len(tasks)} 个")
+            tip = "\n".join(lines)
+            idx = int(spin.value())
+            if 0 <= idx < len(tasks):
+                tip = f"当前: [{idx}] {tasks[idx][2]}\n\n" + tip
+        spin.setToolTip(tip)
+
+    def _libero_task_id_value(self) -> int:
+        if hasattr(self, "libero_task_id_spin"):
+            return int(self.libero_task_id_spin.value())
+        return 0
 
     def _on_libero_mode_changed(self, *_args) -> None:
         # Both modes may need Pi deploy (local = auto-deploy serve + remote client).
@@ -35177,6 +35435,7 @@ class CameraTopicWindow(QMainWindow):
         trials = 1
         chunk = 5
         num_steps = 10
+        task_id = self._libero_task_id_value()
         if hasattr(self, "libero_max_tasks_spin"):
             max_tasks = int(self.libero_max_tasks_spin.value())
         if hasattr(self, "libero_trials_spin"):
@@ -35200,6 +35459,7 @@ class CameraTopicWindow(QMainWindow):
                     config_name=cfg,
                     checkpoint=ckpt,
                     max_tasks=1,
+                    task_id=task_id,
                     num_trials_per_task=1,
                     action_chunk=chunk,
                     num_steps=num_steps,
@@ -35221,11 +35481,13 @@ class CameraTopicWindow(QMainWindow):
             )
             self._expand_workspace_panel()
             self._set_rynnvalue_workspace_hud_active(True)
-            self._append_mujoco_log(f"[libero] python={py} suite={suite} viewer_only")
+            self._append_mujoco_log(
+                f"[libero] python={py} suite={suite} task_id={task_id} viewer_only"
+            )
             self._mujoco_launcher.start_cwd_command(
                 cwd=str(cwd),
                 argv=argv,
-                label=f"libero-viewer {suite}",
+                label=f"libero-viewer {suite}[{task_id}]",
                 env_extra=clean_env,
             )
             self._update_mujoco_ui()
@@ -35292,6 +35554,7 @@ class CameraTopicWindow(QMainWindow):
                 port=LIBERO_PORT_DEFAULT,
                 num_trials_per_task=trials,
                 max_tasks=max_tasks,
+                task_id=task_id,
                 action_chunk=chunk,
                 num_steps=num_steps,
                 python_bin=py,
@@ -35310,13 +35573,13 @@ class CameraTopicWindow(QMainWindow):
         self._append_mujoco_log(
             f"[libero] mode={mode}"
             + (f"→{eval_mode}" if eval_mode != mode else "")
-            + f" suite={suite} config={cfg} render_gui={render_gui}"
+            + f" suite={suite} task_id={task_id} config={cfg} render_gui={render_gui}"
             + f" rynnvalue_hud={rynnvalue_live_hud}"
         )
         self._append_mujoco_log(f"[libero] python={py}")
         self._append_mujoco_log(f"[libero] ckpt={ckpt}")
         self._append_mujoco_log(
-            f"[libero] max_tasks={max_tasks} trials={trials} "
+            f"[libero] max_tasks={max_tasks} task_id={task_id} trials={trials} "
             f"chunk={chunk} num_steps={num_steps}"
         )
         if rynnvalue_live_hud:
@@ -40020,6 +40283,629 @@ class CameraTopicWindow(QMainWindow):
         self._on_skeleton_cam_source_changed()
         if self.skeleton_cam_combo.count() == 0:
             self.skeleton_status_label.setText("手骨架: 无可用相机")
+
+    def _on_human_demo_select_clicked(self) -> None:
+        start = ""
+        if self._human_demo_path and os.path.isfile(self._human_demo_path):
+            start = os.path.dirname(self._human_demo_path)
+        elif os.path.isdir(EAI_DIR):
+            start = EAI_DIR
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择人类演示视频", start, HUMAN_DEMO_VIDEO_FILTER
+        )
+        if not path:
+            return
+        self._set_human_demo_video(path)
+
+    def _refresh_human_demo_task_match(self, path: str = "") -> None:
+        p = path or self._human_demo_path or ""
+        label = getattr(self, "human_demo_match_label", None)
+        if not p:
+            self._human_demo_task_match = None
+            if label is not None:
+                label.setText("匹配任务: —")
+            return
+        try:
+            from human_demo_task_match import match_video_to_libero_task
+
+            m = match_video_to_libero_task(p)
+            self._human_demo_task_match = m
+            if label is not None:
+                label.setText(
+                    f"匹配任务: {m.suite}[{m.task_id}] {m.language} ({m.reason})"
+                )
+        except Exception as exc:
+            self._human_demo_task_match = None
+            if label is not None:
+                label.setText(f"匹配任务: 失败 ({exc})")
+
+    def _apply_human_demo_match_to_libero_ui(self) -> None:
+        m = self._human_demo_task_match
+        if m is None:
+            return
+        if hasattr(self, "sim_backend_libero_radio"):
+            self.sim_backend_libero_radio.setChecked(True)
+        if hasattr(self, "libero_suite_combo"):
+            idx = self.libero_suite_combo.findData(m.suite)
+            if idx >= 0:
+                self.libero_suite_combo.setCurrentIndex(idx)
+        if hasattr(self, "_on_libero_suite_changed"):
+            self._on_libero_suite_changed()
+        if hasattr(self, "libero_task_id_spin"):
+            self.libero_task_id_spin.setValue(int(m.task_id))
+
+    def _set_human_demo_video(self, path: str) -> None:
+        resolved = os.path.abspath(os.path.expanduser(path))
+        self._stop_human_demo_playback()
+        self._human_demo_path = resolved
+        self._human_demo_traj = None
+        self.human_demo_path_edit.setText(resolved)
+        self.human_demo_run_btn.setEnabled(False)
+        if hasattr(self, "human_demo_align_btn"):
+            self.human_demo_align_btn.setEnabled(False)
+        self.human_demo_preview_label.setPixmap(QPixmap())
+        self.human_demo_preview_label.setText("已选视频，点「分析」提取手部轨迹")
+        self._refresh_human_demo_task_match(resolved)
+        # 若有缓存则自动加载（cache_version < 2 则忽略，强制重分析）
+        try:
+            from human_demo_imitate import (
+                TRAJ_CACHE_VERSION,
+                cache_path_for_video,
+                load_trajectory,
+                trajectory_cache_version,
+            )
+            import json as _json
+
+            cache = cache_path_for_video(resolved, HUMAN_DEMO_CACHE_DIR)
+            if os.path.isfile(cache):
+                with open(cache, "r", encoding="utf-8") as f:
+                    raw = _json.load(f)
+                if trajectory_cache_version(raw) < TRAJ_CACHE_VERSION:
+                    self.human_demo_status_label.setText(
+                        f"演示: 缓存过旧(v{trajectory_cache_version(raw)})，请重新分析"
+                    )
+                    self.status_bar.showMessage("演示缓存需重分析以包含 world 深度", 5000)
+                    return
+                traj = load_trajectory(cache)
+                if os.path.abspath(traj.video_path) == resolved or not traj.video_path:
+                    traj.video_path = resolved
+                    self._human_demo_traj = traj
+                    self.human_demo_run_btn.setEnabled(bool(traj.frames))
+                    if hasattr(self, "human_demo_align_btn"):
+                        self.human_demo_align_btn.setEnabled(bool(traj.frames))
+                    self.human_demo_status_label.setText(
+                        f"演示: 已加载缓存 · {traj.summary()}"
+                    )
+                    self._show_human_demo_preview_frame(0)
+                    self.status_bar.showMessage(f"已加载演示缓存: {cache}", 4000)
+                    return
+        except Exception as exc:
+            self.human_demo_status_label.setText(f"演示: 缓存无效 ({exc})")
+        self.human_demo_status_label.setText(
+            f"演示: 已选 {os.path.basename(resolved)}（待分析）"
+        )
+        self.status_bar.showMessage(f"已选择演示视频: {resolved}", 4000)
+
+    def _on_human_demo_analyze_clicked(self) -> None:
+        if self._human_demo_analyzing:
+            self.status_bar.showMessage("正在分析中…")
+            return
+        path = self._human_demo_path or self.human_demo_path_edit.text().strip()
+        if not path or not os.path.isfile(path):
+            QMessageBox.information(self, "人类演示", "请先选择演示视频。")
+            return
+        try:
+            from human_demo_imitate import mediapipe_available
+        except Exception as exc:
+            QMessageBox.warning(self, "人类演示", f"无法加载 human_demo_imitate:\n{exc}")
+            return
+        if not mediapipe_available():
+            QMessageBox.warning(
+                self,
+                "人类演示",
+                "未安装 mediapipe。请在当前环境执行:\n"
+                "  python -m pip install 'mediapipe==0.10.14'",
+            )
+            return
+        self._stop_human_demo_playback()
+        self._human_demo_analyzing = True
+        self.human_demo_analyze_btn.setEnabled(False)
+        self.human_demo_run_btn.setEnabled(False)
+        self.human_demo_status_label.setText("演示: 分析中…")
+        self.human_demo_status_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+
+        def _worker() -> None:
+            try:
+                from human_demo_imitate import (
+                    analyze_demo_video,
+                    cache_path_for_video,
+                    save_trajectory,
+                )
+
+                def _prog(pct: float, msg: str) -> None:
+                    self._human_demo_bridge.progress.emit(float(pct), str(msg))
+
+                traj = analyze_demo_video(
+                    path,
+                    target_fps=12.0,
+                    flip_horizontal=False,
+                    progress=_prog,
+                )
+                os.makedirs(HUMAN_DEMO_CACHE_DIR, exist_ok=True)
+                cache = cache_path_for_video(path, HUMAN_DEMO_CACHE_DIR)
+                save_trajectory(traj, cache)
+                self._human_demo_bridge.finished.emit(True, traj, cache)
+            except Exception as exc:
+                self._human_demo_bridge.finished.emit(False, None, str(exc))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_human_demo_analyze_progress(self, pct: float, msg: str) -> None:
+        self.human_demo_status_label.setText(f"演示: {msg} ({pct * 100:.0f}%)")
+
+    def _on_human_demo_analyze_finished(
+        self, ok: bool, traj: object, detail: str
+    ) -> None:
+        self._human_demo_analyzing = False
+        self.human_demo_analyze_btn.setEnabled(True)
+        if not ok or traj is None:
+            self.human_demo_status_label.setText(f"演示: 分析失败 — {detail}")
+            self.human_demo_status_label.setStyleSheet(f"color: {UI_ACCENT_RED};")
+            QMessageBox.warning(self, "人类演示", f"分析失败:\n{detail}")
+            return
+        self._human_demo_traj = traj
+        ready = bool(getattr(traj, "frames", None))
+        self.human_demo_run_btn.setEnabled(ready)
+        if hasattr(self, "human_demo_align_btn"):
+            self.human_demo_align_btn.setEnabled(ready)
+        summary = traj.summary() if hasattr(traj, "summary") else ""
+        self.human_demo_status_label.setText(f"演示: 就绪 · {summary}")
+        self.human_demo_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        self._show_human_demo_preview_frame(0)
+        self.status_bar.showMessage(f"演示分析完成，缓存: {detail}", 5000)
+
+    def _human_demo_preview_fit_bgr(self, bgr: "np.ndarray") -> "np.ndarray":
+        """将预览帧缩放到预览区宽高内（保持比例，尽量铺满）。"""
+        label = self.human_demo_preview_label
+        max_w = max(520, int(label.width()) - 12)
+        max_h = max(360, int(label.height()) - 12)
+        h, w = bgr.shape[:2]
+        if w < 1 or h < 1:
+            return bgr
+        scale = min(max_w / float(w), max_h / float(h))
+        if abs(scale - 1.0) < 1e-3:
+            return bgr
+        nw = max(1, int(round(w * scale)))
+        nh = max(1, int(round(h * scale)))
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+        return cv2.resize(bgr, (nw, nh), interpolation=interp)
+
+    def _show_human_demo_preview_frame(self, sample_idx: int) -> None:
+        traj = self._human_demo_traj
+        if traj is None or not traj.frames:
+            return
+        idx = max(0, min(int(sample_idx), len(traj.frames) - 1))
+        fr = traj.frames[idx]
+        try:
+            _ensure_cv2_numpy()
+            from human_demo_imitate import draw_demo_frame, read_video_frame
+
+            bgr = read_video_frame(traj.video_path or self._human_demo_path, fr.index)
+            if bgr is None:
+                return
+            title = f"#{fr.index} t={fr.t_sec:.2f}s hands={len(fr.hands)}"
+            vis = draw_demo_frame(bgr, fr, title=title)
+            vis = self._human_demo_preview_fit_bgr(vis)
+            self.human_demo_preview_label.setPixmap(cv2_to_qpixmap(vis))
+            self.human_demo_preview_label.setText("")
+        except Exception as exc:
+            self.human_demo_preview_label.setText(f"预览失败: {exc}")
+
+    def _human_demo_resolve_robot_side(self, robot_side: str) -> Optional[str]:
+        """人物映射侧 → 实际可控臂。LIBERO 等单臂仿真只有 left_ee 时，右臂映射回退到左臂。"""
+        if robot_side in self._human_demo_tcp_base:
+            return robot_side
+        if len(self._human_demo_tcp_base) == 1:
+            return next(iter(self._human_demo_tcp_base))
+        return None
+
+    def _stop_human_demo_playback(self) -> None:
+        self._human_demo_playing = False
+        if getattr(self, "_human_demo_timer", None) is not None:
+            self._human_demo_timer.stop()
+        cap = getattr(self, "_human_demo_video_cap", None)
+        if cap is not None:
+            try:
+                cap.release()
+            except Exception:
+                pass
+        self._human_demo_video_cap = None
+        self._human_demo_play_idx = 0
+        self._human_demo_origins = {}
+        self._human_demo_world_origins = {}
+        self._human_demo_tcp_base = {}
+        self._human_demo_last_pose = {}
+        self._human_demo_play_mode = "wrist"
+        self._human_demo_aligned_waypoints = []
+        if getattr(self, "human_demo_stop_btn", None) is not None:
+            self.human_demo_stop_btn.setEnabled(False)
+        if getattr(self, "human_demo_run_btn", None) is not None:
+            self.human_demo_run_btn.setEnabled(self._human_demo_traj is not None)
+        if getattr(self, "human_demo_align_btn", None) is not None:
+            self.human_demo_align_btn.setEnabled(self._human_demo_traj is not None)
+        if getattr(self, "human_demo_analyze_btn", None) is not None:
+            self.human_demo_analyze_btn.setEnabled(not self._human_demo_analyzing)
+
+    def _on_human_demo_stop_clicked(self) -> None:
+        was = self._human_demo_playing
+        self._stop_human_demo_playback()
+        if was:
+            self.human_demo_status_label.setText("演示: 已停止")
+            self.human_demo_status_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+            self.status_bar.showMessage("已停止人类演示复现")
+
+    def _on_human_demo_run_clicked(self) -> None:
+        traj = self._human_demo_traj
+        if traj is None or not traj.frames:
+            QMessageBox.information(self, "人类演示", "请先分析视频。")
+            return
+        if self._human_demo_playing:
+            return
+        if self._skeleton_tracking and self.skeleton_teleop_check.isChecked():
+            self.skeleton_teleop_check.setChecked(False)
+        # 准备使能
+        if not self._sim_teleop_active():
+            self.node.request_model_control_mode()
+            if not self.node.is_hand_enabled():
+                self.node.request_hand_enable(True)
+            if self.human_demo_move_arm_check.isChecked() and not self.node.is_arm_enabled():
+                self.node.request_arm_enable(True)
+        try:
+            from human_demo_imitate import (
+                first_wrist_origins,
+                first_wrist_world_origins,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "人类演示", f"加载失败: {exc}")
+            return
+        self._human_demo_origins = first_wrist_origins(traj)
+        self._human_demo_world_origins = first_wrist_world_origins(traj)
+        if not self._human_demo_origins:
+            QMessageBox.warning(
+                self, "人类演示", "轨迹中未检测到手，请换一段手部更清晰的视频。"
+            )
+            return
+        self._human_demo_play_mode = "wrist"
+        self._human_demo_aligned_waypoints = []
+        if not self._prepare_human_demo_playback_common(traj):
+            return
+        arms = ",".join(sorted(self._human_demo_tcp_base)) or "无"
+        world_n = len(self._human_demo_world_origins)
+        self.status_bar.showMessage(
+            f"开始按人类演示复现…（可控臂: {arms}"
+            + ("；单臂已自动折叠左右映射" if len(self._human_demo_tcp_base) == 1 else "")
+            + (f"；world原点×{world_n}" if world_n else "；无world回退图像")
+            + "）"
+        )
+
+    def _prepare_human_demo_playback_common(self, traj: object) -> bool:
+        """共享：读 TCP、开视频、启动 timer。失败返回 False。"""
+        self._human_demo_tcp_base = {}
+        for side in ("left", "right"):
+            if self._sim_teleop_active():
+                tcp = self._sim_tcp_pose(side)
+            else:
+                tcp = self.node._tcp_pose_in_ik_frame(side, timeout_s=0.3)
+            if tcp is not None:
+                self._human_demo_tcp_base[side] = tcp
+        need_arm = self.human_demo_move_arm_check.isChecked() or (
+            self._human_demo_play_mode == "aligned"
+        )
+        if need_arm and not self._human_demo_tcp_base:
+            QMessageBox.warning(
+                self,
+                "人类演示",
+                "无法读取 TCP（真机需 /mink_fk/*_tcp_pose；仿真需评测写出状态）。\n"
+                "可取消勾选「驱动手臂」仅复现手部开合。",
+            )
+            return False
+        self._human_demo_last_pose = {
+            side: (tuple(xyz), tuple(quat))  # type: ignore[arg-type]
+            for side, (xyz, quat) in self._human_demo_tcp_base.items()
+        }
+        _ensure_cv2_numpy()
+        cap = cv2.VideoCapture(
+            getattr(traj, "video_path", None) or self._human_demo_path
+        )
+        self._human_demo_video_cap = cap if cap.isOpened() else None
+        self._human_demo_play_idx = 0
+        self._human_demo_playing = True
+        self.human_demo_run_btn.setEnabled(False)
+        if hasattr(self, "human_demo_align_btn"):
+            self.human_demo_align_btn.setEnabled(False)
+        self.human_demo_stop_btn.setEnabled(True)
+        self.human_demo_analyze_btn.setEnabled(False)
+        if self._human_demo_play_mode == "aligned" and self._human_demo_aligned_waypoints:
+            n = len(self._human_demo_aligned_waypoints)
+            t0 = float(self._human_demo_aligned_waypoints[0].t_sec)
+            t1 = float(self._human_demo_aligned_waypoints[-1].t_sec)
+            interval_ms = max(40, int(round(1000.0 * max(0.05, (t1 - t0) / max(1, n - 1)))))
+            total = n
+            mode_tag = "对齐"
+        else:
+            stride = max(1, int(getattr(traj, "sample_stride", 1) or 1))
+            fps = max(1.0, float(getattr(traj, "fps", 30.0) or 30.0))
+            interval_ms = max(40, int(round(1000.0 * stride / fps)))
+            total = len(getattr(traj, "frames", []) or [])
+            mode_tag = "手腕"
+        self._human_demo_timer.setInterval(interval_ms)
+        arms = ",".join(sorted(self._human_demo_tcp_base)) or "无"
+        self.human_demo_status_label.setText(
+            f"演示: {mode_tag}执行中 0/{total} · {interval_ms}ms/步 · 臂[{arms}]"
+        )
+        self.human_demo_status_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        self._human_demo_timer.start()
+        return True
+
+    def _on_human_demo_scene_align_clicked(self) -> None:
+        traj = self._human_demo_traj
+        if traj is None or not traj.frames:
+            QMessageBox.information(self, "人类演示", "请先分析视频。")
+            return
+        if self._human_demo_playing:
+            return
+        if not self._sim_teleop_active():
+            QMessageBox.information(
+                self,
+                "场景对齐复现",
+                "请先在仿真评测打开匹配任务的 LIBERO「只开界面」，\n"
+                "确保 sim_robot_state 含 objects 后再点此按钮。",
+            )
+            return
+        state = self._read_sim_robot_state() or {}
+        if not isinstance(state.get("objects"), dict) or not state.get("objects"):
+            QMessageBox.warning(
+                self,
+                "场景对齐复现",
+                "当前仿真状态无 objects。\n"
+                "请重启带任务序号的 LIBERO「只开界面」（需更新后的 run_libero_eval）。",
+            )
+            return
+        try:
+            from human_demo_scene_align import build_scene_aligned_waypoints
+
+            wps = build_scene_aligned_waypoints(traj, state)
+        except Exception as exc:
+            QMessageBox.warning(self, "场景对齐复现", f"生成航点失败:\n{exc}")
+            return
+        if not wps:
+            QMessageBox.warning(self, "场景对齐复现", "未生成有效航点。")
+            return
+        if self._skeleton_tracking and self.skeleton_teleop_check.isChecked():
+            self.skeleton_teleop_check.setChecked(False)
+        self._human_demo_play_mode = "aligned"
+        self._human_demo_aligned_waypoints = list(wps)
+        if not self._prepare_human_demo_playback_common(traj):
+            return
+        note = wps[0].note if wps else ""
+        self.status_bar.showMessage(
+            f"场景对齐复现开始 · {len(wps)} 航点 · {note}", 6000
+        )
+
+    def _on_human_demo_policy_clicked(self) -> None:
+        path = self._human_demo_path or self.human_demo_path_edit.text().strip()
+        if not path:
+            QMessageBox.information(self, "匹配策略", "请先选择演示视频。")
+            return
+        self._refresh_human_demo_task_match(path)
+        m = self._human_demo_task_match
+        if m is None:
+            QMessageBox.warning(self, "匹配策略", "无法匹配 LIBERO 任务。")
+            return
+        self._apply_human_demo_match_to_libero_ui()
+        reply = QMessageBox.question(
+            self,
+            "用匹配任务跑策略",
+            f"将启动 pi05_libero 单任务评测：\n\n"
+            f"{m.suite}[{m.task_id}]\n{m.language}\n\n"
+            f"（会部署/连接 Pi，并停止当前 viewer 若在运行）\n继续？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        if self._mujoco_launcher.is_running():
+            try:
+                self._mujoco_launcher.stop()
+            except Exception:
+                pass
+        if hasattr(self, "libero_max_tasks_spin"):
+            self.libero_max_tasks_spin.setValue(1)
+        self.status_bar.showMessage(f"启动匹配策略: {m.summary()}", 5000)
+        self._on_libero_run_clicked(viewer_only=False)
+
+    def _on_human_demo_play_tick(self) -> None:
+        if not self._human_demo_playing:
+            self._human_demo_timer.stop()
+            return
+        if self._human_demo_play_mode == "aligned":
+            self._on_human_demo_aligned_tick()
+            return
+        traj = self._human_demo_traj
+        if traj is None or not traj.frames:
+            self._stop_human_demo_playback()
+            return
+        idx = self._human_demo_play_idx
+        if idx >= len(traj.frames):
+            self._stop_human_demo_playback()
+            self.human_demo_status_label.setText(
+                f"演示: 完成 · {traj.summary()}"
+            )
+            self.human_demo_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            self.status_bar.showMessage("人类演示复现完成")
+            self._show_human_demo_preview_frame(max(0, len(traj.frames) - 1))
+            return
+        fr = traj.frames[idx]
+        self._human_demo_play_idx = idx + 1
+        try:
+            from human_demo_imitate import (
+                draw_demo_frame,
+                map_person_hand_to_robot_side,
+                wrist_delta_to_base_world,
+            )
+
+            mirror = self.human_demo_mirror_check.isChecked()
+            ctrl_left = self.human_demo_ctrl_left_check.isChecked()
+            ctrl_right = self.human_demo_ctrl_right_check.isChecked()
+            move_arm = self.human_demo_move_arm_check.isChecked()
+            scale = float(self.human_demo_scale_spin.value())
+            sim = self._sim_teleop_active()
+
+            for hand in fr.hands:
+                person_key = (
+                    "Left" if hand.handedness.lower().startswith("l") else "Right"
+                )
+                mapped = map_person_hand_to_robot_side(hand.handedness, mirror)
+                # 仿真单臂：右臂映射折叠到唯一可控臂；真机保持左右独立
+                robot_side = (
+                    self._human_demo_resolve_robot_side(mapped) if sim else mapped
+                )
+                if robot_side is None:
+                    continue
+                if robot_side == "left" and not ctrl_left:
+                    continue
+                if robot_side == "right" and not ctrl_right:
+                    continue
+                if sim:
+                    scalar = sum(float(v) for v in hand.joints) / max(
+                        1, len(hand.joints)
+                    )
+                    self._apply_sim_gripper(robot_side, scalar)
+                else:
+                    self.node.apply_hand_joint_positions(robot_side, hand.joints)
+                if move_arm and robot_side in self._human_demo_tcp_base:
+                    origin = self._human_demo_origins.get(person_key)
+                    if origin is None:
+                        continue
+                    ww0 = self._human_demo_world_origins.get(person_key)
+                    ww_now = hand.wrist_world
+                    dx, dy, dz = wrist_delta_to_base_world(
+                        hand.wrist_xyz,
+                        origin,
+                        wrist_world_now=ww_now,
+                        wrist_world0=ww0,
+                        scale_m=scale,
+                        mirror=mirror,
+                    )
+                    base_xyz, base_quat = self._human_demo_tcp_base[robot_side]
+                    new_xyz = (
+                        float(base_xyz[0]) + dx,
+                        float(base_xyz[1]) + dy,
+                        float(base_xyz[2]) + dz,
+                    )
+                    self._human_demo_last_pose[robot_side] = (new_xyz, base_quat)
+
+            if move_arm:
+                if sim:
+                    # 持续发送最近目标；无手帧保持，避免把目标打回起点
+                    kwargs: dict = {"enabled": True}
+                    for side, pose in self._human_demo_last_pose.items():
+                        key = "left_ee_pose" if side == "left" else "right_ee_pose"
+                        kwargs[key] = pose7_wxyz_from_xyz_xyzw(pose[0], pose[1])
+                    if len(kwargs) > 1:
+                        self._write_sim_gui_cmd(**kwargs)
+                else:
+                    left_pose = self._human_demo_last_pose.get("left")
+                    right_pose = self._human_demo_last_pose.get("right")
+                    if left_pose is None:
+                        left_pose = self._human_demo_tcp_base.get("left")
+                        if left_pose is None:
+                            left_pose = self.node._tcp_pose_in_ik_frame(
+                                "left", timeout_s=0.05
+                            )
+                    if right_pose is None:
+                        right_pose = self._human_demo_tcp_base.get("right")
+                        if right_pose is None:
+                            right_pose = self.node._tcp_pose_in_ik_frame(
+                                "right", timeout_s=0.05
+                            )
+                    if left_pose is not None and right_pose is not None:
+                        self.node._publish_dual_arm_targets(
+                            left_pose[0],
+                            left_pose[1],
+                            right_pose[0],
+                            right_pose[1],
+                        )
+
+            # 预览
+            bgr = None
+            cap = self._human_demo_video_cap
+            if cap is not None and cap.isOpened():
+                cap.set(cv2.CAP_PROP_POS_FRAMES, fr.index)
+                ok, bgr = cap.read()
+                if not ok:
+                    bgr = None
+            if bgr is not None:
+                title = (
+                    f"复现 {idx + 1}/{len(traj.frames)}  "
+                    f"t={fr.t_sec:.2f}s  hands={len(fr.hands)}"
+                )
+                vis = draw_demo_frame(bgr, fr, title=title)
+                vis = self._human_demo_preview_fit_bgr(vis)
+                self.human_demo_preview_label.setPixmap(cv2_to_qpixmap(vis))
+                self.human_demo_preview_label.setText("")
+            self.human_demo_status_label.setText(
+                f"演示: 执行中 {idx + 1}/{len(traj.frames)} · t={fr.t_sec:.2f}s"
+            )
+        except Exception as exc:
+            self.human_demo_status_label.setText(f"演示: 执行错误 — {exc}")
+            self.human_demo_status_label.setStyleSheet(f"color: {UI_ACCENT_RED};")
+            self._stop_human_demo_playback()
+
+    def _on_human_demo_aligned_tick(self) -> None:
+        wps = self._human_demo_aligned_waypoints or []
+        idx = self._human_demo_play_idx
+        if idx >= len(wps):
+            self._stop_human_demo_playback()
+            self.human_demo_status_label.setText(
+                f"演示: 对齐完成 · {len(wps)} 航点"
+            )
+            self.human_demo_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            self.status_bar.showMessage("场景对齐复现完成")
+            return
+        wp = wps[idx]
+        self._human_demo_play_idx = idx + 1
+        try:
+            pose7 = list(wp.ee_pose7_wxyz)
+            grip = float(wp.gripper01)
+            if self._sim_teleop_active():
+                self._write_sim_gui_cmd(
+                    enabled=True,
+                    left_ee_pose=pose7,
+                    left_gripper=grip,
+                )
+            else:
+                xyz, quat = xyz_xyzw_from_pose7_wxyz(pose7)
+                right = self._human_demo_tcp_base.get("right") or self.node._tcp_pose_in_ik_frame(
+                    "right", timeout_s=0.05
+                )
+                if right is not None:
+                    self.node._publish_dual_arm_targets(
+                        xyz, quat, right[0], right[1]
+                    )
+            self.human_demo_status_label.setText(
+                f"演示: 对齐 {idx + 1}/{len(wps)} · t={wp.t_sec:.2f}s · "
+                f"g={grip:.2f} · {wp.note}"
+            )
+            # 预览：按比例映射到视频帧
+            traj = self._human_demo_traj
+            if traj is not None and traj.frames:
+                fi = int(round((idx / max(1, len(wps) - 1)) * (len(traj.frames) - 1)))
+                self._show_human_demo_preview_frame(fi)
+        except Exception as exc:
+            self.human_demo_status_label.setText(f"演示: 对齐错误 — {exc}")
+            self.human_demo_status_label.setStyleSheet(f"color: {UI_ACCENT_RED};")
+            self._stop_human_demo_playback()
 
     def _on_skeleton_cam_source_changed(self, *_args) -> None:
         is_net = self._skeleton_source_is_network(self.skeleton_cam_combo.currentData())

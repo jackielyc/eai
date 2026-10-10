@@ -122,6 +122,7 @@ class GuiTeleopSession:
         right_ee_pose: Any = None,
         left_gripper: Any = None,
         right_gripper: Any = None,
+        objects: Any = None,
     ) -> None:
         if self._bridge is None:
             return
@@ -132,6 +133,7 @@ class GuiTeleopSession:
                 right_ee_pose=right_ee_pose,
                 left_gripper=left_gripper,
                 right_gripper=right_gripper,
+                objects=objects,
             )
         except Exception:
             pass
@@ -174,6 +176,49 @@ def libero_obs_to_state(obs: dict) -> Tuple[Optional[List[float]], Optional[floa
     except Exception:
         pass
     return pose7, grip
+
+
+def libero_objects_to_state(env: Any) -> Dict[str, Dict[str, Any]]:
+    """Extract movable object / drawer poses from a LIBERO ControlEnv wrapper."""
+    out: Dict[str, Dict[str, Any]] = {}
+    inner = getattr(env, "env", env)
+    states = getattr(inner, "object_states_dict", None)
+    if not isinstance(states, dict):
+        return out
+    for name, st in states.items():
+        entry: Dict[str, Any] = {}
+        try:
+            geom = st.get_geom_state()
+            if isinstance(geom, dict):
+                pos = geom.get("pos")
+                quat = geom.get("quat")
+                if pos is not None:
+                    p = np.asarray(pos, dtype=np.float64).reshape(-1)
+                    if p.size >= 3:
+                        entry["pos"] = [float(p[0]), float(p[1]), float(p[2])]
+                if quat is not None:
+                    q = np.asarray(quat, dtype=np.float64).reshape(-1)
+                    if q.size >= 4:
+                        entry["quat"] = [
+                            float(q[0]),
+                            float(q[1]),
+                            float(q[2]),
+                            float(q[3]),
+                        ]
+        except Exception:
+            pass
+        try:
+            if hasattr(st, "get_joint_state"):
+                js = st.get_joint_state()
+                if js is not None:
+                    arr = np.asarray(js, dtype=np.float64).reshape(-1)
+                    if arr.size:
+                        entry["joint"] = float(arr[0])
+        except Exception:
+            pass
+        if entry:
+            out[str(name)] = entry
+    return out
 
 
 def libero_action_from_cmd(
@@ -288,6 +333,7 @@ __all__ = [
     "ensure_bridge_dir",
     "grip01",
     "libero_action_from_cmd",
+    "libero_objects_to_state",
     "libero_obs_to_state",
     "mujoco_guess_ee_pose",
     "pose7_ok",

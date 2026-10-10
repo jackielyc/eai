@@ -29,11 +29,11 @@
     },
     "sam3_u_spin": {
       "kind": "spin",
-      "value": 0
+      "value": 64
     },
     "sam3_v_spin": {
       "kind": "spin",
-      "value": 0
+      "value": 80
     },
     "pose_backend_combo": {
       "kind": "combo",
@@ -98,8 +98,8 @@
     "lingbot_depth_topic_combo": {
       "kind": "combo",
       "index": 0,
-      "text": "/camera/head_color",
-      "data": "/camera/head_color"
+      "text": "/libero/preview",
+      "data": "/libero/preview"
     },
     "lingbot_depth_model_edit": {
       "kind": "line",
@@ -193,7 +193,7 @@
     },
     "lingbot_video_topic_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 2,
       "text": "/camera/head_color",
       "data": "/camera/head_color"
     },
@@ -263,7 +263,7 @@
     },
     "lingbot_world_topic_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 2,
       "text": "/camera/head_color",
       "data": "/camera/head_color"
     },
@@ -611,9 +611,13 @@
     },
     "libero_suite_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "libero_spatial",
-      "data": "libero_spatial"
+      "index": 2,
+      "text": "libero_goal",
+      "data": "libero_goal"
+    },
+    "libero_task_id_spin": {
+      "kind": "spin",
+      "value": 3
     },
     "libero_config_combo": {
       "kind": "combo",
@@ -633,7 +637,7 @@
     },
     "libero_max_tasks_spin": {
       "kind": "spin",
-      "value": 0
+      "value": 1
     },
     "libero_trials_spin": {
       "kind": "spin",
@@ -743,7 +747,7 @@
     },
     "arm_text_cmd_edit": {
       "kind": "line",
-      "text": ""
+      "text": "左臂向前5cm；左手合并"
     },
     "left_hand_slider_a": {
       "kind": "slider",
@@ -751,7 +755,7 @@
     },
     "left_hand_slider_b": {
       "kind": "slider",
-      "value": 45
+      "value": 100
     },
     "right_hand_slider_a": {
       "kind": "slider",
@@ -759,7 +763,7 @@
     },
     "right_hand_slider_b": {
       "kind": "slider",
-      "value": 45
+      "value": 100
     },
     "arm_move_speed_slider": {
       "kind": "slider",
@@ -775,7 +779,7 @@
     },
     "offset_x_spin": {
       "kind": "dspin",
-      "value": 0.0
+      "value": 0.05
     },
     "offset_y_spin": {
       "kind": "dspin",
@@ -784,6 +788,30 @@
     "offset_z_spin": {
       "kind": "dspin",
       "value": 0.0
+    },
+    "human_demo_path_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/assets/videos/hand_place_dish_in_drawer.mp4"
+    },
+    "human_demo_mirror_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "human_demo_ctrl_left_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "human_demo_ctrl_right_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "human_demo_move_arm_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "human_demo_scale_spin": {
+      "kind": "dspin",
+      "value": 0.3
     },
     "skeleton_cam_combo": {
       "kind": "combo",
@@ -905,7 +933,7 @@
     },
     "reward_topic_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 2,
       "text": "/camera/head_color",
       "data": "/camera/head_color"
     },
@@ -1453,17 +1481,17 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "仿真评测",
+  "control_tab": "手臂/手",
   "splitter_sizes": [
     256,
-    899,
-    662
+    943,
+    695
   ],
   "geometry": [
-    38,
-    69,
-    1843,
-    968
+    0,
+    56,
+    1920,
+    1029
   ],
   "topic_checks": {
     "/libero/preview": true,

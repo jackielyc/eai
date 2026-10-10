@@ -353,6 +353,7 @@ def build_libero_eval_argv(
     port: int = LIBERO_PORT_DEFAULT,
     num_trials_per_task: int = 1,
     max_tasks: int = 1,
+    task_id: Optional[int] = None,
     action_chunk: int = 5,
     num_steps: int = 10,
     seed: int = 7,
@@ -410,6 +411,8 @@ def build_libero_eval_argv(
         f"--rlinf_root={rlinf}",
         f"--openpi_root={openpi}",
     ]
+    if task_id is not None and int(task_id) >= 0:
+        argv.append(f"--task_id={int(task_id)}")
     if want_gui:
         argv.append("--render_gui")
     else:
