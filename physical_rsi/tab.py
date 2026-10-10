@@ -27,10 +27,14 @@ from physical_rsi.loop import LoopConfig, run_loop
 from physical_rsi.tasks import TASKS
 
 _PAGE = "https://mmlab.hk/research/PhysicalRSI"
+# 与 show_camera_topics 全局主题 token 对齐
 _TEXT = "#ececec"
 _MUTED = "#b0b0b0"
 _GREEN = "#50fa7b"
 _RED = "#ff8888"
+_BG = "#1e1f22"
+_BG_LOG = "#1a1b1e"
+_BORDER = "#3d4048"
 _MONO = "Monospace"
 
 
@@ -68,7 +72,7 @@ class PhysicalRsiTab(QWidget):
         super().__init__(parent)
         self.setObjectName("physicalRsiTab")
         self.setStyleSheet(
-            "#physicalRsiTab { background-color: #111111; }"
+            f"#physicalRsiTab {{ background-color: {_BG}; }}"
             "#physicalRsiTab QLabel { background: transparent; }"
         )
         self._loading = False
@@ -144,7 +148,7 @@ class PhysicalRsiTab(QWidget):
         self.budget_btn.clicked.connect(lambda: self._start(self.budget_spin.value()))
         buttons.addWidget(self.budget_btn)
         self.stop_btn = QPushButton("停止")
-        self.stop_btn.setStyleSheet(f"color: {_RED};")
+        self.stop_btn.setObjectName("dangerAction")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop)
         buttons.addWidget(self.stop_btn)
@@ -165,8 +169,8 @@ class PhysicalRsiTab(QWidget):
         self.harness_edit.setLineWrapMode(QPlainTextEdit.NoWrap)
         self.harness_edit.setPlaceholderText("System 1 harness：def act(o, g, m, skills, tools)")
         self.harness_edit.setStyleSheet(
-            f"QPlainTextEdit {{ color: {_TEXT}; background-color: #1c1c1c; "
-            "border: 1px solid #555; }"
+            f"QPlainTextEdit {{ color: {_TEXT}; background-color: {_BG_LOG}; "
+            f"border: 1px solid {_BORDER}; border-radius: 4px; }}"
         )
         split.addWidget(self.harness_edit)
 
@@ -175,8 +179,8 @@ class PhysicalRsiTab(QWidget):
         self.log_edit.setFont(QFont(_MONO, 9))
         self.log_edit.setPlaceholderText("理解、执行、改写、选择的记录…")
         self.log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {_TEXT}; background-color: #252525; "
-            "border: 1px solid #555; }"
+            f"QTextEdit {{ color: {_TEXT}; background-color: {_BG_LOG}; "
+            f"border: 1px solid {_BORDER}; border-radius: 4px; }}"
         )
         split.addWidget(self.log_edit)
         split.setStretchFactor(0, 1)

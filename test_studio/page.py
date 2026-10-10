@@ -58,6 +58,12 @@ class TestStudioPage(QWidget):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
+        brand = QLabel("EAI")
+        brand.setStyleSheet(
+            f"color: {sct.UI_ACCENT_BLUE}; font-weight: bold; font-size: 10pt; "
+            f"letter-spacing: 2px;"
+        )
+        root.addWidget(brand)
         title = QLabel("测试工作室")
         title.setStyleSheet(
             f"color: {sct.UI_TEXT_PRIMARY}; font-weight: bold; font-size: 14pt;"
@@ -67,7 +73,7 @@ class TestStudioPage(QWidget):
             "独立窗口：左侧选场景图 → 右侧对话发送；上方部署推理服务。"
             "启动方式：bash test_studio/run_test_studio.sh"
         )
-        tip.setStyleSheet(f"color: {sct.UI_TEXT_SECONDARY};")
+        tip.setStyleSheet(f"color: {sct.UI_TEXT_MUTED};")
         tip.setWordWrap(True)
         root.addWidget(tip)
 
@@ -116,10 +122,11 @@ class TestStudioPage(QWidget):
         self.load_last_btn.setFocusPolicy(Qt.NoFocus)
         row2.addWidget(self.load_last_btn)
         self.start_btn = QPushButton("启动推理服务")
+        self.start_btn.setObjectName("primaryAction")
         self.start_btn.setFocusPolicy(Qt.NoFocus)
         row2.addWidget(self.start_btn)
         self.stop_btn = QPushButton("停止")
-        self.stop_btn.setStyleSheet(f"color: {sct.UI_ACCENT_RED};")
+        self.stop_btn.setObjectName("dangerAction")
         self.stop_btn.setFocusPolicy(Qt.NoFocus)
         row2.addWidget(self.stop_btn)
         deploy_layout.addLayout(row2)
@@ -192,8 +199,10 @@ class TestStudioPage(QWidget):
         self.log_edit.setMaximumHeight(120)
         self.log_edit.setPlaceholderText("推理服务日志…")
         self.log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {sct.UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {sct.UI_TEXT_PRIMARY}; "
+            f"background-color: {sct.UI_BG_LOG}; "
+            f"border: 1px solid {sct.UI_BORDER}; "
+            f"border-radius: {sct.UI_RADIUS}; }}"
         )
         root.addWidget(self.log_edit)
 

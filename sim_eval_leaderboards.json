@@ -1,0 +1,1322 @@
+{
+  "updated": "2026-10-10 11:49",
+  "note": "Curated + live-refreshable industry boards for EAI 仿真评测. Native: Isaac/MuJoCo/MolmoSpaces/Arena/LIBERO/RoboTwin. Extended: SimplerEnv/CALVIN/RoboCasa/ManiSkill/Genesis/VLA-Harness 等。 可用「刷新」从公开源实时更新并写回本文件。",
+  "backends": {
+    "isaac": {
+      "title": "Isaac / RoboDojo · 业内仿真榜单",
+      "metric": "Average Score / SR%",
+      "protocol": "RoboDojo-Sim 官方协议（多任务平均 Score / 成功率）。Astra 组合为第三方对照评测。",
+      "source_url": "https://galaxygeneralrobotics.github.io/astra-policy/index.html?view=gripper-manipulation",
+      "source_label": "Astra×RoboDojo / 官方条目",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "GalaxeaVLA (G0.5)",
+          "score": "38.26 / 30.95%",
+          "detail": "官方公开策略条目（Score / SR）",
+          "org": "Galaxea",
+          "date": "2026",
+          "note": "公开策略主榜靠前"
+        },
+        {
+          "rank": 2,
+          "method": "Xiaomi-Robotics-1",
+          "score": "33.97 / 25.51%",
+          "detail": "官方公开策略条目",
+          "org": "Xiaomi",
+          "date": "2026",
+          "note": ""
+        },
+        {
+          "rank": 3,
+          "method": "OpenWAM-α",
+          "score": "32.73 / 23.07%",
+          "detail": "官方公开策略条目",
+          "org": "OpenWAM",
+          "date": "2026",
+          "note": ""
+        },
+        {
+          "rank": 4,
+          "method": "DM0.5",
+          "score": "31.82 / 22.04%",
+          "detail": "官方公开策略条目",
+          "org": "DM",
+          "date": "2026",
+          "note": ""
+        },
+        {
+          "rank": 5,
+          "method": "Astra + π₀.₅",
+          "score": "48.0% SR",
+          "detail": "第三方对照：LLM-as-policy + 动作先验",
+          "org": "Galaxy / PI",
+          "date": "2026-09",
+          "note": "非官方主榜冻结表；成功率高于多数公开条目"
+        },
+        {
+          "rank": 6,
+          "method": "GPT-6 Astra",
+          "score": "28.97 / 22.48%",
+          "detail": "2100 trials 全榜对照",
+          "org": "OpenAI",
+          "date": "2026-09",
+          "note": "arXiv:2609.24170"
+        },
+        {
+          "rank": 7,
+          "method": "StarVLA-PI_v3",
+          "score": "22.36 / 16.17%",
+          "detail": "XPolicyLab 公开条目",
+          "org": "XPolicyLab",
+          "date": "2026",
+          "note": "仓库默认策略之一"
+        },
+        {
+          "rank": 8,
+          "method": "π₀.₅",
+          "score": "24.43 / 15.67%",
+          "detail": "官方公开策略条目",
+          "org": "Physical Intelligence",
+          "date": "2026",
+          "note": ""
+        },
+        {
+          "rank": 9,
+          "method": "Human teleop (参考)",
+          "score": "80.42 / 76.03%",
+          "detail": "论文冻结表人类参考，不参与排名",
+          "org": "RoboDojo",
+          "date": "2026-07",
+          "note": "arXiv:2607.04434"
+        }
+      ]
+    },
+    "mujoco": {
+      "title": "MuJoCo · Meta-World 实时榜（参考）",
+      "metric": "Success Rate",
+      "protocol": "本页是 MJCF viewer；实时抓取 EmbodiedBench Meta-World 作为 MuJoCo 系参考榜",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/meta-world",
+      "source_label": "EmbodiedBench Meta-World",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "πRL",
+          "score": "85.8%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 2,
+          "method": "ALAM",
+          "score": "84.975%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 3,
+          "method": "Evo-Depth",
+          "score": "84.375%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 4,
+          "method": "ActionX",
+          "score": "81.3%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 5,
+          "method": "Evo-1",
+          "score": "80.6%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 6,
+          "method": "SmolVLA-EDAR",
+          "score": "80.5%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 7,
+          "method": "RoboTron Mani",
+          "score": "77.725%",
+          "detail": "Average",
+          "org": "",
+          "date": "2024",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 8,
+          "method": "SmolVLA",
+          "score": "68.225%",
+          "detail": "Average · Hugging Face",
+          "org": "Hugging Face",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 9,
+          "method": "π0",
+          "score": "47.925%",
+          "detail": "Average · Physical Intelligence",
+          "org": "Physical Intelligence",
+          "date": "2024",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 10,
+          "method": "π0.5",
+          "score": "43.8%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:48"
+    },
+    "molmospaces": {
+      "title": "MolmoSpaces · 官方 Leaderboard",
+      "metric": "Oracle Success Rate %",
+      "protocol": "MolmoSpaces Combined（不含 MolmoSpaces 训练数据的策略组）。End Success 为过关任务数。",
+      "source_url": "https://molmospaces.allen.ai/leaderboard",
+      "source_label": "molmospaces.allen.ai",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "ZoeInside-VLA",
+          "score": "49.5%",
+          "detail": "9/9 tasks · VLA · DROID",
+          "org": "Zoellent AI",
+          "date": "2026-07",
+          "note": "零样本 / 无 MolmoSpaces 数据"
+        },
+        {
+          "rank": 2,
+          "method": "Phoenix",
+          "score": "48.0%",
+          "detail": "9/9 · TAMP + FMs",
+          "org": "Geodesic",
+          "date": "2026-07",
+          "note": ""
+        },
+        {
+          "rank": 3,
+          "method": "Cosmos3-Nano-Policy",
+          "score": "39.0%",
+          "detail": "9/9 · WAM 16B",
+          "org": "NVIDIA",
+          "date": "2026-06",
+          "note": "开源"
+        },
+        {
+          "rank": 4,
+          "method": "WALL-OSS-0.5",
+          "score": "38.5%",
+          "detail": "9/9 · VLA 4.2B",
+          "org": "X Square Robot",
+          "date": "2026-06",
+          "note": "开源"
+        },
+        {
+          "rank": 5,
+          "method": "TiPToP",
+          "score": "34.7%",
+          "detail": "7/9 · TAMP + FMs",
+          "org": "MIT & UPenn",
+          "date": "2026-03",
+          "note": "跨本体"
+        },
+        {
+          "rank": 6,
+          "method": "MolmoAct2 DROID",
+          "score": "25.9%",
+          "detail": "9/9 · VLA 5B",
+          "org": "Ai2",
+          "date": "2026-05",
+          "note": ""
+        },
+        {
+          "rank": 7,
+          "method": "π₀.₅ DROID",
+          "score": "17.8%",
+          "detail": "9/9 · VLA 3.3B",
+          "org": "Physical Intelligence",
+          "date": "2025-04",
+          "note": "本页可部署的 Pi 系基线"
+        },
+        {
+          "rank": 8,
+          "method": "MolmoBot（使用 MS 数据）",
+          "score": "49.8%",
+          "detail": "7/9 · 训练含 MolmoSpaces 数据",
+          "org": "Ai2",
+          "date": "2026-03",
+          "note": "与零样本组分开看"
+        }
+      ]
+    },
+    "arena": {
+      "title": "IsaacLab-Arena · 框架与社区基准",
+      "metric": "Success Rate % (illustrative / linked)",
+      "protocol": "Arena 是评测框架，本身无单一冻结总榜。下列为文档示例与可挂载社区基准的业内数字。",
+      "source_url": "https://isaac-sim.github.io/IsaacLab-Arena/main/pages/motivation/motivation.html",
+      "source_label": "Isaac Lab-Arena docs",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "GR00T（文档示例）",
+          "score": "51%",
+          "detail": "冻结任务集示意，非 Arena 官方总榜",
+          "org": "NVIDIA",
+          "date": "2025",
+          "note": "motivation 页举例"
+        },
+        {
+          "rank": 2,
+          "method": "π₀（文档示例）",
+          "score": "50%",
+          "detail": "冻结任务集示意，非 Arena 官方总榜",
+          "org": "Physical Intelligence",
+          "date": "2025",
+          "note": "motivation 页举例"
+        },
+        {
+          "rank": 3,
+          "method": "LIBERO via Arena",
+          "score": "见 LIBERO 榜",
+          "detail": "Lightwheel LIBERO Tasks 适配",
+          "org": "community",
+          "date": "2026",
+          "note": "切到 LIBERO 后端看完整榜"
+        },
+        {
+          "rank": 4,
+          "method": "RoboTwin 2.0 via Arena",
+          "score": "见 RoboTwin 榜",
+          "detail": "Arena 扩展仿真评测",
+          "org": "community",
+          "date": "2026",
+          "note": "切到 RoboTwin 后端看完整榜"
+        },
+        {
+          "rank": 5,
+          "method": "predicate 分解示例",
+          "score": "20% end · 30% grasp",
+          "detail": "文档：失败阶段分析示意",
+          "org": "NVIDIA",
+          "date": "2026",
+          "note": "强调 where/why，而非单一 SR"
+        }
+      ]
+    },
+    "libero": {
+      "title": "LIBERO · 实时仿真榜单",
+      "metric": "Average Success Rate %",
+      "protocol": "EmbodiedBench Average；并附 openpi README 官方 π0.5 行",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/libero",
+      "source_label": "EmbodiedBench LIBERO",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "LaST-R1",
+          "score": "99.8%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 2,
+          "method": "CORAL",
+          "score": "99.3%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 3,
+          "method": "SRPO",
+          "score": "99.2%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 4,
+          "method": "SimpleVLA-RL",
+          "score": "99.05%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 5,
+          "method": "Being-H0.5 (Specialist)",
+          "score": "98.9%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 6,
+          "method": "DualCoT-VLA",
+          "score": "98.8%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 7,
+          "method": "DiT4DiT",
+          "score": "98.55%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 8,
+          "method": "ABot-M0",
+          "score": "98.55%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 9,
+          "method": "ACoT-VLA",
+          "score": "98.45%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 10,
+          "method": "EO-1",
+          "score": "98.375%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:48"
+    },
+    "robotwin": {
+      "title": "RoboTwin 2.0 · 实时 Leaderboard",
+      "metric": "Average SR% (clean2clean / clean2random)",
+      "protocol": "EmbodiedBench 实时抓取 · 默认 Average=(c2c+c2r)/2",
+      "source_url": "https://robotwin-platform.github.io/leaderboard",
+      "source_label": "RoboTwin / EmbodiedBench",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "MotuBrain",
+          "score": "95.95%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 2,
+          "method": "STARRY",
+          "score": "93.55%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 3,
+          "method": "LingBot-VA",
+          "score": "92.2%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 4,
+          "method": "Fast-WAM",
+          "score": "91.85%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 5,
+          "method": "JoyAI-RA 0.1",
+          "score": "89.9%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 6,
+          "method": "InternVLA-A1",
+          "score": "89.5%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 7,
+          "method": "HoloBrain-0",
+          "score": "89.5%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 8,
+          "method": "RotVLA",
+          "score": "89.05%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 9,
+          "method": "StarVLA-alpha",
+          "score": "88.25%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 10,
+          "method": "ABot-M0",
+          "score": "85.6%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:48"
+    },
+    "calvin": {
+      "title": "CALVIN · 实时 Leaderboard",
+      "metric": "Avg. Completed Tasks",
+      "protocol": "EmbodiedBench 实时抓取 · setting=Average",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/calvin",
+      "source_label": "EmbodiedBench CALVIN",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "CogACT",
+          "score": "4.16",
+          "detail": "Average · Shanghai AI Lab",
+          "org": "Shanghai AI Lab",
+          "date": "2024",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 2,
+          "method": "OpenVLA",
+          "score": "3.72",
+          "detail": "Average · Stanford · UC Berkeley",
+          "org": "Stanford · UC Berkeley",
+          "date": "2024",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 3,
+          "method": "RDT-1B",
+          "score": "3.41",
+          "detail": "Average · Tsinghua University",
+          "org": "Tsinghua University",
+          "date": "2024",
+          "note": "EmbodiedBench 实时抓取"
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:48"
+    },
+    "metaworld": {
+      "title": "Meta-World · 实时 Leaderboard",
+      "metric": "Success Rate",
+      "protocol": "EmbodiedBench 实时抓取 · setting=Average",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/meta-world",
+      "source_label": "EmbodiedBench Meta-World",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "πRL",
+          "score": "85.8%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 2,
+          "method": "ALAM",
+          "score": "84.975%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 3,
+          "method": "Evo-Depth",
+          "score": "84.375%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 4,
+          "method": "ActionX",
+          "score": "81.3%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 5,
+          "method": "Evo-1",
+          "score": "80.6%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 6,
+          "method": "SmolVLA-EDAR",
+          "score": "80.5%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 7,
+          "method": "RoboTron Mani",
+          "score": "77.725%",
+          "detail": "Average",
+          "org": "",
+          "date": "2024",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 8,
+          "method": "SmolVLA",
+          "score": "68.225%",
+          "detail": "Average · Hugging Face",
+          "org": "Hugging Face",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 9,
+          "method": "π0",
+          "score": "47.925%",
+          "detail": "Average · Physical Intelligence",
+          "org": "Physical Intelligence",
+          "date": "2024",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 10,
+          "method": "π0.5",
+          "score": "43.8%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:48"
+    },
+    "rlbench": {
+      "title": "RLBench · 实时 Leaderboard",
+      "metric": "Success Rate",
+      "protocol": "EmbodiedBench 实时抓取 · setting=Average",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/rlbench",
+      "source_label": "EmbodiedBench RLBench",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "BridgeVLA++",
+          "score": "93.7%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 2,
+          "method": "BridgeVLA",
+          "score": "90.5%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 3,
+          "method": "SAM2Act",
+          "score": "86.8%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 4,
+          "method": "RVT-2",
+          "score": "81.4%",
+          "detail": "Average",
+          "org": "",
+          "date": "2024",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 5,
+          "method": "3D Diffuser Actor",
+          "score": "81.3%",
+          "detail": "Average",
+          "org": "",
+          "date": "2024",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 6,
+          "method": "Act3D",
+          "score": "65%",
+          "detail": "Average",
+          "org": "",
+          "date": "2023",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 7,
+          "method": "RVT",
+          "score": "62.9%",
+          "detail": "Average",
+          "org": "",
+          "date": "2023",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 8,
+          "method": "PerAct",
+          "score": "49.4%",
+          "detail": "Average",
+          "org": "",
+          "date": "2022",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 9,
+          "method": "PolarNet",
+          "score": "46.4%",
+          "detail": "Average",
+          "org": "",
+          "date": "2023",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 10,
+          "method": "HiveFormer",
+          "score": "45.3%",
+          "detail": "Average",
+          "org": "",
+          "date": "2022",
+          "note": "EmbodiedBench 实时抓取"
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:48"
+    },
+    "simpler": {
+      "title": "SimplerEnv · 实时 Leaderboard",
+      "metric": "Success Rate",
+      "protocol": "EmbodiedBench 实时抓取 · setting=Average",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/simpler-env",
+      "source_label": "EmbodiedBench SimplerEnv",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "Green-VLA R2",
+          "score": "80.5%",
+          "detail": "Average",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 2,
+          "method": "DB-MemVLA",
+          "score": "73.2%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 3,
+          "method": "EO-1",
+          "score": "72.7%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 4,
+          "method": "X-VLA",
+          "score": "65.6%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 5,
+          "method": "Magma",
+          "score": "50%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 6,
+          "method": "FLOWER",
+          "score": "45%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 7,
+          "method": "GR00T N1.6",
+          "score": "34.4%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 8,
+          "method": "π0.5",
+          "score": "28.2%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 9,
+          "method": "π0",
+          "score": "27.1%",
+          "detail": "Average · Physical Intelligence",
+          "org": "Physical Intelligence",
+          "date": "2024",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 10,
+          "method": "RT-1-X",
+          "score": "1.1%",
+          "detail": "Average",
+          "org": "",
+          "date": "2023",
+          "note": "EmbodiedBench 实时抓取"
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:48"
+    },
+    "behavior1k": {
+      "title": "BEHAVIOR-1K · 实时 Leaderboard",
+      "metric": "Task Success Score",
+      "protocol": "EmbodiedBench 实时抓取 · setting=Average",
+      "source_url": "https://behavior.stanford.edu/challenge/index.html",
+      "source_label": "BEHAVIOR Challenge",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "G0.5",
+          "score": "0.3136",
+          "detail": "2025 Challenge Validation",
+          "org": "",
+          "date": "2026",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 2,
+          "method": "π0.5",
+          "score": "0.2626",
+          "detail": "2025 Challenge Validation",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 3,
+          "method": "RLC (2025 winner)",
+          "score": "0.2605",
+          "detail": "2025 Challenge Validation",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 4,
+          "method": "Openpi Comet",
+          "score": "0.183",
+          "detail": "2025 Challenge Validation",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:48"
+    },
+    "genesis": {
+      "title": "Genesis · 仿真后端（关联榜）",
+      "metric": "N/A (engine) · linked SR%",
+      "protocol": "Genesis 是仿真引擎；刷新时附带 ManiSkill3 / Meta-World 参考结果",
+      "source_url": "https://genesis-embodied-ai.github.io/",
+      "source_label": "Genesis docs",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "πRL",
+          "score": "85.8%",
+          "detail": "Meta-World（Genesis 可复现同类任务） · Average",
+          "org": "",
+          "date": "2025",
+          "note": "Genesis 无单一冻结总榜；显示关联基准"
+        },
+        {
+          "rank": 2,
+          "method": "ALAM",
+          "score": "84.975%",
+          "detail": "Meta-World（Genesis 可复现同类任务） · Average",
+          "org": "",
+          "date": "2026",
+          "note": "Genesis 无单一冻结总榜；显示关联基准"
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:49"
+    },
+    "vla_harness": {
+      "title": "VLA Evaluation Harness · 跨基准总榜入口",
+      "metric": "Per-benchmark #1 (aggregated)",
+      "protocol": "AllenAI vla-evaluation-harness：Docker 化统一评测；此处展示各主榜当前 #1 作为入口，完整矩阵见官方 Leaderboard",
+      "source_url": "https://allenai.github.io/vla-evaluation-harness/leaderboard/",
+      "source_label": "AllenAI VLA Leaderboard",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "LIBERO · LaST-R1",
+          "score": "99.8%",
+          "detail": "各榜 #1 · 见 AllenAI VLA Harness 总榜",
+          "org": "",
+          "date": "2026",
+          "note": "跨基准入口；完整表打开来源"
+        },
+        {
+          "rank": 2,
+          "method": "SimplerEnv · Green-VLA R2",
+          "score": "80.5%",
+          "detail": "各榜 #1 · 见 AllenAI VLA Harness 总榜",
+          "org": "",
+          "date": "2026",
+          "note": "跨基准入口；完整表打开来源"
+        },
+        {
+          "rank": 3,
+          "method": "CALVIN · CogACT",
+          "score": "4.16",
+          "detail": "各榜 #1 · 见 AllenAI VLA Harness 总榜",
+          "org": "Shanghai AI Lab",
+          "date": "2024",
+          "note": "跨基准入口；完整表打开来源"
+        },
+        {
+          "rank": 4,
+          "method": "RoboCasa · (抓取失败)",
+          "score": "—",
+          "detail": "marker not found: \"results\":[",
+          "org": "",
+          "date": "2026-10-10",
+          "note": ""
+        },
+        {
+          "rank": 5,
+          "method": "RoboTwin · MotuBrain",
+          "score": "95.95%",
+          "detail": "各榜 #1 · 见 AllenAI VLA Harness 总榜",
+          "org": "",
+          "date": "2026",
+          "note": "跨基准入口；完整表打开来源"
+        },
+        {
+          "rank": 6,
+          "method": "ManiSkill2 · (抓取失败)",
+          "score": "—",
+          "detail": "marker not found: \"results\":[",
+          "org": "",
+          "date": "2026-10-10",
+          "note": ""
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:49"
+    },
+    "robocasa": {
+      "title": "RoboCasa · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "EmbodiedBench 页尚无冻结表；下列为论文/社区常用对照（点刷新可重试实时源）",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/robocasa",
+      "source_label": "EmbodiedBench RoboCasa",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "π0.5 (reported)",
+          "score": "—",
+          "detail": "厨房家务套件 · 见官方/论文表",
+          "org": "Physical Intelligence",
+          "date": "2025",
+          "note": "策展占位，刷新后若有实时表将覆盖"
+        },
+        {
+          "rank": 2,
+          "method": "OpenVLA / Octo (reported)",
+          "score": "—",
+          "detail": "RoboCasa paper / follow-ups",
+          "org": "community",
+          "date": "2024-25",
+          "note": ""
+        },
+        {
+          "rank": 3,
+          "method": "BC-Transformer",
+          "score": "baseline",
+          "detail": "官方 baseline 量级参考",
+          "org": "RoboCasa",
+          "date": "2024",
+          "note": ""
+        }
+      ]
+    },
+    "robocasa365": {
+      "title": "RoboCasa365 · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "大规模厨房场景；EmbodiedBench 暂无完整冻结表",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/robocasa365",
+      "source_label": "EmbodiedBench RoboCasa365",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "GR00T / π 系列 (reported)",
+          "score": "—",
+          "detail": "见模型论文附表",
+          "org": "various",
+          "date": "2025-26",
+          "note": "策展"
+        }
+      ]
+    },
+    "maniskill3": {
+      "title": "ManiSkill3 · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "GPU 并行 SAPIEN；对照 SOTA2 / 官方 wandb；EmbodiedBench 表待充实",
+      "source_url": "https://www.sota2.com/research/sota/robotic-manipulation-on-maniskill3",
+      "source_label": "SOTA2 ManiSkill3",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "IPI (OpenVLA-7B / StARe)",
+          "score": "96.4% avg",
+          "detail": "多任务平均",
+          "org": "research",
+          "date": "2025-12",
+          "note": ""
+        },
+        {
+          "rank": 2,
+          "method": "Diffusion Policy (PushT-v1)",
+          "score": ">40% SR",
+          "detail": "~700 demos",
+          "org": "ManiSkill3",
+          "date": "2025",
+          "note": ""
+        },
+        {
+          "rank": 3,
+          "method": "ACT (PushT-v1)",
+          "score": "~30% SR",
+          "detail": "官方 wandb 参考",
+          "org": "ManiSkill",
+          "date": "2025",
+          "note": ""
+        },
+        {
+          "rank": 4,
+          "method": "OpenVLA (难任务子集)",
+          "score": "4% avg",
+          "detail": "SOTA2 难任务",
+          "org": "OpenVLA",
+          "date": "2026-05",
+          "note": ""
+        }
+      ]
+    },
+    "maniskill2": {
+      "title": "ManiSkill2 · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "VLA harness 常用；EmbodiedBench 页暂无完整表",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/maniskill2",
+      "source_label": "EmbodiedBench ManiSkill2",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "RL / IL baselines (official)",
+          "score": "task-dependent",
+          "detail": "见 ManiSkill2 paper",
+          "org": "UCSD Hao Su Lab",
+          "date": "2023",
+          "note": "策展"
+        }
+      ]
+    },
+    "libero_plus": {
+      "title": "LIBERO-Plus · 实时 Leaderboard",
+      "metric": "Success Rate",
+      "protocol": "EmbodiedBench 实时抓取 · setting=Average",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/libero-plus",
+      "source_label": "EmbodiedBench LIBERO-Plus",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "RIPT-VLA",
+          "score": "68.4%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 2,
+          "method": "UniVLA",
+          "score": "42.9%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        },
+        {
+          "rank": 3,
+          "method": "NORA",
+          "score": "39%",
+          "detail": "Average",
+          "org": "",
+          "date": "2025",
+          "note": "EmbodiedBench 实时抓取"
+        }
+      ],
+      "last_live_fetch": "2026-10-10 11:48"
+    },
+    "libero_pro": {
+      "title": "LIBERO-Pro · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "更难 LIBERO 协议；实时表待 EmbodiedBench 充实",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/libero-pro",
+      "source_label": "EmbodiedBench LIBERO-Pro",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "VLA specialists (reported)",
+          "score": "—",
+          "detail": "见 LIBERO-Pro / harness 论文表",
+          "org": "various",
+          "date": "2025-26",
+          "note": "策展"
+        }
+      ]
+    },
+    "libero_mem": {
+      "title": "LIBERO-Mem · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "记忆 / 长程依赖变体",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/libero-mem",
+      "source_label": "EmbodiedBench LIBERO-Mem",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "MemVLA / memory VLAs (reported)",
+          "score": "—",
+          "detail": "见 MemVLA 等论文",
+          "org": "various",
+          "date": "2025-26",
+          "note": "策展"
+        }
+      ]
+    },
+    "furniturebench": {
+      "title": "FurnitureBench · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "家具装配；EmbodiedBench 表待充实",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/furniturebench",
+      "source_label": "EmbodiedBench FurnitureBench",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "FurnitureBench baselines",
+          "score": "—",
+          "detail": "见官方 paper / leaderboard",
+          "org": "CLVR",
+          "date": "2023+",
+          "note": "策展"
+        }
+      ]
+    },
+    "vlabench": {
+      "title": "VLABench · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "VLA 综合套件；实时表待充实",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/vlabench",
+      "source_label": "EmbodiedBench VLABench",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "VLABench reported SOTA",
+          "score": "—",
+          "detail": "见官方仓库 / 论文",
+          "org": "various",
+          "date": "2025-26",
+          "note": "策展"
+        }
+      ]
+    },
+    "mikasa": {
+      "title": "MIKASA-Robo · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "较新套件；EmbodiedBench 表待充实",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/mikasa-robo",
+      "source_label": "EmbodiedBench MIKASA-Robo",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "MIKASA reported",
+          "score": "—",
+          "detail": "见官方发布",
+          "org": "",
+          "date": "2025-26",
+          "note": "策展"
+        }
+      ]
+    },
+    "robocerebra": {
+      "title": "RoboCerebra · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "认知+操作；表待充实",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/robocerebra",
+      "source_label": "EmbodiedBench RoboCerebra",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "RoboCerebra reported",
+          "score": "—",
+          "detail": "见官方发布",
+          "org": "",
+          "date": "2025-26",
+          "note": "策展"
+        }
+      ]
+    },
+    "robomme": {
+      "title": "RoboMME · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "多模态具身；表待充实",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/robomme",
+      "source_label": "EmbodiedBench RoboMME",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "RoboMME reported",
+          "score": "—",
+          "detail": "见官方发布",
+          "org": "",
+          "date": "2025-26",
+          "note": "策展"
+        }
+      ]
+    },
+    "duobench": {
+      "title": "DuoBench · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "双臂评测；表待充实",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/duobench",
+      "source_label": "EmbodiedBench DuoBench",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "DuoBench reported",
+          "score": "—",
+          "detail": "见官方发布",
+          "org": "",
+          "date": "2025-26",
+          "note": "策展"
+        }
+      ]
+    },
+    "kinetix": {
+      "title": "Kinetix · 业内评测榜单（策展）",
+      "metric": "Success Rate %",
+      "protocol": "动力学/控制向；表待充实",
+      "source_url": "https://embodiedbench.vercel.app/en/benchmarks/kinetix",
+      "source_label": "EmbodiedBench Kinetix",
+      "entries": [
+        {
+          "rank": 1,
+          "method": "Kinetix reported",
+          "score": "—",
+          "detail": "见官方发布",
+          "org": "",
+          "date": "2025-26",
+          "note": "策展"
+        }
+      ]
+    }
+  }
+}

@@ -13,11 +13,13 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / HumanEgo / 数据集 / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / 编程冲SOTA / HumanEgo / 数据集 / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
-仿真评测（策略=无）时，「手臂/手」页通过共享目录 gui_robot_cmd.json 遥控 Isaac 双臂/夹爪。
+仿真评测（策略=无 / 只开界面）时，「手臂/手」页通过共享目录 gui_robot_cmd.json
+遥控各仿真后端（Isaac / MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin / 扩展评测）双臂与夹爪。
+「手臂/手」页可输入文本指挥手臂相对移动和手部开合，例如「左臂向前5cm；右手张开」。
 """
 
 from __future__ import annotations
@@ -70,6 +72,15 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from arm_text_commands import (
+    ARM_TEXT_CMD_HELP,
+    ARM_TEXT_CMD_PLACEHOLDER,
+    HAND_JOINT_ORDER,
+    ArmHandTextAction,
+    canonical_hand_joint,
+    parse_arm_hand_text,
+)
 
 # cv2 / numpy 很重（~0.5–0.8s）；启动闪屏出现后再加载。
 cv2: Any = None
@@ -137,6 +148,8 @@ from PyQt5.QtCore import (
     pyqtSignal,
     QObject,
     QPoint,
+    QRect,
+    QSize,
     QEvent,
     QUrl,
     QByteArray,
@@ -154,6 +167,7 @@ from PyQt5.QtGui import (
     QColor,
 )
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QButtonGroup,
     QCheckBox,
@@ -164,8 +178,10 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -181,7 +197,10 @@ from PyQt5.QtWidgets import (
     QStatusBar,
     QSizePolicy,
     QTabBar,
+    QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
+    QPlainTextEdit,
     QTextEdit,
     QToolButton,
     QTreeWidget,
@@ -537,7 +556,7 @@ class FilterableImeSafeComboBox(ImeSafeComboBox):
         filt.setPlaceholderText("输入关键词过滤…")
         filt.setClearButtonEnabled(True)
         filt.setStyleSheet(
-            "QLineEdit { background: #1e1e1e; color: #eee; border: 1px solid #555; "
+            f"QLineEdit {{ background: #1e1e1e; color: #eee; border: 1px solid {UI_BORDER}; "
             "padding: 3px 6px; }"
         )
         filt.textChanged.connect(self._on_filter_text_changed)
@@ -980,6 +999,70 @@ _EAI_TOOLS_DIR = os.path.join(EAI_DIR, "tools")
 if _EAI_TOOLS_DIR not in sys.path:
     sys.path.insert(0, _EAI_TOOLS_DIR)
 try:
+    from sim_eval_leaderboard import (  # noqa: E402
+        board_for_backend as load_sim_eval_board,
+        clear_leaderboard_cache as clear_sim_eval_leaderboard_cache,
+        refresh_backend as refresh_sim_eval_backend,
+    )
+except ImportError:  # pragma: no cover
+    def load_sim_eval_board(_backend: str, **_k):  # type: ignore[misc]
+        return None
+
+    def clear_sim_eval_leaderboard_cache() -> None:  # type: ignore[misc]
+        return None
+
+    def refresh_sim_eval_backend(_backend: str, **_k):  # type: ignore[misc]
+        raise RuntimeError("sim_eval_leaderboard 未找到")
+
+try:
+    from sim_backends_registry import (  # noqa: E402
+        get_backend as get_sim_backend_spec,
+        list_extended_backends,
+        normalize_backend_key as normalize_sim_backend_key,
+        resolve_default_root as resolve_extended_default_root,
+    )
+except ImportError:  # pragma: no cover
+    def get_sim_backend_spec(_key: str):  # type: ignore[misc]
+        return None
+
+    def list_extended_backends():  # type: ignore[misc]
+        return []
+
+    def normalize_sim_backend_key(key: str) -> str:  # type: ignore[misc]
+        return (key or "").strip().lower()
+
+    def resolve_extended_default_root(_spec):  # type: ignore[misc]
+        return ""
+
+try:
+    from external_bench_runtime import (  # noqa: E402
+        build_eval_argv as build_external_bench_argv,
+        install_hint as external_bench_install_hint,
+        list_extended_choices,
+        probe_deps as probe_external_bench_deps,
+        resolve_python as resolve_external_bench_python,
+        resolve_root as resolve_external_bench_root,
+    )
+except ImportError:  # pragma: no cover
+    def build_external_bench_argv(**_k):  # type: ignore[misc]
+        raise RuntimeError("external_bench_runtime 未找到")
+
+    def external_bench_install_hint(_backend: str, _python_bin: str = "") -> str:  # type: ignore[misc]
+        return "external_bench_runtime 未找到"
+
+    def list_extended_choices():  # type: ignore[misc]
+        return []
+
+    def probe_external_bench_deps(_backend: str, **_k):  # type: ignore[misc]
+        return False, "external_bench_runtime 未找到"
+
+    def resolve_external_bench_python(prefer: str = "") -> str:  # type: ignore[misc]
+        return prefer or sys.executable
+
+    def resolve_external_bench_root(_backend: str, prefer: str = "") -> str:  # type: ignore[misc]
+        return prefer or ""
+
+try:
     from pi_policy_runtime import (  # noqa: E402
         OPENPI_DATA_HOME_DEFAULT,
         PI_CKPT_CONFIG_DEFAULT,
@@ -1117,6 +1200,7 @@ try:
         ROBOTWIN_ROOT_DEFAULT,
         ROBOTWIN_TASKS,
         build_robotwin_eval_argv,
+        build_robotwin_viewer_argv,
         ensure_robotwin_checkpoint,
         install_hint as robotwin_install_hint,
         probe_robotwin_deps,
@@ -1139,6 +1223,9 @@ except ImportError:  # pragma: no cover
     )
 
     def build_robotwin_eval_argv(**_kwargs):  # type: ignore[misc]
+        raise RuntimeError("robotwin_policy_runtime 未找到")
+
+    def build_robotwin_viewer_argv(**_kwargs):  # type: ignore[misc]
         raise RuntimeError("robotwin_policy_runtime 未找到")
 
     def ensure_robotwin_checkpoint(prefer: str = "", config: str = "", **_k):  # type: ignore[misc]
@@ -2447,6 +2534,7 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "ICL",
     "Astra",
     "PhysicalRSI",
+    "编程冲SOTA",
     "HumanEgo",
     "数据集",
     "sub task",
@@ -2554,6 +2642,22 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "RoboTwin": "仿真评测",
     "robo_twin": "仿真评测",
     "rlinf": "仿真评测",
+    "simpler": "仿真评测",
+    "SimplerEnv": "仿真评测",
+    "calvin": "仿真评测",
+    "CALVIN": "仿真评测",
+    "robocasa": "仿真评测",
+    "maniskill3": "仿真评测",
+    "maniskill2": "仿真评测",
+    "metaworld": "仿真评测",
+    "rlbench": "仿真评测",
+    "genesis": "仿真评测",
+    "behavior1k": "仿真评测",
+    "furniturebench": "仿真评测",
+    "vlabench": "仿真评测",
+    "vla_harness": "仿真评测",
+    "扩展评测": "仿真评测",
+    "extended": "仿真评测",
     "ctx": "ICL",
     "context": "ICL",
     "icl": "ICL",
@@ -2566,6 +2670,12 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "physical-rsi": "PhysicalRSI",
     "rsi": "PhysicalRSI",
     "PhysicalRSI": "PhysicalRSI",
+    "prog_sota": "编程冲SOTA",
+    "progsota": "编程冲SOTA",
+    "sota": "编程冲SOTA",
+    "code_sota": "编程冲SOTA",
+    "编程冲sota": "编程冲SOTA",
+    "编程冲SOTA": "编程冲SOTA",
     "gpt-6": "Astra",
     "gpt6": "Astra",
     "robodojo": "Astra",
@@ -2620,8 +2730,11 @@ SIM_PREVIEW_DEPTH_TOPICS: Tuple[str, ...] = tuple(
     topic for _, topic in SIM_PREVIEW_DEPTH_CAM_TOPICS
 )
 SIM_PREVIEW_ALL_TOPICS: Tuple[str, ...] = SIM_PREVIEW_TOPICS + SIM_PREVIEW_DEPTH_TOPICS
-# RynnValue Live HUD 控件在下方工作区；打分 HUD 仍单独弹 OpenCV 窗
+# RynnValue Live HUD / LIBERO 预览：写入下方工作区「图像预览」伪 topic
+RYNNVALUE_LIVE_HUD_TOPIC = "/rynnvalue/live_hud"
+LIBERO_PREVIEW_TOPIC = "/libero/preview"
 RYNNVALUE_LIVE_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "rynnvalue_live")
+LIBERO_PREVIEW_JPG = os.path.join(RYNNVALUE_LIVE_CACHE_DIR, "libero_preview.jpg")
 ROBODOJO_EVAL_RESULT_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/eval_result/RoboDojo"
 )
@@ -2942,6 +3055,17 @@ UI_ACCENT_BLUE_BRIGHT = "#4da3ff"
 UI_ACCENT_ORANGE = "#ffb86c"
 UI_ACCENT_GREEN = "#50fa7b"
 UI_ACCENT_RED = "#ff8888"
+# 表面 / 边框（全局主题与各 Tab 共用）
+UI_BG_WINDOW = "#1e1f22"
+UI_BG_PANEL = "#252628"
+UI_BG_ELEVATED = "#2c2e32"
+UI_BG_INPUT = "#1a1b1e"
+UI_BG_HOVER = "#34363c"
+UI_BG_LOG = "#1a1b1e"
+UI_BORDER = "#3d4048"
+UI_BORDER_STRONG = "#52565f"
+UI_HIGHLIGHT = "#3d6ea8"
+UI_RADIUS = "4px"
 UI_MONO_FAMILY = "Monospace"
 UI_MONO_SIZE_SMALL = 9
 UI_MONO_SIZE_NORMAL = 10
@@ -2975,12 +3099,12 @@ class _LogHeightDragBar(QFrame):
         self.setToolTip(f"按住上下拖动，{label}")
         self.setStyleSheet(
             "QFrame {"
-            "  background-color: #3a3a3a;"
-            "  border: 1px solid #666;"
-            "  border-radius: 3px;"
+            f"  background-color: {UI_BG_ELEVATED};"
+            f"  border: 1px solid {UI_BORDER};"
+            f"  border-radius: {UI_RADIUS};"
             "}"
             "QFrame:hover {"
-            f"  background-color: #4a5a6a;"
+            f"  background-color: {UI_BG_HOVER};"
             f"  border: 1px solid {UI_ACCENT_BLUE};"
             "}"
         )
@@ -3112,10 +3236,9 @@ def _configure_resizable_text_edit(
     edit: QTextEdit,
     *,
     default_h: int,
-    tooltip: str = "拖动手柄可调整高度",
+    tooltip: str = "",
 ) -> None:
-    """给多行文本框设合理默认高度；需再配 `_LogHeightDragBar` 才能拖动。"""
-    # 清掉旧的 min/max，改用 FixedHeight，便于拖动手柄改高。
+    """给多行文本框设合理默认高度（不再附加拖动手柄以节省纵向空间）。"""
     edit.setMinimumHeight(0)
     edit.setMaximumHeight(16777215)
     edit.setFixedHeight(int(default_h))
@@ -3134,23 +3257,114 @@ def _add_text_edit_with_drag_bar(
     grow_down: bool = True,
     bar_before: bool = False,
     label: str = "拖动调整高度",
-) -> _LogHeightDragBar:
-    """放入文本框 + 拖动手柄（默认手柄在文本框下方，向下拖变高）。"""
-    _configure_resizable_text_edit(
-        edit,
-        default_h=default_h,
-        tooltip=f"{'拖动上方' if bar_before else '拖动下方'}手柄可调整高度",
-    )
-    bar = _LogHeightDragBar(
-        edit, grow_down=grow_down, min_h=min_h, max_h=max_h, label=label
-    )
-    if bar_before:
-        layout.addWidget(bar)
-        layout.addWidget(edit)
-    else:
-        layout.addWidget(edit)
-        layout.addWidget(bar)
-    return bar
+) -> Optional[_LogHeightDragBar]:
+    """放入文本框；拖动手柄已移除（保留参数兼容旧调用）。"""
+    del min_h, max_h, grow_down, bar_before, label  # unused — drag bars removed
+    _configure_resizable_text_edit(edit, default_h=default_h, tooltip="")
+    layout.addWidget(edit)
+    return None
+
+
+class _FlowLayout(QLayout):
+    """Horizontal wrapping layout so controls stay readable on narrow widths."""
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        margin: int = 0,
+        spacing: int = 6,
+    ) -> None:
+        super().__init__(parent)
+        self._items: List[Any] = []
+        self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(int(spacing))
+
+    def addWidget(self, w, *args, **kwargs) -> None:  # noqa: N802
+        # Accept QHBoxLayout-style stretch/alignment; flow layout ignores them.
+        super().addWidget(w)
+
+    def addItem(self, item) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int):  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):  # noqa: N802
+        return Qt.Orientations(Qt.Orientation(0))
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._do_layout(QRect(0, 0, width, 0), True)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, False)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left() + m.right(), m.top() + m.bottom())
+        size.setHeight(max(size.height(), 22))
+        return size
+
+    def _do_layout(self, rect: QRect, test_only: bool) -> int:
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_h = 0
+        space = max(0, self.spacing())
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + space
+            if line_h > 0 and next_x - space > effective.right() + 1:
+                x = effective.x()
+                y = y + line_h + space
+                next_x = x + hint.width() + space
+                line_h = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_h = max(line_h, hint.height())
+        return y + line_h - rect.y() + m.bottom()
+
+
+def _wrap_in_vscroll(inner: QWidget) -> QScrollArea:
+    """Put *inner* in a scroll area so nothing is clipped when the tab is short."""
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    scroll.setWidget(inner)
+    scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    return scroll
+
+
+def _always_visible_splitter(orientation: Qt.Orientation = Qt.Vertical) -> QSplitter:
+    split = QSplitter(orientation)
+    split.setChildrenCollapsible(False)
+    split.setHandleWidth(8)
+    split.setOpaqueResize(True)
+    return split
 
 
 # 测试 Tab：场景示意图像框（2×4）
@@ -4239,6 +4453,12 @@ EAI_IMAGES_DIR = os.path.join(EAI_DIR, "images")
 CHAT_USER_SETTINGS_PATH = os.path.join(EAI_DIR, "chat_user_settings.json")
 CONTROL_TABS_ORDER_PATH = os.path.join(EAI_DIR, "control_tabs_order.json")
 TEST_QWEN_LAST_CONFIG_PATH = os.path.join(EAI_DIR, "test_qwen_last_config.json")
+VIEWER_UI_STATE_PATH = os.path.join(EAI_DIR, "viewer_ui_state.json")
+# 只读日志/结果类文本框不参与恢复（避免把运行日志写回界面）
+_UI_STATE_SKIP_TEXT_NAME_RE = re.compile(
+    r"(^|_)(log|result|history|status)(_edit|_view|_label)?$",
+    re.IGNORECASE,
+)
 HY_EMBODIED_VLM_API_BASE = os.environ.get(
     "HY_EMBODIED_VLM_API_BASE", "http://127.0.0.1:8080/v1"
 )
@@ -8087,6 +8307,211 @@ def save_test_qwen_last_config(data: Dict[str, object]) -> str:
     return TEST_QWEN_LAST_CONFIG_PATH
 
 
+def load_viewer_ui_state() -> Dict[str, object]:
+    """加载主界面控件状态（选项 / 下拉 / 输入等）。"""
+    try:
+        with open(VIEWER_UI_STATE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return {}
+
+
+def save_viewer_ui_state(data: Dict[str, object]) -> str:
+    os.makedirs(os.path.dirname(VIEWER_UI_STATE_PATH), exist_ok=True)
+    with open(VIEWER_UI_STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return VIEWER_UI_STATE_PATH
+
+
+def _ui_state_skip_text_widget(name: str, widget: QWidget) -> bool:
+    """跳过只读日志/结果类文本框。"""
+    if _UI_STATE_SKIP_TEXT_NAME_RE.search(str(name or "")):
+        return True
+    try:
+        if isinstance(widget, (QTextEdit, QPlainTextEdit)) and widget.isReadOnly():
+            return True
+    except Exception:
+        return True
+    return False
+
+
+def _ui_state_read_widget(widget: QWidget) -> Optional[Dict[str, object]]:
+    """读取单个可操作控件的可序列化状态。"""
+    try:
+        if isinstance(widget, QComboBox):
+            payload: Dict[str, object] = {
+                "kind": "combo",
+                "index": int(widget.currentIndex()),
+                "text": widget.currentText(),
+            }
+            data = widget.currentData()
+            if data is not None and isinstance(data, (str, int, float, bool)):
+                payload["data"] = data
+            elif data is not None:
+                payload["data"] = str(data)
+            if widget.isEditable():
+                payload["edit"] = widget.currentText()
+            return payload
+        if isinstance(widget, QLineEdit):
+            return {"kind": "line", "text": widget.text()}
+        if isinstance(widget, QPlainTextEdit):
+            return {"kind": "plain", "text": widget.toPlainText()}
+        if isinstance(widget, QTextEdit):
+            return {"kind": "text", "text": widget.toPlainText()}
+        if isinstance(widget, QSpinBox):
+            return {"kind": "spin", "value": int(widget.value())}
+        if isinstance(widget, QDoubleSpinBox):
+            return {"kind": "dspin", "value": float(widget.value())}
+        if isinstance(widget, QSlider):
+            return {"kind": "slider", "value": int(widget.value())}
+        if isinstance(widget, QCheckBox):
+            return {"kind": "check", "checked": bool(widget.isChecked())}
+        if isinstance(widget, QRadioButton):
+            return {"kind": "radio", "checked": bool(widget.isChecked())}
+        if isinstance(widget, (QToolButton, QPushButton)) and widget.isCheckable():
+            return {"kind": "toggle", "checked": bool(widget.isChecked())}
+    except Exception:
+        return None
+    return None
+
+
+def _ui_state_write_widget(widget: QWidget, payload: object) -> bool:
+    """把已保存状态写回控件；写期间屏蔽信号，避免误触发网络/任务。"""
+    if not isinstance(payload, dict):
+        return False
+    kind = str(payload.get("kind") or "")
+    # radio / 可勾选按钮需要信号以同步互斥组或展开面板
+    block = kind not in ("radio", "toggle")
+    prev_blocked = widget.blockSignals(True) if block else False
+    try:
+        if kind == "combo" and isinstance(widget, QComboBox):
+            data = payload.get("data", None)
+            text = str(payload.get("text") or "")
+            idx = payload.get("index", None)
+            matched = -1
+            if data is not None:
+                for i in range(widget.count()):
+                    if widget.itemData(i) == data or str(widget.itemData(i)) == str(data):
+                        matched = i
+                        break
+            if matched < 0 and text:
+                matched = widget.findText(text)
+            if matched < 0 and isinstance(idx, int) and 0 <= idx < widget.count():
+                matched = idx
+            if matched >= 0:
+                widget.setCurrentIndex(matched)
+            if widget.isEditable() and "edit" in payload:
+                widget.setEditText(str(payload.get("edit") or ""))
+            elif widget.isEditable() and text and matched < 0:
+                widget.setEditText(text)
+            return matched >= 0 or widget.isEditable()
+        if kind == "line" and isinstance(widget, QLineEdit):
+            widget.setText(str(payload.get("text") or ""))
+            return True
+        if kind == "plain" and isinstance(widget, QPlainTextEdit):
+            widget.setPlainText(str(payload.get("text") or ""))
+            return True
+        if kind == "text" and isinstance(widget, QTextEdit):
+            widget.setPlainText(str(payload.get("text") or ""))
+            return True
+        if kind == "spin" and isinstance(widget, QSpinBox):
+            widget.setValue(int(payload.get("value") or 0))
+            return True
+        if kind == "dspin" and isinstance(widget, QDoubleSpinBox):
+            widget.setValue(float(payload.get("value") or 0.0))
+            return True
+        if kind == "slider" and isinstance(widget, QSlider):
+            widget.setValue(int(payload.get("value") or 0))
+            return True
+        if kind == "check" and isinstance(widget, QCheckBox):
+            widget.setChecked(bool(payload.get("checked")))
+            return True
+        if kind == "radio" and isinstance(widget, QRadioButton):
+            if bool(payload.get("checked")):
+                widget.setChecked(True)
+            return True
+        if kind == "toggle" and isinstance(widget, (QToolButton, QPushButton)):
+            if widget.isCheckable():
+                widget.setChecked(bool(payload.get("checked")))
+                return True
+    except Exception:
+        return False
+    finally:
+        if block:
+            widget.blockSignals(prev_blocked)
+    return False
+
+
+def _ui_state_collect_owner(owner: object, prefix: str = "") -> Dict[str, object]:
+    """从对象属性中采集可操作控件状态。"""
+    out: Dict[str, object] = {}
+    try:
+        items = list(vars(owner).items())
+    except Exception:
+        return out
+    form_types = (
+        QLineEdit,
+        QTextEdit,
+        QPlainTextEdit,
+        QComboBox,
+        QSpinBox,
+        QDoubleSpinBox,
+        QCheckBox,
+        QRadioButton,
+        QSlider,
+        QToolButton,
+        QPushButton,
+    )
+    for name, value in items:
+        if not isinstance(name, str) or not name or name.startswith("_"):
+            continue
+        if not isinstance(value, form_types):
+            continue
+        if isinstance(value, (QTextEdit, QPlainTextEdit)) and _ui_state_skip_text_widget(
+            name, value
+        ):
+            continue
+        if isinstance(value, QLineEdit) and _UI_STATE_SKIP_TEXT_NAME_RE.search(name):
+            continue
+        if isinstance(value, (QToolButton, QPushButton)) and not value.isCheckable():
+            continue
+        payload = _ui_state_read_widget(value)
+        if payload is not None:
+            out[f"{prefix}{name}"] = payload
+    return out
+
+
+def _ui_state_apply_owner(
+    owner: object, widgets: Dict[str, object], prefix: str = ""
+) -> int:
+    """把 widgets 字典中属于该 owner 的项写回控件，返回成功条数。"""
+    restored = 0
+    try:
+        attrs = vars(owner)
+    except Exception:
+        return 0
+    for key, payload in widgets.items():
+        if prefix:
+            if not key.startswith(prefix):
+                continue
+            name = key[len(prefix) :]
+        else:
+            if "." in key or key.startswith("tab:"):
+                continue
+            name = key
+        if not name or "." in name:
+            continue
+        value = attrs.get(name)
+        if value is None:
+            continue
+        if _ui_state_write_widget(value, payload):
+            restored += 1
+    return restored
+
+
 def chat_history_path(history_id: str) -> str:
     safe = "".join(ch for ch in history_id if ch.isalnum() or ch in "-_")
     if not safe:
@@ -8423,7 +8848,7 @@ class BagelHistoryDialog(QWidget):
         self.list_widget.setAttribute(Qt.WA_InputMethodEnabled, False)
         self.list_widget.setFocusPolicy(Qt.ClickFocus)
         self.list_widget.setStyleSheet(
-            "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+            f"QListWidget {{ background-color: {UI_BG_INPUT}; color: #ddd; border: 1px solid {UI_BORDER}; }}"
         )
         self.list_widget.itemDoubleClicked.connect(self._on_load_clicked)
         self.list_widget.currentItemChanged.connect(self._on_current_changed)
@@ -8445,7 +8870,7 @@ class BagelHistoryDialog(QWidget):
         btn_row.addWidget(self.load_btn)
         self.delete_btn = QPushButton("删除")
         self.delete_btn.setFocusPolicy(Qt.NoFocus)
-        self.delete_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.delete_btn.setObjectName("dangerAction")
         self.delete_btn.clicked.connect(self._on_delete_clicked)
         btn_row.addWidget(self.delete_btn)
         self._delete_armed = False
@@ -8623,7 +9048,7 @@ class ChatHistoryDialog(QWidget):
         self.list_widget.setAttribute(Qt.WA_InputMethodEnabled, False)
         self.list_widget.setFocusPolicy(Qt.ClickFocus)
         self.list_widget.setStyleSheet(
-            "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+            f"QListWidget {{ background-color: {UI_BG_INPUT}; color: #ddd; border: 1px solid {UI_BORDER}; }}"
         )
         self.list_widget.itemDoubleClicked.connect(self._on_load_clicked)
         self.list_widget.currentItemChanged.connect(self._on_current_changed)
@@ -8645,7 +9070,7 @@ class ChatHistoryDialog(QWidget):
         btn_row.addWidget(self.load_btn)
         self.delete_btn = QPushButton("删除")
         self.delete_btn.setFocusPolicy(Qt.NoFocus)
-        self.delete_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.delete_btn.setObjectName("dangerAction")
         self.delete_btn.clicked.connect(self._on_delete_clicked)
         btn_row.addWidget(self.delete_btn)
         self._delete_armed = False
@@ -9015,11 +9440,11 @@ class ChatPanelWidget(QWidget):
         self.system_prompt_edit.setPlaceholderText("System prompt…")
         self.system_prompt_edit.setToolTip(
             "认知编排器 system 提示词；Lake 模式下随请求发送。"
-            "点「保存 System」写入 eai/chat_user_settings.json；"
-            "拖动手柄可调整高度。"
+            "点「保存 System」写入 eai/chat_user_settings.json。"
         )
         self.system_prompt_edit.setStyleSheet(
-            "QTextEdit { background-color: #252525; color: #eee; border: 1px solid #555; }"
+            f"QTextEdit {{ background-color: {UI_BG_LOG}; color: {UI_TEXT_PRIMARY}; "
+            f"border: 1px solid {UI_BORDER}; border-radius: {UI_RADIUS}; }}"
         )
         self.system_prompt_resize_bar = _add_text_edit_with_drag_bar(
             settings_layout,
@@ -9082,7 +9507,8 @@ class ChatPanelWidget(QWidget):
         self.chat_image_preview.setFixedSize(56, 42)
         self.chat_image_preview.setAlignment(Qt.AlignCenter)
         self.chat_image_preview.setStyleSheet(
-            "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #888; }"
+            f"QLabel {{ background-color: {UI_BG_INPUT}; border: 1px solid {UI_BORDER}; "
+            f"border-radius: {UI_RADIUS}; color: {UI_TEXT_MUTED}; }}"
         )
         self.chat_image_preview.setText("预览")
         opt_row.addWidget(self.chat_image_preview)
@@ -9099,8 +9525,9 @@ class ChatPanelWidget(QWidget):
         self.history_view.setFocusPolicy(Qt.NoFocus)
         self.history_view.document().setDocumentMargin(8)
         self.history_view.setStyleSheet(
-            "QTextEdit { background-color: #1a1a1a; color: #ddd; border: 1px solid #444; "
-            "padding: 4px 6px 12px 6px; }"
+            f"QTextEdit {{ background-color: {UI_BG_LOG}; color: {UI_TEXT_PRIMARY}; "
+            f"border: 1px solid {UI_BORDER}; border-radius: {UI_RADIUS}; "
+            f"padding: 6px 8px 12px 8px; }}"
         )
         layout.addWidget(self.history_view, stretch=1)
 
@@ -9110,35 +9537,26 @@ class ChatPanelWidget(QWidget):
         self.input_edit = ChatInputEdit()
         self.input_edit._chat_panel = self
         self.input_edit.setPlaceholderText(LAKE_CHAT_INPUT_PLACEHOLDER)
-        # 默认可多行输入；上方手柄可再拉高，避免长期挤占历史区
-        _configure_resizable_text_edit(
-            self.input_edit,
-            default_h=100,
-            tooltip="拖动上方手柄可调整输入框高度",
-        )
+        _configure_resizable_text_edit(self.input_edit, default_h=100, tooltip="")
         self.input_edit.setAttribute(Qt.WA_InputMethodEnabled, True)
         self.input_edit.document().setDocumentMargin(4)
         self.input_edit.setStyleSheet(
-            "QTextEdit { background-color: #252525; color: #eee; border: 1px solid #555; "
-            "padding: 4px 6px 6px 6px; }"
+            f"QTextEdit {{ background-color: {UI_BG_INPUT}; color: {UI_TEXT_PRIMARY}; "
+            f"border: 1px solid {UI_BORDER}; border-radius: {UI_RADIUS}; "
+            f"padding: 6px 8px 8px 8px; }}"
         )
         self._refresh_system_lang_btn()
         self._suppress_send_until = 0.0
         self._ime_dirty_from_history = False
         self._ime_rebuilding = False
         self._history_dialog = None
-        self.input_resize_bar = _LogHeightDragBar(
-            self.input_edit,
-            grow_down=False,
-            min_h=72,
-            max_h=360,
-            label="拖动调整输入高度",
-        )
-        layout.addWidget(self.input_resize_bar)
+        self.input_resize_bar = None
         input_row.addWidget(self.input_edit, stretch=1)
         send_col = QVBoxLayout()
         self.send_btn = QPushButton("发送")
+        self.send_btn.setObjectName("primaryAction")
         self.send_btn.setMinimumHeight(40)
+        self.send_btn.setMinimumWidth(72)
         self.send_btn.setToolTip("调用大模型获取回复")
         self.send_btn.setFocusPolicy(Qt.NoFocus)
         self.send_btn.clicked.connect(self._on_send_clicked)
@@ -10065,7 +10483,7 @@ class ChatPanelWidget(QWidget):
     def _append_system_line(self, text: str) -> None:
         self.history_view.append(
             f'<p style="margin:4px 0 10px 0;">'
-            f'<span style="color:{UI_TEXT_MUTED};">[系统] {text}</span></p>'
+            f'<span style="color:{UI_TEXT_MUTED};">[系统] {{text}}</span></p>'
         )
         self._scroll_history_to_bottom()
 
@@ -10175,7 +10593,7 @@ class ChatPanelWidget(QWidget):
         safe = _html_escape(text).replace("\n", "<br>")
         self.history_view.append(
             f'<p style="margin:6px 0 12px 0;">'
-            f'<b style="color:{UI_ACCENT_RED};">错误:</b>{self._meta_span(ts, latency_s)}'
+            f'<b style="color:{UI_ACCENT_RED};">错误:</b>{{self._meta_span(ts, latency_s)}}'
             f"<br>{safe}</p>"
         )
         self._scroll_history_to_bottom()
@@ -10669,7 +11087,7 @@ class ScaledPixmapLabel(QLabel):
     def _apply_frame_style(self) -> None:
         border = "2px solid #4CAF50" if self._selected else "1px solid #555"
         self.setStyleSheet(
-            f"QLabel {{ background-color: #1a1a1a; border: {border}; "
+            f"QLabel {{ background-color: {UI_BG_INPUT}; border: {{border}}; "
             f"color: {UI_TEXT_MUTED}; }}"
         )
 
@@ -10718,7 +11136,7 @@ class ClickableImageLabel(QLabel):
         self.setMinimumSize(64, 48)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet(
-            f"background-color: #1e1e1e; color: {UI_TEXT_MUTED}; border: 1px solid #555;"
+            f"background-color: {UI_BG_INPUT}; color: {UI_TEXT_MUTED}; border: 1px solid {UI_BORDER};"
         )
         self.setCursor(Qt.CrossCursor)
         self._source_image: Optional[np.ndarray] = None
@@ -11281,7 +11699,7 @@ class DepthPanel3D(QWidget):
             "QGroupBox {"
             "  color: #e8e8e8;"
             "  font-weight: bold;"
-            "  border: 1px solid #555;"
+            f"  border: 1px solid {UI_BORDER};"
             "  border-radius: 4px;"
             "  margin-top: 6px;"
             "  padding-top: 6px;"
@@ -11301,7 +11719,7 @@ class DepthPanel3D(QWidget):
         self.robot_info_label.setTextFormat(Qt.RichText)
         self.robot_info_label.setStyleSheet(
             f"color: {UI_TEXT_PRIMARY};"
-            "background-color: #252525;"
+            f"background-color: {UI_BG_LOG};"
             "padding: 4px 6px;"
             "border-radius: 3px;"
         )
@@ -19907,6 +20325,8 @@ class CameraTopicWindow(QMainWindow):
         self._fp_call_bridge.finished.connect(self._on_fp_call_finished)
         self._robot_ui_last_update = 0.0
         self._pending_arm_move_goal: Optional[ResolvedArmMoveGoal] = None
+        self._text_cmd_queue: List[ArmHandTextAction] = []
+        self._text_cmd_pumping = False
         self._arm_enable_wait_deadline = 0.0
         self._arm_enable_wait_timer = QTimer(self)
         self._arm_enable_wait_timer.setInterval(200)
@@ -19920,20 +20340,26 @@ class CameraTopicWindow(QMainWindow):
         self._cad_capture_saved = 0
         self._cad_last_capture_gray: Optional[np.ndarray] = None
 
-        self.setWindowTitle("Camera Topic Viewer")
+        self.setWindowTitle("EAI · Camera Topic Viewer")
         win_x, win_y, win_w, win_h = default_viewer_geometry()
         self.setMinimumSize(min(1280, win_w), min(820, win_h))
         self.setGeometry(win_x, win_y, win_w, win_h)
 
         central = QWidget()
+        central.setObjectName("viewerCentral")
         self.setCentralWidget(central)
         root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(6, 4, 6, 4)
+        root_layout.setSpacing(4)
 
         control_tabs = QTabWidget()
         self.control_tabs = control_tabs
+        control_tabs.setObjectName("controlTabs")
         control_tabs.setDocumentMode(True)
         control_tabs.setTabPosition(QTabWidget.North)
         control_tabs.setMovable(True)
+        control_tabs.setUsesScrollButtons(True)
+        control_tabs.tabBar().setElideMode(Qt.ElideRight)
         control_tabs.tabBar().setToolTip(
             "可拖动标签调整顺序；下次启动会按此顺序打开（写入 eai/control_tabs_order.json）"
         )
@@ -20073,7 +20499,7 @@ class CameraTopicWindow(QMainWindow):
         self.replay_start_btn.clicked.connect(self._on_replay_start_clicked)
         self.replay_stop_btn = QPushButton("停止")
         self.replay_stop_btn.setToolTip("停止 rrd_replay 节点与当前回放。")
-        self.replay_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.replay_stop_btn.setObjectName("dangerAction")
         self.replay_stop_btn.clicked.connect(self._on_replay_stop_clicked)
         replay_row.addWidget(QLabel("次数"))
         self.replay_count_spin = QSpinBox()
@@ -20187,15 +20613,11 @@ class CameraTopicWindow(QMainWindow):
         self.sam3_result_edit = QTextEdit()
         self.sam3_result_edit.setReadOnly(True)
         self.sam3_result_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        _configure_resizable_text_edit(
-            self.sam3_result_edit,
-            default_h=140,
-            tooltip="拖动下方手柄可调整结果区高度",
-        )
+        _configure_resizable_text_edit(self.sam3_result_edit, default_h=140, tooltip="")
         self.sam3_result_edit.setPlaceholderText("SAM3 调用结果将显示在这里…")
         self.sam3_result_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         sam3_result_row = QHBoxLayout()
         sam3_result_row.setSpacing(8)
@@ -20205,15 +20627,12 @@ class CameraTopicWindow(QMainWindow):
         self.sam3_preview_label.setMinimumSize(160, 140)
         self.sam3_preview_label.setMaximumSize(240, 220)
         self.sam3_preview_label.setStyleSheet(
-            "QLabel { color: #888; background-color: #1a1a1a; border: 1px solid #555; }"
+            f"QLabel {{ color: #888; background-color: {UI_BG_INPUT}; border: 1px solid {UI_BORDER}; }}"
         )
         self.sam3_preview_label.setToolTip("分割 mask 叠加预览（相机画面上也会持续绘制）")
         sam3_result_row.addWidget(self.sam3_preview_label)
         segment_outer.addLayout(sam3_result_row)
-        self.sam3_result_resize_bar = _LogHeightDragBar(
-            self.sam3_result_edit, grow_down=True, min_h=80, max_h=480, label="拖动调整 SAM3 结果高度"
-        )
-        segment_outer.addWidget(self.sam3_result_resize_bar)
+        self.sam3_result_resize_bar = None
 
         pose_row = QHBoxLayout()
         pose_row.setSpacing(6)
@@ -20270,8 +20689,8 @@ class CameraTopicWindow(QMainWindow):
         self.fp_result_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.fp_result_edit.setPlaceholderText("FoundationPose 调用结果将显示在这里…")
         self.fp_result_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.fp_result_edit_resize_bar = _add_text_edit_with_drag_bar(
             segment_outer,
@@ -20360,7 +20779,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_run_btn.clicked.connect(self._on_lingbot_run_clicked)
         vis_run_row.addWidget(self.lingbot_run_btn)
         self.lingbot_stop_btn = QPushButton("停止")
-        self.lingbot_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.lingbot_stop_btn.setObjectName("dangerAction")
         self.lingbot_stop_btn.setEnabled(False)
         self.lingbot_stop_btn.clicked.connect(self._on_lingbot_stop_clicked)
         vis_run_row.addWidget(self.lingbot_stop_btn)
@@ -20384,8 +20803,8 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.lingbot_log_edit.setPlaceholderText("LingBot-Vision 日志…")
         self.lingbot_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.lingbot_log_edit_resize_bar = _add_text_edit_with_drag_bar(
             vis_outer,
@@ -20403,7 +20822,7 @@ class CameraTopicWindow(QMainWindow):
         self._lingbot_launcher.result_ready.connect(self._on_lingbot_result)
         self._on_lingbot_source_changed()
 
-        control_tabs.addTab(vis_tab, "视觉基础模型")
+        control_tabs.addTab(_wrap_in_vscroll(vis_tab), "视觉基础模型")
         _boot_tick("构建界面：空间/3D…")
 
         depth_tab = QWidget()
@@ -20549,7 +20968,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_depth_run_btn.clicked.connect(self._on_lingbot_depth_run_clicked)
         depth_run_row.addWidget(self.lingbot_depth_run_btn)
         self.lingbot_depth_stop_btn = QPushButton("停止")
-        self.lingbot_depth_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.lingbot_depth_stop_btn.setObjectName("dangerAction")
         self.lingbot_depth_stop_btn.setEnabled(False)
         self.lingbot_depth_stop_btn.clicked.connect(self._on_lingbot_depth_stop_clicked)
         depth_run_row.addWidget(self.lingbot_depth_stop_btn)
@@ -20576,8 +20995,8 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_depth_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.lingbot_depth_log_edit.setPlaceholderText("LingBot-Depth 日志…")
         self.lingbot_depth_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.lingbot_depth_log_edit_resize_bar = _add_text_edit_with_drag_bar(
             depth_outer,
@@ -20595,7 +21014,7 @@ class CameraTopicWindow(QMainWindow):
         self._lingbot_depth_launcher.result_ready.connect(self._on_lingbot_depth_result)
         self._on_lingbot_depth_source_changed()
 
-        control_tabs.addTab(depth_tab, "空间感知模型")
+        control_tabs.addTab(_wrap_in_vscroll(depth_tab), "空间感知模型")
 
         map_tab = QWidget()
         map_outer = QVBoxLayout(map_tab)
@@ -20707,7 +21126,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_map_run_btn.clicked.connect(self._on_lingbot_map_run_clicked)
         map_run_row.addWidget(self.lingbot_map_run_btn)
         self.lingbot_map_stop_btn = QPushButton("停止")
-        self.lingbot_map_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.lingbot_map_stop_btn.setObjectName("dangerAction")
         self.lingbot_map_stop_btn.setEnabled(False)
         self.lingbot_map_stop_btn.clicked.connect(self._on_lingbot_map_stop_clicked)
         map_run_row.addWidget(self.lingbot_map_stop_btn)
@@ -20738,8 +21157,8 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_map_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.lingbot_map_log_edit.setPlaceholderText("LingBot-Map 日志…")
         self.lingbot_map_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.lingbot_map_log_edit_resize_bar = _add_text_edit_with_drag_bar(
             map_outer,
@@ -20758,12 +21177,16 @@ class CameraTopicWindow(QMainWindow):
         self._lingbot_map_capture_count = 0
         self._on_lingbot_map_scene_changed()
 
-        control_tabs.addTab(map_tab, "3D重建模型")
+        control_tabs.addTab(_wrap_in_vscroll(map_tab), "3D重建模型")
 
         video_tab = QWidget()
         video_outer = QVBoxLayout(video_tab)
         video_outer.setContentsMargins(8, 6, 8, 6)
         video_outer.setSpacing(6)
+        video_form = QWidget()
+        video_form_l = QVBoxLayout(video_form)
+        video_form_l.setContentsMargins(0, 0, 0, 0)
+        video_form_l.setSpacing(6)
         video_hint = QLabel(
             "LingBot-Video：T2I / T2V / TI2V 生成。推荐用官方 cases 的结构化 prompt.json；"
             "TI2V 可在下方选择图像预览中的彩色画面（或点击预览图）作为首帧。"
@@ -20771,7 +21194,7 @@ class CameraTopicWindow(QMainWindow):
         )
         video_hint.setWordWrap(True)
         video_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        video_outer.addWidget(video_hint)
+        video_form_l.addWidget(video_hint)
 
         video_row = QHBoxLayout()
         video_row.setSpacing(6)
@@ -20800,7 +21223,7 @@ class CameraTopicWindow(QMainWindow):
             self._on_lingbot_video_preset_changed
         )
         video_row.addWidget(self.lingbot_video_preset_combo)
-        video_outer.addLayout(video_row)
+        video_form_l.addLayout(video_row)
 
         video_path_row = QHBoxLayout()
         video_path_row.setSpacing(6)
@@ -20830,7 +21253,7 @@ class CameraTopicWindow(QMainWindow):
         )
         self.lingbot_video_cam_btn.clicked.connect(self._on_lingbot_video_cam_clicked)
         video_path_row.addWidget(self.lingbot_video_cam_btn)
-        video_outer.addLayout(video_path_row)
+        video_form_l.addLayout(video_path_row)
 
         video_topic_row = QHBoxLayout()
         video_topic_row.setSpacing(6)
@@ -20850,7 +21273,7 @@ class CameraTopicWindow(QMainWindow):
             self._refresh_lingbot_video_topic_combo
         )
         video_topic_row.addWidget(self.lingbot_video_topic_refresh_btn)
-        video_outer.addLayout(video_topic_row)
+        video_form_l.addLayout(video_topic_row)
 
         video_model_row = QHBoxLayout()
         video_model_row.setSpacing(6)
@@ -20866,10 +21289,9 @@ class CameraTopicWindow(QMainWindow):
             self._on_lingbot_video_model_browse_clicked
         )
         video_model_row.addWidget(self.lingbot_video_model_browse_btn)
-        video_outer.addLayout(video_model_row)
+        video_form_l.addLayout(video_model_row)
 
-        video_opt_row = QHBoxLayout()
-        video_opt_row.setSpacing(6)
+        video_opt_row = _FlowLayout(spacing=6)
         video_opt_row.addWidget(QLabel("H"))
         self.lingbot_video_h_spin = QSpinBox()
         self.lingbot_video_h_spin.setRange(64, 2160)
@@ -20897,7 +21319,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_video_refiner_check = QCheckBox("refiner")
         self.lingbot_video_refiner_check.setToolTip("Dense 通常无 refiner；MoE 才需要")
         video_opt_row.addWidget(self.lingbot_video_refiner_check)
-        video_outer.addLayout(video_opt_row)
+        video_form_l.addLayout(video_opt_row)
 
         video_run_row = QHBoxLayout()
         video_run_row.setSpacing(6)
@@ -20905,7 +21327,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_video_run_btn.clicked.connect(self._on_lingbot_video_run_clicked)
         video_run_row.addWidget(self.lingbot_video_run_btn)
         self.lingbot_video_stop_btn = QPushButton("停止")
-        self.lingbot_video_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.lingbot_video_stop_btn.setObjectName("dangerAction")
         self.lingbot_video_stop_btn.setEnabled(False)
         self.lingbot_video_stop_btn.clicked.connect(self._on_lingbot_video_stop_clicked)
         video_run_row.addWidget(self.lingbot_video_stop_btn)
@@ -20919,42 +21341,64 @@ class CameraTopicWindow(QMainWindow):
         video_run_row.addWidget(self.lingbot_video_status_label, 1)
         video_outer.addLayout(video_run_row)
 
-        video_preview = QHBoxLayout()
-        video_preview.setSpacing(8)
+        video_preview = QWidget()
+        video_preview_l = QHBoxLayout(video_preview)
+        video_preview_l.setContentsMargins(0, 0, 0, 0)
+        video_preview_l.setSpacing(8)
         self.lingbot_video_input_label = ScaledPixmapLabel("输入 / 首帧")
-        self.lingbot_video_input_label.setMinimumHeight(180)
-        video_preview.addWidget(self.lingbot_video_input_label, 1)
+        self.lingbot_video_input_label.setMinimumHeight(96)
+        video_preview_l.addWidget(self.lingbot_video_input_label, 1)
 
         self.lingbot_video_output_stack = QWidget()
         out_stack_layout = QVBoxLayout(self.lingbot_video_output_stack)
         out_stack_layout.setContentsMargins(0, 0, 0, 0)
         out_stack_layout.setSpacing(0)
         self.lingbot_video_output_label = ScaledPixmapLabel("输出图像（T2I）")
-        self.lingbot_video_output_label.setMinimumHeight(180)
+        self.lingbot_video_output_label.setMinimumHeight(96)
         out_stack_layout.addWidget(self.lingbot_video_output_label)
         self.lingbot_video_player = VideoPlayerWidget(self.lingbot_video_output_stack)
-        self.lingbot_video_player.setMinimumHeight(220)
+        self.lingbot_video_player.setMinimumHeight(96)
         self.lingbot_video_player.setVisible(False)
         out_stack_layout.addWidget(self.lingbot_video_player, 1)
-        video_preview.addWidget(self.lingbot_video_output_stack, 2)
-        video_outer.addLayout(video_preview, 1)
+        video_preview_l.addWidget(self.lingbot_video_output_stack, 2)
 
         self.lingbot_video_log_edit = QTextEdit()
         self.lingbot_video_log_edit.setReadOnly(True)
         self.lingbot_video_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.lingbot_video_log_edit.setPlaceholderText("LingBot-Video 日志…")
         self.lingbot_video_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
+        )
+        video_log_pane = QWidget()
+        video_log_l = QVBoxLayout(video_log_pane)
+        video_log_l.setContentsMargins(0, 0, 0, 0)
+        video_log_l.setSpacing(2)
+        self.lingbot_video_log_edit.setMinimumHeight(72)
+        self.lingbot_video_log_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
         )
         self.lingbot_video_log_edit_resize_bar = _add_text_edit_with_drag_bar(
-            video_outer,
+            video_log_l,
             self.lingbot_video_log_edit,
-            default_h=160,
-            min_h=80,
+            default_h=120,
+            min_h=72,
             max_h=900,
             label="拖动调整 Video 日志高度",
         )
+        self.lingbot_video_log_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        self.lingbot_video_log_edit.setMaximumHeight(16777215)
+        video_split = _always_visible_splitter(Qt.Vertical)
+        video_split.addWidget(_wrap_in_vscroll(video_form))
+        video_split.addWidget(video_preview)
+        video_split.addWidget(video_log_pane)
+        video_split.setStretchFactor(0, 2)
+        video_split.setStretchFactor(1, 3)
+        video_split.setStretchFactor(2, 2)
+        video_split.setSizes([220, 280, 140])
+        video_outer.addWidget(video_split, 1)
 
         self._lingbot_video_launcher = LingbotVideoLauncher(self)
         self._lingbot_video_launcher.log_line.connect(self._append_lingbot_video_log)
@@ -20972,6 +21416,10 @@ class CameraTopicWindow(QMainWindow):
         world_outer = QVBoxLayout(world_tab)
         world_outer.setContentsMargins(8, 6, 8, 6)
         world_outer.setSpacing(6)
+        world_form = QWidget()
+        world_form_l = QVBoxLayout(world_form)
+        world_form_l.setContentsMargins(0, 0, 0, 0)
+        world_form_l.setSpacing(6)
         world_hint = QLabel(
             "LingBot-World-V2：图像 + 相机轨迹 → 交互世界视频。默认使用本地 "
             "1.3B-causal-fast（单卡）。可在下方选择图像预览中的彩色画面（或点击预览图）"
@@ -20979,10 +21427,9 @@ class CameraTopicWindow(QMainWindow):
         )
         world_hint.setWordWrap(True)
         world_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        world_outer.addWidget(world_hint)
+        world_form_l.addWidget(world_hint)
 
-        world_row = QHBoxLayout()
-        world_row.setSpacing(6)
+        world_row = _FlowLayout(spacing=6)
         world_row.addWidget(QLabel("示例"))
         self.lingbot_world_example_combo = ImeSafeComboBox()
         for ex in ("00", "01", "02", "03", "04", "05"):
@@ -21016,7 +21463,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_world_offload_check = QCheckBox("offload")
         self.lingbot_world_offload_check.setChecked(True)
         world_row.addWidget(self.lingbot_world_offload_check)
-        world_outer.addLayout(world_row)
+        world_form_l.addLayout(world_row)
 
         world_path_row = QHBoxLayout()
         world_path_row.setSpacing(6)
@@ -21045,7 +21492,7 @@ class CameraTopicWindow(QMainWindow):
             self._on_lingbot_world_action_browse_clicked
         )
         world_path_row.addWidget(self.lingbot_world_action_browse_btn)
-        world_outer.addLayout(world_path_row)
+        world_form_l.addLayout(world_path_row)
 
         world_topic_row = QHBoxLayout()
         world_topic_row.setSpacing(6)
@@ -21065,7 +21512,7 @@ class CameraTopicWindow(QMainWindow):
             self._refresh_lingbot_world_topic_combo
         )
         world_topic_row.addWidget(self.lingbot_world_topic_refresh_btn)
-        world_outer.addLayout(world_topic_row)
+        world_form_l.addLayout(world_topic_row)
 
         world_ckpt_row = QHBoxLayout()
         world_ckpt_row.setSpacing(6)
@@ -21078,28 +21525,19 @@ class CameraTopicWindow(QMainWindow):
             self._on_lingbot_world_ckpt_browse_clicked
         )
         world_ckpt_row.addWidget(self.lingbot_world_ckpt_browse_btn)
-        world_outer.addLayout(world_ckpt_row)
+        world_form_l.addLayout(world_ckpt_row)
 
         world_prompt_row = QHBoxLayout()
         world_prompt_row.setSpacing(6)
         world_prompt_row.addWidget(QLabel("prompt"))
         self.lingbot_world_prompt_edit = QTextEdit()
         _configure_resizable_text_edit(
-            self.lingbot_world_prompt_edit,
-            default_h=100,
-            tooltip="拖动下方手柄可调整 prompt 高度",
+            self.lingbot_world_prompt_edit, default_h=100, tooltip=""
         )
         self.lingbot_world_prompt_edit.setPlainText(LINGBOT_WORLD_PROMPT_DEFAULT)
         world_prompt_row.addWidget(self.lingbot_world_prompt_edit, 1)
-        world_outer.addLayout(world_prompt_row)
-        self.lingbot_world_prompt_resize_bar = _LogHeightDragBar(
-            self.lingbot_world_prompt_edit,
-            grow_down=True,
-            min_h=64,
-            max_h=360,
-            label="拖动调整 prompt 高度",
-        )
-        world_outer.addWidget(self.lingbot_world_prompt_resize_bar)
+        world_form_l.addLayout(world_prompt_row)
+        self.lingbot_world_prompt_resize_bar = None
 
         world_run_row = QHBoxLayout()
         world_run_row.setSpacing(6)
@@ -21107,7 +21545,7 @@ class CameraTopicWindow(QMainWindow):
         self.lingbot_world_run_btn.clicked.connect(self._on_lingbot_world_run_clicked)
         world_run_row.addWidget(self.lingbot_world_run_btn)
         self.lingbot_world_stop_btn = QPushButton("停止")
-        self.lingbot_world_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.lingbot_world_stop_btn.setObjectName("dangerAction")
         self.lingbot_world_stop_btn.setEnabled(False)
         self.lingbot_world_stop_btn.clicked.connect(self._on_lingbot_world_stop_clicked)
         world_run_row.addWidget(self.lingbot_world_stop_btn)
@@ -21120,32 +21558,51 @@ class CameraTopicWindow(QMainWindow):
         world_run_row.addWidget(self.lingbot_world_status_label, 1)
         world_outer.addLayout(world_run_row)
 
-        world_preview = QHBoxLayout()
-        world_preview.setSpacing(8)
+        world_preview = QWidget()
+        world_preview_l = QHBoxLayout(world_preview)
+        world_preview_l.setContentsMargins(0, 0, 0, 0)
+        world_preview_l.setSpacing(8)
         self.lingbot_world_input_label = ScaledPixmapLabel("输入图像")
-        self.lingbot_world_input_label.setMinimumHeight(160)
-        world_preview.addWidget(self.lingbot_world_input_label, 1)
-        self.lingbot_world_player = VideoPlayerWidget(world_tab)
-        self.lingbot_world_player.setMinimumHeight(220)
-        world_preview.addWidget(self.lingbot_world_player, 2)
-        world_outer.addLayout(world_preview, 1)
+        self.lingbot_world_input_label.setMinimumHeight(96)
+        world_preview_l.addWidget(self.lingbot_world_input_label, 1)
+        self.lingbot_world_player = VideoPlayerWidget(world_preview)
+        self.lingbot_world_player.setMinimumHeight(96)
+        world_preview_l.addWidget(self.lingbot_world_player, 2)
 
         self.lingbot_world_log_edit = QTextEdit()
         self.lingbot_world_log_edit.setReadOnly(True)
         self.lingbot_world_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.lingbot_world_log_edit.setPlaceholderText("LingBot-World 日志…")
         self.lingbot_world_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
+        world_log_pane = QWidget()
+        world_log_l = QVBoxLayout(world_log_pane)
+        world_log_l.setContentsMargins(0, 0, 0, 0)
+        world_log_l.setSpacing(2)
+        self.lingbot_world_log_edit.setMinimumHeight(72)
         self.lingbot_world_log_edit_resize_bar = _add_text_edit_with_drag_bar(
-            world_outer,
+            world_log_l,
             self.lingbot_world_log_edit,
-            default_h=160,
-            min_h=80,
+            default_h=120,
+            min_h=72,
             max_h=900,
             label="拖动调整 World 日志高度",
         )
+        self.lingbot_world_log_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        self.lingbot_world_log_edit.setMaximumHeight(16777215)
+        world_split = _always_visible_splitter(Qt.Vertical)
+        world_split.addWidget(_wrap_in_vscroll(world_form))
+        world_split.addWidget(world_preview)
+        world_split.addWidget(world_log_pane)
+        world_split.setStretchFactor(0, 2)
+        world_split.setStretchFactor(1, 3)
+        world_split.setStretchFactor(2, 2)
+        world_split.setSizes([240, 280, 140])
+        world_outer.addWidget(world_split, 1)
 
         self._lingbot_world_launcher = LingbotWorldLauncher(self)
         self._lingbot_world_launcher.log_line.connect(self._append_lingbot_world_log)
@@ -21163,7 +21620,7 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_tab = bagel_tab
         bagel_tab.setObjectName("bagelTab")
         bagel_tab.setStyleSheet(
-            "#bagelTab { background-color: #1a1a1a; }"
+            f"#bagelTab {{ background-color: {UI_BG_INPUT}; }}"
             "#bagelTab QLabel { background: transparent; }"
         )
         bagel_outer = QVBoxLayout(bagel_tab)
@@ -21268,7 +21725,7 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_start_btn.clicked.connect(self._on_bagel_start_clicked)
         bagel_run_row.addWidget(self.bagel_start_btn)
         self.bagel_stop_btn = QPushButton("停止")
-        self.bagel_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.bagel_stop_btn.setObjectName("dangerAction")
         self.bagel_stop_btn.setEnabled(False)
         self.bagel_stop_btn.clicked.connect(self._on_bagel_stop_clicked)
         bagel_run_row.addWidget(self.bagel_stop_btn)
@@ -21309,7 +21766,7 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_api_start_btn.clicked.connect(self._on_bagel_api_start_clicked)
         bagel_api_row.addWidget(self.bagel_api_start_btn)
         self.bagel_api_stop_btn = QPushButton("停止 API")
-        self.bagel_api_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.bagel_api_stop_btn.setObjectName("dangerAction")
         self.bagel_api_stop_btn.setEnabled(False)
         self.bagel_api_stop_btn.setToolTip(
             "停止推理 API，并清理所有相关 Bagel 进程（含 Gradio / 残留 serve_api）。"
@@ -21411,24 +21868,15 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_call_prompt_edit = ImeSafeTextEdit()
         self.bagel_call_prompt_edit.setPlaceholderText("输入提示词后点「调用」")
         self.bagel_call_prompt_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         _configure_resizable_text_edit(
-            self.bagel_call_prompt_edit,
-            default_h=88,
-            tooltip="拖动下方手柄可调整提示词高度",
+            self.bagel_call_prompt_edit, default_h=88, tooltip=""
         )
         bagel_prompt_row.addWidget(self.bagel_call_prompt_edit, 1)
         bagel_outer.addLayout(bagel_prompt_row)
-        self.bagel_call_prompt_resize_bar = _LogHeightDragBar(
-            self.bagel_call_prompt_edit,
-            grow_down=True,
-            min_h=56,
-            max_h=360,
-            label="拖动调整提示词高度",
-        )
-        bagel_outer.addWidget(self.bagel_call_prompt_resize_bar)
+        self.bagel_call_prompt_resize_bar = None
 
         bagel_speed_row = QHBoxLayout()
         bagel_speed_row.setSpacing(6)
@@ -21481,7 +21929,7 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_history_btn.clicked.connect(self._on_bagel_history_clicked)
         bagel_hist_row.addWidget(self.bagel_history_btn)
         self.bagel_history_del_turn_btn = QPushButton("删本轮")
-        self.bagel_history_del_turn_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.bagel_history_del_turn_btn.setObjectName("dangerAction")
         self.bagel_history_del_turn_btn.setToolTip("删除左侧列表中选中的调用轮次")
         self.bagel_history_del_turn_btn.clicked.connect(
             self._on_bagel_history_delete_turn_clicked
@@ -21499,7 +21947,7 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_history_turns_list.setMinimumWidth(160)
         self.bagel_history_turns_list.setMaximumWidth(220)
         self.bagel_history_turns_list.setStyleSheet(
-            "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+            f"QListWidget {{ background-color: {UI_BG_INPUT}; color: #ddd; border: 1px solid {UI_BORDER}; }}"
         )
         self.bagel_history_turns_list.itemClicked.connect(
             self._on_bagel_history_turn_clicked
@@ -21513,7 +21961,7 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_call_input_preview.setFixedSize(120, 90)
         self.bagel_call_input_preview.setAlignment(Qt.AlignCenter)
         self.bagel_call_input_preview.setStyleSheet(
-            "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #888; }"
+            f"QLabel {{ background-color: {UI_BG_INPUT}; border: 1px solid {UI_BORDER}; color: #888; }}"
         )
         bagel_in_col.addWidget(self.bagel_call_input_preview)
         self.bagel_call_input_size_label = QLabel("输入分辨率: —")
@@ -21532,7 +21980,7 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_call_output_preview.setMinimumHeight(160)
         self.bagel_call_output_preview.setAlignment(Qt.AlignCenter)
         self.bagel_call_output_preview.setStyleSheet(
-            "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #888; }"
+            f"QLabel {{ background-color: {UI_BG_INPUT}; border: 1px solid {UI_BORDER}; color: #888; }}"
         )
         self.bagel_call_output_preview.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding
@@ -21585,8 +22033,8 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.bagel_log_edit.setPlaceholderText("Bagel 启动 / 推理日志…")
         self.bagel_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.bagel_log_edit_resize_bar = _add_text_edit_with_drag_bar(
             bagel_outer,
@@ -21772,7 +22220,7 @@ class CameraTopicWindow(QMainWindow):
         self.cad_start_btn.clicked.connect(self._on_cad_start_clicked)
         cad_action_row.addWidget(self.cad_start_btn)
         self.cad_stop_btn = QPushButton("停止")
-        self.cad_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.cad_stop_btn.setObjectName("dangerAction")
         self.cad_stop_btn.setEnabled(False)
         self.cad_stop_btn.clicked.connect(self._on_cad_stop_clicked)
         cad_action_row.addWidget(self.cad_stop_btn)
@@ -21789,8 +22237,8 @@ class CameraTopicWindow(QMainWindow):
             "建议：≥12 张照片、相邻约 60% 重叠；哑光非透明物体更稳。"
         )
         self.cad_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.cad_log_edit_resize_bar = _add_text_edit_with_drag_bar(
             cad_outer,
@@ -21904,7 +22352,7 @@ class CameraTopicWindow(QMainWindow):
         train_row2.addWidget(self.train_start_btn)
         self.train_stop_btn = QPushButton("停止")
         self.train_stop_btn.setToolTip("终止当前训练进程")
-        self.train_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.train_stop_btn.setObjectName("dangerAction")
         self.train_stop_btn.setEnabled(False)
         self.train_stop_btn.clicked.connect(self._on_train_stop_clicked)
         train_row2.addWidget(self.train_stop_btn)
@@ -21918,8 +22366,8 @@ class CameraTopicWindow(QMainWindow):
         self.train_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.train_log_edit.setPlaceholderText("训练日志将在此实时显示…")
         self.train_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.train_log_edit_resize_bar = _add_text_edit_with_drag_bar(
             train_outer,
@@ -21944,13 +22392,24 @@ class CameraTopicWindow(QMainWindow):
         sim_outer.setContentsMargins(8, 6, 8, 6)
         sim_outer.setSpacing(6)
 
+        sim_header = QWidget()
+        sim_header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+        sim_header_l = QVBoxLayout(sim_header)
+        sim_header_l.setContentsMargins(0, 0, 0, 0)
+        sim_header_l.setSpacing(6)
+        sim_outer.addWidget(sim_header)
+
+        sim_form = QWidget()
+        sim_form_l = QVBoxLayout(sim_form)
+        sim_form_l.setContentsMargins(0, 0, 0, 0)
+        sim_form_l.setSpacing(6)
+
         self.sim_hint_label = QLabel("")
         self.sim_hint_label.setWordWrap(True)
         self.sim_hint_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        sim_outer.addWidget(self.sim_hint_label)
+        sim_form_l.addWidget(self.sim_hint_label)
 
-        sim_backend_row = QHBoxLayout()
-        sim_backend_row.setSpacing(12)
+        sim_backend_row = _FlowLayout(spacing=10)
         sim_backend_row.addWidget(QLabel("仿真后端"))
         self.sim_backend_isaac_radio = QRadioButton("Isaac / RoboDojo")
         self.sim_backend_mujoco_radio = QRadioButton("MuJoCo")
@@ -21958,6 +22417,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_backend_arena_radio = QRadioButton("IsaacLab-Arena")
         self.sim_backend_libero_radio = QRadioButton("LIBERO")
         self.sim_backend_robotwin_radio = QRadioButton("RoboTwin")
+        self.sim_backend_extended_radio = QRadioButton("扩展评测")
         self.sim_backend_isaac_radio.setChecked(True)
         self._sim_backend_group = QButtonGroup(self)
         self._sim_backend_group.addButton(self.sim_backend_isaac_radio, 0)
@@ -21966,20 +22426,141 @@ class CameraTopicWindow(QMainWindow):
         self._sim_backend_group.addButton(self.sim_backend_arena_radio, 3)
         self._sim_backend_group.addButton(self.sim_backend_libero_radio, 4)
         self._sim_backend_group.addButton(self.sim_backend_robotwin_radio, 5)
+        self._sim_backend_group.addButton(self.sim_backend_extended_radio, 6)
         self.sim_backend_isaac_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_mujoco_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_spaces_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_arena_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_libero_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_robotwin_radio.toggled.connect(self._on_sim_backend_changed)
+        self.sim_backend_extended_radio.toggled.connect(self._on_sim_backend_changed)
         sim_backend_row.addWidget(self.sim_backend_isaac_radio)
         sim_backend_row.addWidget(self.sim_backend_mujoco_radio)
         sim_backend_row.addWidget(self.sim_backend_spaces_radio)
         sim_backend_row.addWidget(self.sim_backend_arena_radio)
         sim_backend_row.addWidget(self.sim_backend_libero_radio)
         sim_backend_row.addWidget(self.sim_backend_robotwin_radio)
-        sim_backend_row.addStretch(1)
-        sim_outer.addLayout(sim_backend_row)
+        sim_backend_row.addWidget(self.sim_backend_extended_radio)
+        sim_header_l.addLayout(sim_backend_row)
+
+        ext_backend_row = QHBoxLayout()
+        ext_backend_row.setSpacing(6)
+        ext_backend_row.addWidget(QLabel("扩展套件"))
+        self.sim_extended_combo = ImeSafeComboBox()
+        self.sim_extended_combo.setMinimumWidth(220)
+        self.sim_extended_combo.setToolTip(
+            "SimplerEnv / CALVIN / RoboCasa / ManiSkill / Genesis / VLA Harness 等扩展评测。\n"
+            "需先选中上方「扩展评测」；榜单随套件切换；启动走 tools/run_external_bench.py。"
+        )
+        for label, key in list_extended_choices() or [
+            ("SimplerEnv", "simpler"),
+            ("CALVIN", "calvin"),
+            ("RoboCasa", "robocasa"),
+            ("ManiSkill3", "maniskill3"),
+            ("VLA Harness (总榜)", "vla_harness"),
+        ]:
+            self.sim_extended_combo.addItem(label, key)
+        idx_simpler = self.sim_extended_combo.findData("simpler")
+        if idx_simpler >= 0:
+            self.sim_extended_combo.setCurrentIndex(idx_simpler)
+        self.sim_extended_combo.currentIndexChanged.connect(
+            self._on_sim_extended_combo_changed
+        )
+        ext_backend_row.addWidget(self.sim_extended_combo, 1)
+        self.sim_extended_combo.setEnabled(False)
+        sim_form_l.addLayout(ext_backend_row)
+
+        # Shared industry leaderboard (switches with 仿真后端)
+        self.sim_leaderboard_group = QGroupBox("业内评测榜单")
+        self.sim_leaderboard_group.setCheckable(True)
+        self.sim_leaderboard_group.setChecked(True)
+        self.sim_leaderboard_group.setStyleSheet(
+            f"QGroupBox {{ color: {UI_TEXT_PRIMARY}; font-weight: bold; "
+            f"border: 1px solid {UI_BORDER}; margin-top: 8px; padding-top: 10px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; }}"
+        )
+        _lb_outer = QVBoxLayout(self.sim_leaderboard_group)
+        _lb_outer.setContentsMargins(8, 8, 8, 6)
+        _lb_outer.setSpacing(4)
+        _lb_meta = QHBoxLayout()
+        _lb_meta.setSpacing(6)
+        self.sim_leaderboard_meta_label = QLabel("")
+        self.sim_leaderboard_meta_label.setWordWrap(True)
+        self.sim_leaderboard_meta_label.setStyleSheet(
+            f"color: {UI_TEXT_MUTED}; font-weight: normal;"
+        )
+        _lb_meta.addWidget(self.sim_leaderboard_meta_label, 1)
+        self.sim_leaderboard_source_btn = QPushButton("打开来源")
+        self.sim_leaderboard_source_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_leaderboard_source_btn.setToolTip("打开当前后端官方 / 公开榜单页面")
+        self.sim_leaderboard_source_btn.clicked.connect(
+            self._on_sim_leaderboard_source_clicked
+        )
+        _lb_meta.addWidget(self.sim_leaderboard_source_btn)
+        self.sim_leaderboard_refresh_btn = QPushButton("刷新")
+        self.sim_leaderboard_refresh_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_leaderboard_refresh_btn.setStyleSheet(f"color: {UI_ACCENT_BLUE};")
+        self.sim_leaderboard_refresh_btn.setToolTip(
+            "从公开榜单源实时抓取当前后端结果，更新表格并写回\n"
+            "eai/sim_eval_leaderboards.json（后台线程，不卡 UI）"
+        )
+        self.sim_leaderboard_refresh_btn.clicked.connect(
+            self._on_sim_leaderboard_refresh_clicked
+        )
+        _lb_meta.addWidget(self.sim_leaderboard_refresh_btn)
+        self.sim_leaderboard_reload_btn = QPushButton("本地")
+        self.sim_leaderboard_reload_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_leaderboard_reload_btn.setToolTip(
+            "仅重新读取本地 eai/sim_eval_leaderboards.json（不联网）"
+        )
+        self.sim_leaderboard_reload_btn.clicked.connect(
+            self._on_sim_leaderboard_reload_clicked
+        )
+        _lb_meta.addWidget(self.sim_leaderboard_reload_btn)
+        self._sim_leaderboard_refreshing = False
+        _lb_outer.addLayout(_lb_meta)
+        self.sim_leaderboard_table = QTableWidget(0, 6)
+        self.sim_leaderboard_table.setHorizontalHeaderLabels(
+            ["#", "方法", "指标", "说明", "机构", "日期"]
+        )
+        self.sim_leaderboard_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.sim_leaderboard_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.sim_leaderboard_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.sim_leaderboard_table.setAlternatingRowColors(True)
+        self.sim_leaderboard_table.verticalHeader().setVisible(False)
+        self.sim_leaderboard_table.setShowGrid(True)
+        self.sim_leaderboard_table.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_leaderboard_table.setStyleSheet(
+            f"QTableWidget {{ background-color: {UI_BG_INPUT}; color: #ddd; "
+            f"border: 1px solid {UI_BORDER}; gridline-color: #444; "
+            "alternate-background-color: #222; }"
+            "QHeaderView::section { background-color: #2a2a2a; color: #ccc; "
+            f"border: 1px solid {UI_BORDER}; padding: 3px; font-weight: bold; }}"
+        )
+        _hdr = self.sim_leaderboard_table.horizontalHeader()
+        _hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        _hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        _hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        _hdr.setSectionResizeMode(3, QHeaderView.Stretch)
+        _hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        _hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.sim_leaderboard_table.setMinimumHeight(72)
+        self.sim_leaderboard_table.setMaximumHeight(220)
+        self.sim_leaderboard_table.setFixedHeight(112)
+        self.sim_leaderboard_table.setToolTip(
+            "业内公开发布的实际结果快照；切换仿真后端会切换对应榜单。"
+            "完整协议与最新排名以「打开来源」为准。"
+        )
+        _lb_outer.addWidget(self.sim_leaderboard_table)
+        self.sim_leaderboard_note_label = QLabel("")
+        self.sim_leaderboard_note_label.setWordWrap(True)
+        self.sim_leaderboard_note_label.setStyleSheet(
+            f"color: {UI_TEXT_MUTED}; font-weight: normal;"
+        )
+        _lb_outer.addWidget(self.sim_leaderboard_note_label)
+        self.sim_leaderboard_group.toggled.connect(self._on_sim_leaderboard_toggled)
+        self._sim_leaderboard_source_url = ""
+        sim_form_l.addWidget(self.sim_leaderboard_group)
 
         self.sim_backend_stack = QStackedWidget()
 
@@ -22036,7 +22617,7 @@ class CameraTopicWindow(QMainWindow):
         sim_ctrl_row.addWidget(self.sim_bridge_start_btn)
         self.sim_bridge_stop_btn = QPushButton("停止")
         self.sim_bridge_stop_btn.setFocusPolicy(Qt.NoFocus)
-        self.sim_bridge_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.sim_bridge_stop_btn.setObjectName("dangerAction")
         self.sim_bridge_stop_btn.setEnabled(False)
         self.sim_bridge_stop_btn.clicked.connect(self._on_sim_bridge_stop_clicked)
         sim_ctrl_row.addWidget(self.sim_bridge_stop_btn)
@@ -22061,16 +22642,12 @@ class CameraTopicWindow(QMainWindow):
         self.sim_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.sim_log_edit.setFixedHeight(160)
         self.sim_log_edit.setPlaceholderText("相机桥 / Isaac 评测日志…")
-        self.sim_log_edit.setToolTip("拖动下方手柄可调整日志高度")
         self.sim_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         isaac_outer.addWidget(self.sim_log_edit)
-        self.sim_log_resize_bar = _LogHeightDragBar(
-            self.sim_log_edit, grow_down=True, min_h=60, max_h=900
-        )
-        isaac_outer.addWidget(self.sim_log_resize_bar)
+        self.sim_log_resize_bar = None
 
         isaac_lower = QWidget()
         isaac_lower_l = QVBoxLayout(isaac_lower)
@@ -22120,8 +22697,8 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_policy_combo.setToolTip(
             "XPolicyLab 策略目录（自动扫描带 deploy.py 的 policy/*）。\n"
             "选「无」：只启动评测（Isaac / eval client），不启动策略服务；\n"
-            "评测侧用进程内 hold-pose / GUI 遥控推进，相机可预览；\n"
-            "「手臂/手」页可控制仿真双臂与夹爪。\n"
+            "评测侧用进程内 hold-pose / GUI 遥控推进，相机可预览。\n"
+            "各后端「只开界面」后，「手臂/手」文本指挥 / 滑块均可遥控。\n"
             "各策略还需对应 conda 环境与 ckpt 才可真正推理。"
         )
         self.sim_eval_policy_combo.currentIndexChanged.connect(
@@ -22175,11 +22752,23 @@ class CameraTopicWindow(QMainWindow):
             "策略选「无」：只启评测客户端（零动作 / GUI 遥控）。\n"
             "相关进程一直保留，直到点击「停止评测」。"
         )
-        self.sim_eval_start_btn.clicked.connect(self._on_sim_eval_start_clicked)
+        self.sim_eval_start_btn.clicked.connect(
+            lambda: self._start_sim_eval(viewer_only=False)
+        )
         sim_run_row.addWidget(self.sim_eval_start_btn)
+        self.sim_eval_viewer_only_btn = QPushButton("只开界面")
+        self.sim_eval_viewer_only_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_viewer_only_btn.setToolTip(
+            "只启动当前仿真后端界面，不调用策略推理。\n"
+            "可用「手臂/手」页文本指挥 / 滑块遥控；点「停止评测」或「停止」关闭。"
+        )
+        self.sim_eval_viewer_only_btn.clicked.connect(
+            self._on_sim_viewer_only_clicked
+        )
+        sim_run_row.addWidget(self.sim_eval_viewer_only_btn)
         self.sim_eval_stop_run_btn = QPushButton("停止评测")
         self.sim_eval_stop_run_btn.setFocusPolicy(Qt.NoFocus)
-        self.sim_eval_stop_run_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.sim_eval_stop_run_btn.setObjectName("dangerAction")
         self.sim_eval_stop_run_btn.setEnabled(False)
         self.sim_eval_stop_run_btn.setToolTip(
             "停止全部仿真（本窗口进程 + 系统中所有 eval_client / Isaac / robodojo）。\n"
@@ -22212,7 +22801,7 @@ class CameraTopicWindow(QMainWindow):
         sim_policy_deploy_row.addWidget(self.sim_policy_deploy_start_btn)
         self.sim_policy_deploy_stop_btn = QPushButton("部署停止")
         self.sim_policy_deploy_stop_btn.setFocusPolicy(Qt.NoFocus)
-        self.sim_policy_deploy_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.sim_policy_deploy_stop_btn.setObjectName("dangerAction")
         self.sim_policy_deploy_stop_btn.setEnabled(False)
         self.sim_policy_deploy_stop_btn.setToolTip("停止本窗口拉起的 RoboDojo 策略服务")
         self.sim_policy_deploy_stop_btn.clicked.connect(
@@ -22281,7 +22870,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_tree.setMinimumWidth(280)
         self.sim_eval_tree.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.sim_eval_tree.setStyleSheet(
-            "QTreeWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+            f"QTreeWidget {{ background-color: {UI_BG_INPUT}; color: #ddd; border: 1px solid {UI_BORDER}; }}"
         )
         self.sim_eval_tree.itemExpanded.connect(self._on_sim_eval_item_expanded)
         self.sim_eval_tree.currentItemChanged.connect(self._on_sim_eval_selection_changed)
@@ -22296,15 +22885,15 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_detail_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.sim_eval_detail_edit.setPlaceholderText("选中含 _result.json 的运行后显示摘要…")
         self.sim_eval_detail_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.sim_eval_detail_edit.setMinimumHeight(140)
         sim_eval_right_layout.addWidget(self.sim_eval_detail_edit, 1)
         self.sim_eval_files_list = QListWidget()
         self.sim_eval_files_list.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.sim_eval_files_list.setStyleSheet(
-            "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+            f"QListWidget {{ background-color: {UI_BG_INPUT}; color: #ddd; border: 1px solid {UI_BORDER}; }}"
         )
         self.sim_eval_files_list.setMinimumHeight(60)
         self.sim_eval_files_list.setMaximumHeight(180)
@@ -22347,6 +22936,13 @@ class CameraTopicWindow(QMainWindow):
         self._sim_preview_retry_timer.setInterval(1500)
         self._sim_preview_retry_timer.timeout.connect(self._retry_enable_sim_preview_topics)
         self._sim_preview_retry_left = 0
+        self._rynnvalue_workspace_hud_timer = QTimer(self)
+        self._rynnvalue_workspace_hud_timer.setInterval(100)  # ~10 Hz overlay poll
+        self._rynnvalue_workspace_hud_timer.timeout.connect(
+            self._poll_rynnvalue_workspace_hud
+        )
+        self._rynnvalue_workspace_hud_mtime = 0.0
+        # Started after workspace Topic/preview widgets exist (see __init__ tail).
         self._sim_eval_auto_bridge = False
         # 用户手动取消勾选的 topic：轮询 / ROS 刷新不得再强制勾回
         self._topic_user_unchecked: set[str] = set()
@@ -22694,8 +23290,7 @@ class CameraTopicWindow(QMainWindow):
         libero_root_row.addWidget(self.libero_rlinf_browse_btn)
         libero_page_l.addLayout(libero_root_row)
 
-        libero_task_row = QHBoxLayout()
-        libero_task_row.setSpacing(6)
+        libero_task_row = _FlowLayout(spacing=6)
         libero_task_row.addWidget(QLabel("套件"))
         self.libero_suite_combo = ImeSafeComboBox()
         for label, suite_id in LIBERO_TASK_SUITES:
@@ -22750,7 +23345,7 @@ class CameraTopicWindow(QMainWindow):
         libero_ckpt_row.addWidget(self.libero_pi_probe_btn)
         self.libero_pi_stop_btn = QPushButton("停止 Pi")
         self.libero_pi_stop_btn.setFocusPolicy(Qt.NoFocus)
-        self.libero_pi_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.libero_pi_stop_btn.setObjectName("dangerAction")
         self.libero_pi_stop_btn.setToolTip("停止 :8080 上的 OpenPI serve_policy，卸载 Pi 模型并释放 GPU")
         self.libero_pi_stop_btn.clicked.connect(self._on_libero_pi_stop_clicked)
         libero_ckpt_row.addWidget(self.libero_pi_stop_btn)
@@ -22766,8 +23361,7 @@ class CameraTopicWindow(QMainWindow):
         libero_pi_status_row.addWidget(self.libero_pi_status_label, 1)
         libero_page_l.addLayout(libero_pi_status_row)
 
-        libero_param_row = QHBoxLayout()
-        libero_param_row.setSpacing(6)
+        libero_param_row = _FlowLayout(spacing=6)
         libero_param_row.addWidget(QLabel("任务数"))
         self.libero_max_tasks_spin = QSpinBox()
         self.libero_max_tasks_spin.setRange(0, 1000)
@@ -22800,7 +23394,6 @@ class CameraTopicWindow(QMainWindow):
             "无 DISPLAY 时可取消勾选，仅离屏渲染并保存视频。"
         )
         libero_param_row.addWidget(self.libero_render_gui_check)
-        libero_param_row.addStretch(1)
         libero_page_l.addLayout(libero_param_row)
 
         libero_hint = QLabel(
@@ -22918,8 +23511,7 @@ class CameraTopicWindow(QMainWindow):
         robotwin_ckpt_row.addWidget(self.robotwin_ckpt_browse_btn)
         robotwin_page_l.addLayout(robotwin_ckpt_row)
 
-        robotwin_param_row = QHBoxLayout()
-        robotwin_param_row.setSpacing(6)
+        robotwin_param_row = _FlowLayout(spacing=6)
         robotwin_param_row.addWidget(QLabel("并行环境"))
         self.robotwin_num_envs_spin = QSpinBox()
         self.robotwin_num_envs_spin.setRange(1, 256)
@@ -22941,7 +23533,6 @@ class CameraTopicWindow(QMainWindow):
             "图形模式强制并行环境=1；无 DISPLAY 时可取消勾选，仅离屏并保存 mp4。"
         )
         robotwin_param_row.addWidget(self.robotwin_render_gui_check)
-        robotwin_param_row.addStretch(1)
         robotwin_page_l.addLayout(robotwin_param_row)
 
         robotwin_hint = QLabel(
@@ -22957,16 +23548,127 @@ class CameraTopicWindow(QMainWindow):
         robotwin_page_l.addStretch(1)
         self.sim_backend_stack.addWidget(robotwin_page)
 
-        # Shared MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin run controls + 可拖动高度的日志
-        sim_outer.addWidget(self.sim_backend_stack, 1)
+        # --- page 6: Extended benches (SimplerEnv / CALVIN / RoboCasa / …) ---
+        ext_page = QWidget()
+        ext_page_l = QVBoxLayout(ext_page)
+        ext_page_l.setContentsMargins(0, 0, 0, 0)
+        ext_page_l.setSpacing(6)
+
+        self.ext_bench_title_label = QLabel("扩展评测")
+        self.ext_bench_title_label.setStyleSheet(
+            f"color: {UI_TEXT_PRIMARY}; font-weight: bold;"
+        )
+        ext_page_l.addWidget(self.ext_bench_title_label)
+        self.ext_bench_hint_label = QLabel("")
+        self.ext_bench_hint_label.setWordWrap(True)
+        self.ext_bench_hint_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        ext_page_l.addWidget(self.ext_bench_hint_label)
+
+        ext_root_row = QHBoxLayout()
+        ext_root_row.setSpacing(6)
+        ext_root_row.addWidget(QLabel("仓库根目录"))
+        self.ext_bench_root_edit = QLineEdit("")
+        self.ext_bench_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.ext_bench_root_edit.setToolTip(
+            "本地 clone 路径；留空则用默认候选目录。"
+            "无本地仓时可用「Harness Docker」或「安装指引」。"
+        )
+        ext_root_row.addWidget(self.ext_bench_root_edit, 1)
+        self.ext_bench_root_browse_btn = QPushButton("…")
+        self.ext_bench_root_browse_btn.setFixedWidth(28)
+        self.ext_bench_root_browse_btn.clicked.connect(self._on_ext_bench_root_browse)
+        ext_root_row.addWidget(self.ext_bench_root_browse_btn)
+        ext_page_l.addLayout(ext_root_row)
+
+        ext_py_row = QHBoxLayout()
+        ext_py_row.setSpacing(6)
+        ext_py_row.addWidget(QLabel("Python"))
+        self.ext_bench_python_edit = QLineEdit(sys.executable)
+        self.ext_bench_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ext_py_row.addWidget(self.ext_bench_python_edit, 1)
+        ext_page_l.addLayout(ext_py_row)
+
+        ext_param_row = QHBoxLayout()
+        ext_param_row.setSpacing(6)
+        ext_param_row.addWidget(QLabel("模式"))
+        self.ext_bench_mode_combo = ImeSafeComboBox()
+        self.ext_bench_mode_combo.addItem("探测依赖 (probe)", "probe")
+        self.ext_bench_mode_combo.addItem("安装指引 (hint)", "hint")
+        self.ext_bench_mode_combo.addItem("本地评测 (eval)", "eval")
+        self.ext_bench_mode_combo.addItem("只开界面 (viewer)", "viewer")
+        self.ext_bench_mode_combo.addItem("Harness Docker", "harness")
+        self.ext_bench_mode_combo.setCurrentIndex(0)
+        self.ext_bench_mode_combo.setToolTip(
+            "probe/hint：不跑仿真，只检查与打印命令。\n"
+            "eval/viewer：优先本地仓库入口；找不到则回退指引。\n"
+            "harness：AllenAI vla-evaluation-harness Docker 镜像。"
+        )
+        ext_param_row.addWidget(self.ext_bench_mode_combo)
+        ext_param_row.addWidget(QLabel("任务"))
+        self.ext_bench_task_edit = QLineEdit("")
+        self.ext_bench_task_edit.setPlaceholderText("可选 task / suite 名")
+        self.ext_bench_task_edit.setMinimumWidth(140)
+        ext_param_row.addWidget(self.ext_bench_task_edit)
+        ext_param_row.addWidget(QLabel("episodes"))
+        self.ext_bench_episodes_spin = QSpinBox()
+        self.ext_bench_episodes_spin.setRange(1, 1000)
+        self.ext_bench_episodes_spin.setValue(1)
+        ext_param_row.addWidget(self.ext_bench_episodes_spin)
+        self.ext_bench_viewer_check = QCheckBox("图形")
+        self.ext_bench_viewer_check.setChecked(True)
+        self.ext_bench_viewer_check.setFocusPolicy(Qt.NoFocus)
+        ext_param_row.addWidget(self.ext_bench_viewer_check)
+        ext_param_row.addStretch(1)
+        ext_page_l.addLayout(ext_param_row)
+
+        ext_btn_row = QHBoxLayout()
+        ext_btn_row.setSpacing(6)
+        self.ext_bench_probe_btn = QPushButton("探测")
+        self.ext_bench_probe_btn.setFocusPolicy(Qt.NoFocus)
+        self.ext_bench_probe_btn.clicked.connect(self._on_ext_bench_probe_clicked)
+        ext_btn_row.addWidget(self.ext_bench_probe_btn)
+        self.ext_bench_hint_btn = QPushButton("安装指引")
+        self.ext_bench_hint_btn.setFocusPolicy(Qt.NoFocus)
+        self.ext_bench_hint_btn.clicked.connect(self._on_ext_bench_hint_clicked)
+        ext_btn_row.addWidget(self.ext_bench_hint_btn)
+        self.ext_bench_docs_btn = QPushButton("打开文档/榜单")
+        self.ext_bench_docs_btn.setFocusPolicy(Qt.NoFocus)
+        self.ext_bench_docs_btn.clicked.connect(self._on_ext_bench_docs_clicked)
+        ext_btn_row.addWidget(self.ext_bench_docs_btn)
+        ext_btn_row.addStretch(1)
+        ext_page_l.addLayout(ext_btn_row)
+
+        self.ext_bench_status_label = QLabel("空闲 · 扩展评测")
+        self.ext_bench_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.ext_bench_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.ext_bench_status_label.setWordWrap(True)
+        ext_page_l.addWidget(self.ext_bench_status_label)
+
+        ext_note = QLabel(
+            "扩展后端通过 tools/run_external_bench.py 统一启动；"
+            "业内榜单来自 EmbodiedBench / AllenAI VLA Harness。"
+            "完整策略闭环需自行 clone 对应仓库或拉取 harness Docker。"
+            "下方共享「启动」按钮与 MuJoCo 系日志区。"
+        )
+        ext_note.setWordWrap(True)
+        ext_note.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        ext_page_l.addWidget(ext_note)
+        ext_page_l.addStretch(1)
+        self.sim_backend_stack.addWidget(ext_page)
+        self._refresh_ext_bench_form()
+
+        # Shared MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin / Extended run controls
+        self.sim_backend_stack.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Maximum
+        )
+        sim_form_l.addWidget(self.sim_backend_stack)
 
         # Shared RynnValue Live HUD (LIBERO / RoboTwin / future sims)
         self.sim_rynnvalue_hud_panel = QWidget()
         _rv_panel_l = QVBoxLayout(self.sim_rynnvalue_hud_panel)
         _rv_panel_l.setContentsMargins(0, 4, 0, 0)
         _rv_panel_l.setSpacing(4)
-        _rv_row1 = QHBoxLayout()
-        _rv_row1.setSpacing(6)
+        _rv_row1 = _FlowLayout(spacing=6)
         self.sim_rynnvalue_hud_check = QCheckBox("RynnValue Live HUD")
         self.sim_rynnvalue_hud_check.setChecked(False)
         self.sim_rynnvalue_hud_check.setToolTip(
@@ -22985,18 +23687,18 @@ class CameraTopicWindow(QMainWindow):
             "Live HUD 墙钟刷新间隔（秒），不绑定控制步频"
         )
         _rv_row1.addWidget(self.sim_rynnvalue_refresh_spin)
-        _rv_row1.addStretch(1)
         _rv_panel_l.addLayout(_rv_row1)
 
-        _rv_row2 = QHBoxLayout()
-        _rv_row2.setSpacing(6)
+        _rv_row2 = _FlowLayout(spacing=6)
         _rv_row2.addWidget(QLabel("RynnValue URL"))
         self.sim_rynnvalue_url_edit = QLineEdit("http://127.0.0.1:8001")
         self.sim_rynnvalue_url_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.sim_rynnvalue_url_edit.setToolTip(
             "reward_server 地址（POST /evaluate_batch_npy）"
         )
-        _rv_row2.addWidget(self.sim_rynnvalue_url_edit, 1)
+        # _FlowLayout.addWidget only takes the widget (no stretch like QHBoxLayout).
+        self.sim_rynnvalue_url_edit.setMinimumWidth(220)
+        _rv_row2.addWidget(self.sim_rynnvalue_url_edit)
         _rv_row2.addWidget(QLabel("num_frames"))
         self.sim_rynnvalue_frames_spin = QSpinBox()
         self.sim_rynnvalue_frames_spin.setRange(2, 64)
@@ -23021,7 +23723,7 @@ class CameraTopicWindow(QMainWindow):
         _rv_row2.addWidget(self.sim_rynnvalue_deploy_btn)
         self.sim_rynnvalue_stop_btn = QPushButton("停止模型")
         self.sim_rynnvalue_stop_btn.setFocusPolicy(Qt.NoFocus)
-        self.sim_rynnvalue_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.sim_rynnvalue_stop_btn.setObjectName("dangerAction")
         self.sim_rynnvalue_stop_btn.setToolTip(
             "停止 RynnValue reward_server / 模型进程并释放 GPU（含占用 URL 端口的外部进程）"
         )
@@ -23066,8 +23768,22 @@ class CameraTopicWindow(QMainWindow):
         )
         self.mujoco_start_btn.clicked.connect(self._on_mujoco_unified_start_clicked)
         mj_run_row.addWidget(self.mujoco_start_btn)
+        self.mujoco_viewer_only_btn = QPushButton("只开界面")
+        self.mujoco_viewer_only_btn.setToolTip(
+            "只启动当前后端的仿真/图形界面，不调用策略模型推理：\n"
+            "· MuJoCo：官方 MJCF viewer\n"
+            "· MolmoSpaces：快速演示 --viewer\n"
+            "· Arena：zero_action + Kit 窗口\n"
+            "· LIBERO：开场景窗口并保持（不连 Pi）\n"
+            "· RoboTwin：SAPIEN Viewer（不加载 OpenPI）\n"
+            "点「停止」关闭。"
+        )
+        self.mujoco_viewer_only_btn.clicked.connect(
+            self._on_sim_viewer_only_clicked
+        )
+        mj_run_row.addWidget(self.mujoco_viewer_only_btn)
         self.mujoco_stop_btn = QPushButton("停止")
-        self.mujoco_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.mujoco_stop_btn.setObjectName("dangerAction")
         self.mujoco_stop_btn.setEnabled(False)
         self.mujoco_stop_btn.clicked.connect(self._on_mujoco_stop_clicked)
         mj_run_row.addWidget(self.mujoco_stop_btn)
@@ -23080,25 +23796,42 @@ class CameraTopicWindow(QMainWindow):
         self.mujoco_status_label = QLabel("空闲 · MuJoCo")
         self.mujoco_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         mj_run_row.addWidget(self.mujoco_status_label, 1)
-        sim_outer.addWidget(self.mujoco_run_row_widget)
+        sim_header_l.addWidget(self.mujoco_run_row_widget)
 
         self.mujoco_log_edit = QTextEdit()
         self.mujoco_log_edit.setReadOnly(True)
         self.mujoco_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.mujoco_log_edit.setFixedHeight(320)
         self.mujoco_log_edit.setPlaceholderText(
             "MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin 日志…"
         )
-        self.mujoco_log_edit.setToolTip("拖动上方手柄可调整日志高度")
         self.mujoco_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
-        self.mujoco_log_resize_bar = _LogHeightDragBar(
-            self.mujoco_log_edit, grow_down=False, min_h=120, max_h=1200
+        _configure_resizable_text_edit(
+            self.mujoco_log_edit,
+            default_h=140,
+            tooltip="拖动上下分割条可调整日志高度",
         )
-        sim_outer.addWidget(self.mujoco_log_resize_bar)
-        sim_outer.addWidget(self.mujoco_log_edit)
+        self.mujoco_log_edit.setMinimumHeight(80)
+        self.mujoco_log_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Expanding
+        )
+        self.mujoco_log_resize_bar = None
+        log_pane = QWidget()
+        self._sim_log_pane = log_pane
+        log_pane_l = QVBoxLayout(log_pane)
+        log_pane_l.setContentsMargins(0, 0, 0, 0)
+        log_pane_l.setSpacing(2)
+        log_pane_l.addWidget(self.mujoco_log_edit, 1)
+
+        self._sim_body_split = _always_visible_splitter(Qt.Vertical)
+        self._sim_body_split.addWidget(_wrap_in_vscroll(sim_form))
+        self._sim_body_split.addWidget(log_pane)
+        self._sim_body_split.setStretchFactor(0, 3)
+        self._sim_body_split.setStretchFactor(1, 2)
+        self._sim_body_split.setSizes([420, 180])
+        sim_outer.addWidget(self._sim_body_split, 1)
 
         self._mujoco_launcher = MuJoCoViewerLauncher(self)
         self._mujoco_launcher.log_line.connect(self._append_mujoco_log)
@@ -23174,7 +23907,7 @@ class CameraTopicWindow(QMainWindow):
         real_ctrl_row.addWidget(self.real_eval_start_btn)
         self.real_eval_stop_btn = QPushButton("停止")
         self.real_eval_stop_btn.setFocusPolicy(Qt.NoFocus)
-        self.real_eval_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.real_eval_stop_btn.setObjectName("dangerAction")
         self.real_eval_stop_btn.setEnabled(False)
         self.real_eval_stop_btn.clicked.connect(self._on_real_eval_stop_clicked)
         real_ctrl_row.addWidget(self.real_eval_stop_btn)
@@ -23195,8 +23928,8 @@ class CameraTopicWindow(QMainWindow):
         self.real_eval_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.real_eval_log_edit.setPlaceholderText("真机评测日志…")
         self.real_eval_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.real_eval_log_edit_resize_bar = _add_text_edit_with_drag_bar(
             real_outer,
@@ -23216,6 +23949,20 @@ class CameraTopicWindow(QMainWindow):
         control_layout = QVBoxLayout(control_tab)
         control_layout.setContentsMargins(8, 6, 8, 6)
         control_layout.setSpacing(6)
+
+        text_cmd_row = QHBoxLayout()
+        text_cmd_row.setSpacing(6)
+        text_cmd_row.addWidget(QLabel("文本指挥"))
+        self.arm_text_cmd_edit = ImeSafeLineEdit()
+        self.arm_text_cmd_edit.setPlaceholderText(ARM_TEXT_CMD_PLACEHOLDER)
+        self.arm_text_cmd_edit.setToolTip(ARM_TEXT_CMD_HELP)
+        self.arm_text_cmd_edit.returnPressed.connect(self._on_arm_text_command)
+        text_cmd_row.addWidget(self.arm_text_cmd_edit, 1)
+        self.arm_text_cmd_btn = QPushButton("执行")
+        self.arm_text_cmd_btn.setToolTip(ARM_TEXT_CMD_HELP)
+        self.arm_text_cmd_btn.clicked.connect(self._on_arm_text_command)
+        text_cmd_row.addWidget(self.arm_text_cmd_btn)
+        control_layout.addLayout(text_cmd_row)
 
         hand_row = QHBoxLayout()
         hand_row.setSpacing(6)
@@ -23540,7 +24287,7 @@ class CameraTopicWindow(QMainWindow):
         self.skeleton_preview_label.setAlignment(Qt.AlignCenter)
         self.skeleton_preview_label.setMinimumHeight(220)
         self.skeleton_preview_label.setStyleSheet(
-            "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #aaa; }"
+            f"QLabel {{ background-color: {UI_BG_INPUT}; border: 1px solid {UI_BORDER}; color: #aaa; }}"
         )
         skeleton_layout.addWidget(self.skeleton_preview_label, 1)
 
@@ -23673,7 +24420,7 @@ class CameraTopicWindow(QMainWindow):
         )
         service_row.addWidget(self.test_qwen_start_btn)
         self.test_qwen_stop_btn = QPushButton("停止")
-        self.test_qwen_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.test_qwen_stop_btn.setObjectName("dangerAction")
         self.test_qwen_stop_btn.setToolTip("停止当前部署位置对应的推理服务（远程含隧道）")
         service_row.addWidget(self.test_qwen_stop_btn)
         self.test_qwen_start_btn.setFocusPolicy(Qt.NoFocus)
@@ -23693,8 +24440,8 @@ class CameraTopicWindow(QMainWindow):
         self.test_infer_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.test_infer_log_edit.setPlaceholderText("推理服务日志…")
         self.test_infer_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.test_infer_log_edit_resize_bar = _add_text_edit_with_drag_bar(
             test_outer,
@@ -23772,7 +24519,7 @@ class CameraTopicWindow(QMainWindow):
         ctx_ctrl.addWidget(self.ctx_sync_start_btn)
         self.ctx_stop_btn = QPushButton("停止")
         self.ctx_stop_btn.setFocusPolicy(Qt.NoFocus)
-        self.ctx_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.ctx_stop_btn.setObjectName("dangerAction")
         self.ctx_stop_btn.setEnabled(False)
         self.ctx_stop_btn.clicked.connect(self._on_ctx_stop_clicked)
         ctx_ctrl.addWidget(self.ctx_stop_btn)
@@ -23938,7 +24685,7 @@ class CameraTopicWindow(QMainWindow):
         self.reward_run_btn.clicked.connect(self._on_reward_run_clicked)
         rm_mode_row.addWidget(self.reward_run_btn)
         self.reward_stop_btn = QPushButton("停止")
-        self.reward_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.reward_stop_btn.setObjectName("dangerAction")
         self.reward_stop_btn.setEnabled(False)
         self.reward_stop_btn.clicked.connect(self._on_reward_stop_clicked)
         rm_mode_row.addWidget(self.reward_stop_btn)
@@ -24073,7 +24820,7 @@ class CameraTopicWindow(QMainWindow):
         self.reward_batch_summary.setWordWrap(True)
         self.reward_batch_summary.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.reward_batch_summary.setStyleSheet(
-            "background-color: #1a1a1a; padding: 10px; border: 1px solid #444;"
+            f"background-color: {UI_BG_INPUT}; padding: 10px; border: 1px solid {UI_BORDER};"
         )
         self.reward_batch_summary.setMinimumHeight(120)
         rm_batch_l.addWidget(self.reward_batch_summary, 1)
@@ -24108,8 +24855,8 @@ class CameraTopicWindow(QMainWindow):
         self.reward_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.reward_log_edit.setPlaceholderText("Reward 评测日志…")
         self.reward_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.reward_log_edit_resize_bar = _add_text_edit_with_drag_bar(
             reward_outer,
@@ -24343,7 +25090,7 @@ class CameraTopicWindow(QMainWindow):
         self.reward_wf_start_btn.clicked.connect(self._on_reward_wf_start_clicked)
         rwf_run_row.addWidget(self.reward_wf_start_btn)
         self.reward_wf_stop_btn = QPushButton("停止")
-        self.reward_wf_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.reward_wf_stop_btn.setObjectName("dangerAction")
         self.reward_wf_stop_btn.setEnabled(False)
         self.reward_wf_stop_btn.clicked.connect(self._on_reward_wf_stop_clicked)
         rwf_run_row.addWidget(self.reward_wf_stop_btn)
@@ -24374,8 +25121,8 @@ class CameraTopicWindow(QMainWindow):
         self.reward_wf_log_edit.setMinimumHeight(180)
         self.reward_wf_log_edit.setPlaceholderText("Reward 工作流日志…")
         self.reward_wf_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         rwf_outer.addWidget(self.reward_wf_log_edit, 1)
 
@@ -24536,7 +25283,7 @@ class CameraTopicWindow(QMainWindow):
         self.dojo_rl_start_btn.clicked.connect(self._on_dojo_rl_start_clicked)
         drl_run_row.addWidget(self.dojo_rl_start_btn)
         self.dojo_rl_stop_btn = QPushButton("停止")
-        self.dojo_rl_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.dojo_rl_stop_btn.setObjectName("dangerAction")
         self.dojo_rl_stop_btn.setEnabled(False)
         self.dojo_rl_stop_btn.clicked.connect(self._on_dojo_rl_stop_clicked)
         drl_run_row.addWidget(self.dojo_rl_stop_btn)
@@ -24567,8 +25314,8 @@ class CameraTopicWindow(QMainWindow):
         self.dojo_rl_log_edit.setMinimumHeight(180)
         self.dojo_rl_log_edit.setPlaceholderText("仿真强化学习训练 训练日志…")
         self.dojo_rl_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         dojo_rl_outer.addWidget(self.dojo_rl_log_edit, 1)
 
@@ -24723,7 +25470,7 @@ class CameraTopicWindow(QMainWindow):
         self.robometer_start_btn.clicked.connect(self._on_robometer_start_clicked)
         rm_run_row.addWidget(self.robometer_start_btn)
         self.robometer_stop_btn = QPushButton("停止")
-        self.robometer_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.robometer_stop_btn.setObjectName("dangerAction")
         self.robometer_stop_btn.setEnabled(False)
         self.robometer_stop_btn.clicked.connect(self._on_robometer_stop_clicked)
         rm_run_row.addWidget(self.robometer_stop_btn)
@@ -24754,8 +25501,8 @@ class CameraTopicWindow(QMainWindow):
         self.robometer_log_edit.setMinimumHeight(180)
         self.robometer_log_edit.setPlaceholderText("RoboMeter 运行日志…")
         self.robometer_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         rm_outer.addWidget(self.robometer_log_edit, 1)
 
@@ -24980,7 +25727,7 @@ class CameraTopicWindow(QMainWindow):
         self.rynnvalue_start_btn.clicked.connect(self._on_rynnvalue_start_clicked)
         rv_run_row.addWidget(self.rynnvalue_start_btn)
         self.rynnvalue_stop_btn = QPushButton("停止")
-        self.rynnvalue_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.rynnvalue_stop_btn.setObjectName("dangerAction")
         self.rynnvalue_stop_btn.setEnabled(False)
         self.rynnvalue_stop_btn.clicked.connect(self._on_rynnvalue_stop_clicked)
         rv_run_row.addWidget(self.rynnvalue_stop_btn)
@@ -25021,8 +25768,8 @@ class CameraTopicWindow(QMainWindow):
         self.rynnvalue_log_edit.setMinimumHeight(180)
         self.rynnvalue_log_edit.setPlaceholderText("RynnValue 运行日志…")
         self.rynnvalue_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         rv_outer.addWidget(self.rynnvalue_log_edit, 1)
 
@@ -25252,7 +25999,7 @@ class CameraTopicWindow(QMainWindow):
         self.roboicl_start_btn.clicked.connect(self._on_roboicl_start_clicked)
         ricl_run_row.addWidget(self.roboicl_start_btn)
         self.roboicl_stop_btn = QPushButton("停止")
-        self.roboicl_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.roboicl_stop_btn.setObjectName("dangerAction")
         self.roboicl_stop_btn.setEnabled(False)
         self.roboicl_stop_btn.clicked.connect(self._on_roboicl_stop_clicked)
         ricl_run_row.addWidget(self.roboicl_stop_btn)
@@ -25281,8 +26028,8 @@ class CameraTopicWindow(QMainWindow):
         self.roboicl_log_edit.setMinimumHeight(180)
         self.roboicl_log_edit.setPlaceholderText("RoboICL 运行日志…")
         self.roboicl_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         ricl_outer.addWidget(self.roboicl_log_edit, 1)
 
@@ -25386,7 +26133,13 @@ class CameraTopicWindow(QMainWindow):
 
         from physical_rsi.tab import PhysicalRsiTab
 
-        control_tabs.addTab(PhysicalRsiTab(), "PhysicalRSI")
+        self.physical_rsi_tab = PhysicalRsiTab()
+        control_tabs.addTab(self.physical_rsi_tab, "PhysicalRSI")
+
+        from prog_sota.tab import ProgSotaTab
+
+        self.prog_sota_tab = ProgSotaTab()
+        control_tabs.addTab(self.prog_sota_tab, "编程冲SOTA")
 
         humanego_tab = QWidget()
         humanego_tab.setObjectName("humanegoTab")
@@ -25513,7 +26266,7 @@ class CameraTopicWindow(QMainWindow):
         self.humanego_run_btn.clicked.connect(self._on_humanego_run_clicked)
         he_btn_row.addWidget(self.humanego_run_btn)
         self.humanego_stop_btn = QPushButton("停止")
-        self.humanego_stop_btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        self.humanego_stop_btn.setObjectName("dangerAction")
         self.humanego_stop_btn.setEnabled(False)
         self.humanego_stop_btn.clicked.connect(self._on_humanego_stop_clicked)
         he_btn_row.addWidget(self.humanego_stop_btn)
@@ -25543,8 +26296,8 @@ class CameraTopicWindow(QMainWindow):
         self.humanego_log_edit.setMinimumHeight(240)
         self.humanego_log_edit.setPlaceholderText("HumanEgo 运行日志…")
         self.humanego_log_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         humanego_outer.addWidget(self.humanego_log_edit, 1)
 
@@ -25624,7 +26377,7 @@ class CameraTopicWindow(QMainWindow):
         ds_split = QSplitter(Qt.Horizontal)
         self.dataset_list = QListWidget()
         self.dataset_list.setStyleSheet(
-            "QListWidget { background-color: #1a1a1a; color: #ddd; border: 1px solid #555; }"
+            f"QListWidget {{ background-color: {UI_BG_INPUT}; color: #ddd; border: 1px solid {UI_BORDER}; }}"
         )
         self.dataset_list.setMinimumWidth(220)
         self.dataset_list.itemSelectionChanged.connect(
@@ -25641,7 +26394,7 @@ class CameraTopicWindow(QMainWindow):
         self.dataset_preview.setMinimumHeight(180)
         self.dataset_preview.setAlignment(Qt.AlignCenter)
         self.dataset_preview.setStyleSheet(
-            "QLabel { background-color: #1a1a1a; border: 1px solid #555; color: #888; }"
+            f"QLabel {{ background-color: {UI_BG_INPUT}; border: 1px solid {UI_BORDER}; color: #888; }}"
         )
         self.dataset_preview.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding
@@ -25652,8 +26405,8 @@ class CameraTopicWindow(QMainWindow):
         self.dataset_detail_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.dataset_detail_edit.setPlaceholderText("条目详情…")
         self.dataset_detail_edit.setStyleSheet(
-            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: #252525; "
-            f"border: 1px solid #555; }}"
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
         )
         self.dataset_detail_resize_bar = _add_text_edit_with_drag_bar(
             ds_right_layout,
@@ -25825,13 +26578,27 @@ class CameraTopicWindow(QMainWindow):
         self._workspace_panel = workspace
         self._workspace_body = workspace_body
         self._workspace_collapsed = False
-        root_layout.addWidget(workspace, stretch=1)
+        try:
+            root_layout.removeWidget(control_tabs)
+        except Exception:
+            pass
+        self._ui_vsplitter = _always_visible_splitter(Qt.Vertical)
+        control_tabs.setMinimumHeight(200)
+        control_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        workspace.setMinimumHeight(36)
+        self._ui_vsplitter.addWidget(control_tabs)
+        self._ui_vsplitter.addWidget(workspace)
+        self._ui_vsplitter.setStretchFactor(0, 3)
+        self._ui_vsplitter.setStretchFactor(1, 2)
+        self._ui_vsplitter_saved_sizes: List[int] = []
+        root_layout.addWidget(self._ui_vsplitter, 1)
         self._toggle_workspace_panel()  # 默认折叠工作区，给上方 Tab 更多空间
 
         # status_bar 已在空壳阶段创建
         self.status_bar.showMessage("就绪")
         self._apply_only_tabs(self._only_tabs)
         self._restore_control_tabs_order()
+        self._restore_viewer_ui_state()
         self._control_tabs_order_guard = False
         self.control_tabs.tabBar().tabMoved.connect(self._on_control_tab_moved)
         self.chat_panel.status_message.connect(self.status_bar.showMessage)
@@ -25860,6 +26627,9 @@ class CameraTopicWindow(QMainWindow):
         bridge.status_message.connect(self.status_bar.showMessage)
         bridge.frame_stats.connect(self._on_frame_stats)
 
+        # File-backed LIBERO / Live HUD preview — safe only after topic_list_layout exists.
+        if hasattr(self, "_rynnvalue_workspace_hud_timer"):
+            self._rynnvalue_workspace_hud_timer.start()
         self._ui_timer = QTimer(self)
         self._ui_timer.timeout.connect(self._update_waiting_hint)
         self._ui_timer.timeout.connect(self._update_robot_enable_status_ui)
@@ -26249,7 +27019,7 @@ class CameraTopicWindow(QMainWindow):
         try:
             view = QWebEngineView(container)
             view.setMinimumHeight(0)
-            view.setStyleSheet("QWebEngineView { background-color: #1a1a1a; }")
+            view.setStyleSheet(f"QWebEngineView {{ background-color: {UI_BG_INPUT}; }}")
             try:
                 view.page().setBackgroundColor(QColor("#1a1a1a"))
             except Exception:
@@ -27967,6 +28737,12 @@ class CameraTopicWindow(QMainWindow):
         stopping = bool(getattr(self._sim_eval_launcher, "_stopping", False))
         no_policy = not str(self.sim_eval_policy_combo.currentData() or "")
         self.sim_eval_stop_run_btn.setEnabled(running)
+        if hasattr(self, "sim_eval_viewer_only_btn"):
+            self.sim_eval_viewer_only_btn.setEnabled(
+                (not running)
+                and (not stopping)
+                and self._sim_backend_id() == "isaac"
+            )
         # 策略 / GUI 模式仍锁定；任务可在运行中切换
         self.sim_eval_policy_combo.setEnabled(not running)
         self.sim_eval_ckpt_edit.setEnabled(not running and not no_policy)
@@ -28293,6 +29069,10 @@ class CameraTopicWindow(QMainWindow):
             )
 
     def _on_sim_eval_start_clicked(self) -> None:
+        """Backward-compatible alias for「启动评测」."""
+        self._start_sim_eval(viewer_only=False)
+
+    def _start_sim_eval(self, *, viewer_only: bool = False) -> None:
         if getattr(self, "_mujoco_launcher", None) and self._mujoco_launcher.is_running():
             self._append_sim_log("MuJoCo / MolmoSpaces 正在运行，请先停止后再启动 Isaac 评测")
             return
@@ -28310,21 +29090,29 @@ class CameraTopicWindow(QMainWindow):
             )
         )
         # currentData() 为 "" 表示「无」：勿回落到 demo_policy
-        policy_data = self.sim_eval_policy_combo.currentData()
-        if policy_data is None:
-            policy_dir = "XPolicyLab/policy/demo_policy"
+        if viewer_only:
+            policy_dir = ""
+            skip_policy = True
+            use_gui = True
+            self._append_sim_log(
+                "[只开界面] 策略=无，强制开仿真 GUI，不部署/不调用模型"
+            )
         else:
-            policy_dir = str(policy_data)
-        skip_policy = not policy_dir.strip()
+            policy_data = self.sim_eval_policy_combo.currentData()
+            if policy_data is None:
+                policy_dir = "XPolicyLab/policy/demo_policy"
+            else:
+                policy_dir = str(policy_data)
+            skip_policy = not policy_dir.strip()
+            use_gui = bool(
+                getattr(self, "sim_eval_use_gui_check", None) is not None
+                and self.sim_eval_use_gui_check.isChecked()
+            )
         policy_env = ROBODOJO_ENV_DEFAULT
         if (not skip_policy) and "starVLA" in policy_dir and os.path.isdir(
             ROBODOJO_STARVLA_ENV_DEFAULT
         ):
             policy_env = ROBODOJO_STARVLA_ENV_DEFAULT
-        use_gui = bool(
-            getattr(self, "sim_eval_use_gui_check", None) is not None
-            and self.sim_eval_use_gui_check.isChecked()
-        )
         # 一体启动：评测进程内先起策略再起 Isaac（旧 robodojo.sh eval）；不依赖「部署启动」
         bundled = bool(
             (not skip_policy)
@@ -28357,7 +29145,7 @@ class CameraTopicWindow(QMainWindow):
                 )
                 self._activate_sim_camera_preview(force=False)
                 self._update_sim_eval_run_ui()
-                if self._sim_rynnvalue_hud_enabled():
+                if (not viewer_only) and self._sim_rynnvalue_hud_enabled():
                     if self._ensure_live_hud_reward_or_abort("isaac"):
                         self._start_isaac_rynnvalue_npy_hud(bridge_dir)
                 return
@@ -28379,7 +29167,7 @@ class CameraTopicWindow(QMainWindow):
                 self._append_sim_log(
                     f"已复用仿真进程（{result}），任务目标={task}；未重头启动 Isaac"
                 )
-                if self._sim_rynnvalue_hud_enabled():
+                if (not viewer_only) and self._sim_rynnvalue_hud_enabled():
                     if self._ensure_live_hud_reward_or_abort("isaac"):
                         self._start_isaac_rynnvalue_npy_hud(bridge_dir)
                 return
@@ -28537,7 +29325,7 @@ class CameraTopicWindow(QMainWindow):
             "（优先共享 .npy，忽略同名真机 ROS 流）"
         )
         # RynnValue Live HUD: poll cam_head.npy written by Isaac cam bridge.
-        if self._sim_rynnvalue_hud_enabled():
+        if (not viewer_only) and self._sim_rynnvalue_hud_enabled():
             if not self._ensure_live_hud_reward_or_abort("isaac"):
                 return
             self._start_isaac_rynnvalue_npy_hud(bridge_dir)
@@ -29193,7 +29981,12 @@ class CameraTopicWindow(QMainWindow):
 
     def _toggle_workspace_panel(self) -> None:
         """折叠 / 展开下方工作区（Topic + 图像预览 + AI 对话）。"""
+        splitter = getattr(self, "_ui_vsplitter", None)
         if not self._workspace_collapsed:
+            if splitter is not None:
+                sizes = splitter.sizes()
+                if len(sizes) == 2 and sizes[1] > 48:
+                    self._ui_vsplitter_saved_sizes = list(sizes)
             self._workspace_body.hide()
             self._workspace_title_label.setText("工作区已折叠")
             self._workspace_toggle_btn.setText("展开")
@@ -29202,6 +29995,9 @@ class CameraTopicWindow(QMainWindow):
             self._workspace_panel.setMinimumHeight(36)
             self._workspace_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             self._workspace_collapsed = True
+            if splitter is not None:
+                total = max(1, sum(splitter.sizes()) or splitter.height())
+                splitter.setSizes([max(200, total - 40), 40])
             if getattr(self, "status_bar", None) is not None:
                 self.status_bar.showMessage("已折叠工作区", 2000)
         else:
@@ -29212,11 +30008,20 @@ class CameraTopicWindow(QMainWindow):
                 "折叠下方工作区（Topic、图像预览、Live HUD、AI 对话）"
             )
             self._workspace_panel.setMaximumHeight(16777215)
-            self._workspace_panel.setMinimumHeight(0)
+            self._workspace_panel.setMinimumHeight(160)
             self._workspace_panel.setSizePolicy(
                 QSizePolicy.Expanding, QSizePolicy.Expanding
             )
             self._workspace_collapsed = False
+            if splitter is not None:
+                saved = getattr(self, "_ui_vsplitter_saved_sizes", None)
+                if saved and len(saved) == 2 and saved[1] >= 160:
+                    splitter.setSizes(saved)
+                else:
+                    total = max(1, sum(splitter.sizes()) or splitter.height())
+                    splitter.setSizes(
+                        [max(220, int(total * 0.55)), max(200, int(total * 0.45))]
+                    )
             if getattr(self, "status_bar", None) is not None:
                 self.status_bar.showMessage("已展开工作区", 2000)
 
@@ -30352,6 +31157,10 @@ class CameraTopicWindow(QMainWindow):
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
+        try:
+            self._save_viewer_ui_state()
+        except Exception as exc:
+            print(f"[viewer_ui_state] save failed: {exc}", flush=True)
         self._stop_skeleton_tracking()
         self._ui_timer.stop()
         self._sam3_health_timer.stop()
@@ -30791,6 +31600,193 @@ class CameraTopicWindow(QMainWindow):
                     tabs.tabBar().moveTab(cur, target_idx)
         finally:
             self._control_tabs_order_guard = False
+
+    def _viewer_ui_state_owners(self) -> List[Tuple[str, object]]:
+        """主窗口 + 对话面板 + 自定义 Tab 面板。"""
+        owners: List[Tuple[str, object]] = [("", self)]
+        chat = getattr(self, "chat_panel", None)
+        if chat is not None:
+            owners.append(("chat_panel.", chat))
+        for attr, prefix in (
+            ("physical_rsi_tab", "tab:PhysicalRSI."),
+            ("prog_sota_tab", "tab:编程冲SOTA."),
+        ):
+            panel = getattr(self, attr, None)
+            if panel is not None:
+                owners.append((prefix, panel))
+        return owners
+
+    def _save_viewer_ui_state(self) -> str:
+        """关闭前把所有可操作控件状态写入 eai/viewer_ui_state.json。"""
+        if getattr(self, "_viewer_ui_state_saved", False):
+            return VIEWER_UI_STATE_PATH
+        if not getattr(self, "_heavy_ui_built", False):
+            return VIEWER_UI_STATE_PATH
+        widgets: Dict[str, object] = {}
+        for prefix, owner in self._viewer_ui_state_owners():
+            widgets.update(_ui_state_collect_owner(owner, prefix=prefix))
+
+        geo = self.geometry()
+        tabs = getattr(self, "control_tabs", None)
+        control_tab = ""
+        if tabs is not None and tabs.count() > 0:
+            control_tab = str(tabs.tabText(tabs.currentIndex()) or "")
+
+        splitter = getattr(self, "_main_splitter", None)
+        splitter_sizes: List[int] = []
+        if splitter is not None:
+            try:
+                splitter_sizes = [int(x) for x in splitter.sizes()]
+            except Exception:
+                splitter_sizes = []
+
+        topic_checks = {
+            str(topic): bool(cb.isChecked())
+            for topic, cb in getattr(self, "topic_checks", {}).items()
+        }
+        topic_unchecked = sorted(
+            str(t) for t in getattr(self, "_topic_user_unchecked", set())
+        )
+
+        payload: Dict[str, object] = {
+            "version": 1,
+            "widgets": widgets,
+            "control_tab": control_tab,
+            "splitter_sizes": splitter_sizes,
+            "geometry": [geo.x(), geo.y(), geo.width(), geo.height()],
+            "topic_checks": topic_checks,
+            "topic_user_unchecked": topic_unchecked,
+            "workspace_collapsed": bool(
+                getattr(self, "_workspace_collapsed", True)
+            ),
+        }
+        path = save_viewer_ui_state(payload)
+        self._viewer_ui_state_saved = True
+        status_bar = getattr(self, "status_bar", None)
+        if status_bar is not None:
+            status_bar.showMessage(
+                f"已保存界面状态（{len(widgets)} 项）→ {path}", 3000
+            )
+        return path
+
+    def _restore_viewer_ui_state(self) -> None:
+        """启动时恢复上次关闭前的控件状态。"""
+        state = load_viewer_ui_state()
+        if not state:
+            return
+
+        widgets = state.get("widgets")
+        restored = 0
+        pending_combo: Dict[str, object] = {}
+        if isinstance(widgets, dict):
+            for prefix, owner in self._viewer_ui_state_owners():
+                restored += _ui_state_apply_owner(owner, widgets, prefix=prefix)
+            # 动态下拉（topic 等）可能尚未填满：记下 combo 以便后续重试
+            for key, payload in widgets.items():
+                if not isinstance(payload, dict) or payload.get("kind") != "combo":
+                    continue
+                applied = False
+                for prefix, owner in self._viewer_ui_state_owners():
+                    if prefix:
+                        if not key.startswith(prefix):
+                            continue
+                        name = key[len(prefix) :]
+                    else:
+                        if "." in key or key.startswith("tab:"):
+                            continue
+                        name = key
+                    if not name or "." in name:
+                        continue
+                    w = getattr(owner, name, None)
+                    if isinstance(w, QComboBox):
+                        cur = w.currentText()
+                        want = str(payload.get("text") or "")
+                        data = payload.get("data", None)
+                        if data is not None and w.currentData() == data:
+                            applied = True
+                        elif want and cur == want:
+                            applied = True
+                        break
+                if not applied:
+                    pending_combo[key] = payload
+        self._pending_combo_state = pending_combo
+
+        geo = state.get("geometry")
+        if isinstance(geo, list) and len(geo) == 4:
+            try:
+                x, y, w, h = (int(geo[0]), int(geo[1]), int(geo[2]), int(geo[3]))
+                if w >= 640 and h >= 480:
+                    self.setGeometry(x, y, w, h)
+            except Exception:
+                pass
+
+        tabs = getattr(self, "control_tabs", None)
+        control_tab = str(state.get("control_tab") or "").strip()
+        if tabs is not None and control_tab:
+            for i in range(tabs.count()):
+                if tabs.tabText(i) == control_tab:
+                    tabs.blockSignals(True)
+                    try:
+                        tabs.setCurrentIndex(i)
+                    finally:
+                        tabs.blockSignals(False)
+                    break
+
+        splitter = getattr(self, "_main_splitter", None)
+        sizes = state.get("splitter_sizes")
+        if splitter is not None and isinstance(sizes, list) and sizes:
+            try:
+                ints = [int(x) for x in sizes]
+                if len(ints) == splitter.count() and sum(ints) > 0:
+                    splitter.setSizes(ints)
+            except Exception:
+                pass
+
+        want_collapsed = state.get("workspace_collapsed")
+        if want_collapsed is not None:
+            cur = bool(getattr(self, "_workspace_collapsed", True))
+            if bool(want_collapsed) != cur:
+                self._toggle_workspace_panel()
+
+        topic_checks = state.get("topic_checks")
+        if isinstance(topic_checks, dict):
+            self._pending_topic_checks = {
+                str(k): bool(v) for k, v in topic_checks.items()
+            }
+        unchecked = state.get("topic_user_unchecked")
+        if isinstance(unchecked, list):
+            self._topic_user_unchecked = {str(t) for t in unchecked if str(t).strip()}
+
+        status_bar = getattr(self, "status_bar", None)
+        if status_bar is not None and restored:
+            status_bar.showMessage(f"已恢复界面状态（{restored} 项）", 3000)
+
+    def _retry_pending_combo_ui_state(self) -> None:
+        """topic 列表刷新后，重试尚未匹配的下拉框恢复。"""
+        pending = getattr(self, "_pending_combo_state", None)
+        if not isinstance(pending, dict) or not pending:
+            return
+        still: Dict[str, object] = {}
+        for key, payload in pending.items():
+            ok = False
+            for prefix, owner in self._viewer_ui_state_owners():
+                if prefix:
+                    if not key.startswith(prefix):
+                        continue
+                    name = key[len(prefix) :]
+                else:
+                    if "." in key or key.startswith("tab:"):
+                        continue
+                    name = key
+                if not name or "." in name:
+                    continue
+                w = getattr(owner, name, None)
+                if w is not None and _ui_state_write_widget(w, payload):
+                    ok = True
+                    break
+            if not ok:
+                still[key] = payload
+        self._pending_combo_state = still
 
     def _on_control_tab_moved(self, _from: int, _to: int) -> None:
         if getattr(self, "_control_tabs_order_guard", False):
@@ -31243,6 +32239,7 @@ class CameraTopicWindow(QMainWindow):
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
         combo.blockSignals(False)
+        self._retry_pending_combo_ui_state()
 
     def _select_preview_topic_combo(
         self, combo: object, topic: str, *, status_cb=None
@@ -32109,12 +33106,23 @@ class CameraTopicWindow(QMainWindow):
                     text = "空闲 · LIBERO"
                 elif backend == "robotwin":
                     text = "空闲 · RoboTwin"
+                elif backend not in ("isaac", "mujoco", "molmospaces"):
+                    text = f"空闲 · {backend}"
             self.mujoco_status_label.setText(text)
         if hasattr(self, "status_bar") and self.status_bar is not None:
             self.status_bar.showMessage(msg)
 
     def _sim_backend_id(self) -> str:
-        """Return isaac | mujoco | molmospaces | arena | libero | robotwin."""
+        """Return native backend id, or extended suite key when「扩展评测」selected."""
+        if (
+            getattr(self, "sim_backend_extended_radio", None) is not None
+            and self.sim_backend_extended_radio.isChecked()
+        ):
+            if hasattr(self, "sim_extended_combo"):
+                key = str(self.sim_extended_combo.currentData() or "").strip()
+                if key:
+                    return normalize_sim_backend_key(key)
+            return "simpler"
         if getattr(self, "sim_backend_robotwin_radio", None) is not None and self.sim_backend_robotwin_radio.isChecked():
             return "robotwin"
         if getattr(self, "sim_backend_libero_radio", None) is not None and self.sim_backend_libero_radio.isChecked():
@@ -32127,11 +33135,273 @@ class CameraTopicWindow(QMainWindow):
             return "mujoco"
         return "isaac"
 
+    def _is_extended_sim_backend(self, backend: str = "") -> bool:
+        key = backend or self._sim_backend_id()
+        if key in (
+            "isaac",
+            "mujoco",
+            "molmospaces",
+            "arena",
+            "libero",
+            "robotwin",
+        ):
+            return False
+        # extended radio selected, or known extended key
+        if (
+            getattr(self, "sim_backend_extended_radio", None) is not None
+            and self.sim_backend_extended_radio.isChecked()
+        ):
+            return True
+        spec = get_sim_backend_spec(key)
+        return bool(spec and getattr(spec, "kind", "") == "extended")
+
     def _mujoco_backend_is_mujoco(self) -> bool:
         return self._sim_backend_id() == "mujoco"
 
+    def _on_sim_leaderboard_toggled(self, checked: bool) -> None:
+        show = bool(checked)
+        for w in (
+            getattr(self, "sim_leaderboard_meta_label", None),
+            getattr(self, "sim_leaderboard_source_btn", None),
+            getattr(self, "sim_leaderboard_refresh_btn", None),
+            getattr(self, "sim_leaderboard_reload_btn", None),
+            getattr(self, "sim_leaderboard_table", None),
+            getattr(self, "sim_leaderboard_note_label", None),
+        ):
+            if w is not None:
+                w.setVisible(show)
+
+    def _on_sim_leaderboard_reload_clicked(self) -> None:
+        try:
+            clear_sim_eval_leaderboard_cache()
+        except Exception:
+            pass
+        self._refresh_sim_leaderboard()
+        if hasattr(self, "sim_leaderboard_meta_label"):
+            cur = self.sim_leaderboard_meta_label.text()
+            if "本地重载" not in cur:
+                self.sim_leaderboard_meta_label.setText(
+                    (cur + " · 本地重载").strip(" ·")
+                )
+
+    def _on_sim_leaderboard_refresh_clicked(self) -> None:
+        """Fetch current backend leaderboard from public sources (background)."""
+        if getattr(self, "_sim_leaderboard_refreshing", False):
+            return
+        backend = self._sim_backend_id()
+        self._sim_leaderboard_refreshing = True
+        if hasattr(self, "sim_leaderboard_refresh_btn"):
+            self.sim_leaderboard_refresh_btn.setEnabled(False)
+            self.sim_leaderboard_refresh_btn.setText("刷新中…")
+        if hasattr(self, "sim_leaderboard_meta_label"):
+            self.sim_leaderboard_meta_label.setText(
+                f"正在从公开源拉取「{backend}」实时榜单…"
+            )
+
+        result: Dict[str, Any] = {"done": False, "ok": False, "backend": backend}
+
+        def _work() -> None:
+            try:
+                board = refresh_sim_eval_backend(backend, persist=True)
+                result["ok"] = True
+                result["board"] = board
+            except Exception as exc:
+                result["ok"] = False
+                result["error"] = str(exc)
+            finally:
+                result["done"] = True
+
+        def _done() -> None:
+            self._sim_leaderboard_refreshing = False
+            if hasattr(self, "sim_leaderboard_refresh_btn"):
+                self.sim_leaderboard_refresh_btn.setEnabled(True)
+                self.sim_leaderboard_refresh_btn.setText("刷新")
+            if result.get("ok") and isinstance(result.get("board"), dict):
+                try:
+                    clear_sim_eval_leaderboard_cache()
+                except Exception:
+                    pass
+                self._apply_sim_leaderboard_board(result["board"])
+                fetched = str(result["board"].get("_fetched_at") or "")
+                if hasattr(self, "status_bar") and self.status_bar is not None:
+                    self.status_bar.showMessage(
+                        f"业内榜单已刷新 · {backend}"
+                        + (f" · {fetched}" if fetched else ""),
+                        5000,
+                    )
+            else:
+                err = str(result.get("error") or "未知错误")
+                try:
+                    self._refresh_sim_leaderboard(backend)
+                except Exception:
+                    pass
+                if hasattr(self, "sim_leaderboard_meta_label"):
+                    self.sim_leaderboard_meta_label.setText(
+                        f"刷新失败（仍显示本地）: {err}"
+                    )
+
+        threading.Thread(target=_work, daemon=True).start()
+
+        def _poll() -> None:
+            if not result.get("done"):
+                QTimer.singleShot(200, _poll)
+                return
+            _done()
+
+        QTimer.singleShot(200, _poll)
+
+    def _on_sim_leaderboard_source_clicked(self) -> None:
+        url = (getattr(self, "_sim_leaderboard_source_url", None) or "").strip()
+        if not url:
+            return
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _apply_sim_leaderboard_board(self, board: Dict[str, Any]) -> None:
+        """Render one board dict into the shared leaderboard widgets."""
+        if not hasattr(self, "sim_leaderboard_table") or not isinstance(board, dict):
+            return
+        title = str(board.get("title") or "业内评测榜单")
+        self.sim_leaderboard_group.setTitle(title)
+        metric = str(board.get("metric") or "")
+        protocol = str(board.get("protocol") or "")
+        updated = str(
+            board.get("_fetched_at")
+            or board.get("last_live_fetch")
+            or board.get("_updated")
+            or ""
+        )
+        source_label = str(board.get("source_label") or "来源")
+        meta_bits = [b for b in (metric, protocol) if b]
+        if board.get("_live") or board.get("_fetched_at"):
+            meta_bits.append(f"实时 {updated}" if updated else "实时")
+        elif updated:
+            meta_bits.append(f"快照 {updated}")
+        self.sim_leaderboard_meta_label.setText(" · ".join(meta_bits))
+        self._sim_leaderboard_source_url = str(board.get("source_url") or "").strip()
+        self.sim_leaderboard_source_btn.setEnabled(bool(self._sim_leaderboard_source_url))
+        self.sim_leaderboard_source_btn.setText("打开来源")
+        tip_url = self._sim_leaderboard_source_url or "无来源链接"
+        self.sim_leaderboard_source_btn.setToolTip(f"{source_label}\n{tip_url}")
+
+        entries = [e for e in (board.get("entries") or []) if isinstance(e, dict)]
+        self.sim_leaderboard_table.setRowCount(len(entries))
+        for row, entry in enumerate(entries):
+            cells = [
+                str(entry.get("rank", row + 1)),
+                str(entry.get("method") or ""),
+                str(entry.get("score") or ""),
+                str(entry.get("detail") or ""),
+                str(entry.get("org") or ""),
+                str(entry.get("date") or ""),
+            ]
+            tip = str(entry.get("note") or "").strip()
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if tip:
+                    item.setToolTip(tip)
+                if col == 0:
+                    item.setTextAlignment(int(Qt.AlignCenter))
+                self.sim_leaderboard_table.setItem(row, col, item)
+        notes = []
+        if board.get("_global_note"):
+            notes.append(str(board["_global_note"]))
+        if board.get("_live") or board.get("_fetched_at"):
+            notes.append(
+                "已从公开源实时更新"
+                + (f"（{board.get('_fetched_at')}）" if board.get("_fetched_at") else "")
+            )
+        highlighted = [
+            f"{e.get('method')}: {e.get('note')}"
+            for e in entries
+            if str(e.get("note") or "").strip()
+        ]
+        if highlighted:
+            notes.append("备注 · " + "；".join(highlighted[:4]))
+        self.sim_leaderboard_note_label.setText("\n".join(notes))
+
+    def _refresh_sim_leaderboard(self, backend: str = "") -> None:
+        """Fill the shared industry leaderboard for the current sim backend."""
+        if not hasattr(self, "sim_leaderboard_table"):
+            return
+        key = (backend or self._sim_backend_id() or "isaac").strip().lower()
+        board = None
+        try:
+            board = load_sim_eval_board(key)
+        except Exception as exc:
+            self.sim_leaderboard_meta_label.setText(f"榜单加载失败: {exc}")
+            self.sim_leaderboard_table.setRowCount(0)
+            self.sim_leaderboard_note_label.setText("")
+            self._sim_leaderboard_source_url = ""
+            self.sim_leaderboard_source_btn.setEnabled(False)
+            return
+
+        if not board:
+            self.sim_leaderboard_group.setTitle("业内评测榜单")
+            self.sim_leaderboard_meta_label.setText(
+                f"暂无「{key}」后端的业内结果快照。"
+            )
+            self.sim_leaderboard_table.setRowCount(0)
+            self.sim_leaderboard_note_label.setText("")
+            self._sim_leaderboard_source_url = ""
+            self.sim_leaderboard_source_btn.setEnabled(False)
+            return
+
+        self._apply_sim_leaderboard_board(board)
+
+    def _on_sim_extended_combo_changed(self, *_args) -> None:
+        if (
+            getattr(self, "sim_backend_extended_radio", None) is not None
+            and self.sim_backend_extended_radio.isChecked()
+        ):
+            self._refresh_ext_bench_form()
+            self._on_sim_backend_changed()
+
+    def _refresh_ext_bench_form(self) -> None:
+        """Sync extended-page fields from the selected suite."""
+        if not hasattr(self, "ext_bench_root_edit"):
+            return
+        key = "simpler"
+        if hasattr(self, "sim_extended_combo"):
+            key = str(self.sim_extended_combo.currentData() or "simpler").strip()
+        key = normalize_sim_backend_key(key)
+        spec = get_sim_backend_spec(key)
+        label = getattr(spec, "label", None) or key
+        if hasattr(self, "ext_bench_title_label"):
+            self.ext_bench_title_label.setText(f"扩展评测 · {label}")
+        if hasattr(self, "ext_bench_hint_label"):
+            hint = getattr(spec, "hint", "") or ""
+            engine = getattr(spec, "engine", "") or ""
+            if engine:
+                hint = f"{hint}  引擎: {engine}".strip()
+            self.ext_bench_hint_label.setText(hint)
+        root = ""
+        if spec is not None:
+            try:
+                root = resolve_extended_default_root(spec) or ""
+            except Exception:
+                roots = getattr(spec, "default_roots", ()) or ()
+                root = roots[0] if roots else ""
+        # Don't clobber a user-edited path for the same backend.
+        cur = self.ext_bench_root_edit.text().strip()
+        prev_key = getattr(self, "_ext_bench_form_key", "")
+        if key != prev_key or not cur:
+            self.ext_bench_root_edit.setText(root)
+        self._ext_bench_form_key = key
+        if hasattr(self, "ext_bench_status_label"):
+            self.ext_bench_status_label.setText(f"空闲 · {label}")
+
     def _on_sim_backend_changed(self, *_args) -> None:
         backend = self._sim_backend_id()
+        extended = self._is_extended_sim_backend(backend)
+        if hasattr(self, "sim_extended_combo"):
+            self.sim_extended_combo.setEnabled(
+                bool(
+                    getattr(self, "sim_backend_extended_radio", None) is not None
+                    and self.sim_backend_extended_radio.isChecked()
+                )
+            )
+        if extended:
+            self._refresh_ext_bench_form()
         idx = {
             "isaac": 0,
             "mujoco": 1,
@@ -32139,9 +33409,11 @@ class CameraTopicWindow(QMainWindow):
             "arena": 3,
             "libero": 4,
             "robotwin": 5,
-        }.get(backend, 0)
+        }.get(backend, 6 if extended else 0)
         if hasattr(self, "sim_backend_stack"):
             self.sim_backend_stack.setCurrentIndex(idx)
+        if hasattr(self, "_refresh_sim_leaderboard"):
+            self._refresh_sim_leaderboard(backend)
         hints = {
             "isaac": (
                 "Isaac / RoboDojo：启动评测后进程常驻，直到「停止评测」。"
@@ -32168,34 +33440,37 @@ class CameraTopicWindow(QMainWindow):
                 "需 RLinf_support + assets；与其它仿真后端互斥。"
             ),
         }
+        if extended:
+            spec = get_sim_backend_spec(backend)
+            hint = getattr(spec, "hint", "") if spec else ""
+            if not hint:
+                hint = (
+                    f"扩展评测「{backend}」：通过 run_external_bench.py / "
+                    "AllenAI VLA Harness Docker 启动；榜单可点刷新。"
+                )
+            hints[backend] = hint
         if hasattr(self, "sim_hint_label"):
             self.sim_hint_label.setText(hints.get(backend, ""))
-        show_mj = backend in ("mujoco", "molmospaces", "arena", "libero", "robotwin")
+        show_mj = backend in (
+            "mujoco",
+            "molmospaces",
+            "arena",
+            "libero",
+            "robotwin",
+        ) or extended
         if hasattr(self, "mujoco_run_row_widget"):
             self.mujoco_run_row_widget.setVisible(show_mj)
         if hasattr(self, "mujoco_log_edit"):
             self.mujoco_log_edit.setVisible(show_mj)
-        if hasattr(self, "mujoco_log_resize_bar"):
-            self.mujoco_log_resize_bar.setVisible(show_mj)
+        bar = getattr(self, "mujoco_log_resize_bar", None)
+        if bar is not None:
+            bar.setVisible(show_mj)
+        if hasattr(self, "_sim_log_pane"):
+            self._sim_log_pane.setVisible(show_mj)
         if hasattr(self, "sim_rynnvalue_hud_panel"):
             self.sim_rynnvalue_hud_panel.setVisible(True)
             if hasattr(self, "_update_sim_rynnvalue_hud_controls"):
                 self._update_sim_rynnvalue_hud_controls()
-        # RoboTwin / LIBERO logs are verbose — prefer a taller pane when switching in
-        # (respect a user-dragged height if already larger).
-        if (
-            show_mj
-            and backend in ("robotwin", "libero")
-            and hasattr(self, "mujoco_log_edit")
-            and hasattr(self, "mujoco_log_resize_bar")
-        ):
-            prefer_h = 420 if backend == "robotwin" else 360
-            if self.mujoco_log_edit.height() < prefer_h:
-                apply = getattr(self.mujoco_log_resize_bar, "_apply_height", None)
-                if callable(apply):
-                    apply(prefer_h)
-                else:
-                    self.mujoco_log_edit.setFixedHeight(prefer_h)
         if hasattr(self, "mujoco_start_btn"):
             start_labels = {
                 "mujoco": "启动 MuJoCo",
@@ -32204,7 +33479,12 @@ class CameraTopicWindow(QMainWindow):
                 "libero": "启动 LIBERO",
                 "robotwin": "启动 RoboTwin",
             }
-            self.mujoco_start_btn.setText(start_labels.get(backend, "启动"))
+            if extended:
+                spec = get_sim_backend_spec(backend)
+                label = getattr(spec, "label", None) or backend
+                self.mujoco_start_btn.setText(f"启动 {label}")
+            else:
+                self.mujoco_start_btn.setText(start_labels.get(backend, "启动"))
         if hasattr(self, "mujoco_open_model_btn"):
             self.mujoco_open_model_btn.setText(
                 "打开模型目录" if backend == "mujoco" else "打开仓库目录"
@@ -32223,6 +33503,10 @@ class CameraTopicWindow(QMainWindow):
                 self.mujoco_status_label.setText("空闲 · LIBERO")
             elif backend == "robotwin":
                 self.mujoco_status_label.setText("空闲 · RoboTwin")
+            elif extended:
+                spec = get_sim_backend_spec(backend)
+                label = getattr(spec, "label", None) or backend
+                self.mujoco_status_label.setText(f"空闲 · {label}")
         if backend != "isaac":
             # Stop Isaac-only preview timers / forced topic subscribe while on other backends.
             if getattr(self, "_sim_npy_preview_timer", None) is not None:
@@ -32268,22 +33552,45 @@ class CameraTopicWindow(QMainWindow):
             "sim_backend_arena_radio",
             "sim_backend_libero_radio",
             "sim_backend_robotwin_radio",
+            "sim_backend_extended_radio",
+            "sim_extended_combo",
         ):
             w = getattr(self, wname, None)
             if w is not None:
-                w.setEnabled(not mj_running and not isaac_running)
+                # Keep extended combo enabled only when extended radio is selected
+                # and nothing is running.
+                if wname == "sim_extended_combo":
+                    w.setEnabled(
+                        (not mj_running)
+                        and (not isaac_running)
+                        and bool(
+                            getattr(self, "sim_backend_extended_radio", None)
+                            and self.sim_backend_extended_radio.isChecked()
+                        )
+                    )
+                else:
+                    w.setEnabled(not mj_running and not isaac_running)
 
         backend = self._sim_backend_id()
-        if hasattr(self, "mujoco_start_btn"):
-            self.mujoco_start_btn.setEnabled(
-                (not mj_running)
-                and (not isaac_running)
-                and backend in ("mujoco", "molmospaces", "arena", "libero", "robotwin")
+        mj_startable = (
+            (not mj_running)
+            and (not isaac_running)
+            and (
+                backend
+                in ("mujoco", "molmospaces", "arena", "libero", "robotwin")
+                or self._is_extended_sim_backend(backend)
             )
+        )
+        if hasattr(self, "mujoco_start_btn"):
+            self.mujoco_start_btn.setEnabled(mj_startable)
+        if hasattr(self, "mujoco_viewer_only_btn"):
+            self.mujoco_viewer_only_btn.setEnabled(mj_startable)
 
         if mj_running:
             if hasattr(self, "sim_eval_start_btn"):
                 self.sim_eval_start_btn.setEnabled(False)
+            if hasattr(self, "sim_eval_viewer_only_btn"):
+                self.sim_eval_viewer_only_btn.setEnabled(False)
             if hasattr(self, "sim_bridge_start_btn"):
                 self.sim_bridge_start_btn.setEnabled(False)
             return
@@ -32306,11 +33613,27 @@ class CameraTopicWindow(QMainWindow):
             and self._mujoco_launcher.is_running()
         )
         backend = self._sim_backend_id()
+        # Keep workspace LIBERO/Live-HUD preview while eval runs.
+        if hasattr(self, "_set_rynnvalue_workspace_hud_active"):
+            timer = getattr(self, "_rynnvalue_workspace_hud_timer", None)
+            if running and backend == "libero":
+                if timer is not None and not timer.isActive():
+                    self._set_rynnvalue_workspace_hud_active(True)
+            elif (
+                not running
+                and not self._sim_rynnvalue_hud_enabled()
+                and timer is not None
+                and timer.isActive()
+            ):
+                self._set_rynnvalue_workspace_hud_active(False)
+        startable = (not running) and (
+            backend in ("mujoco", "molmospaces", "arena", "libero", "robotwin")
+            or self._is_extended_sim_backend(backend)
+        )
         if hasattr(self, "mujoco_start_btn"):
-            self.mujoco_start_btn.setEnabled(
-                (not running)
-                and backend in ("mujoco", "molmospaces", "arena", "libero", "robotwin")
-            )
+            self.mujoco_start_btn.setEnabled(startable)
+        if hasattr(self, "mujoco_viewer_only_btn"):
+            self.mujoco_viewer_only_btn.setEnabled(startable)
         if hasattr(self, "mujoco_stop_btn"):
             self.mujoco_stop_btn.setEnabled(running)
         if hasattr(self, "mujoco_install_btn"):
@@ -32379,6 +33702,16 @@ class CameraTopicWindow(QMainWindow):
             "robotwin_max_steps_spin",
             "robotwin_render_gui_check",
             "mujoco_open_model_btn",
+            "ext_bench_root_edit",
+            "ext_bench_root_browse_btn",
+            "ext_bench_python_edit",
+            "ext_bench_mode_combo",
+            "ext_bench_task_edit",
+            "ext_bench_episodes_spin",
+            "ext_bench_viewer_check",
+            "ext_bench_probe_btn",
+            "ext_bench_hint_btn",
+            "ext_bench_docs_btn",
         ):
             w = getattr(self, wname, None)
             if w is not None:
@@ -32395,8 +33728,30 @@ class CameraTopicWindow(QMainWindow):
             self._on_libero_run_clicked()
         elif backend == "robotwin":
             self._on_robotwin_run_clicked()
+        elif self._is_extended_sim_backend(backend):
+            self._on_ext_bench_run_clicked(viewer_only=False)
         else:
             self._on_mujoco_start_clicked()
+
+    def _on_sim_viewer_only_clicked(self) -> None:
+        """Start sim GUI only — no policy / model inference for any backend."""
+        backend = self._sim_backend_id()
+        if backend == "isaac":
+            self._start_sim_eval(viewer_only=True)
+        elif backend == "mujoco":
+            self._on_mujoco_start_clicked(viewer_only=True)
+        elif backend == "molmospaces":
+            self._on_molmospaces_run_clicked(viewer_only=True)
+        elif backend == "arena":
+            self._on_arena_run_clicked(viewer_only=True)
+        elif backend == "libero":
+            self._on_libero_run_clicked(viewer_only=True)
+        elif backend == "robotwin":
+            self._on_robotwin_viewer_only_clicked()
+        elif self._is_extended_sim_backend(backend):
+            self._on_ext_bench_run_clicked(viewer_only=True)
+        else:
+            self._on_mujoco_status(f"未知后端: {backend}")
 
     def _on_mujoco_open_selected_dir(self) -> None:
         backend = self._sim_backend_id()
@@ -32416,6 +33771,13 @@ class CameraTopicWindow(QMainWindow):
                     else ""
                 )
             )
+        elif self._is_extended_sim_backend(backend):
+            root = (
+                self.ext_bench_root_edit.text().strip()
+                if hasattr(self, "ext_bench_root_edit")
+                else ""
+            )
+            root = resolve_external_bench_root(backend, root)
         else:
             self._on_mujoco_open_model_dir()
             return
@@ -32424,6 +33786,140 @@ class CameraTopicWindow(QMainWindow):
             self._append_mujoco_log(f"已打开目录: {root}")
         else:
             self._on_mujoco_status(f"目录不存在: {root}")
+
+    def _on_ext_bench_root_browse(self) -> None:
+        cur = (
+            self.ext_bench_root_edit.text().strip()
+            if hasattr(self, "ext_bench_root_edit")
+            else ""
+        ) or os.path.expanduser("~")
+        selected = QFileDialog.getExistingDirectory(self, "选择扩展评测仓库根目录", cur)
+        if selected and hasattr(self, "ext_bench_root_edit"):
+            self.ext_bench_root_edit.setText(selected)
+
+    def _on_ext_bench_probe_clicked(self) -> None:
+        backend = self._sim_backend_id()
+        if not self._is_extended_sim_backend(backend):
+            self._on_mujoco_status("请先切换到「扩展评测」")
+            return
+        root = self.ext_bench_root_edit.text().strip() if hasattr(self, "ext_bench_root_edit") else ""
+        py = self.ext_bench_python_edit.text().strip() if hasattr(self, "ext_bench_python_edit") else ""
+        ok, msg = probe_external_bench_deps(backend, python_bin=py, root=root)
+        line = ("OK · " if ok else "NEED · ") + msg
+        self._append_mujoco_log(f"[{backend}] {line}")
+        if hasattr(self, "ext_bench_status_label"):
+            self.ext_bench_status_label.setText(line)
+        self._on_mujoco_status(line)
+
+    def _on_ext_bench_hint_clicked(self) -> None:
+        backend = self._sim_backend_id()
+        if not self._is_extended_sim_backend(backend):
+            self._on_mujoco_status("请先切换到「扩展评测」")
+            return
+        py = self.ext_bench_python_edit.text().strip() if hasattr(self, "ext_bench_python_edit") else ""
+        text = external_bench_install_hint(backend, py)
+        self._append_mujoco_log("--- 安装指引 ---")
+        for ln in (text or "").splitlines() or ["(empty)"]:
+            self._append_mujoco_log(ln)
+        self._on_mujoco_status(f"{backend} 安装指引已写入日志")
+
+    def _on_ext_bench_docs_clicked(self) -> None:
+        backend = self._sim_backend_id()
+        spec = get_sim_backend_spec(backend)
+        url = ""
+        if spec is not None:
+            url = getattr(spec, "source_url", "") or ""
+        if not url:
+            board = None
+            try:
+                board = load_sim_eval_board(backend)
+            except Exception:
+                board = None
+            if isinstance(board, dict):
+                url = str(board.get("source_url") or "")
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+        else:
+            self._on_mujoco_status(f"无文档链接: {backend}")
+
+    def _on_ext_bench_run_clicked(self, *, viewer_only: bool = False) -> None:
+        """Launch tools/run_external_bench.py for the selected extended suite."""
+        backend = self._sim_backend_id()
+        if not self._is_extended_sim_backend(backend):
+            self._on_mujoco_status("请先将仿真后端切换为「扩展评测」")
+            return
+        if getattr(self, "_mujoco_launcher", None) and self._mujoco_launcher.is_running():
+            self._on_mujoco_status("已有仿真进程在运行，请先停止")
+            return
+        if getattr(self, "_sim_eval_launcher", None) and self._sim_eval_launcher.is_running():
+            self._on_mujoco_status("Isaac 评测仍在运行，请先停止")
+            return
+
+        root = self.ext_bench_root_edit.text().strip() if hasattr(self, "ext_bench_root_edit") else ""
+        py = self.ext_bench_python_edit.text().strip() if hasattr(self, "ext_bench_python_edit") else ""
+        mode = "viewer" if viewer_only else str(
+            self.ext_bench_mode_combo.currentData()
+            if hasattr(self, "ext_bench_mode_combo")
+            else "eval"
+        )
+        if viewer_only:
+            mode = "viewer"
+        task = (
+            self.ext_bench_task_edit.text().strip()
+            if hasattr(self, "ext_bench_task_edit")
+            else ""
+        )
+        episodes = (
+            int(self.ext_bench_episodes_spin.value())
+            if hasattr(self, "ext_bench_episodes_spin")
+            else 1
+        )
+        viewer = bool(
+            self.ext_bench_viewer_check.isChecked()
+            if hasattr(self, "ext_bench_viewer_check")
+            else True
+        )
+        harness = mode == "harness"
+        try:
+            plan = build_external_bench_argv(
+                backend,
+                root=root,
+                python_bin=py,
+                mode="harness" if harness else mode,
+                task=task,
+                episodes=episodes,
+                viewer=viewer or viewer_only,
+                harness=harness,
+            )
+        except Exception as exc:
+            self._on_mujoco_status(f"构建启动命令失败: {exc}")
+            self._append_mujoco_log(str(exc))
+            return
+
+        argv = list(plan.get("argv") or [])
+        cwd = str(plan.get("cwd") or EAI_DIR)
+        if not os.path.isdir(cwd):
+            cwd = EAI_DIR
+        child_env = dict(plan.get("env") or {})
+        try:
+            child_env.update(self._rynnvalue_live_hud_child_env(backend))
+        except Exception:
+            pass
+        note = str(plan.get("note") or "")
+        self._append_mujoco_log(f"--- 扩展评测 {backend} · {mode} ---")
+        if note:
+            self._append_mujoco_log(note)
+        self._append_mujoco_log("cmd: " + " ".join(argv))
+        if hasattr(self, "ext_bench_status_label"):
+            self.ext_bench_status_label.setText(f"运行中 · {backend} · {mode}")
+        self._on_mujoco_status(f"启动扩展评测 · {backend}")
+        self._mujoco_launcher.start_cwd_command(
+            cwd=cwd,
+            argv=argv,
+            label=f"ext:{backend}",
+            env_extra=child_env,
+        )
+        self._update_mujoco_ui()
 
     def _resolve_mujoco_mjcf_path(self) -> str:
         raw = (
@@ -32604,7 +34100,7 @@ class CameraTopicWindow(QMainWindow):
         if selected:
             self.arena_policy_file_edit.setText(selected)
 
-    def _on_arena_run_clicked(self) -> None:
+    def _on_arena_run_clicked(self, *, viewer_only: bool = False) -> None:
         if (
             self._sim_eval_launcher.is_running()
             or self._sim_bridge_launcher.is_running()
@@ -32628,21 +34124,36 @@ class CameraTopicWindow(QMainWindow):
         if not env_name:
             self._on_mujoco_status("请选择一个 IsaacLab-Arena 任务")
             return
-        policy = "zero_action"
-        if hasattr(self, "arena_policy_combo"):
-            policy = str(self.arena_policy_combo.currentData() or policy)
+        # 只开界面：强制 zero_action + Kit，不加载策略权重 / Live HUD。
+        if viewer_only:
+            policy = "zero_action"
+            show_gui = True
+        else:
+            policy = "zero_action"
+            if hasattr(self, "arena_policy_combo"):
+                policy = str(self.arena_policy_combo.currentData() or policy)
+            show_gui = not (
+                hasattr(self, "arena_headless_check")
+                and self.arena_headless_check.isChecked()
+            )
         steps = 200
         if hasattr(self, "arena_steps_spin"):
             steps = int(self.arena_steps_spin.value())
+        if viewer_only:
+            steps = max(steps, 2000)
         py = resolve_isaaclab_arena_python()
         runner = os.path.join(root, "isaaclab_arena", "evaluation", "policy_runner.py")
         wrapper = os.path.join(EAI_DIR, "tools", "run_arena_eval.py")
         if not os.path.isfile(runner):
             self._on_mujoco_status(f"未找到: {runner}")
             return
-        if not self._ensure_live_hud_reward_or_abort("arena"):
+        if (not viewer_only) and not self._ensure_live_hud_reward_or_abort("arena"):
             return
-        hud_env = self._rynnvalue_live_hud_child_env("arena")
+        hud_env = (
+            {}
+            if viewer_only
+            else self._rynnvalue_live_hud_child_env("arena")
+        )
         if hud_env:
             self._expand_workspace_panel()
         argv = [
@@ -32665,7 +34176,7 @@ class CameraTopicWindow(QMainWindow):
             argv.extend(["--device", "cuda:0"])
         else:
             argv.extend(["--device", "cpu"])
-        if policy in ("replay", "rsl_rl"):
+        if (not viewer_only) and policy in ("replay", "rsl_rl"):
             policy_file = ""
             if hasattr(self, "arena_policy_file_edit"):
                 policy_file = self.arena_policy_file_edit.text().strip()
@@ -32675,9 +34186,6 @@ class CameraTopicWindow(QMainWindow):
                 return
             flag = "--replay_file_path" if policy == "replay" else "--checkpoint_path"
             argv.extend([flag, os.path.abspath(policy_file)])
-        show_gui = not (
-            hasattr(self, "arena_headless_check") and self.arena_headless_check.isChecked()
-        )
         if show_gui:
             argv.extend(["--viz", "kit"])
         else:
@@ -32693,6 +34201,10 @@ class CameraTopicWindow(QMainWindow):
                 self._on_mujoco_status(f"额外参数无法解析: {exc}")
                 return
         self.mujoco_log_edit.clear()
+        if viewer_only:
+            self._append_mujoco_log(
+                "[arena] 只开界面：zero_action + Kit，不加载策略/不推理"
+            )
         self._append_mujoco_log(f"[arena] root={root}")
         self._append_mujoco_log(f"[arena] python={py}")
         device_label = f"cuda:{gpu_id}" if use_gpu else "cpu"
@@ -32975,6 +34487,167 @@ class CameraTopicWindow(QMainWindow):
         if getattr(self, "_workspace_collapsed", False):
             self._toggle_workspace_panel()
 
+    def _rynnvalue_workspace_overlay_candidates(self) -> List[str]:
+        """Paths that may hold the latest LIBERO / Live HUD preview JPEG."""
+        paths: List[str] = []
+        seen: set[str] = set()
+
+        def _add(path: str) -> None:
+            p = os.path.abspath(os.path.expanduser(path or ""))
+            if not p or p in seen:
+                return
+            seen.add(p)
+            paths.append(p)
+
+        # Prefer Live HUD overlay when present; always include raw LIBERO preview.
+        _add(LIBERO_PREVIEW_JPG)
+        cache = RYNNVALUE_LIVE_CACHE_DIR
+        try:
+            if os.path.isdir(cache):
+                for name in sorted(os.listdir(cache)):
+                    if name.endswith("_overlay.jpg") or name == "libero_preview.jpg":
+                        _add(os.path.join(cache, name))
+                for name in sorted(os.listdir(cache)):
+                    if not name.endswith(".json"):
+                        continue
+                    jp = os.path.join(cache, name)
+                    try:
+                        with open(jp, "r", encoding="utf-8") as fh:
+                            payload = json.load(fh)
+                        op = str((payload or {}).get("overlay_path") or "").strip()
+                        if op:
+                            _add(op)
+                    except Exception:
+                        pass
+        except OSError:
+            pass
+        return paths
+
+    def _workspace_preview_topics(self) -> List[str]:
+        return [LIBERO_PREVIEW_TOPIC, RYNNVALUE_LIVE_HUD_TOPIC]
+
+    def _set_rynnvalue_workspace_hud_active(self, active: bool) -> None:
+        """Ensure LIBERO + Live HUD panels exist in 工作区「图像预览」."""
+        if not hasattr(self, "topic_list_layout") or not hasattr(self, "grid_layout"):
+            return
+        topics = self._workspace_preview_topics()
+        timer = getattr(self, "_rynnvalue_workspace_hud_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start()
+        if not active:
+            # Keep last frames / timer; a new JPEG will refresh the panels.
+            return
+
+        self._expand_workspace_panel()
+        types: Dict[str, List[str]] = {}
+        for k, v in (getattr(self, "_topic_types", {}) or {}).items():
+            if isinstance(v, (list, tuple)):
+                types[k] = list(v)
+            elif isinstance(v, str):
+                types[k] = [v]
+            else:
+                types[k] = ["sensor_msgs/msg/Image"]
+        for topic in topics:
+            types[topic] = ["sensor_msgs/msg/Image"]
+        self._on_topics_updated(types)
+        enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
+        for topic in topics:
+            checkbox = self.topic_checks.get(topic)
+            if checkbox is not None:
+                checkbox.blockSignals(True)
+                checkbox.setChecked(True)
+                checkbox.blockSignals(False)
+            self._topic_user_unchecked.discard(topic)
+            enabled.add(topic)
+        # File-backed previews: show panels but do not ROS-subscribe.
+        if hasattr(self, "node") and hasattr(self.node, "set_enabled_topics"):
+            ros_enabled = {
+                t
+                for t in enabled
+                if t not in (LIBERO_PREVIEW_TOPIC, RYNNVALUE_LIVE_HUD_TOPIC)
+            }
+            self.node.set_enabled_topics(ros_enabled)
+        self._rebuild_panels(enabled)
+        self._poll_rynnvalue_workspace_hud()
+
+    def _poll_rynnvalue_workspace_hud(self) -> None:
+        """Pull newest LIBERO preview / Live HUD overlay into the preview panel."""
+        if not hasattr(self, "topic_list_layout") or not hasattr(self, "grid_layout"):
+            return
+        # Prefer Live HUD overlay when it is the newest file; else raw preview.
+        best_path = ""
+        best_mtime = 0.0
+        for path in self._rynnvalue_workspace_overlay_candidates():
+            try:
+                if not os.path.isfile(path):
+                    continue
+                mtime = float(os.path.getmtime(path))
+            except OSError:
+                continue
+            if mtime >= best_mtime:
+                best_mtime = mtime
+                best_path = path
+        if not best_path:
+            return
+        # Auto-expose pseudo-topics as soon as a preview JPEG exists.
+        checks = getattr(self, "topic_checks", {}) or {}
+        panels = getattr(self, "panels", {}) or {}
+        need_topics = [
+            t
+            for t in self._workspace_preview_topics()
+            if t not in checks or t not in panels
+        ]
+        if need_topics and not getattr(self, "_rynnvalue_workspace_hud_activating", False):
+            self._rynnvalue_workspace_hud_activating = True
+            try:
+                self._set_rynnvalue_workspace_hud_active(True)
+            finally:
+                self._rynnvalue_workspace_hud_activating = False
+            # Activation itself calls poll; avoid double-read in this tick.
+            return
+        prev = float(getattr(self, "_rynnvalue_workspace_hud_mtime", 0.0) or 0.0)
+        if best_mtime <= prev:
+            return
+        try:
+            import cv2 as _cv2
+
+            img = _cv2.imread(best_path, _cv2.IMREAD_COLOR)
+        except Exception:
+            return
+        if img is None or getattr(img, "size", 0) == 0:
+            return
+        self._rynnvalue_workspace_hud_mtime = best_mtime
+        # Route into both pseudo-topics so either panel name works.
+        for topic in self._workspace_preview_topics():
+            self._frame_cache[topic] = img
+            panel = self.panels.get(topic) if hasattr(self, "panels") else None
+            if panel is None:
+                enabled = {
+                    t
+                    for t, cb in getattr(self, "topic_checks", {}).items()
+                    if cb.isChecked()
+                }
+                enabled.add(topic)
+                self._apply_selection(enabled)
+                panel = self.panels.get(topic)
+            if isinstance(panel, CameraPanel):
+                panel.update_frame(img)
+        try:
+            if best_path.endswith("_overlay.jpg"):
+                status_guess = best_path.replace("_overlay.jpg", ".json")
+                if os.path.isfile(status_guess):
+                    with open(status_guess, "r", encoding="utf-8") as fh:
+                        payload = json.load(fh)
+                    rem = payload.get("remaining_s")
+                    if rem is not None and hasattr(self, "_set_sim_rynnvalue_status"):
+                        self._set_sim_rynnvalue_status(
+                            f"Live HUD rem={float(rem):.2f}s "
+                            f"step={payload.get('step', '?')}",
+                            level="ok",
+                        )
+        except Exception:
+            pass
+
     # Backward-compatible aliases (older call sites / signal names).
     def _libero_rynnvalue_server_url(self) -> str:
         return self._sim_rynnvalue_server_url()
@@ -33096,6 +34769,7 @@ class CameraTopicWindow(QMainWindow):
         self._update_sim_rynnvalue_hud_controls()
         if checked:
             self._expand_workspace_panel()
+            self._set_rynnvalue_workspace_hud_active(True)
             self._append_mujoco_log(
                 f"[rynnvalue] Live HUD 已勾选，探测 {self._sim_rynnvalue_server_url()}"
             )
@@ -33105,6 +34779,7 @@ class CameraTopicWindow(QMainWindow):
             else:
                 self._on_mujoco_status(msg)
         else:
+            self._set_rynnvalue_workspace_hud_active(False)
             self._set_sim_rynnvalue_status("未启用 Live HUD", level="muted")
             if hasattr(self, "sim_rynnvalue_deploy_btn"):
                 self.sim_rynnvalue_deploy_btn.setText("部署 RynnValue")
@@ -33464,7 +35139,7 @@ class CameraTopicWindow(QMainWindow):
             time.sleep(2.0)
         return False, f"等待 RynnValue reward_server 超时: {last}"
 
-    def _on_libero_run_clicked(self) -> None:
+    def _on_libero_run_clicked(self, *, viewer_only: bool = False) -> None:
         if (
             self._sim_eval_launcher.is_running()
             or self._sim_bridge_launcher.is_running()
@@ -33498,6 +35173,64 @@ class CameraTopicWindow(QMainWindow):
             self._on_mujoco_status("LIBERO 依赖未就绪（见日志）")
             return
 
+        max_tasks = 1
+        trials = 1
+        chunk = 5
+        num_steps = 10
+        if hasattr(self, "libero_max_tasks_spin"):
+            max_tasks = int(self.libero_max_tasks_spin.value())
+        if hasattr(self, "libero_trials_spin"):
+            trials = int(self.libero_trials_spin.value())
+        if hasattr(self, "libero_chunk_spin"):
+            chunk = int(self.libero_chunk_spin.value())
+        if hasattr(self, "libero_steps_spin"):
+            num_steps = int(self.libero_steps_spin.value())
+        render_gui = True
+        if hasattr(self, "libero_render_gui_check"):
+            render_gui = bool(self.libero_render_gui_check.isChecked())
+        if viewer_only:
+            render_gui = True
+            self._append_mujoco_log(
+                "[libero] 只开界面：不连 Pi / 不推理；「手臂/手」文本指挥可用"
+            )
+            try:
+                argv, cwd, env_extra = build_libero_eval_argv(
+                    mode="remote",
+                    task_suite=suite,
+                    config_name=cfg,
+                    checkpoint=ckpt,
+                    max_tasks=1,
+                    num_trials_per_task=1,
+                    action_chunk=chunk,
+                    num_steps=num_steps,
+                    python_bin=py,
+                    rlinf_root=rlinf,
+                    render_gui=True,
+                    viewer_only=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._on_mujoco_status(f"无法组装 LIBERO viewer 命令: {exc}")
+                return
+            clean_env = {k: v for k, v in env_extra.items() if v is not None}
+            clean_env["EAI_DIR"] = EAI_DIR
+            clean_env.update(self._sim_bridge_child_env())
+            tools = os.path.join(EAI_DIR, "tools")
+            prev = clean_env.get("PYTHONPATH") or ""
+            clean_env["PYTHONPATH"] = os.pathsep.join(
+                [tools] + [p for p in prev.split(os.pathsep) if p and p != tools]
+            )
+            self._expand_workspace_panel()
+            self._set_rynnvalue_workspace_hud_active(True)
+            self._append_mujoco_log(f"[libero] python={py} suite={suite} viewer_only")
+            self._mujoco_launcher.start_cwd_command(
+                cwd=str(cwd),
+                argv=argv,
+                label=f"libero-viewer {suite}",
+                env_extra=clean_env,
+            )
+            self._update_mujoco_ui()
+            return
+
         # libero 客户端环境无 jax/openpi；「local」改为自动部署 serve + remote 评测。
         eval_mode = mode
         if mode == "local":
@@ -33522,21 +35255,6 @@ class CameraTopicWindow(QMainWindow):
             return
         self._append_mujoco_log(f"[libero] Pi 预检通过: {msg}")
 
-        max_tasks = 1
-        trials = 1
-        chunk = 5
-        num_steps = 10
-        if hasattr(self, "libero_max_tasks_spin"):
-            max_tasks = int(self.libero_max_tasks_spin.value())
-        if hasattr(self, "libero_trials_spin"):
-            trials = int(self.libero_trials_spin.value())
-        if hasattr(self, "libero_chunk_spin"):
-            chunk = int(self.libero_chunk_spin.value())
-        if hasattr(self, "libero_steps_spin"):
-            num_steps = int(self.libero_steps_spin.value())
-        render_gui = True
-        if hasattr(self, "libero_render_gui_check"):
-            render_gui = bool(self.libero_render_gui_check.isChecked())
         _rv = self._sim_rynnvalue_hud_settings()
         rynnvalue_live_hud = bool(_rv["enabled"])
         rynnvalue_refresh_sec = float(_rv["refresh_sec"])
@@ -33607,7 +35325,12 @@ class CameraTopicWindow(QMainWindow):
                 f"url={rynnvalue_server_url} refresh={rynnvalue_refresh_sec}s "
                 f"num_frames={rynnvalue_num_frames}"
             )
-            self._expand_workspace_panel()
+        # Always feed agentview into 工作区图像预览 (even without Live HUD).
+        self._expand_workspace_panel()
+        self._set_rynnvalue_workspace_hud_active(True)
+        self._append_mujoco_log(
+            f"[libero] 图像预览 ← {LIBERO_PREVIEW_JPG}"
+        )
         self._append_mujoco_log(f"[libero] out={LIBERO_EVAL_OUTPUT_DIR}")
         if render_gui and not (os.environ.get("DISPLAY") or "").strip():
             self._append_mujoco_log(
@@ -33616,6 +35339,9 @@ class CameraTopicWindow(QMainWindow):
         clean_env = {k: v for k, v in env_extra.items() if v is not None}
         if rynnvalue_live_hud:
             clean_env.update(self._rynnvalue_live_hud_child_env("libero"))
+        # Force EAI_DIR so the child writes preview next to this UI cache.
+        clean_env["EAI_DIR"] = EAI_DIR
+        clean_env.update(self._sim_bridge_child_env())
         self._mujoco_launcher.start_cwd_command(
             cwd=str(cwd),
             argv=argv,
@@ -33837,6 +35563,7 @@ class CameraTopicWindow(QMainWindow):
                 f"num_frames={rynnvalue_num_frames}"
             )
             self._expand_workspace_panel()
+            self._set_rynnvalue_workspace_hud_active(True)
         if render_gui and not (os.environ.get("DISPLAY") or "").strip():
             self._append_mujoco_log(
                 "[robotwin] 警告: DISPLAY 为空，SAPIEN 图形窗口可能无法弹出"
@@ -33844,10 +35571,67 @@ class CameraTopicWindow(QMainWindow):
         clean_env = {k: v for k, v in env_extra.items() if v is not None}
         if rynnvalue_live_hud:
             clean_env.update(self._rynnvalue_live_hud_child_env("robotwin"))
+        clean_env.update(self._sim_bridge_child_env())
+        tools = os.path.join(EAI_DIR, "tools")
+        prev = clean_env.get("PYTHONPATH") or ""
+        clean_env["PYTHONPATH"] = os.pathsep.join(
+            [tools] + [p for p in prev.split(os.pathsep) if p and p != tools]
+        )
         self._mujoco_launcher.start_cwd_command(
             cwd=str(cwd),
             argv=argv,
             label=f"robotwin {task}",
+            env_extra=clean_env,
+        )
+        self._update_mujoco_ui()
+
+    def _on_robotwin_viewer_only_clicked(self) -> None:
+        """SAPIEN viewer without OpenPI — GUI teleop via gui_robot_cmd.json."""
+        if (
+            self._sim_eval_launcher.is_running()
+            or self._sim_bridge_launcher.is_running()
+        ):
+            self._on_mujoco_status("Isaac 评测/相机桥正在运行，请先停止")
+            return
+        if self._sim_backend_id() != "robotwin":
+            self._on_mujoco_status("请先将仿真后端切换为 RoboTwin")
+            return
+        if self._mujoco_launcher.is_running():
+            self._on_mujoco_status("其它仿真后端正在运行，请先停止")
+            return
+        self.mujoco_log_edit.clear()
+        task = self._robotwin_task_id()
+        rt = ""
+        if hasattr(self, "robotwin_root_edit"):
+            rt = self.robotwin_root_edit.text().strip()
+        assets = ""
+        if hasattr(self, "robotwin_assets_edit"):
+            assets = self.robotwin_assets_edit.text().strip()
+        py = resolve_robotwin_python()
+        try:
+            argv, cwd, env_extra = build_robotwin_viewer_argv(
+                task=task,
+                python_bin=py,
+                robotwin_root=rt,
+                assets_path=assets,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._on_mujoco_status(f"无法组装 RoboTwin viewer: {exc}")
+            return
+        clean_env = {k: v for k, v in env_extra.items() if v is not None}
+        clean_env.update(self._sim_bridge_child_env())
+        tools = os.path.join(EAI_DIR, "tools")
+        prev = clean_env.get("PYTHONPATH") or ""
+        clean_env["PYTHONPATH"] = os.pathsep.join(
+            [tools] + [p for p in prev.split(os.pathsep) if p and p != tools]
+        )
+        self._append_mujoco_log(
+            f"[robotwin] 只开界面 task={task}；「手臂/手」文本指挥可用"
+        )
+        self._mujoco_launcher.start_cwd_command(
+            cwd=str(cwd),
+            argv=argv,
+            label=f"robotwin-viewer {task}",
             env_extra=clean_env,
         )
         self._update_mujoco_ui()
@@ -34406,7 +36190,7 @@ class CameraTopicWindow(QMainWindow):
             time.sleep(2.0)
         return False, f"等待策略服务超时: {last}"
 
-    def _on_molmospaces_run_clicked(self) -> None:
+    def _on_molmospaces_run_clicked(self, *, viewer_only: bool = False) -> None:
         if (
             self._sim_eval_launcher.is_running()
             or self._sim_bridge_launcher.is_running()
@@ -34417,9 +36201,18 @@ class CameraTopicWindow(QMainWindow):
             self._on_mujoco_status("请先将仿真后端切换为 MolmoSpaces")
             return
         root = self._resolve_molmospaces_root()
-        recipe = "quick_viewer"
-        if hasattr(self, "molmospaces_recipe_combo"):
-            recipe = str(self.molmospaces_recipe_combo.currentData() or "quick_viewer")
+        # 只开界面：强制快速演示 --viewer（不走 Pi 评测）。
+        if viewer_only:
+            recipe = "quick_viewer"
+            self._append_mujoco_log(
+                "[molmospaces] 只开界面：快速演示 --viewer，不调用模型"
+            )
+        else:
+            recipe = "quick_viewer"
+            if hasattr(self, "molmospaces_recipe_combo"):
+                recipe = str(
+                    self.molmospaces_recipe_combo.currentData() or "quick_viewer"
+                )
         if not os.path.isdir(root):
             self._on_mujoco_status(f"MolmoSpaces 目录不存在: {root}")
             return
@@ -34736,7 +36529,13 @@ class CameraTopicWindow(QMainWindow):
             "PYTHONPATH": "",
             "PYTHONNOUSERSITE": "1",
             **molmospaces_cache_env(),
+            **self._sim_bridge_child_env(),
         }
+        tools = os.path.join(EAI_DIR, "tools")
+        prev = env_extra.get("PYTHONPATH") or ""
+        env_extra["PYTHONPATH"] = os.pathsep.join(
+            [tools] + [p for p in prev.split(os.pathsep) if p and p != tools]
+        )
         if hud_env:
             env_extra.update(hud_env)
             self._expand_workspace_panel()
@@ -34766,7 +36565,7 @@ class CameraTopicWindow(QMainWindow):
         )
         self._update_mujoco_ui()
 
-    def _on_mujoco_start_clicked(self) -> None:
+    def _on_mujoco_start_clicked(self, *, viewer_only: bool = False) -> None:
         if self._mujoco_launcher.is_running():
             self._on_mujoco_status("MuJoCo 正在运行")
             return
@@ -34788,10 +36587,16 @@ class CameraTopicWindow(QMainWindow):
             self._append_mujoco_log(
                 "[warn] DISPLAY 为空，若窗口未弹出请检查本机图形环境"
             )
-        if not self._ensure_live_hud_reward_or_abort("mujoco"):
+        if (not viewer_only) and not self._ensure_live_hud_reward_or_abort("mujoco"):
             return
         self.mujoco_log_edit.clear()
-        hud_env = self._rynnvalue_live_hud_child_env("mujoco")
+        if viewer_only:
+            self._append_mujoco_log("[mujoco] 只开界面：官方 MJCF viewer（无策略）")
+        hud_env = (
+            {}
+            if viewer_only
+            else self._rynnvalue_live_hud_child_env("mujoco")
+        )
         if hud_env:
             # Force EGL path when Live HUD needs RGB frames from renderer.
             mode = str(self.mujoco_mode_combo.currentData() or "python")
@@ -34809,13 +36614,22 @@ class CameraTopicWindow(QMainWindow):
             )
         else:
             mode = str(self.mujoco_mode_combo.currentData() or "python")
+            if viewer_only and mode in ("auto", "python"):
+                mode = "egl"
+        env_extra = dict(hud_env or {})
+        env_extra.update(self._sim_bridge_child_env())
+        tools = os.path.join(EAI_DIR, "tools")
+        prev = env_extra.get("PYTHONPATH") or ""
+        env_extra["PYTHONPATH"] = os.pathsep.join(
+            [tools] + [p for p in prev.split(os.pathsep) if p and p != tools]
+        )
         self._mujoco_launcher.start(
             mjcf_path=mjcf,
             mujoco_root=self.mujoco_root_edit.text().strip(),
             python_bin=self.mujoco_python_edit.text().strip(),
             mode=mode,
             install=False,
-            env_extra=hud_env or None,
+            env_extra=env_extra,
         )
         self._update_mujoco_ui()
 
@@ -37089,13 +38903,37 @@ class CameraTopicWindow(QMainWindow):
         except Exception:
             return None
 
+    def _sim_bridge_child_env(self) -> Dict[str, str]:
+        """Env vars so any sim child can read/write gui_robot_cmd / sim_robot_state."""
+        return {
+            "ISAAC_CAM_BRIDGE_DIR": self._sim_bridge_dir(),
+            "EAI_DIR": EAI_DIR,
+        }
+
+    def _any_sim_process_running(self) -> bool:
+        if getattr(self, "_sim_eval_launcher", None) and self._sim_eval_launcher.is_running():
+            return True
+        if getattr(self, "_mujoco_launcher", None) and self._mujoco_launcher.is_running():
+            return True
+        return False
+
     def _sim_teleop_active(self) -> bool:
-        """仿真评测常驻且策略=无（或已有新鲜 sim_robot_state）时，手臂/手走共享指令桥。"""
-        launcher = getattr(self, "_sim_eval_launcher", None)
-        if launcher is None or not launcher.is_running():
-            return False
+        """任一仿真后端运行且走共享指令桥时，「手臂/手」文本/滑块遥控仿真。"""
         if write_gui_robot_cmd is None:
             return False
+        isaac = getattr(self, "_sim_eval_launcher", None)
+        mj = getattr(self, "_mujoco_launcher", None)
+        isaac_on = bool(isaac is not None and isaac.is_running())
+        mj_on = bool(mj is not None and mj.is_running())
+        if not isaac_on and not mj_on:
+            state = self._read_sim_robot_state()
+            if sim_state_is_fresh is None:
+                return False
+            return bool(sim_state_is_fresh(state, SIM_TELEOP_STATE_MAX_AGE_S))
+        # MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin（统一走 _mujoco_launcher）
+        if mj_on and not isaac_on:
+            return True
+        # Isaac：策略=无直接开桥；有策略时需仿真已回写新鲜 TCP
         combo = getattr(self, "sim_eval_policy_combo", None)
         no_policy = True
         if combo is not None:
@@ -37226,7 +39064,12 @@ class CameraTopicWindow(QMainWindow):
             label = str(move.get("label") or "")
             self._sim_arm_move = None
             self._sim_arm_move_timer.stop()
-            self.status_bar.showMessage(f"仿真{side_name}移动完成" + (f" → {label}" if label else ""))
+            done_msg = f"仿真{side_name}移动完成" + (f" → {label}" if label else "")
+            if not self._text_cmd_pumping:
+                extra = self._pump_text_cmd_queue()
+                if extra:
+                    done_msg = f"{done_msg}；{extra}"
+            self.status_bar.showMessage(done_msg)
             self._update_arm_move_btns_ui()
             return
         self._update_arm_move_btns_ui()
@@ -37496,6 +39339,10 @@ class CameraTopicWindow(QMainWindow):
         self._pending_arm_move_goal = None
         self._arm_enable_wait_timer.stop()
         msg = self.node.request_slow_move_to_goal(goal)
+        if str(msg).startswith("无法") or str(msg).startswith("已有移动"):
+            if self._text_cmd_queue:
+                self._text_cmd_queue.clear()
+                msg += "（已取消后续文本指令）"
         self.status_bar.showMessage(msg)
         self._update_arm_move_btns_ui()
 
@@ -37508,6 +39355,7 @@ class CameraTopicWindow(QMainWindow):
             return
         if time.time() > self._arm_enable_wait_deadline:
             self._pending_arm_move_goal = None
+            self._text_cmd_queue.clear()
             self._arm_enable_wait_timer.stop()
             self.status_bar.showMessage(
                 "自动启用手臂超时，请确认 topic_router 已运行，或手动按 F2 / 点「启用手臂」"
@@ -37546,7 +39394,7 @@ class CameraTopicWindow(QMainWindow):
             right_ok = self._sim_tcp_pose("right") is not None
             if not left_ok or not right_ok:
                 hints.append(
-                    "等待仿真 TCP（策略=无 评测写出 sim_robot_state.json）"
+                    "等待仿真 TCP（请「只开界面」或策略=无，等待 sim_robot_state.json）"
                 )
             side_name = arm_side_label(arm_side)
             if self.move_target_segment_radio.isChecked():
@@ -37729,7 +39577,7 @@ class CameraTopicWindow(QMainWindow):
                     extra = "\n请设置非零偏移后再点击"
                 btn.setToolTip(
                     f"仿真遥控：将{side_name} TCP 移到目标（策略=无）。\n"
-                    f"目标写入共享目录 gui_robot_cmd.json，由 NoopModelClient 执行。{extra}"
+                    f"目标写入共享目录 gui_robot_cmd.json，由当前仿真后端执行。{extra}"
                 )
             else:
                 blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
@@ -37811,12 +39659,207 @@ class CameraTopicWindow(QMainWindow):
         self.status_bar.showMessage(msg)
         self._update_arm_move_btns_ui()
 
+    def _on_arm_text_command(self) -> None:
+        text = self.arm_text_cmd_edit.text().strip()
+        if not text:
+            self.status_bar.showMessage("请输入指令，例如：左臂向前5cm；右手张开")
+            return
+        actions, errors = parse_arm_hand_text(text)
+        if not actions:
+            hint = "；".join(errors) if errors else "无法识别"
+            self.status_bar.showMessage(f"无法识别：{hint}")
+            return
+        if actions[0].kind == "stop":
+            self._text_cmd_queue.clear()
+            stop_msg = self._cancel_arm_motion_for_text()
+            actions = actions[1:]
+        else:
+            stop_msg = ""
+        self._text_cmd_queue.extend(actions)
+        msg = self._pump_text_cmd_queue()
+        parts = [p for p in (stop_msg, msg) if p]
+        if errors:
+            parts.append("未识别：" + "；".join(errors))
+        self.status_bar.showMessage("；".join(parts) if parts else "没有可执行的指令")
+        try:
+            self.node.get_logger().info(f"文本指挥 [{text}] -> {self.status_bar.currentMessage()}")
+        except Exception:
+            pass
+
+    def _arm_text_motion_busy(self) -> bool:
+        return (
+            self._is_sim_arm_moving()
+            or self.node.is_slow_motion_busy()
+            or self._pending_arm_move_goal is not None
+        )
+
+    def _pump_text_cmd_queue(self) -> str:
+        if self._text_cmd_pumping:
+            return ""
+        self._text_cmd_pumping = True
+        try:
+            return self._pump_text_cmd_queue_body()
+        finally:
+            self._text_cmd_pumping = False
+
+    def _pump_text_cmd_queue_body(self) -> str:
+        notes: List[str] = []
+        while self._text_cmd_queue:
+            action = self._text_cmd_queue[0]
+            if action.kind == "stop":
+                self._text_cmd_queue.clear()
+                notes.append(self._cancel_arm_motion_for_text())
+                break
+            if action.kind == "hand":
+                self._text_cmd_queue.pop(0)
+                notes.append(self._execute_text_hand(action))
+                continue
+            if action.kind != "arm":
+                self._text_cmd_queue.pop(0)
+                continue
+            if self._arm_text_motion_busy():
+                notes.append(f"后续 {len(self._text_cmd_queue)} 段已排队")
+                break
+            self._text_cmd_queue.pop(0)
+            status, msg = self._start_text_arm_action(action)
+            notes.append(msg)
+            if status == "busy":
+                self._text_cmd_queue.insert(0, action)
+                break
+            if status == "fail":
+                self._text_cmd_queue.clear()
+                break
+            if status == "skip":
+                continue
+            if self._text_cmd_queue:
+                notes.append(f"完成后继续 {len(self._text_cmd_queue)} 段")
+            break
+        return "；".join(note for note in notes if note)
+
+    def _cancel_arm_motion_for_text(self) -> str:
+        self._pending_arm_move_goal = None
+        self._arm_enable_wait_timer.stop()
+        if self._is_sim_arm_moving():
+            self._cancel_sim_arm_move()
+            self._update_arm_move_btns_ui()
+            return "已停止仿真手臂移动"
+        if self.node.is_slow_motion_busy():
+            msg = self.node.cancel_slow_motion()
+            self._update_arm_move_btns_ui()
+            return msg
+        return "已停止"
+
+    def _current_hand_vector(self, side: str) -> List[float]:
+        state = self.node.get_robot_state()
+        joints = state.right_hand if side == "right" else state.left_hand
+        out = [0.0] * len(HAND_JOINT_ORDER)
+        index = {name: i for i, name in enumerate(HAND_JOINT_ORDER)}
+        for name, val in joints:
+            key = canonical_hand_joint(name)
+            if key is None or key not in index:
+                continue
+            out[index[key]] = max(0.0, min(1.0, float(val)))
+        return out
+
+    def _hand_vector_for_action(self, side: str, action: ArmHandTextAction) -> List[float]:
+        if action.joints:
+            out = self._current_hand_vector(side)
+            index = {name: i for i, name in enumerate(HAND_JOINT_ORDER)}
+            for name, val in action.joints.items():
+                if name in index:
+                    out[index[name]] = max(0.0, min(1.0, float(val)))
+            return out
+        pos = 0.0 if action.position is None else float(action.position)
+        pos = max(0.0, min(1.0, pos))
+        return [pos] * len(HAND_JOINT_ORDER)
+
+    def _execute_text_hand(self, action: ArmHandTextAction) -> str:
+        sides = ["left", "right"] if action.side == "both" else [action.side]
+        enable_note = ""
+        if not self._sim_teleop_active() and not self.node.is_hand_enabled():
+            enable_note = self.node.request_hand_enable(True)
+        parts: List[str] = []
+        for side in sides:
+            side_name = "右手" if side == "right" else "左手"
+            if self._sim_teleop_active():
+                if action.joints:
+                    scalar = sum(float(v) for v in action.joints.values()) / len(action.joints)
+                else:
+                    scalar = 0.0 if action.position is None else float(action.position)
+                scalar = max(0.0, min(1.0, scalar))
+                ok = self._apply_sim_gripper(side, scalar)
+                parts.append(
+                    f"仿真{side_name} gripper={scalar:.2f}" + ("" if ok else "（写入失败）")
+                )
+                continue
+            vals = self.node.apply_hand_joint_positions(
+                side, self._hand_vector_for_action(side, action)
+            )
+            shown = ", ".join(f"{v:.2f}" for v in vals)
+            parts.append(f"{side_name} [{shown}] -> {ROBOT_RIGHT_HAND_CMD_TOPIC if side == 'right' else ROBOT_LEFT_HAND_CMD_TOPIC}")
+        msg = "；".join(parts)
+        if enable_note and "已使能" not in enable_note:
+            msg = f"{enable_note}；{msg}"
+        return msg
+
+    def _start_text_arm_action(self, action: ArmHandTextAction) -> Tuple[str, str]:
+        side = action.side if action.side in ("left", "right") else "left"
+        tcp = self._tcp_for_relative_goal(side)
+        if tcp is None:
+            return "fail", f"无法移动: 无{arm_side_label(side)} TCP"
+        xyz, quat = tcp
+        goal = compute_relative_move_goal(
+            xyz, quat, action.dx, action.dy, action.dz, arm_side=side
+        )
+        if goal is None:
+            return "skip", "偏移为零，已跳过"
+        goal = ResolvedArmMoveGoal(
+            position_xyz=goal.position_xyz,
+            quaternion_xyzw=goal.quaternion_xyzw,
+            label=action.label or goal.label,
+            arm_side=side,
+        )
+        self.move_target_relative_radio.setChecked(True)
+        for spin, val in (
+            (self.offset_x_spin, action.dx),
+            (self.offset_y_spin, action.dy),
+            (self.offset_z_spin, action.dz),
+        ):
+            spin.blockSignals(True)
+            spin.setValue(max(-MANUAL_OFFSET_MAX_M, min(MANUAL_OFFSET_MAX_M, float(val))))
+            spin.blockSignals(False)
+        self._update_move_offset_ui_visibility()
+        self._update_arm_pose_display()
+        if self._sim_teleop_active():
+            msg = self._start_sim_arm_move(side, goal)
+            self._update_arm_move_btns_ui()
+            if str(msg).startswith("无法"):
+                return "fail", msg
+            return "ok", msg
+        if self.node.is_slow_motion_busy() or self._pending_arm_move_goal is not None:
+            return "busy", "已有移动进行中"
+        if not self.node.is_arm_enabled():
+            self._pending_arm_move_goal = goal
+            msg = self.node.request_arm_enable(True)
+            self._arm_enable_wait_deadline = time.time() + 15.0
+            self._arm_enable_wait_timer.start()
+            self._update_arm_move_btns_ui()
+            return "ok", f"{msg}，使能后将执行：{goal.label}"
+        msg = self.node.request_slow_move_to_goal(goal)
+        self._update_arm_move_btns_ui()
+        if str(msg).startswith("已有移动"):
+            return "busy", msg
+        if str(msg).startswith("无法"):
+            return "fail", msg
+        return "ok", msg
+
     def _on_arm_move_clicked(self, arm_side: str) -> None:
         side_name = arm_side_label(arm_side)
         if self._is_sim_arm_moving():
             moving = str((self._sim_arm_move or {}).get("arm_side", ""))
             if moving != arm_side:
                 return
+            self._text_cmd_queue.clear()
             msg = self._cancel_sim_arm_move()
             self.status_bar.showMessage(msg)
             self._update_arm_move_btns_ui()
@@ -37824,6 +39867,7 @@ class CameraTopicWindow(QMainWindow):
         if self.node.is_slow_motion_busy():
             if self.node._slow_motion_moving_side != arm_side:
                 return
+            self._text_cmd_queue.clear()
             self._pending_arm_move_goal = None
             self._arm_enable_wait_timer.stop()
             msg = self.node.cancel_slow_motion()
@@ -37846,6 +39890,7 @@ class CameraTopicWindow(QMainWindow):
                     f"请设置非零偏移量，或等待{side_name} TCP 数据"
                 )
             return
+        self._text_cmd_queue.clear()
         if self._sim_teleop_active():
             msg = self._start_sim_arm_move(arm_side, goal)
             self.status_bar.showMessage(msg)
@@ -37872,6 +39917,18 @@ class CameraTopicWindow(QMainWindow):
         self._update_arm_pose_display()
 
     def _on_slow_motion_finished(self, ok: bool, text: str) -> None:
+        if self._text_cmd_pumping:
+            self.status_bar.showMessage(text)
+            self._update_arm_move_btns_ui()
+            return
+        if not ok:
+            if self._text_cmd_queue:
+                self._text_cmd_queue.clear()
+                text += "（已取消后续文本指令）"
+        else:
+            extra = self._pump_text_cmd_queue()
+            if extra:
+                text = f"{text}；{extra}"
         self.status_bar.showMessage(text)
         self._update_arm_move_btns_ui()
 
@@ -38379,6 +40436,24 @@ class CameraTopicWindow(QMainWindow):
                 or os.path.isfile(npy_path)
             ):
                 out[topic] = list(img_types)
+        # LIBERO / Live HUD file-backed preview topics (not real ROS pubs).
+        libero_running = bool(
+            getattr(self, "_mujoco_launcher", None)
+            and self._mujoco_launcher.is_running()
+            and self._sim_backend_id() == "libero"
+        )
+        timer = getattr(self, "_rynnvalue_workspace_hud_timer", None)
+        preview_on = bool(timer is not None and timer.isActive()) or libero_running
+        for topic in (LIBERO_PREVIEW_TOPIC, RYNNVALUE_LIVE_HUD_TOPIC):
+            if topic in out:
+                continue
+            if (
+                preview_on
+                or topic in self._frame_cache
+                or topic in self.panels
+                or os.path.isfile(LIBERO_PREVIEW_JPG)
+            ):
+                out[topic] = list(img_types)
         return out
 
     def _on_topics_updated(self, topics: Dict[str, List[str]]) -> None:
@@ -38413,6 +40488,14 @@ class CameraTopicWindow(QMainWindow):
             self._refresh_skeleton_camera_list()
             return
 
+        pending_topic_checks = getattr(self, "_pending_topic_checks", None)
+        if isinstance(pending_topic_checks, dict) and pending_topic_checks:
+            # 首次 topic 刷新时套用上次关闭前的勾选；之后交给 prev_checked
+            for topic, checked in pending_topic_checks.items():
+                if topic not in prev_checked:
+                    prev_checked[topic] = bool(checked)
+            self._pending_topic_checks = None
+
         default_enabled: set[str] = set()
         for topic, types in topics.items():
             type_str = ", ".join(t.split("/")[-1] for t in types)
@@ -38426,6 +40509,9 @@ class CameraTopicWindow(QMainWindow):
                 and self._sim_preview_active()
             ):
                 # 新出现的仿真 topic：默认勾选（用户取消过的除外）
+                checked = True
+            elif topic in (LIBERO_PREVIEW_TOPIC, RYNNVALUE_LIVE_HUD_TOPIC):
+                # File-backed LIBERO / Live HUD preview — keep visible by default.
                 checked = True
             else:
                 checked = is_default
@@ -38441,6 +40527,7 @@ class CameraTopicWindow(QMainWindow):
         self.topic_list_layout.addStretch()
         self._apply_selection(default_enabled)
         self._refresh_skeleton_camera_list()
+        self._retry_pending_combo_ui_state()
 
     def _on_selection_changed(self) -> None:
         for topic, checkbox in self.topic_checks.items():
@@ -38453,7 +40540,13 @@ class CameraTopicWindow(QMainWindow):
         self._refresh_skeleton_camera_list()
 
     def _apply_selection(self, enabled: set[str]) -> None:
-        self.node.set_enabled_topics(enabled)
+        # Pseudo file-backed topics are painted by the poller, not ROS.
+        ros_enabled = {
+            t
+            for t in enabled
+            if t not in (LIBERO_PREVIEW_TOPIC, RYNNVALUE_LIVE_HUD_TOPIC)
+        }
+        self.node.set_enabled_topics(ros_enabled)
         self._rebuild_panels(enabled)
 
     def _select_all_images(self) -> None:
@@ -38527,6 +40620,9 @@ class CameraTopicWindow(QMainWindow):
             self.grid_layout.takeAt(0)
 
         order_index = {t: i for i, t in enumerate(SIM_PREVIEW_ALL_TOPICS)}
+        # LIBERO / Live HUD preview sit first when present.
+        order_index[LIBERO_PREVIEW_TOPIC] = -2
+        order_index[RYNNVALUE_LIVE_HUD_TOPIC] = -1
         topics = sorted(
             self.panels.keys(),
             key=lambda t: (order_index.get(t, 1000), t),
@@ -38772,92 +40868,268 @@ def parse_only_tabs(tab_args: Optional[List[object]]) -> List[str]:
 
 
 def apply_viewer_theme(app: QApplication) -> None:
-    """统一深色主题，提高标签/输入框/标签页文字对比度。"""
+    """统一深色主题：表面层级、焦点环、标签页强调色、滚动条。"""
     palette = QPalette()
-    palette.setColor(QPalette.Window, QColor("#2b2b2b"))
+    palette.setColor(QPalette.Window, QColor(UI_BG_WINDOW))
     palette.setColor(QPalette.WindowText, QColor(UI_TEXT_PRIMARY))
-    palette.setColor(QPalette.Base, QColor("#1e1e1e"))
-    palette.setColor(QPalette.AlternateBase, QColor("#353535"))
+    palette.setColor(QPalette.Base, QColor(UI_BG_INPUT))
+    palette.setColor(QPalette.AlternateBase, QColor(UI_BG_ELEVATED))
     palette.setColor(QPalette.Text, QColor(UI_TEXT_PRIMARY))
-    palette.setColor(QPalette.Button, QColor("#3a3a3a"))
+    palette.setColor(QPalette.Button, QColor(UI_BG_ELEVATED))
     palette.setColor(QPalette.ButtonText, QColor(UI_TEXT_PRIMARY))
-    palette.setColor(QPalette.Highlight, QColor("#3d6ea8"))
+    palette.setColor(QPalette.Highlight, QColor(UI_HIGHLIGHT))
     palette.setColor(QPalette.HighlightedText, QColor("#ffffff"))
-    palette.setColor(QPalette.ToolTipBase, QColor("#2d2d2d"))
+    palette.setColor(QPalette.ToolTipBase, QColor(UI_BG_PANEL))
     palette.setColor(QPalette.ToolTipText, QColor(UI_TEXT_PRIMARY))
     palette.setColor(QPalette.PlaceholderText, QColor(UI_TEXT_PLACEHOLDER))
+    palette.setColor(QPalette.Light, QColor(UI_BORDER_STRONG))
+    palette.setColor(QPalette.Mid, QColor(UI_BORDER))
+    palette.setColor(QPalette.Dark, QColor(UI_BG_INPUT))
     app.setPalette(palette)
     app.setStyleSheet(
         f"""
         QWidget {{
             font-size: {UI_MONO_SIZE_NORMAL}pt;
+            color: {UI_TEXT_PRIMARY};
+        }}
+        QMainWindow, QWidget#viewerCentral {{
+            background-color: {UI_BG_WINDOW};
         }}
         QLabel {{
             color: {UI_TEXT_PRIMARY};
+            background: transparent;
         }}
-        QTabWidget::pane {{
-            border: 1px solid #555;
-            background: #2b2b2b;
+        QToolTip {{
+            color: {UI_TEXT_PRIMARY};
+            background-color: {UI_BG_PANEL};
+            border: 1px solid {UI_BORDER};
+            padding: 4px 8px;
+        }}
+        QTabWidget#controlTabs::pane, QTabWidget::pane {{
+            border: 1px solid {UI_BORDER};
+            border-radius: {UI_RADIUS};
+            background: {UI_BG_PANEL};
+            top: -1px;
         }}
         QTabBar::tab {{
             color: {UI_TEXT_SECONDARY};
-            background: #333333;
-            padding: 6px 14px;
-            margin-right: 2px;
-            border: 1px solid #555;
+            background: {UI_BG_WINDOW};
+            padding: 7px 12px;
+            margin-right: 1px;
+            border: 1px solid {UI_BORDER};
+            border-bottom: none;
+            border-top-left-radius: {UI_RADIUS};
+            border-top-right-radius: {UI_RADIUS};
+            min-width: 4em;
+        }}
+        QTabBar::tab:hover:!selected {{
+            color: {UI_TEXT_PRIMARY};
+            background: {UI_BG_HOVER};
         }}
         QTabBar::tab:selected {{
             color: #ffffff;
-            background: #3d3d3d;
+            background: {UI_BG_PANEL};
             font-weight: bold;
+            border-color: {UI_BORDER};
+            border-bottom: 2px solid {UI_ACCENT_BLUE_BRIGHT};
+            padding-bottom: 5px;
+        }}
+        QTabBar::scroller {{
+            width: 28px;
+        }}
+        QTabBar QToolButton {{
+            background: {UI_BG_ELEVATED};
+            border: 1px solid {UI_BORDER};
+            border-radius: 2px;
+            padding: 2px;
+        }}
+        QTabBar QToolButton:hover {{
+            background: {UI_BG_HOVER};
+            border-color: {UI_ACCENT_BLUE};
         }}
         QGroupBox {{
             color: {UI_TEXT_PRIMARY};
-            border: 1px solid #555;
-            margin-top: 8px;
-            padding-top: 8px;
+            border: 1px solid {UI_BORDER};
+            border-radius: {UI_RADIUS};
+            margin-top: 10px;
+            padding: 10px 8px 8px 8px;
+            background-color: {UI_BG_ELEVATED};
         }}
         QGroupBox::title {{
             subcontrol-origin: margin;
-            left: 8px;
-            padding: 0 4px;
-            color: #f5f5f5;
+            left: 10px;
+            padding: 0 6px;
+            color: {UI_TEXT_PRIMARY};
+            font-weight: bold;
         }}
         QCheckBox, QRadioButton {{
             color: {UI_TEXT_PRIMARY};
             spacing: 6px;
         }}
-        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
+        QCheckBox::indicator, QRadioButton::indicator {{
+            width: 14px;
+            height: 14px;
+        }}
+        QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPlainTextEdit, QTextEdit {{
             color: {UI_TEXT_PRIMARY};
-            background-color: #2d2d2d;
-            border: 1px solid #555;
-            padding: 2px 4px;
-            selection-background-color: #3d6ea8;
+            background-color: {UI_BG_INPUT};
+            border: 1px solid {UI_BORDER};
+            border-radius: {UI_RADIUS};
+            padding: 3px 6px;
+            selection-background-color: {UI_HIGHLIGHT};
+        }}
+        QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus,
+        QPlainTextEdit:focus, QTextEdit:focus {{
+            border: 1px solid {UI_ACCENT_BLUE_BRIGHT};
+        }}
+        QComboBox::drop-down {{
+            border: none;
+            width: 22px;
         }}
         QComboBox QAbstractItemView {{
             color: {UI_TEXT_PRIMARY};
-            background-color: #2d2d2d;
-            selection-background-color: #3d6ea8;
+            background-color: {UI_BG_PANEL};
+            border: 1px solid {UI_BORDER};
+            selection-background-color: {UI_HIGHLIGHT};
+            outline: 0;
         }}
         QPushButton {{
             color: {UI_TEXT_PRIMARY};
-            background-color: #3a3a3a;
-            border: 1px solid #555;
-            padding: 4px 10px;
+            background-color: {UI_BG_ELEVATED};
+            border: 1px solid {UI_BORDER};
+            border-radius: {UI_RADIUS};
+            padding: 5px 12px;
+            min-height: 1.2em;
         }}
         QPushButton:hover {{
-            background-color: #454545;
+            background-color: {UI_BG_HOVER};
+            border-color: {UI_BORDER_STRONG};
+        }}
+        QPushButton:pressed {{
+            background-color: {UI_BG_INPUT};
         }}
         QPushButton:disabled {{
             color: {UI_TEXT_MUTED};
-            background-color: #2a2a2a;
+            background-color: {UI_BG_WINDOW};
+            border-color: {UI_BORDER};
+        }}
+        QPushButton#primaryAction {{
+            color: #ffffff;
+            background-color: {UI_HIGHLIGHT};
+            border: 1px solid {UI_ACCENT_BLUE_BRIGHT};
+            font-weight: bold;
+        }}
+        QPushButton#primaryAction:hover {{
+            background-color: {UI_ACCENT_BLUE_BRIGHT};
+        }}
+        QPushButton#primaryAction:disabled {{
+            color: {UI_TEXT_MUTED};
+            background-color: {UI_BG_ELEVATED};
+            border-color: {UI_BORDER};
+            font-weight: normal;
+        }}
+        QPushButton#dangerAction {{
+            color: {UI_ACCENT_RED};
+            border-color: #6a4040;
+        }}
+        QPushButton#dangerAction:hover {{
+            background-color: #3a2828;
+            border-color: {UI_ACCENT_RED};
+        }}
+        QSplitter::handle {{
+            background: {UI_BORDER};
+        }}
+        QSplitter::handle:horizontal {{
+            width: 3px;
+            margin: 2px 0;
+        }}
+        QSplitter::handle:vertical {{
+            height: 3px;
+            margin: 0 2px;
+        }}
+        QSplitter::handle:hover {{
+            background: {UI_ACCENT_BLUE};
         }}
         QStatusBar {{
-            color: {UI_TEXT_PRIMARY};
-            background: #252525;
+            color: {UI_TEXT_SECONDARY};
+            background: {UI_BG_PANEL};
+            border-top: 1px solid {UI_BORDER};
+            padding: 2px 6px;
+        }}
+        QStatusBar::item {{
+            border: none;
         }}
         QScrollArea {{
             border: none;
+            background: transparent;
+        }}
+        QScrollBar:vertical {{
+            background: {UI_BG_WINDOW};
+            width: 10px;
+            margin: 0;
+            border: none;
+        }}
+        QScrollBar::handle:vertical {{
+            background: {UI_BORDER_STRONG};
+            border-radius: 4px;
+            min-height: 28px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: {UI_ACCENT_BLUE};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical,
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+            height: 0;
+            background: none;
+        }}
+        QScrollBar:horizontal {{
+            background: {UI_BG_WINDOW};
+            height: 10px;
+            margin: 0;
+            border: none;
+        }}
+        QScrollBar::handle:horizontal {{
+            background: {UI_BORDER_STRONG};
+            border-radius: 4px;
+            min-width: 28px;
+        }}
+        QScrollBar::handle:horizontal:hover {{
+            background: {UI_ACCENT_BLUE};
+        }}
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+            width: 0;
+            background: none;
+        }}
+        QListWidget, QTreeWidget, QTableWidget {{
+            background-color: {UI_BG_INPUT};
+            border: 1px solid {UI_BORDER};
+            border-radius: {UI_RADIUS};
+            outline: 0;
+        }}
+        QListWidget::item:selected, QTreeWidget::item:selected,
+        QTableWidget::item:selected {{
+            background-color: {UI_HIGHLIGHT};
+            color: #ffffff;
+        }}
+        QHeaderView::section {{
+            background-color: {UI_BG_ELEVATED};
+            color: {UI_TEXT_SECONDARY};
+            border: none;
+            border-right: 1px solid {UI_BORDER};
+            border-bottom: 1px solid {UI_BORDER};
+            padding: 4px 8px;
+        }}
+        QProgressBar {{
+            border: 1px solid {UI_BORDER};
+            border-radius: {UI_RADIUS};
+            background: {UI_BG_INPUT};
+            text-align: center;
+            color: {UI_TEXT_PRIMARY};
+        }}
+        QProgressBar::chunk {{
+            background-color: {UI_ACCENT_BLUE_BRIGHT};
+            border-radius: 2px;
         }}
         """
     )
@@ -39096,6 +41368,13 @@ def main(
     sig_timer.timeout.connect(lambda: None)
     sig_timer.start(50)
 
+    def _persist_viewer_ui() -> None:
+        try:
+            window._save_viewer_ui_state()
+        except Exception as exc:
+            print(f"[viewer_ui_state] save failed: {exc}", flush=True)
+
+    app.aboutToQuit.connect(_persist_viewer_ui)
     app.aboutToQuit.connect(cleanup)
 
     result = 0
@@ -39104,6 +41383,7 @@ def main(
     except KeyboardInterrupt:
         app.quit()
     finally:
+        _persist_viewer_ui()
         cleanup()
     return result
 

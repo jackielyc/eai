@@ -362,6 +362,7 @@ def build_libero_eval_argv(
     rlinf_root: str = "",
     openpi_root: str = "",
     render_gui: bool = True,
+    viewer_only: bool = False,
     rynnvalue_live_hud: bool = False,
     rynnvalue_server_url: str = "http://127.0.0.1:8001",
     rynnvalue_refresh_sec: float = 1.0,
@@ -373,6 +374,8 @@ def build_libero_eval_argv(
     ``mode``:
       - remote: websocket client (openpi examples / eai wrapper)
       - local: in-process policy (RLinf libero_eval style via eai wrapper)
+
+    ``viewer_only=True`` opens the on-screen env and holds it (no policy / Pi).
     """
     py = resolve_libero_python(python_bin)
     rlinf = resolve_rlinf_root(rlinf_root)
@@ -380,9 +383,13 @@ def build_libero_eval_argv(
     wrapper = Path(__file__).resolve().parent / "run_libero_eval.py"
     ckpt = resolve_libero_checkpoint(checkpoint, config_name)
     exp = (exp_name or "").strip() or f"{task_suite}_{config_name}"
+    if viewer_only:
+        exp = f"{exp}_viewer"
     out_dir = LIBERO_EVAL_OUTPUT_DIR / exp
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Viewer-only always needs the GLFW on-screen window.
+    want_gui = bool(render_gui or viewer_only)
     argv = [
         py,
         str(wrapper),
@@ -403,15 +410,17 @@ def build_libero_eval_argv(
         f"--rlinf_root={rlinf}",
         f"--openpi_root={openpi}",
     ]
-    if render_gui:
+    if want_gui:
         argv.append("--render_gui")
     else:
         argv.append("--no_render_gui")
+    if viewer_only:
+        argv.append("--viewer_only")
     from rynnvalue_sim_bridge import append_rynnvalue_live_hud_argv
 
     append_rynnvalue_live_hud_argv(
         argv,
-        enabled=bool(rynnvalue_live_hud),
+        enabled=bool(rynnvalue_live_hud) and not viewer_only,
         server_url=rynnvalue_server_url,
         refresh_sec=rynnvalue_refresh_sec,
         num_frames=rynnvalue_num_frames,
@@ -421,7 +430,7 @@ def build_libero_eval_argv(
         python_bin=py,
         rlinf_root=str(rlinf),
         openpi_root=str(openpi),
-        render_gui=bool(render_gui),
+        render_gui=bool(want_gui),
     )
     return argv, openpi, env_extra
 

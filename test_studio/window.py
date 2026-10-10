@@ -28,7 +28,7 @@ class TestStudioWindow(QMainWindow):
         super().__init__(parent)
         import show_camera_topics as sct
 
-        self.setWindowTitle("测试工作室")
+        self.setWindowTitle("EAI · 测试工作室")
         self.resize(1280, 860)
 
         self._deploy = QwenDeployController(self)

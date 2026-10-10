@@ -484,6 +484,41 @@ def main() -> int:
         flush=True,
     )
 
+    teleop = None
+    try:
+        from sim_gui_teleop import GuiTeleopSession, mujoco_guess_ee_pose, pose7_ok
+
+        teleop = GuiTeleopSession(label="mujoco")
+        print(
+            "[mujoco-egl] GUI teleop bridge on（手臂/手文本指挥可写状态；"
+            "有 mocap 时跟随目标）",
+            flush=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[mujoco-egl] GUI teleop disabled: {exc}", flush=True)
+
+    def _apply_gui_teleop() -> None:
+        if teleop is None:
+            return
+        left = mujoco_guess_ee_pose(model, data, "left")
+        right = mujoco_guess_ee_pose(model, data, "right")
+        if left is None and right is None:
+            left = mujoco_guess_ee_pose(model, data, "")
+        teleop.write_state(left_ee_pose=left, right_ee_pose=right)
+        cmd = teleop.read_cmd()
+        if not cmd or model.nmocap <= 0:
+            return
+        # Best-effort: first mocap ← left/right target position.
+        for mocap_i, key in enumerate(("left_ee_pose", "right_ee_pose")):
+            if mocap_i >= model.nmocap:
+                break
+            pose = pose7_ok(cmd.get(key))
+            if pose is None:
+                continue
+            data.mocap_pos[mocap_i] = pose[:3]
+            # wxyz → mujoco quat wxyz
+            data.mocap_quat[mocap_i] = pose[3:7]
+
     def tick() -> None:
         if not state["alive"]:
             return
@@ -494,6 +529,10 @@ def main() -> int:
                 for _ in range(nsub):
                     if pert.active:
                         mujoco.mjv_applyPerturbForce(model, data, pert)
+                    try:
+                        _apply_gui_teleop()
+                    except Exception:
+                        pass
                     mujoco.mj_step(model, data)
             render_frame()
         except tk.TclError:

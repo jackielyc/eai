@@ -87,7 +87,15 @@ def _quat2axisangle(quat):
     return (quat[:3] * 2.0 * math.acos(quat[3])) / den
 
 
-def _get_libero_env(task, resolution, seed, *, render_gui: bool = False):
+def _get_libero_env(
+    task,
+    resolution,
+    seed,
+    *,
+    render_gui: bool = False,
+    ignore_done: bool = False,
+    hard_reset: bool = True,
+):
     from libero.libero import get_libero_path
     from libero.libero.envs.env_wrapper import ControlEnv, OffScreenRenderEnv
 
@@ -101,6 +109,8 @@ def _get_libero_env(task, resolution, seed, *, render_gui: bool = False):
         bddl_file_name=task_bddl_file,
         camera_heights=resolution,
         camera_widths=resolution,
+        ignore_done=ignore_done,
+        hard_reset=hard_reset,
     )
     if render_gui:
         # Keep offscreen cameras for policy obs; also open robosuite GLFW window.
@@ -119,7 +129,56 @@ def _get_libero_env(task, resolution, seed, *, render_gui: bool = False):
 # robosuite OpenCVRenderer window (utils/opencv_renderer.py).
 _LIBERO_GUI_WINDOW = "offscreen render"
 _gui_center_state = {"left": 0, "moved": 0}
+# User closed the on-screen viewer (title-bar X / Esc / q). Once set, skip imshow
+# so robosuite render() cannot pop the window back open.
+_gui_dismiss_state = {"dismissed": False, "seen_open": False, "missing_streak": 0}
 _opencv_renderer_close_patched = False
+# Shared JPEG for eai 工作区「图像预览」(written every few steps).
+_PREVIEW_WRITE_STATE = {"last_at": 0.0, "path": "", "logged_ok": 0, "logged_err": 0}
+
+
+def _libero_preview_path() -> pathlib.Path:
+    eai = pathlib.Path(os.environ.get("EAI_DIR") or pathlib.Path(__file__).resolve().parent.parent)
+    return eai / ".cache" / "rynnvalue_live" / "libero_preview.jpg"
+
+
+def _write_libero_preview_rgb(rgb: Any, *, min_interval_s: float = 0.1) -> None:
+    """Atomically write agentview RGB for the eai GUI preview poller."""
+    import time as _time
+
+    now = _time.time()
+    if now - float(_PREVIEW_WRITE_STATE["last_at"] or 0.0) < float(min_interval_s):
+        return
+    try:
+        import cv2
+        import numpy as np
+    except Exception as exc:  # noqa: BLE001
+        if not _PREVIEW_WRITE_STATE["logged_err"]:
+            logging.warning("libero preview write: cv2/numpy unavailable: %s", exc)
+            _PREVIEW_WRITE_STATE["logged_err"] = 1
+        return
+    try:
+        arr = np.asarray(rgb)
+        if arr.ndim != 3 or arr.shape[-1] < 3:
+            return
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        bgr = cv2.cvtColor(arr[..., :3], cv2.COLOR_RGB2BGR)
+        path = _libero_preview_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.stem + ".writing.jpg")
+        if not cv2.imwrite(str(tmp), bgr):
+            raise RuntimeError(f"cv2.imwrite failed for {tmp}")
+        tmp.replace(path)
+        _PREVIEW_WRITE_STATE["last_at"] = now
+        _PREVIEW_WRITE_STATE["path"] = str(path)
+        if not _PREVIEW_WRITE_STATE["logged_ok"]:
+            logging.info("libero preview → %s (%sx%s)", path, arr.shape[1], arr.shape[0])
+            _PREVIEW_WRITE_STATE["logged_ok"] = 1
+    except Exception as exc:  # noqa: BLE001
+        if not _PREVIEW_WRITE_STATE["logged_err"]:
+            logging.warning("libero preview write failed: %s", exc)
+            _PREVIEW_WRITE_STATE["logged_err"] = 1
 
 
 def _patch_opencv_renderer_close() -> None:
@@ -155,6 +214,76 @@ def _arm_libero_gui_center() -> None:
     """Recenter after the next show. hard_reset destroys and recreates the window."""
     _gui_center_state["left"] = 30
     _gui_center_state["moved"] = 0
+    # hard_reset briefly destroys the OpenCV window — do not treat that as user X.
+    if not _gui_dismiss_state["dismissed"]:
+        _gui_dismiss_state["seen_open"] = False
+        _gui_dismiss_state["missing_streak"] = 0
+
+
+def _libero_gui_dismissed() -> bool:
+    return bool(_gui_dismiss_state["dismissed"])
+
+
+def _dismiss_libero_gui(reason: str = "") -> None:
+    """Close the LIBERO OpenCV viewer and stop further on-screen renders."""
+    if _gui_dismiss_state["dismissed"]:
+        return
+    _gui_dismiss_state["dismissed"] = True
+    try:
+        import cv2
+
+        cv2.destroyWindow(_LIBERO_GUI_WINDOW)
+        cv2.waitKey(1)
+    except Exception:  # noqa: BLE001
+        pass
+    extra = f" ({reason})" if reason else ""
+    logging.info("LIBERO 图形窗口已关闭%s", extra)
+    print(f"[libero] 图形窗口已关闭{extra}", flush=True)
+
+
+def _libero_gui_window_is_open() -> bool:
+    if _gui_dismiss_state["dismissed"]:
+        return False
+    try:
+        import cv2
+
+        visible = cv2.getWindowProperty(
+            _LIBERO_GUI_WINDOW, cv2.WND_PROP_VISIBLE
+        )
+        return float(visible) >= 1.0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _pump_libero_gui_close_events() -> bool:
+    """Detect Esc/q / title-bar X. Returns True if the GUI was dismissed."""
+    if _gui_dismiss_state["dismissed"]:
+        return True
+    try:
+        import cv2
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        key = int(cv2.waitKey(1) & 0xFF)
+    except Exception:  # noqa: BLE001
+        return False
+    if key in (27, ord("q"), ord("Q")):
+        _dismiss_libero_gui("Esc/q")
+        return True
+    if _libero_gui_window_is_open():
+        _gui_dismiss_state["seen_open"] = True
+        _gui_dismiss_state["missing_streak"] = 0
+    else:
+        # QT often reports -1 during create/move; require a stable open first,
+        # then several consecutive misses before treating as user X.
+        _gui_dismiss_state["missing_streak"] += 1
+        if (
+            _gui_dismiss_state["seen_open"]
+            and _gui_dismiss_state["missing_streak"] >= 8
+        ):
+            _dismiss_libero_gui("title-bar X")
+            return True
+    return bool(_gui_dismiss_state["dismissed"])
 
 
 def _primary_monitor_rect() -> tuple[int, int, int, int]:
@@ -207,7 +336,6 @@ def _maybe_center_libero_gui() -> None:
     y = int(oy + max(0, (sh - height) // 2))
     try:
         cv2.moveWindow(name, x, y)
-        cv2.waitKey(1)
     except Exception as exc:  # noqa: BLE001
         logging.debug("center libero window skipped: %s", exc)
         return
@@ -216,8 +344,14 @@ def _maybe_center_libero_gui() -> None:
         logging.info("LIBERO 图形窗口已置于屏幕中央 (%s, %s)", x, y)
 
 
-def _render_gui_frame(env) -> None:
-    """Best-effort on-screen robosuite/mujoco render."""
+def _render_gui_frame(env) -> bool:
+    """Best-effort on-screen robosuite/mujoco render.
+
+    Returns False if the user dismissed the window (X / Esc / q); callers must
+    stop rendering so OpenCV does not recreate it via imshow.
+    """
+    if _libero_gui_dismissed():
+        return False
     inner = getattr(env, "env", env)
     render = getattr(inner, "render", None) or getattr(env, "render", None)
     if callable(render):
@@ -225,14 +359,18 @@ def _render_gui_frame(env) -> None:
             render()
         except Exception as exc:  # noqa: BLE001
             logging.debug("render skipped: %s", exc)
-            return
+            return not _pump_libero_gui_close_events()
     _maybe_center_libero_gui()
+    return not _pump_libero_gui_close_events()
 
 
 def _hold_gui_until_stop(env) -> None:
-    """Keep the on-screen viewer open until SIGINT/SIGTERM (UI「停止」)."""
+    """Keep the on-screen viewer open until window close / Esc / SIGTERM."""
     import signal
     import time
+
+    if _libero_gui_dismissed():
+        return
 
     stop = {"flag": False}
 
@@ -243,11 +381,12 @@ def _hold_gui_until_stop(env) -> None:
     prev_int = signal.signal(signal.SIGINT, _on_signal)
     prev_term = signal.signal(signal.SIGTERM, _on_signal)
     logging.info(
-        "评测完成，图形窗口保持打开；点击 UI「停止」或 Ctrl+C 后关闭"
+        "评测完成，图形窗口保持打开；关闭窗口 / Esc / q，或 UI「停止」/ Ctrl+C 后退出"
     )
     try:
-        while not stop["flag"]:
-            _render_gui_frame(env)
+        while not stop["flag"] and not _libero_gui_dismissed():
+            if not _render_gui_frame(env):
+                break
             time.sleep(0.05)
     finally:
         signal.signal(signal.SIGINT, prev_int)
@@ -357,6 +496,119 @@ def _setup_policy(args: argparse.Namespace) -> Any:
     return _LocalPolicy(args.config_name, args.pretrained_path, args.num_steps)
 
 
+def _main_viewer_only(args: argparse.Namespace) -> int:
+    """Open first-task LIBERO env GUI and hold — no policy / no Pi.
+
+    Accepts EAI「手臂/手」文本指挥 / 滑块 via ``gui_robot_cmd.json``.
+    """
+    import numpy as np
+    from libero.libero import benchmark
+    from rynnvalue_sim_bridge import LiberoHudBridge
+    from sim_gui_teleop import (
+        GuiTeleopSession,
+        libero_action_from_cmd,
+        libero_obs_to_state,
+    )
+
+    _patch_opencv_renderer_close()
+    args.render_gui = True
+    np.random.seed(args.seed)
+    task_suite = benchmark.get_benchmark_dict()[args.task_suite_name]()
+    task = task_suite.get_task(0)
+    initial_states = task_suite.get_task_init_states(0)
+    # ignore_done: horizon (~1000 steps) must not terminate the episode —
+    # otherwise viewer_only hard-resets and the OpenCV window repeatedly pops.
+    # hard_reset=False: if we do reset, keep the same window (soft sim.reset).
+    env, task_description = _get_libero_env(
+        task,
+        256,
+        args.seed,
+        render_gui=True,
+        ignore_done=True,
+        hard_reset=False,
+    )
+    hud_bridge = LiberoHudBridge()
+    teleop = GuiTeleopSession(label="libero")
+    hold = [0.0] * 6 + [-1.0]
+    logging.info(
+        "LIBERO viewer_only suite=%s task=%s (no policy; GUI teleop on; "
+        "ignore_done, soft reset)",
+        args.task_suite_name,
+        task_description,
+    )
+    try:
+        env.reset()
+        _arm_libero_gui_center()
+        obs = env.set_init_state(initial_states[0])
+        try:
+            _write_libero_preview_rgb(
+                hud_bridge.extract_rgb(obs, apply_flip=False), min_interval_s=0.0
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        logging.info(
+            "界面已打开（无策略推理）；「手臂/手」文本指挥可用；"
+            "关闭窗口 / Esc / q，或 UI「停止」/ Ctrl+C 退出"
+        )
+        import signal
+        import time
+
+        stop = {"flag": False}
+
+        def _on_signal(signum, _frame) -> None:
+            stop["flag"] = True
+            logging.info("received signal %s — closing GUI", signum)
+
+        prev_int = signal.signal(signal.SIGINT, _on_signal)
+        prev_term = signal.signal(signal.SIGTERM, _on_signal)
+
+        def _viewer_reset() -> Any:
+            """Soft reset + restore init pose; do not destroy the GUI window."""
+            # Belt-and-suspenders: force soft reset even if env was created hard.
+            inner = getattr(env, "env", None)
+            if inner is not None and hasattr(inner, "hard_reset"):
+                inner.hard_reset = False
+            env.reset()
+            return env.set_init_state(initial_states[0])
+
+        try:
+            while not stop["flag"] and not _libero_gui_dismissed():
+                pose7, grip = libero_obs_to_state(obs)
+                teleop.write_state(left_ee_pose=pose7, left_gripper=grip)
+                cmd = teleop.read_cmd()
+                action = libero_action_from_cmd(obs, cmd) if cmd else hold
+                try:
+                    obs, _reward, done, _info = env.step(action)
+                except ValueError as exc:
+                    # robosuite: "executing action in terminated episode"
+                    if "terminated episode" not in str(exc).lower():
+                        raise
+                    logging.info("episode ended — soft-resetting viewer env")
+                    obs = _viewer_reset()
+                    done = False
+                if done:
+                    logging.info("task done — soft-resetting viewer env (keep GUI open)")
+                    obs = _viewer_reset()
+                try:
+                    _write_libero_preview_rgb(
+                        hud_bridge.extract_rgb(obs, apply_flip=False)
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                if not _render_gui_frame(env):
+                    break
+                time.sleep(0.02)
+        finally:
+            signal.signal(signal.SIGINT, prev_int)
+            signal.signal(signal.SIGTERM, prev_term)
+        return 0
+    finally:
+        try:
+            env.close()
+        except Exception as exc:  # noqa: BLE001
+            logging.debug("env.close skipped: %s", exc)
+
+
 def main(args: argparse.Namespace) -> int:
     _bootstrap_paths(args)
 
@@ -376,6 +628,10 @@ def main(args: argparse.Namespace) -> int:
         ],
         force=True,
     )
+
+    if bool(getattr(args, "viewer_only", False)):
+        return _main_viewer_only(args)
+
     from rynnvalue_sim_bridge import LiberoHudBridge, maybe_create_live_hud
 
     # robosuite hard_reset used destroyAllWindows() which also killed Live HUD.
@@ -426,6 +682,7 @@ def main(args: argparse.Namespace) -> int:
     env = None
 
     try:
+        gui_closed = False
         for task_id in tqdm(range(num_tasks)):
             if env is not None:
                 env.close()
@@ -458,8 +715,16 @@ def main(args: argparse.Namespace) -> int:
                 for t in range(max_steps + args.num_steps_wait):
                     if t < args.num_steps_wait:
                         obs, reward, done, info = env.step(dummy)
-                        if args.render_gui:
-                            _render_gui_frame(env)
+                        if args.render_gui and not _render_gui_frame(env):
+                            gui_closed = True
+                            break
+                        # Feed eai 图像预览 during settle steps too.
+                        try:
+                            _write_libero_preview_rgb(
+                                hud_bridge.extract_rgb(obs, apply_flip=False)
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                         continue
 
                     # openpi/LIBERO policy expects 180°-flipped agentview.
@@ -482,9 +747,11 @@ def main(args: argparse.Namespace) -> int:
                         img_in, wrist_in = img, wrist_img
 
                     replay_images.append(img_in)
+                    # Unflipped agentview → eai workspace preview (always).
+                    hud_img = hud_bridge.extract_rgb(obs, apply_flip=False)
+                    _write_libero_preview_rgb(hud_img)
                     if live_hud is not None:
                         # Unflipped: score + display match sim viewer.
-                        hud_img = hud_bridge.extract_rgb(obs, apply_flip=False)
                         live_hud.push_frame(
                             hud_img, step=t - args.num_steps_wait
                         )
@@ -513,12 +780,16 @@ def main(args: argparse.Namespace) -> int:
 
                     action = action_plan.popleft()
                     obs, reward, done, info = env.step(action.tolist())
-                    if args.render_gui:
-                        _render_gui_frame(env)
+                    if args.render_gui and not _render_gui_frame(env):
+                        gui_closed = True
+                        break
                     if done:
                         task_successes += 1
                         total_successes += 1
                         break
+
+                if gui_closed:
+                    break
 
                 task_episodes += 1
                 total_episodes += 1
@@ -555,15 +826,20 @@ def main(args: argparse.Namespace) -> int:
                     100.0 * total_successes / max(1, total_episodes),
                 )
 
-            rate = task_successes / task_episodes if task_episodes else 0.0
-            results_per_task[task_description] = rate
-            logging.info(
-                "Task done: %s %s/%s (%.1f%%)",
-                task_description,
-                task_successes,
-                task_episodes,
-                100.0 * rate,
-            )
+            if task_episodes:
+                rate = task_successes / task_episodes
+                results_per_task[task_description] = rate
+                logging.info(
+                    "Task %s: %s %s/%s (%.1f%%)",
+                    "interrupted" if gui_closed else "done",
+                    task_description,
+                    task_successes,
+                    task_episodes,
+                    100.0 * rate,
+                )
+            if gui_closed:
+                logging.info("LIBERO 图形窗口已关闭，跳过剩余任务")
+                break
 
         logging.info("======== LIBERO SUMMARY ========")
         for name, rate in results_per_task.items():
@@ -575,8 +851,12 @@ def main(args: argparse.Namespace) -> int:
             total_episodes,
             100.0 * overall,
         )
-        # Keep last scene visible until UI「停止」sends SIGTERM.
-        if bool(getattr(args, "render_gui", False)) and env is not None:
+        # Keep last scene visible until window close / Esc / UI「停止」.
+        if (
+            bool(getattr(args, "render_gui", False))
+            and env is not None
+            and not _libero_gui_dismissed()
+        ):
             _hold_gui_until_stop(env)
         return 0
     finally:
@@ -616,6 +896,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force headless OffScreenRenderEnv (default when --render_gui omitted)",
     )
+    p.add_argument(
+        "--viewer_only",
+        action="store_true",
+        help="Open on-screen env and hold (no policy / no Pi inference)",
+    )
     from rynnvalue_sim_bridge import add_rynnvalue_live_hud_args
 
     add_rynnvalue_live_hud_args(p, profile="libero")
@@ -630,6 +915,9 @@ if __name__ == "__main__":
     from rynnvalue_sim_bridge import finalize_rynnvalue_live_hud_args
 
     _args = build_parser().parse_args()
+    if _args.viewer_only:
+        _args.render_gui = True
+        _args.no_render_gui = False
     if _args.no_render_gui:
         _args.render_gui = False
     finalize_rynnvalue_live_hud_args(_args)

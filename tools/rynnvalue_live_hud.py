@@ -880,7 +880,9 @@ class RynnValueLiveHud:
             import cv2
 
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(path.suffix + ".tmp")
+            # Keep a real image suffix so OpenCV picks a JPEG writer
+            # (``.jpg.tmp`` is treated as extension ``.tmp`` and fails).
+            tmp = path.with_name(path.stem + ".writing.jpg")
             ok = cv2.imwrite(str(tmp), overlay_bgr)
             if ok:
                 tmp.replace(path)

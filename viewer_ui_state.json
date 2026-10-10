@@ -1,0 +1,1480 @@
+{
+  "version": 1,
+  "widgets": {
+    "prefix_edit": {
+      "kind": "line",
+      "text": "/camera"
+    },
+    "replay_count_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "replay_rrd_path_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "segment_backend_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "几何(深度+颜色)",
+      "data": "geometry"
+    },
+    "sam3_text_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "sam3_http_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "sam3_u_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "sam3_v_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "pose_backend_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "PCA(点云)",
+      "data": "pca"
+    },
+    "fp_mesh_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/meshes/box/reconstructed.obj"
+    },
+    "fp_http_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "lingbot_variant_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "small（演示）",
+      "data": "small"
+    },
+    "lingbot_source_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "当前相机",
+      "data": "camera"
+    },
+    "lingbot_size_spin": {
+      "kind": "spin",
+      "value": 512
+    },
+    "lingbot_path_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/lingbot-vision/examples/example.png"
+    },
+    "lingbot_ckpt_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "lingbot_depth_model_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "v0.5（推荐）",
+      "data": "robbyant/lingbot-depth-pretrain-vitl-14-v0.5"
+    },
+    "lingbot_depth_source_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "当前相机 RGB-D",
+      "data": "camera"
+    },
+    "lingbot_depth_example_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "lingbot_depth_device_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "auto",
+      "data": "auto"
+    },
+    "lingbot_depth_topic_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "/camera/head_color",
+      "data": "/camera/head_color"
+    },
+    "lingbot_depth_model_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "lingbot_depth_rgb_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "lingbot_depth_depth_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "lingbot_depth_intrinsics_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "lingbot_map_scene_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "courthouse（示例）",
+      "data": "courthouse"
+    },
+    "lingbot_map_ckpt_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "lingbot-map.pt（推荐）",
+      "data": "lingbot-map.pt"
+    },
+    "lingbot_map_port_spin": {
+      "kind": "spin",
+      "value": 8080
+    },
+    "lingbot_map_path_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/lingbot-map/example/courthouse"
+    },
+    "lingbot_map_model_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "lingbot_map_first_k_spin": {
+      "kind": "spin",
+      "value": 48
+    },
+    "lingbot_map_stride_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "lingbot_map_fps_spin": {
+      "kind": "spin",
+      "value": 10
+    },
+    "lingbot_map_mask_sky_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "lingbot_map_sdpa_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "lingbot_map_capture_spin": {
+      "kind": "spin",
+      "value": 24
+    },
+    "lingbot_video_mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "T2V 文生视频",
+      "data": "t2v"
+    },
+    "lingbot_video_case_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "example_1",
+      "data": "{'image': '', 'prompt_json': '/share_data/projects/mahjong/share/personal/liyichao/lingbot-video/assets/cases/t2v/example_1/prompt.json'}"
+    },
+    "lingbot_video_preset_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "快速预览",
+      "data": "fast"
+    },
+    "lingbot_video_prompt_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/lingbot-video/assets/cases/t2v/example_1/prompt.json"
+    },
+    "lingbot_video_image_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "lingbot_video_topic_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "/camera/head_color",
+      "data": "/camera/head_color"
+    },
+    "lingbot_video_model_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "lingbot_video_h_spin": {
+      "kind": "spin",
+      "value": 192
+    },
+    "lingbot_video_w_spin": {
+      "kind": "spin",
+      "value": 320
+    },
+    "lingbot_video_frames_spin": {
+      "kind": "spin",
+      "value": 9
+    },
+    "lingbot_video_steps_spin": {
+      "kind": "spin",
+      "value": 20
+    },
+    "lingbot_video_seed_spin": {
+      "kind": "spin",
+      "value": 42
+    },
+    "lingbot_video_refiner_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "lingbot_world_example_combo": {
+      "kind": "combo",
+      "index": 3,
+      "text": "examples/03",
+      "data": "03"
+    },
+    "lingbot_world_size_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "480×832",
+      "data": "480*832"
+    },
+    "lingbot_world_frames_spin": {
+      "kind": "spin",
+      "value": 17
+    },
+    "lingbot_world_seed_spin": {
+      "kind": "spin",
+      "value": 42
+    },
+    "lingbot_world_t5_cpu_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "lingbot_world_offload_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "lingbot_world_image_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/lingbot-world-v2/examples/03/image.jpg"
+    },
+    "lingbot_world_action_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/lingbot-world-v2/examples/03"
+    },
+    "lingbot_world_topic_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "/camera/head_color",
+      "data": "/camera/head_color"
+    },
+    "lingbot_world_ckpt_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/lingbot-world-v2/lingbot-world-v2-1.3b-causal-fast"
+    },
+    "lingbot_world_prompt_edit": {
+      "kind": "text",
+      "text": "A serene lakeside scene with a lone tree standing in calm water, surrounded by distant snow-capped mountains under a bright blue sky with drifting white clouds."
+    },
+    "bagel_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/Bagel"
+    },
+    "bagel_python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/bagel_venv/bin/python"
+    },
+    "bagel_model_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/bagel_models/BAGEL-7B-MoT"
+    },
+    "bagel_host_edit": {
+      "kind": "line",
+      "text": "127.0.0.1"
+    },
+    "bagel_port_spin": {
+      "kind": "spin",
+      "value": 7860
+    },
+    "bagel_mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "1 · 全精度 (32GB+)",
+      "data": 1
+    },
+    "bagel_zh_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "bagel_share_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "bagel_api_port_spin": {
+      "kind": "spin",
+      "value": 7861
+    },
+    "bagel_call_task_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "文生图",
+      "data": "text2image"
+    },
+    "bagel_num_timesteps_spin": {
+      "kind": "spin",
+      "value": 25
+    },
+    "bagel_image_size_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "跟随输入",
+      "data": "input"
+    },
+    "bagel_image_w_spin": {
+      "kind": "spin",
+      "value": 224
+    },
+    "bagel_image_h_spin": {
+      "kind": "spin",
+      "value": 224
+    },
+    "bagel_call_prompt_edit": {
+      "kind": "text",
+      "text": ""
+    },
+    "bagel_cfg_interval_spin": {
+      "kind": "dspin",
+      "value": 0.4
+    },
+    "bagel_taylorseer_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "cad_mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "多视角照片",
+      "data": "photos"
+    },
+    "cad_name_edit": {
+      "kind": "line",
+      "text": "my_object"
+    },
+    "cad_extent_spin": {
+      "kind": "dspin",
+      "value": 0.15
+    },
+    "cad_poisson_spin": {
+      "kind": "spin",
+      "value": 9
+    },
+    "cad_src_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "cad_capture_target_spin": {
+      "kind": "spin",
+      "value": 12
+    },
+    "cad_auto_gen_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "cad_existing_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "box",
+      "data": "/share_data/projects/mahjong/share/personal/liyichao/eai/meshes/box/reconstructed.obj"
+    },
+    "train_policy_dir_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "train_config_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "example_workspace_imle_rgb",
+      "data": "example_workspace_imle_rgb"
+    },
+    "train_datahouse_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "train_view_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "train_epochs_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "train_batch_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "train_logging_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "offline",
+      "data": "offline"
+    },
+    "train_gpu_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "sim_backend_isaac_radio": {
+      "kind": "radio",
+      "checked": false
+    },
+    "sim_backend_mujoco_radio": {
+      "kind": "radio",
+      "checked": false
+    },
+    "sim_backend_spaces_radio": {
+      "kind": "radio",
+      "checked": false
+    },
+    "sim_backend_arena_radio": {
+      "kind": "radio",
+      "checked": false
+    },
+    "sim_backend_libero_radio": {
+      "kind": "radio",
+      "checked": true
+    },
+    "sim_backend_robotwin_radio": {
+      "kind": "radio",
+      "checked": false
+    },
+    "sim_backend_extended_radio": {
+      "kind": "radio",
+      "checked": false
+    },
+    "sim_extended_combo": {
+      "kind": "combo",
+      "index": 2,
+      "text": "RoboCasa",
+      "data": "robocasa"
+    },
+    "sim_bridge_dir_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/isaac_cam_bridge"
+    },
+    "sim_bridge_hz_spin": {
+      "kind": "dspin",
+      "value": 30.0
+    },
+    "sim_eval_task_combo": {
+      "kind": "combo",
+      "index": 3,
+      "text": "build_tower",
+      "data": "build_tower",
+      "edit": "build_tower"
+    },
+    "sim_eval_policy_combo": {
+      "kind": "combo",
+      "index": 6,
+      "text": "demo_policy",
+      "data": "XPolicyLab/policy/demo_policy"
+    },
+    "sim_eval_ckpt_edit": {
+      "kind": "line",
+      "text": "demo"
+    },
+    "sim_eval_action_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "ee",
+      "data": "ee"
+    },
+    "sim_eval_use_gui_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "sim_eval_bundled_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "sim_eval_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/eval_result/RoboDojo"
+    },
+    "sim_eval_filter_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "sim_eval_outcome_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "全部",
+      "data": ""
+    },
+    "mujoco_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/mujoco"
+    },
+    "mujoco_python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/molmospaces/bin/python"
+    },
+    "mujoco_model_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "psi_r1_ruiyan/urdf/model.xml  (psi_r1)",
+      "data": "/share_data/projects/mahjong/share/personal/liyichao/psi_r1_ruiyan/urdf/model.xml",
+      "edit": "psi_r1_ruiyan/urdf/model.xml  (psi_r1)"
+    },
+    "mujoco_mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "官方 viewer (VGL)",
+      "data": "python"
+    },
+    "molmospaces_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/molmospaces"
+    },
+    "molmospaces_recipe_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "评测所选任务",
+      "data": "eval_task"
+    },
+    "molmospaces_robot_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "Franka Droid",
+      "data": "droid"
+    },
+    "molmospaces_task_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "Close (Close-v1)",
+      "data": "{'extra': (), 'id': 'close_v1', 'label': 'Close (Close-v1)', 'path': '/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/molmospaces/assets/L3NoYXJlX2RhdGEvcHJvamVjdHMvbWFoam9uZy9zaGFyZS9wZXJzb25hbC9saXlpY2hhby9tb2xtb3NwYWNlcw/benchmarks/molmospaces-bench-v1/ithor/FrankaCloseDataGenConfig/FrankaCloseDataGenConfig_20260123_json_benchmark', 'ready': True}"
+    },
+    "molmospaces_policy_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "Pi",
+      "data": "molmo_spaces.evaluation.configs.evaluation_configs:PiPolicyEvalConfig"
+    },
+    "molmospaces_episodes_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "molmospaces_pi_ckpt_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/openpi/hf/pi05_libero"
+    },
+    "arena_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/psi-lab/IsaacLab-Arena"
+    },
+    "arena_task_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "chinese_knot_stacking",
+      "data": "chinese_knot_stacking"
+    },
+    "arena_policy_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "zero_action（零动作）",
+      "data": "zero_action"
+    },
+    "arena_steps_spin": {
+      "kind": "spin",
+      "value": 200
+    },
+    "arena_headless_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "arena_gpu_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "arena_gpu_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "arena_policy_file_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "arena_extra_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "libero_rlinf_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RLinf"
+    },
+    "libero_suite_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "libero_spatial",
+      "data": "libero_spatial"
+    },
+    "libero_config_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "π0.5-LIBERO (pi05_libero)",
+      "data": "pi05_libero"
+    },
+    "libero_mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "本地 ckpt（自动部署 serve）",
+      "data": "local"
+    },
+    "libero_ckpt_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/openpi/hf/pi05_libero"
+    },
+    "libero_max_tasks_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "libero_trials_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "libero_chunk_spin": {
+      "kind": "spin",
+      "value": 5
+    },
+    "libero_steps_spin": {
+      "kind": "spin",
+      "value": 10
+    },
+    "libero_render_gui_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "robotwin_rlinf_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RLinf"
+    },
+    "robotwin_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RoboTwin"
+    },
+    "robotwin_assets_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RoboTwin"
+    },
+    "robotwin_task_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "adjust_bottle",
+      "data": "adjust_bottle"
+    },
+    "robotwin_config_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "π0.5 Aloha (pi05_aloha_robotwin)",
+      "data": "pi05_aloha_robotwin"
+    },
+    "robotwin_gpu_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "robotwin_ckpt_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/robotwin/hf/RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
+    },
+    "robotwin_num_envs_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "robotwin_max_steps_spin": {
+      "kind": "spin",
+      "value": 200
+    },
+    "robotwin_render_gui_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "ext_bench_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/robocasa"
+    },
+    "ext_bench_python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/envs/ros-humble/bin/python"
+    },
+    "ext_bench_mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "探测依赖 (probe)",
+      "data": "probe"
+    },
+    "ext_bench_task_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "ext_bench_episodes_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "ext_bench_viewer_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "sim_rynnvalue_hud_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "sim_rynnvalue_refresh_spin": {
+      "kind": "dspin",
+      "value": 1.0
+    },
+    "sim_rynnvalue_url_edit": {
+      "kind": "line",
+      "text": "http://127.0.0.1:8001"
+    },
+    "sim_rynnvalue_frames_spin": {
+      "kind": "spin",
+      "value": 8
+    },
+    "real_eval_task_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "arm_text_cmd_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "left_hand_slider_a": {
+      "kind": "slider",
+      "value": 0
+    },
+    "left_hand_slider_b": {
+      "kind": "slider",
+      "value": 45
+    },
+    "right_hand_slider_a": {
+      "kind": "slider",
+      "value": 0
+    },
+    "right_hand_slider_b": {
+      "kind": "slider",
+      "value": 45
+    },
+    "arm_move_speed_slider": {
+      "kind": "slider",
+      "value": 45
+    },
+    "move_target_relative_radio": {
+      "kind": "radio",
+      "checked": true
+    },
+    "move_target_segment_radio": {
+      "kind": "radio",
+      "checked": false
+    },
+    "offset_x_spin": {
+      "kind": "dspin",
+      "value": 0.0
+    },
+    "offset_y_spin": {
+      "kind": "dspin",
+      "value": 0.0
+    },
+    "offset_z_spin": {
+      "kind": "dspin",
+      "value": 0.0
+    },
+    "skeleton_cam_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "网络流 (下方 URL)",
+      "data": "network_stream"
+    },
+    "skeleton_stream_url_edit": {
+      "kind": "line",
+      "text": "http://127.0.0.1:8090/cam.mjpg"
+    },
+    "skeleton_flip_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "skeleton_mirror_map_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "skeleton_ctrl_left_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "skeleton_ctrl_right_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "skeleton_teleop_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "skeleton_smooth_slider": {
+      "kind": "slider",
+      "value": 35
+    },
+    "test_qwen_target_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "本地本机",
+      "data": "local"
+    },
+    "test_qwen_root_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "本地 Qwen 基座",
+      "data": "/share_data/projects/mahjong/share/personal/liyichao/models/Qwen"
+    },
+    "test_qwen_model_combo": {
+      "kind": "combo",
+      "index": 4,
+      "text": "Qwen3.5-35B-A3B (全量)",
+      "data": "{'kind': 'full', 'label': 'Qwen3.5-35B-A3B', 'model_id': 'Qwen3.5-35B-A3B', 'name': 'Qwen3.5-35B-A3B', 'path': '/share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-35B-A3B', 'readable': '1', 'root': '/share_data/projects/mahjong/share/personal/liyichao/models/Qwen'}"
+    },
+    "ctx_loop_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "ctx_video_path_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/eval_result/RoboDojo/pack_objects_into_box/starVLA/arx_x5/0_ckpt_name=hf_qwenpi_v3,action_type=joint/gui_starvla_20260907_122225_pack_objects_into_box/episode_0000000_cam_head_fail.mp4"
+    },
+    "ctx_rrd_path_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "reward_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RLinf"
+    },
+    "reward_python_edit": {
+      "kind": "line",
+      "text": "/home/psibot/miniconda3/envs/RLinf/bin/python"
+    },
+    "reward_type_combo": {
+      "kind": "combo",
+      "index": 1,
+      "text": "vlm",
+      "data": "vlm"
+    },
+    "reward_arch_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "resnet18",
+      "data": "resnet18"
+    },
+    "reward_image_size_edit": {
+      "kind": "line",
+      "text": "3,224,224"
+    },
+    "reward_device_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "auto",
+      "data": "auto"
+    },
+    "reward_threshold_spin": {
+      "kind": "dspin",
+      "value": 0.5
+    },
+    "reward_ckpt_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/reward_model/Qwen3-VL-4B-Instruct"
+    },
+    "reward_task_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "reward_mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "① 单帧打分",
+      "data": "single"
+    },
+    "reward_single_source_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "当前相机",
+      "data": "camera"
+    },
+    "reward_topic_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "/camera/head_color",
+      "data": "/camera/head_color"
+    },
+    "reward_single_path_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "reward_pair_source_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "本地文件",
+      "data": "file"
+    },
+    "reward_pair_a_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "reward_pair_b_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "reward_dataset_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "reward_max_samples_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "reward_teleop_config_edit": {
+      "kind": "line",
+      "text": "realworld_teleop"
+    },
+    "reward_wf_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RLinf"
+    },
+    "reward_wf_python_edit": {
+      "kind": "line",
+      "text": "/home/psibot/miniconda3/envs/RLinf/bin/python"
+    },
+    "reward_wf_mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "数据预处理",
+      "data": "preprocess"
+    },
+    "reward_wf_dataset_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "ResNet (.pt)",
+      "data": "resnet"
+    },
+    "reward_wf_cuda_edit": {
+      "kind": "line",
+      "text": "0"
+    },
+    "reward_wf_raw_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "reward_wf_out_edit": {
+      "kind": "line",
+      "text": "logs/processed_reward_data"
+    },
+    "reward_wf_samples_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "reward_wf_val_spin": {
+      "kind": "dspin",
+      "value": 0.2
+    },
+    "reward_wf_ratio_spin": {
+      "kind": "dspin",
+      "value": 2.0
+    },
+    "reward_wf_seed_spin": {
+      "kind": "spin",
+      "value": 42
+    },
+    "reward_wf_keep_last_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "reward_wf_train_pt_edit": {
+      "kind": "line",
+      "text": "logs/processed_reward_data/train.pt"
+    },
+    "reward_wf_val_pt_edit": {
+      "kind": "line",
+      "text": "logs/processed_reward_data/val.pt"
+    },
+    "reward_wf_config_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "reward_training",
+      "data": "reward_training",
+      "edit": "reward_training"
+    },
+    "reward_wf_overrides_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "reward_wf_log_dir_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "dojo_rl_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/XPolicyLab/policy/RISE/RISE"
+    },
+    "dojo_rl_python_edit": {
+      "kind": "line",
+      "text": "/home/psibot/miniconda3/envs/RLinf/bin/python"
+    },
+    "dojo_rl_mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "单机",
+      "data": "single"
+    },
+    "dojo_rl_config_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "rl_release",
+      "data": "rl_release",
+      "edit": "rl_release"
+    },
+    "dojo_rl_cuda_edit": {
+      "kind": "line",
+      "text": "0"
+    },
+    "dojo_rl_auto_gpu_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "dojo_rl_model_dir_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_droid_jointpos_polaris"
+    },
+    "dojo_rl_reward_ckpt_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_droid_jointpos_polaris"
+    },
+    "dojo_rl_resume_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "dojo_rl_overrides_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "dojo_rl_log_dir_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "robometer_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/robometer-policy-learning"
+    },
+    "robometer_python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/robometer-policy/bin/python"
+    },
+    "robometer_job_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "在线 RL（train.py）",
+      "data": "('train', 'libero_online_rl')"
+    },
+    "robometer_config_combo": {
+      "kind": "combo",
+      "index": 11,
+      "text": "libero_online_rl",
+      "data": "libero_online_rl",
+      "edit": "libero_online_rl"
+    },
+    "robometer_cuda_edit": {
+      "kind": "line",
+      "text": "0"
+    },
+    "robometer_render_gui_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "robometer_wandb_offline_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "robometer_ckpt_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "robometer_overrides_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "robometer_log_dir_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "rynnvalue_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RynnValue"
+    },
+    "rynnvalue_python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/rynnvalue/bin/python"
+    },
+    "rynnvalue_job_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "视频推理（rynn_infer）",
+      "data": "infer"
+    },
+    "rynnvalue_cuda_edit": {
+      "kind": "line",
+      "text": "0"
+    },
+    "rynnvalue_render_gui_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "rynnvalue_model_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/rynnvalue/RynnValue-4B"
+    },
+    "rynnvalue_ckpt_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "rynnvalue_video_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RynnValue/example/Put_the_box_in_the_drawer_and_close_it.mp4"
+    },
+    "rynnvalue_instruction_edit": {
+      "kind": "line",
+      "text": "Put the box in the drawer and close it"
+    },
+    "rynnvalue_robot_edit": {
+      "kind": "line",
+      "text": "an ALOHA dual-arm robot"
+    },
+    "rynnvalue_camera_edit": {
+      "kind": "line",
+      "text": "the top-down camera"
+    },
+    "rynnvalue_frames_spin": {
+      "kind": "spin",
+      "value": 16
+    },
+    "rynnvalue_steps_spin": {
+      "kind": "spin",
+      "value": 32
+    },
+    "rynnvalue_batch_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "rynnvalue_tokens_spin": {
+      "kind": "spin",
+      "value": 128
+    },
+    "rynnvalue_fps_spin": {
+      "kind": "spin",
+      "value": 30
+    },
+    "rynnvalue_port_spin": {
+      "kind": "spin",
+      "value": 8001
+    },
+    "rynnvalue_extra_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "rynnvalue_log_dir_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "roboicl_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RoboICL"
+    },
+    "roboicl_policy_python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/env_isaaclab/bin/python"
+    },
+    "roboicl_sim_python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/env_isaaclab/bin/python"
+    },
+    "roboicl_mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "准备 Assets（软链本地）",
+      "data": "prepare_assets"
+    },
+    "roboicl_task_combo": {
+      "kind": "combo",
+      "index": 6,
+      "text": "deposit_coin",
+      "data": "deposit_coin",
+      "edit": "deposit_coin"
+    },
+    "roboicl_protocol_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "Zero-shot B25",
+      "data": "('configs/protocols/zero_shot_b25.json', 0)"
+    },
+    "roboicl_shots_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "roboicl_seed_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "roboicl_layout_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "roboicl_gpu_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "roboicl_render_gui_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "roboicl_data_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RoboICL/data"
+    },
+    "roboicl_results_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RoboICL/results"
+    },
+    "roboicl_reference_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "roboicl_model_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "roboicl_api_key_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "roboicl_extra_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "roboicl_log_dir_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "astra_page_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "English",
+      "data": "https://cookiegg.github.io/llm-as-policies/"
+    },
+    "astra_url_edit": {
+      "kind": "line",
+      "text": "https://cookiegg.github.io/llm-as-policies/"
+    },
+    "humanego_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/HumanEgo"
+    },
+    "humanego_python_edit": {
+      "kind": "line",
+      "text": "/home/psibot/miniconda3/envs/eai/bin/python"
+    },
+    "humanego_action_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "下载数据 (download)",
+      "data": "download"
+    },
+    "humanego_task_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "serve_bread",
+      "data": "serve_bread"
+    },
+    "humanego_num_edit": {
+      "kind": "line",
+      "text": "2"
+    },
+    "humanego_input_only_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "humanego_use_cfg_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "humanego_mps_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/HumanEgo/data/serve_bread/aria/mps_serve_bread_000_vrs"
+    },
+    "humanego_mps_combo": {
+      "kind": "combo",
+      "index": 1,
+      "text": "data/serve_bread/aria/mps_serve_bread_000_vrs",
+      "data": "/share_data/projects/mahjong/share/personal/liyichao/HumanEgo/data/serve_bread/aria/mps_serve_bread_000_vrs"
+    },
+    "humanego_cmd_edit": {
+      "kind": "line",
+      "text": "$PYTHON scripts/download_data.py --task serve_bread --num 2 --input-only"
+    },
+    "dataset_preset_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "eai/datasets (.rrd)",
+      "data": "/share_data/projects/mahjong/share/personal/liyichao/eai/datasets"
+    },
+    "dataset_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/datasets"
+    },
+    "dataset_filter_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "dataset_type_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "全部",
+      "data": "all"
+    },
+    "chat_panel.provider_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "（无运行中的推理服务）"
+    },
+    "chat_panel.model_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "chat_panel.settings_toggle_btn": {
+      "kind": "toggle",
+      "checked": false
+    },
+    "chat_panel.api_base_edit": {
+      "kind": "line",
+      "text": "https://api.openai.com/v1"
+    },
+    "chat_panel.api_key_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "chat_panel.system_prompt_edit": {
+      "kind": "text",
+      "text": "Given a scene image and a task name, output two lines: All subtasks, then Current subtask."
+    },
+    "chat_panel.attach_camera_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "chat_panel.thinking_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "chat_panel.input_edit": {
+      "kind": "text",
+      "text": ""
+    },
+    "tab:PhysicalRSI.task_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "做麻将杠 · make_kong",
+      "data": "make_kong"
+    },
+    "tab:PhysicalRSI.budget_spin": {
+      "kind": "spin",
+      "value": 5
+    },
+    "tab:PhysicalRSI.seed_spin": {
+      "kind": "spin",
+      "value": 4
+    },
+    "tab:PhysicalRSI.model_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "tab:PhysicalRSI.api_edit": {
+      "kind": "line",
+      "text": "http://127.0.0.1:8080/v1"
+    },
+    "tab:PhysicalRSI.model_edit": {
+      "kind": "line",
+      "text": "qwen"
+    },
+    "tab:PhysicalRSI.variant_spin": {
+      "kind": "spin",
+      "value": 2
+    },
+    "tab:PhysicalRSI.harness_edit": {
+      "kind": "plain",
+      "text": "def act(o, g, m, skills, tools):\n    tiles = skills.perceive(o)\n    if tiles:\n        skills.pick_and_place(tiles[0], \"row\")\n    return m\n"
+    },
+    "tab:编程冲SOTA.backend_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "LIBERO",
+      "data": "libero"
+    },
+    "tab:编程冲SOTA.task_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "LIBERO · pick bowl → plate",
+      "data": "libero_pick_place_bowl"
+    },
+    "tab:编程冲SOTA.budget_spin": {
+      "kind": "spin",
+      "value": 5
+    },
+    "tab:编程冲SOTA.seed_spin": {
+      "kind": "spin",
+      "value": 4
+    },
+    "tab:编程冲SOTA.model_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "tab:编程冲SOTA.api_edit": {
+      "kind": "line",
+      "text": "http://127.0.0.1:8080/v1"
+    },
+    "tab:编程冲SOTA.model_edit": {
+      "kind": "line",
+      "text": "qwen"
+    },
+    "tab:编程冲SOTA.text_edit": {
+      "kind": "plain",
+      "text": "Put the bowl on the plate. Observe the tabletop from the wrist/head cameras, locate the bowl and plate, then use the gripper arm to pick and place."
+    },
+    "tab:编程冲SOTA.program_edit": {
+      "kind": "plain",
+      "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
+    }
+  },
+  "control_tab": "仿真评测",
+  "splitter_sizes": [
+    256,
+    899,
+    662
+  ],
+  "geometry": [
+    38,
+    69,
+    1843,
+    968
+  ],
+  "topic_checks": {
+    "/libero/preview": true,
+    "/rynnvalue/live_hud": true,
+    "/camera/left_wrist_color": true,
+    "/camera/head_color": true,
+    "/camera/right_wrist_color": true,
+    "/camera/left_wrist_depth": false,
+    "/camera/head_depth": false,
+    "/camera/right_wrist_depth": false
+  },
+  "topic_user_unchecked": [],
+  "workspace_collapsed": true
+}

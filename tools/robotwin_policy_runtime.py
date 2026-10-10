@@ -516,6 +516,45 @@ def build_robotwin_eval_argv(
     return argv, rlinf / "examples" / "embodiment", env_extra
 
 
+def build_robotwin_viewer_argv(
+    *,
+    task: str = "adjust_bottle",
+    task_config: str = "demo_clean",
+    python_bin: str = "",
+    robotwin_root: str = "",
+    assets_path: str = "",
+    seed: int = 0,
+) -> Tuple[List[str], Path, Dict[str, Optional[str]]]:
+    """Return (argv, cwd, env_extra) for SAPIEN viewer without policy inference."""
+    py = resolve_robotwin_python(python_bin)
+    rt = resolve_robotwin_root(robotwin_root)
+    assets = resolve_robotwin_assets(assets_path, robotwin_root=rt)
+    wrapper = Path(__file__).resolve().parent / "run_robotwin_viewer.py"
+    task_id = (task or "").strip() or "adjust_bottle"
+    cfg = (task_config or "").strip() or "demo_clean"
+    argv = [
+        py,
+        str(wrapper),
+        f"--task={task_id}",
+        f"--task_config={cfg}",
+        f"--robotwin_root={rt}",
+        f"--assets_path={assets}",
+        f"--seed={int(seed)}",
+    ]
+    env_extra = robotwin_child_env(
+        python_bin=py,
+        robotwin_root=str(rt),
+        assets_path=assets,
+    )
+    display = (os.environ.get("DISPLAY") or "").strip()
+    if display:
+        env_extra["DISPLAY"] = display
+    xauth = (os.environ.get("XAUTHORITY") or "").strip()
+    if xauth:
+        env_extra["XAUTHORITY"] = xauth
+    return argv, rt, env_extra
+
+
 def install_hint(python_bin: str = "") -> str:
     py = resolve_robotwin_python(python_bin)
     rlinf = resolve_rlinf_root()
@@ -542,6 +581,7 @@ __all__ = [
     "ROBOTWIN_TASKS",
     "RobotwinCheckpoint",
     "build_robotwin_eval_argv",
+    "build_robotwin_viewer_argv",
     "ensure_robotwin_checkpoint",
     "hydra_config_for",
     "install_hint",

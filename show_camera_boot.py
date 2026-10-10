@@ -75,22 +75,61 @@ def _prepare_qt_env() -> None:
 def _make_splash(app):
     from PyQt5.QtCore import Qt
     from PyQt5.QtGui import QFont
-    from PyQt5.QtWidgets import QLabel, QVBoxLayout, QWidget
+    from PyQt5.QtWidgets import QLabel, QProgressBar, QVBoxLayout, QWidget
 
     splash = QWidget()
-    splash.setWindowTitle("Camera Topic Viewer")
-    splash.setFixedSize(420, 160)
+    splash.setObjectName("bootSplash")
+    splash.setWindowTitle("EAI · Camera Topic Viewer")
+    splash.setFixedSize(440, 200)
     splash.setWindowFlags(Qt.Window | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
+    splash.setStyleSheet(
+        "#bootSplash {"
+        "  background-color: #1e1f22;"
+        "  border: 1px solid #3d4048;"
+        "}"
+        "#bootSplash QLabel#bootBrand {"
+        "  color: #7ec8ff;"
+        "  letter-spacing: 2px;"
+        "}"
+        "#bootSplash QLabel#bootTitle {"
+        "  color: #ececec;"
+        "}"
+        "#bootSplash QLabel#bootStatus {"
+        "  color: #b0b0b0;"
+        "}"
+        "#bootSplash QProgressBar {"
+        "  border: 1px solid #3d4048;"
+        "  border-radius: 3px;"
+        "  background: #1a1b1e;"
+        "  max-height: 6px;"
+        "  text-align: center;"
+        "}"
+        "#bootSplash QProgressBar::chunk {"
+        "  background-color: #4da3ff;"
+        "  border-radius: 2px;"
+        "}"
+    )
     layout = QVBoxLayout(splash)
-    layout.setContentsMargins(24, 24, 24, 24)
+    layout.setContentsMargins(28, 28, 28, 24)
+    layout.setSpacing(8)
+    brand = QLabel("EAI")
+    brand.setObjectName("bootBrand")
+    brand.setFont(QFont("", 11, QFont.Bold))
+    brand.setAlignment(Qt.AlignCenter)
     title = QLabel("Camera Topic Viewer")
-    title.setFont(QFont("", 14, QFont.Bold))
+    title.setObjectName("bootTitle")
+    title.setFont(QFont("", 15, QFont.Bold))
     title.setAlignment(Qt.AlignCenter)
     status = QLabel("正在加载…")
     status.setObjectName("bootStatus")
     status.setAlignment(Qt.AlignCenter)
-    status.setStyleSheet("color: #666;")
+    bar = QProgressBar()
+    bar.setRange(0, 0)  # indeterminate
+    bar.setTextVisible(False)
+    layout.addWidget(brand)
     layout.addWidget(title)
+    layout.addSpacing(4)
+    layout.addWidget(bar)
     layout.addWidget(status)
     splash._boot_status = status  # type: ignore[attr-defined]
     splash._boot_t0 = time.perf_counter()  # type: ignore[attr-defined]

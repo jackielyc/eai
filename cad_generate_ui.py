@@ -261,76 +261,97 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <title>CAD / Mesh 生成</title>
 <style>
   :root {
-    --bg: #0f1419;
-    --panel: #1a2332;
-    --line: #2c3b52;
-    --text: #e8eef7;
-    --muted: #8fa3bf;
-    --accent: #3d7eff;
-    --accent2: #2bb673;
-    --danger: #e25555;
+    --bg: #1e1f22;
+    --panel: #252628;
+    --elevated: #2c2e32;
+    --line: #3d4048;
+    --text: #ececec;
+    --muted: #b0b0b0;
+    --accent: #4da3ff;
+    --accent-soft: #7ec8ff;
+    --ok: #50fa7b;
+    --warn: #ffb86c;
+    --danger: #ff8888;
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; font-family: "IBM Plex Sans", "Noto Sans SC", system-ui, sans-serif;
+    margin: 0;
+    font-family: "Source Sans 3", "Noto Sans SC", "Segoe UI", sans-serif;
     background:
-      radial-gradient(900px 420px at 10% -10%, #1c3358 0%, transparent 55%),
-      radial-gradient(700px 380px at 100% 0%, #163528 0%, transparent 50%),
+      linear-gradient(180deg, #23252a 0%, var(--bg) 42%),
       var(--bg);
     color: var(--text); min-height: 100vh;
   }
   main { max-width: 1080px; margin: 0 auto; padding: 28px 20px 48px; }
-  h1 { font-size: 1.65rem; margin: 0 0 6px; letter-spacing: -0.02em; }
-  .sub { color: var(--muted); margin-bottom: 22px; line-height: 1.5; }
-  .grid { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 16px; }
+  .brand {
+    font-size: 0.78rem; letter-spacing: 0.18em; color: var(--accent-soft);
+    font-weight: 700; margin: 0 0 6px;
+  }
+  h1 { font-size: 1.55rem; margin: 0 0 6px; letter-spacing: -0.02em; font-weight: 700; }
+  .sub { color: var(--muted); margin-bottom: 22px; line-height: 1.55; }
+  .sub code {
+    background: var(--elevated); border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 6px; color: var(--accent-soft);
+  }
+  .grid { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 14px; }
   @media (max-width: 860px) { .grid { grid-template-columns: 1fr; } }
   .card {
-    background: color-mix(in srgb, var(--panel) 92%, black);
-    border: 1px solid var(--line); border-radius: 14px; padding: 18px;
+    background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px;
   }
-  .tabs { display: flex; gap: 8px; margin-bottom: 14px; }
+  .tabs { display: flex; gap: 0; margin: 0 0 14px; border-bottom: 1px solid var(--line); }
   .tab {
-    background: transparent; border: 1px solid var(--line); color: var(--muted);
-    padding: 8px 14px; border-radius: 999px; cursor: pointer;
+    background: transparent; border: none; border-bottom: 2px solid transparent;
+    color: var(--muted); padding: 10px 14px; margin-bottom: -1px; cursor: pointer;
+    font: inherit;
   }
-  .tab.active { color: var(--text); border-color: var(--accent); background: #243553; }
+  .tab:hover { color: var(--text); }
+  .tab.active {
+    color: #fff; border-bottom-color: var(--accent); font-weight: 600;
+  }
   label { display: block; font-size: 0.85rem; color: var(--muted); margin: 12px 0 6px; }
   input[type=text], input[type=number], input[type=file] {
-    width: 100%; background: #101821; border: 1px solid var(--line); color: var(--text);
-    border-radius: 10px; padding: 10px 12px;
+    width: 100%; background: #1a1b1e; border: 1px solid var(--line); color: var(--text);
+    border-radius: 4px; padding: 10px 12px; font: inherit;
   }
+  input:focus { outline: none; border-color: var(--accent); }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .btn {
-    margin-top: 16px; width: 100%; border: 0; border-radius: 10px; padding: 12px 14px;
-    background: linear-gradient(135deg, var(--accent), #5a9bff); color: white;
-    font-weight: 600; cursor: pointer;
+    margin-top: 16px; width: 100%; border: 1px solid var(--accent); border-radius: 4px;
+    padding: 11px 14px; background: #3d6ea8; color: white;
+    font-weight: 600; cursor: pointer; font: inherit;
   }
+  .btn:hover { background: var(--accent); }
   .btn:disabled { opacity: 0.55; cursor: not-allowed; }
-  .btn.secondary { background: #243041; border: 1px solid var(--line); }
+  .btn.secondary {
+    background: var(--elevated); border: 1px solid var(--line); color: var(--text);
+  }
+  .btn.secondary:hover { border-color: var(--accent-soft); }
   pre {
-    white-space: pre-wrap; background: #101821; border: 1px solid var(--line);
-    border-radius: 10px; padding: 12px; min-height: 110px; color: #cfe0f7; font-size: 0.9rem;
+    white-space: pre-wrap; background: #1a1b1e; border: 1px solid var(--line);
+    border-radius: 4px; padding: 12px; min-height: 110px; color: var(--text); font-size: 0.9rem;
   }
   img.preview {
-    width: 100%; max-height: 360px; object-fit: contain; background: #0c1118;
-    border-radius: 10px; border: 1px solid var(--line);
+    width: 100%; max-height: 360px; object-fit: contain; background: #1a1b1e;
+    border-radius: 4px; border: 1px solid var(--line); margin-top: 10px;
   }
-  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.9rem; margin-top: 10px; }
   th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
   th { color: var(--muted); font-weight: 500; }
-  a { color: #7eb0ff; }
+  a { color: var(--accent-soft); }
   .hint { font-size: 0.82rem; color: var(--muted); margin-top: 8px; line-height: 1.45; }
   .status-pill {
-    display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 0.78rem;
-    border: 1px solid var(--line); color: var(--muted);
+    display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 0.78rem;
+    border: 1px solid var(--line); color: var(--muted); background: #1a1b1e;
   }
-  .status-pill.running { color: #ffd27a; border-color: #80622a; }
-  .status-pill.done { color: #8dffc0; border-color: #2d6b4c; }
-  .status-pill.error { color: #ff9b9b; border-color: #7a2f2f; }
+  .status-pill.running { color: var(--warn); border-color: #6a5230; }
+  .status-pill.done { color: var(--ok); border-color: #2d6b4c; }
+  .status-pill.error { color: var(--danger); border-color: #6a4040; }
 </style>
 </head>
 <body>
 <main>
+  <p class="brand">EAI</p>
   <h1>CAD / Mesh 生成</h1>
   <p class="sub">多视角照片或外部 mesh → FoundationPose 可用的 <code>reconstructed.obj</code>（居中并缩放到米制）。</p>
 

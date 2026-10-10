@@ -10,6 +10,7 @@
     "RoboMeter",
     "RynnValue",
     "RoboICL",
+    "手臂/手",
     "训练",
     "大脑",
     "回放",
@@ -20,11 +21,12 @@
     "视频生成模型",
     "世界模型",
     "CAD",
-    "手臂/手",
     "手骨架遥控",
     "真机评测",
     "ICL",
     "数据集",
-    "HumanEgo"
+    "HumanEgo",
+    "PhysicalRSI",
+    "编程冲SOTA"
   ]
 }
