@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D / R1） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D / R1） / 本地摄像头（本机 MJPEG 推流 + SSH 反向隧道 + 预览） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -2886,6 +2886,7 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "手骨架遥控",
     "仿真评测",
     "真机评测",
+    "本地摄像头",
     "Reward评测",
     "Reward训练",
     "仿真强化学习训练",
@@ -2952,6 +2953,11 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "real": "真机评测",
     "real_eval": "真机评测",
     "真机评测": "真机评测",
+    "local_cam": "本地摄像头",
+    "local_webcam": "本地摄像头",
+    "webcam": "本地摄像头",
+    "cam_forward": "本地摄像头",
+    "本地摄像头": "本地摄像头",
     "reward": "Reward评测",
     "rm": "Reward评测",
     "reward_eval": "Reward评测",
@@ -5129,6 +5135,21 @@ SKELETON_NETWORK_HELP = (
     "也支持 rtsp://...（需 OpenCV/FFmpeg 可读）。"
 )
 REAL_EVAL_LOCAL_CAM_HELP = SKELETON_NETWORK_HELP
+LOCAL_WEBCAM_MJPEG_SCRIPT = os.path.join(EAI_DIR, "examples", "local_webcam_mjpeg_server.py")
+LOCAL_WEBCAM_FORWARD_UI = os.path.join(EAI_DIR, "examples", "local_webcam_forward_ui.py")
+LOCAL_WEBCAM_DEFAULT_PORT = 8090
+LOCAL_WEBCAM_TAB_HELP = (
+    "本页用按钮完成本机摄像头转发（对应原先两条命令）：\n\n"
+    "1) 「启动推流」→ 本机 MJPEG：\n"
+    "   python3 examples/local_webcam_mjpeg_server.py --device 0 --port 8090\n"
+    "2) 「启动隧道」→ SSH 反向端口：\n"
+    "   ssh -N -R 8090:127.0.0.1:8090 user@远端\n\n"
+    "【Remote SSH / VNC】摄像头在 Mac、eai 在远端时：\n"
+    "请在 Mac 本机运行独立助手（同样两个按钮）：\n"
+    "   python3 examples/local_webcam_forward_ui.py\n"
+    "然后在本页或「真机评测」点「打开预览」。\n\n"
+    "macOS 首次推流需在「系统设置 → 隐私与安全性 → 摄像头」允许终端/Python。"
+)
 RIGHT_HAND_ANGLE_A_DEFAULT = 0
 RIGHT_HAND_ANGLE_B_DEFAULT = 45
 
@@ -17635,6 +17656,211 @@ class IsaacCamBridgeLauncher(QObject):
             self.status_message.emit("相机桥已强制停止")
 
 
+class LocalWebcamMjpegLauncher(QObject):
+    """启动/停止本机 MJPEG 推流（examples/local_webcam_mjpeg_server.py）。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() == QProcess.Running
+
+    def start(self, device: str = "0", port: int = LOCAL_WEBCAM_DEFAULT_PORT, bind: str = "127.0.0.1") -> None:
+        if self.is_running():
+            self.status_message.emit("本机推流已在运行")
+            return
+        if not os.path.isfile(LOCAL_WEBCAM_MJPEG_SCRIPT):
+            self.status_message.emit(f"未找到推流脚本: {LOCAL_WEBCAM_MJPEG_SCRIPT}")
+            return
+        device = (device or "0").strip() or "0"
+        port = int(port)
+        bind = (bind or "127.0.0.1").strip() or "127.0.0.1"
+        args = [
+            sys.executable,
+            LOCAL_WEBCAM_MJPEG_SCRIPT,
+            "--device",
+            device,
+            "--port",
+            str(port),
+            "--bind",
+            bind,
+        ]
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.setWorkingDirectory(EAI_DIR)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("PYTHONUNBUFFERED", "1")
+        proc.setProcessEnvironment(env)
+        proc.start(args[0], args[1:])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit("$ " + " ".join(shlex.quote(a) for a in args))
+        self.status_message.emit(f"正在启动本机推流 :{port} …")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的推流")
+            return
+        self.status_message.emit("正在停止本机推流…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(3000, self._force_kill_process)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.terminate()
+            self._process.waitForFinished(2000)
+            if self._process is not None and self._process.state() == QProcess.Running:
+                self._process.kill()
+                self._process.waitForFinished(1000)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            if line:
+                self.log_line.emit(line.rstrip())
+
+    def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        self._process = None
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- 本机推流正常退出 ---")
+            self.status_message.emit("本机推流已停止")
+        else:
+            self.log_line.emit(f"--- 本机推流退出 (code={exit_code}) ---")
+            self.status_message.emit(f"本机推流异常退出 (code={exit_code})")
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.status_message.emit("本机推流启动失败（请检查 Python/OpenCV）")
+            self.log_line.emit("推流进程 FailedToStart")
+        elif error != QProcess.Crashed:
+            self.status_message.emit(f"本机推流进程错误: {error}")
+
+    def _force_kill_process(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.kill()
+            self._process = None
+            self.running_changed.emit(False)
+            self.log_line.emit("--- 本机推流已被强制终止 ---")
+            self.status_message.emit("本机推流已强制停止")
+
+
+class SshReverseTunnelLauncher(QObject):
+    """启动/停止 SSH 反向隧道：ssh -N -R remote:127.0.0.1:local target。"""
+
+    log_line = pyqtSignal(str)
+    status_message = pyqtSignal(str)
+    running_changed = pyqtSignal(bool)
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._process: Optional[QProcess] = None
+
+    def is_running(self) -> bool:
+        return self._process is not None and self._process.state() == QProcess.Running
+
+    def start(
+        self,
+        target: str,
+        *,
+        local_port: int = LOCAL_WEBCAM_DEFAULT_PORT,
+        remote_port: int = LOCAL_WEBCAM_DEFAULT_PORT,
+        extra_args: str = "",
+    ) -> None:
+        if self.is_running():
+            self.status_message.emit("反向隧道已在运行")
+            return
+        target = (target or "").strip()
+        if not target or "@" not in target:
+            self.status_message.emit("请填写 SSH 远端，例如 user@10.0.0.5")
+            return
+        local_port = int(local_port)
+        remote_port = int(remote_port)
+        args = ["ssh", "-N", "-R", f"{remote_port}:127.0.0.1:{local_port}"]
+        try:
+            extras = shlex.split(extra_args or "")
+        except ValueError as exc:
+            self.status_message.emit(f"额外 ssh 参数解析失败: {exc}")
+            return
+        args.extend(extras)
+        args.append(target)
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.readyReadStandardOutput.connect(self._on_process_output)
+        proc.finished.connect(self._on_process_finished)
+        proc.errorOccurred.connect(self._on_process_error)
+        proc.start(args[0], args[1:])
+        self._process = proc
+        self.running_changed.emit(True)
+        self.log_line.emit("$ " + " ".join(shlex.quote(a) for a in args))
+        self.status_message.emit(f"正在建立反向隧道 → {target}:{remote_port} …")
+
+    def stop(self) -> None:
+        if not self.is_running():
+            self.status_message.emit("当前没有运行中的隧道")
+            return
+        self.status_message.emit("正在停止反向隧道…")
+        if self._process is not None:
+            self._process.terminate()
+            QTimer.singleShot(3000, self._force_kill_process)
+
+    def shutdown(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.terminate()
+            self._process.waitForFinished(2000)
+            if self._process is not None and self._process.state() == QProcess.Running:
+                self._process.kill()
+                self._process.waitForFinished(1000)
+        self._process = None
+        self.running_changed.emit(False)
+
+    def _on_process_output(self) -> None:
+        if self._process is None:
+            return
+        data = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        for line in data.splitlines():
+            if line:
+                self.log_line.emit(line.rstrip())
+
+    def _on_process_finished(self, exit_code: int, _exit_status: QProcess.ExitStatus) -> None:
+        self._process = None
+        self.running_changed.emit(False)
+        if exit_code == 0:
+            self.log_line.emit("--- 反向隧道正常退出 ---")
+            self.status_message.emit("反向隧道已停止")
+        else:
+            self.log_line.emit(f"--- 反向隧道退出 (code={exit_code}) ---")
+            self.status_message.emit(f"反向隧道异常退出 (code={exit_code})")
+
+    def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if error == QProcess.FailedToStart:
+            self.status_message.emit("ssh 启动失败（请确认已安装 OpenSSH 客户端）")
+            self.log_line.emit("隧道进程 FailedToStart")
+        elif error != QProcess.Crashed:
+            self.status_message.emit(f"隧道进程错误: {error}")
+
+    def _force_kill_process(self) -> None:
+        if self._process is not None and self._process.state() == QProcess.Running:
+            self._process.kill()
+            self._process = None
+            self.running_changed.emit(False)
+            self.log_line.emit("--- 反向隧道已被强制终止 ---")
+            self.status_message.emit("反向隧道已强制停止")
+
+
 def list_robodojo_tasks() -> List[str]:
     """从 RoboDojo task config 列出可评测任务名。"""
     cfg_dir = ROBODOJO_TASK_CONFIG_DIR
@@ -25198,6 +25424,171 @@ class CameraTopicWindow(QMainWindow):
         self._real_eval_local_cam_timer.timeout.connect(self._on_real_eval_local_cam_tick)
         self._on_real_robot_backend_changed()
 
+        # —— 本地摄像头：推流 + SSH 反向隧道 + 预览 ——
+        local_cam_tab = QWidget()
+        local_cam_outer = QVBoxLayout(local_cam_tab)
+        local_cam_outer.setContentsMargins(8, 6, 8, 6)
+        local_cam_outer.setSpacing(6)
+
+        local_cam_hint = QLabel(LOCAL_WEBCAM_TAB_HELP.split("\n\n")[0] + " 点「用法」看完整步骤。")
+        local_cam_hint.setWordWrap(True)
+        local_cam_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        local_cam_outer.addWidget(local_cam_hint)
+
+        # 1) 推流
+        mjpeg_group = QGroupBox("1. 本机推流 (MJPEG)")
+        mjpeg_group.setStyleSheet(
+            f"QGroupBox {{ color: {UI_TEXT_PRIMARY}; border: 1px solid {UI_BORDER}; "
+            f"margin-top: 6px; padding-top: 4px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; "
+            f"color: {UI_TEXT_SECONDARY}; }}"
+        )
+        mjpeg_layout = QVBoxLayout(mjpeg_group)
+        mjpeg_layout.setContentsMargins(8, 10, 8, 8)
+        mjpeg_layout.setSpacing(6)
+        mjpeg_row = QHBoxLayout()
+        mjpeg_row.setSpacing(6)
+        mjpeg_row.addWidget(QLabel("设备"))
+        self.local_cam_device_edit = QLineEdit("0")
+        self.local_cam_device_edit.setFixedWidth(64)
+        self.local_cam_device_edit.setToolTip("摄像头 index（macOS 一般为 0）或 /dev/videoN")
+        mjpeg_row.addWidget(self.local_cam_device_edit)
+        mjpeg_row.addWidget(QLabel("端口"))
+        self.local_cam_port_spin = QSpinBox()
+        self.local_cam_port_spin.setRange(1024, 65535)
+        self.local_cam_port_spin.setValue(LOCAL_WEBCAM_DEFAULT_PORT)
+        mjpeg_row.addWidget(self.local_cam_port_spin)
+        self.local_cam_mjpeg_btn = QPushButton("启动推流")
+        self.local_cam_mjpeg_btn.setFocusPolicy(Qt.NoFocus)
+        self.local_cam_mjpeg_btn.setToolTip("等价于: python3 examples/local_webcam_mjpeg_server.py")
+        self.local_cam_mjpeg_btn.clicked.connect(self._on_local_cam_mjpeg_toggled)
+        mjpeg_row.addWidget(self.local_cam_mjpeg_btn)
+        self.local_cam_mjpeg_status = QLabel("推流: 未启动")
+        self.local_cam_mjpeg_status.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.local_cam_mjpeg_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        mjpeg_row.addWidget(self.local_cam_mjpeg_status, 1)
+        mjpeg_layout.addLayout(mjpeg_row)
+        local_cam_outer.addWidget(mjpeg_group)
+
+        # 2) 隧道
+        tunnel_group = QGroupBox("2. SSH 反向隧道")
+        tunnel_group.setStyleSheet(
+            f"QGroupBox {{ color: {UI_TEXT_PRIMARY}; border: 1px solid {UI_BORDER}; "
+            f"margin-top: 6px; padding-top: 4px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; "
+            f"color: {UI_TEXT_SECONDARY}; }}"
+        )
+        tunnel_layout = QVBoxLayout(tunnel_group)
+        tunnel_layout.setContentsMargins(8, 10, 8, 8)
+        tunnel_layout.setSpacing(6)
+        tunnel_row = QHBoxLayout()
+        tunnel_row.setSpacing(6)
+        tunnel_row.addWidget(QLabel("远端"))
+        default_ssh = os.environ.get("EAI_SSH_REVERSE_TARGET", "").strip() or "user@remote-host"
+        self.local_cam_ssh_target_edit = QLineEdit(default_ssh)
+        self.local_cam_ssh_target_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.local_cam_ssh_target_edit.setPlaceholderText("user@10.0.0.5  或  user@hostname")
+        self.local_cam_ssh_target_edit.setToolTip(
+            "有摄像头的本机执行时填写 eai 所在远端。也可设环境变量 EAI_SSH_REVERSE_TARGET。"
+        )
+        tunnel_row.addWidget(self.local_cam_ssh_target_edit, 1)
+        tunnel_row.addWidget(QLabel("远端端口"))
+        self.local_cam_remote_port_spin = QSpinBox()
+        self.local_cam_remote_port_spin.setRange(1024, 65535)
+        self.local_cam_remote_port_spin.setValue(LOCAL_WEBCAM_DEFAULT_PORT)
+        tunnel_row.addWidget(self.local_cam_remote_port_spin)
+        self.local_cam_tunnel_btn = QPushButton("启动隧道")
+        self.local_cam_tunnel_btn.setFocusPolicy(Qt.NoFocus)
+        self.local_cam_tunnel_btn.setToolTip("等价于: ssh -N -R <远端端口>:127.0.0.1:<本机端口> user@host")
+        self.local_cam_tunnel_btn.clicked.connect(self._on_local_cam_tunnel_toggled)
+        tunnel_row.addWidget(self.local_cam_tunnel_btn)
+        self.local_cam_tunnel_status = QLabel("隧道: 未启动")
+        self.local_cam_tunnel_status.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.local_cam_tunnel_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        tunnel_row.addWidget(self.local_cam_tunnel_status, 1)
+        tunnel_layout.addLayout(tunnel_row)
+        tunnel_extra_row = QHBoxLayout()
+        tunnel_extra_row.setSpacing(6)
+        tunnel_extra_row.addWidget(QLabel("额外 ssh 参数"))
+        self.local_cam_ssh_extra_edit = QLineEdit(
+            "-o ServerAliveInterval=30 -o ExitOnForwardFailure=yes"
+        )
+        self.local_cam_ssh_extra_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        tunnel_extra_row.addWidget(self.local_cam_ssh_extra_edit, 1)
+        tunnel_layout.addLayout(tunnel_extra_row)
+        local_cam_outer.addWidget(tunnel_group)
+
+        # 预览 + 助手
+        preview_row = QHBoxLayout()
+        preview_row.setSpacing(6)
+        self.local_cam_url_edit = QLineEdit(SKELETON_NETWORK_URL_DEFAULT)
+        self.local_cam_url_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.local_cam_url_edit.setPlaceholderText("http://127.0.0.1:8090/cam.mjpg")
+        preview_row.addWidget(self.local_cam_url_edit, 1)
+        self.local_cam_preview_btn = QPushButton("打开预览")
+        self.local_cam_preview_btn.setFocusPolicy(Qt.NoFocus)
+        self.local_cam_preview_btn.clicked.connect(self._on_local_cam_preview_toggled)
+        preview_row.addWidget(self.local_cam_preview_btn)
+        self.local_cam_help_btn = QPushButton("用法")
+        self.local_cam_help_btn.setFocusPolicy(Qt.NoFocus)
+        self.local_cam_help_btn.clicked.connect(self._on_local_cam_tab_help)
+        preview_row.addWidget(self.local_cam_help_btn)
+        self.local_cam_mac_helper_btn = QPushButton("复制 Mac 助手命令")
+        self.local_cam_mac_helper_btn.setFocusPolicy(Qt.NoFocus)
+        self.local_cam_mac_helper_btn.setToolTip(
+            "Remote SSH 时在 Mac 本机终端粘贴运行（推流+隧道独立窗口）"
+        )
+        self.local_cam_mac_helper_btn.clicked.connect(self._on_local_cam_copy_mac_helper)
+        preview_row.addWidget(self.local_cam_mac_helper_btn)
+        local_cam_outer.addLayout(preview_row)
+
+        self.local_cam_preview_status = QLabel("预览: 未开启")
+        self.local_cam_preview_status.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.local_cam_preview_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        local_cam_outer.addWidget(self.local_cam_preview_status)
+
+        self.local_cam_preview_label = QLabel("启动推流与隧道后，点「打开预览」")
+        self.local_cam_preview_label.setAlignment(Qt.AlignCenter)
+        self.local_cam_preview_label.setMinimumHeight(200)
+        self.local_cam_preview_label.setStyleSheet(
+            f"QLabel {{ background-color: {UI_BG_INPUT}; border: 1px solid {UI_BORDER}; "
+            f"color: {UI_TEXT_MUTED}; }}"
+        )
+        local_cam_outer.addWidget(self.local_cam_preview_label, 1)
+
+        self.local_cam_log_edit = QTextEdit()
+        self.local_cam_log_edit.setReadOnly(True)
+        self.local_cam_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.local_cam_log_edit.setPlaceholderText("推流 / 隧道日志…")
+        self.local_cam_log_edit.setStyleSheet(
+            f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
+            f"border: 1px solid {UI_BORDER}; }}"
+        )
+        self.local_cam_log_edit_resize_bar = _add_text_edit_with_drag_bar(
+            local_cam_outer,
+            self.local_cam_log_edit,
+            default_h=140,
+            min_h=60,
+            max_h=600,
+            label="拖动调整本地摄像头日志高度",
+        )
+
+        self._local_cam_mjpeg_launcher = LocalWebcamMjpegLauncher(self)
+        self._local_cam_mjpeg_launcher.log_line.connect(self._append_local_cam_log)
+        self._local_cam_mjpeg_launcher.status_message.connect(self._on_local_cam_mjpeg_status)
+        self._local_cam_mjpeg_launcher.running_changed.connect(self._on_local_cam_mjpeg_running)
+        self._local_cam_tunnel_launcher = SshReverseTunnelLauncher(self)
+        self._local_cam_tunnel_launcher.log_line.connect(self._append_local_cam_log)
+        self._local_cam_tunnel_launcher.status_message.connect(self._on_local_cam_tunnel_status)
+        self._local_cam_tunnel_launcher.running_changed.connect(self._on_local_cam_tunnel_running)
+        self._local_cam_preview_cap = None
+        self._local_cam_preview_active = False
+        self._local_cam_preview_busy = False
+        self._local_cam_preview_timer = QTimer(self)
+        self._local_cam_preview_timer.setInterval(66)
+        self._local_cam_preview_timer.timeout.connect(self._on_local_cam_preview_tick)
+        self.local_cam_port_spin.valueChanged.connect(self._on_local_cam_port_changed)
+
         control_tab = QWidget()
         control_layout = QVBoxLayout(control_tab)
         control_layout.setContentsMargins(8, 6, 8, 6)
@@ -27486,6 +27877,7 @@ class CameraTopicWindow(QMainWindow):
 
         control_tabs.addTab(sim_tab, "仿真评测")
         control_tabs.addTab(real_tab, "真机评测")
+        control_tabs.addTab(local_cam_tab, "本地摄像头")
         control_tabs.addTab(reward_tab, "Reward评测")
         control_tabs.addTab(reward_wf_tab, "Reward训练")
         control_tabs.addTab(dojo_rl_tab, "仿真强化学习训练")
@@ -32016,6 +32408,254 @@ class CameraTopicWindow(QMainWindow):
         finally:
             self._real_eval_local_cam_busy = False
 
+    def _append_local_cam_log(self, line: str) -> None:
+        if not hasattr(self, "local_cam_log_edit"):
+            return
+        self.local_cam_log_edit.append(line)
+        scrollbar = self.local_cam_log_edit.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def _on_local_cam_tab_help(self) -> None:
+        QMessageBox.information(self, "本地摄像头转发", LOCAL_WEBCAM_TAB_HELP)
+
+    def _on_local_cam_copy_mac_helper(self) -> None:
+        cmd = f"cd {shlex.quote(EAI_DIR)} && python3 examples/local_webcam_forward_ui.py"
+        QApplication.clipboard().setText(cmd)
+        self._append_local_cam_log(f"[助手] 已复制: {cmd}")
+        self.status_bar.showMessage("已复制 Mac 助手启动命令到剪贴板", 4000)
+
+    def _on_local_cam_port_changed(self, value: int) -> None:
+        url = f"http://127.0.0.1:{int(value)}/cam.mjpg"
+        if hasattr(self, "local_cam_url_edit") and not getattr(
+            self, "_local_cam_preview_active", False
+        ):
+            self.local_cam_url_edit.setText(url)
+        if hasattr(self, "real_eval_cam_url_edit") and not getattr(
+            self, "_real_eval_local_cam_active", False
+        ):
+            self.real_eval_cam_url_edit.setText(url)
+
+    def _confirm_local_cam_on_remote_host(self, action: str) -> bool:
+        """SSH 远端上点推流/隧道时提示；返回 False 表示取消。"""
+        if not (os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT")):
+            return True
+        reply = QMessageBox.question(
+            self,
+            "本地摄像头",
+            (
+                "检测到界面运行在 SSH 远端。\n"
+                f"「{action}」应在有摄像头的 Mac 本机执行。\n\n"
+                "建议在 Mac 运行:\n"
+                "  python3 examples/local_webcam_forward_ui.py\n"
+                "（可用本页「复制 Mac 助手命令」）\n\n"
+                "仍要在当前机器尝试启动吗？"
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
+    def _on_local_cam_mjpeg_toggled(self) -> None:
+        launcher = getattr(self, "_local_cam_mjpeg_launcher", None)
+        if launcher is None:
+            return
+        if launcher.is_running():
+            launcher.stop()
+            return
+        if not self._confirm_local_cam_on_remote_host("启动推流"):
+            return
+        device = self.local_cam_device_edit.text().strip() or "0"
+        port = int(self.local_cam_port_spin.value())
+        launcher.start(device=device, port=port, bind="127.0.0.1")
+
+    def _on_local_cam_mjpeg_status(self, msg: str) -> None:
+        self.status_bar.showMessage(msg, 5000)
+        self._append_local_cam_log(f"[推流] {msg}")
+
+    def _on_local_cam_mjpeg_running(self, running: bool) -> None:
+        if not hasattr(self, "local_cam_mjpeg_btn"):
+            return
+        self.local_cam_mjpeg_btn.setText("停止推流" if running else "启动推流")
+        port = int(self.local_cam_port_spin.value())
+        if running:
+            self.local_cam_mjpeg_status.setText(f"推流: 运行中 :{port}")
+            self.local_cam_mjpeg_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            self.local_cam_device_edit.setEnabled(False)
+            self.local_cam_port_spin.setEnabled(False)
+        else:
+            self.local_cam_mjpeg_status.setText("推流: 未启动")
+            self.local_cam_mjpeg_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+            self.local_cam_device_edit.setEnabled(True)
+            self.local_cam_port_spin.setEnabled(True)
+
+    def _on_local_cam_tunnel_toggled(self) -> None:
+        launcher = getattr(self, "_local_cam_tunnel_launcher", None)
+        if launcher is None:
+            return
+        if launcher.is_running():
+            launcher.stop()
+            return
+        if not self._confirm_local_cam_on_remote_host("启动隧道"):
+            return
+        target = self.local_cam_ssh_target_edit.text().strip()
+        if "remote-host" in target:
+            QMessageBox.warning(
+                self,
+                "反向隧道",
+                "请把「远端」改成真实地址，例如 yourname@10.0.0.5",
+            )
+            return
+        launcher.start(
+            target,
+            local_port=int(self.local_cam_port_spin.value()),
+            remote_port=int(self.local_cam_remote_port_spin.value()),
+            extra_args=self.local_cam_ssh_extra_edit.text(),
+        )
+
+    def _on_local_cam_tunnel_status(self, msg: str) -> None:
+        self.status_bar.showMessage(msg, 5000)
+        self._append_local_cam_log(f"[隧道] {msg}")
+
+    def _on_local_cam_tunnel_running(self, running: bool) -> None:
+        if not hasattr(self, "local_cam_tunnel_btn"):
+            return
+        self.local_cam_tunnel_btn.setText("停止隧道" if running else "启动隧道")
+        if running:
+            target = self.local_cam_ssh_target_edit.text().strip()
+            rport = int(self.local_cam_remote_port_spin.value())
+            self.local_cam_tunnel_status.setText(f"隧道: 运行中 → {target}:{rport}")
+            self.local_cam_tunnel_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            self.local_cam_ssh_target_edit.setEnabled(False)
+            self.local_cam_remote_port_spin.setEnabled(False)
+            self.local_cam_ssh_extra_edit.setEnabled(False)
+        else:
+            self.local_cam_tunnel_status.setText("隧道: 未启动")
+            self.local_cam_tunnel_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+            self.local_cam_ssh_target_edit.setEnabled(True)
+            self.local_cam_remote_port_spin.setEnabled(True)
+            self.local_cam_ssh_extra_edit.setEnabled(True)
+
+    def _close_local_cam_preview(self) -> None:
+        cap = self._local_cam_preview_cap
+        self._local_cam_preview_cap = None
+        if cap is None:
+            return
+        try:
+            cap.release()
+        except Exception:
+            pass
+
+    def _stop_local_cam_preview(self) -> None:
+        self._local_cam_preview_active = False
+        self._local_cam_preview_busy = False
+        if hasattr(self, "_local_cam_preview_timer"):
+            self._local_cam_preview_timer.stop()
+        self._close_local_cam_preview()
+        if hasattr(self, "local_cam_preview_btn"):
+            self.local_cam_preview_btn.setText("打开预览")
+        if hasattr(self, "local_cam_preview_status"):
+            self.local_cam_preview_status.setText("预览: 未开启")
+            self.local_cam_preview_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        if hasattr(self, "local_cam_preview_label"):
+            self.local_cam_preview_label.setPixmap(QPixmap())
+            self.local_cam_preview_label.setText("启动推流与隧道后，点「打开预览」")
+        if hasattr(self, "local_cam_url_edit"):
+            self.local_cam_url_edit.setEnabled(True)
+
+    def _open_local_cam_preview_source(self, url: str) -> Tuple[bool, str]:
+        url = (url or "").strip()
+        if not url:
+            return False, "请填写预览 URL（例如 http://127.0.0.1:8090/cam.mjpg）"
+        self._close_local_cam_preview()
+        cap = None
+        try:
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+            if not cap.isOpened():
+                cap.release()
+                cap = cv2.VideoCapture(url)
+            if not cap.isOpened():
+                return (
+                    False,
+                    f"无法打开:\n{url}\n\n请先启动推流与 SSH 反向隧道（或在 Mac 运行助手）。",
+                )
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            deadline = time.time() + 8.0
+            ok = False
+            frame = None
+            while time.time() < deadline:
+                ok, frame = cap.read()
+                if ok and frame is not None and getattr(frame, "size", 0) > 0:
+                    break
+                time.sleep(0.05)
+            if not ok or frame is None or getattr(frame, "size", 0) == 0:
+                cap.release()
+                return False, f"已连接但读不到画面:\n{url}"
+            self._local_cam_preview_cap = cap
+            return True, url
+        except Exception as exc:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            return False, f"打开预览失败: {exc}"
+
+    def _on_local_cam_preview_toggled(self) -> None:
+        if self._local_cam_preview_active:
+            self._stop_local_cam_preview()
+            self._append_local_cam_log("[预览] 已停止")
+            return
+        url = self.local_cam_url_edit.text().strip() or SKELETON_NETWORK_URL_DEFAULT
+        self.local_cam_url_edit.setText(url)
+        self.local_cam_preview_status.setText(f"预览: 连接中… {url}")
+        QApplication.processEvents()
+        ok, msg = self._open_local_cam_preview_source(url)
+        if not ok:
+            QMessageBox.warning(self, "本地摄像头预览", msg)
+            self.local_cam_preview_status.setText("预览: 连接失败")
+            self.local_cam_preview_status.setStyleSheet(f"color: {UI_ACCENT_RED};")
+            return
+        self._local_cam_preview_active = True
+        self.local_cam_url_edit.setEnabled(False)
+        self.local_cam_preview_btn.setText("停止预览")
+        short = msg if len(msg) <= 56 else msg[:53] + "..."
+        self.local_cam_preview_status.setText(f"预览: 播放中 @ {short}")
+        self.local_cam_preview_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        self.local_cam_preview_label.setText("")
+        self._local_cam_preview_timer.start()
+        self._append_local_cam_log(f"[预览] 已开启: {msg}")
+
+    def _on_local_cam_preview_tick(self) -> None:
+        if not self._local_cam_preview_active or self._local_cam_preview_busy:
+            return
+        cap = self._local_cam_preview_cap
+        if cap is None:
+            return
+        self._local_cam_preview_busy = True
+        try:
+            ok, frame = cap.read()
+            if not ok or frame is None or getattr(frame, "size", 0) == 0:
+                self.local_cam_preview_status.setText("预览: 等待画面…")
+                return
+            max_w = max(320, self.local_cam_preview_label.width() - 8)
+            h, w = frame.shape[:2]
+            if w > max_w:
+                scale = max_w / float(w)
+                frame = cv2.resize(
+                    frame,
+                    (max_w, max(1, int(h * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            self.local_cam_preview_label.setPixmap(cv2_to_qpixmap(frame))
+        except Exception as exc:
+            self.local_cam_preview_status.setText(f"预览: 读帧错误 {exc}")
+            self.local_cam_preview_status.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        finally:
+            self._local_cam_preview_busy = False
+
     def _init_qwen_deploy_controller(self) -> None:
         """测试 Tab 挂载共享推理控制器（测试工作室为独立窗口，见 test_studio/run_test_studio.sh）。"""
         if EAI_DIR not in sys.path:
@@ -33319,6 +33959,11 @@ class CameraTopicWindow(QMainWindow):
             print(f"[viewer_ui_state] save failed: {exc}", flush=True)
         self._stop_skeleton_tracking()
         self._stop_real_eval_local_cam()
+        self._stop_local_cam_preview()
+        if getattr(self, "_local_cam_mjpeg_launcher", None) is not None:
+            self._local_cam_mjpeg_launcher.shutdown()
+        if getattr(self, "_local_cam_tunnel_launcher", None) is not None:
+            self._local_cam_tunnel_launcher.shutdown()
         self._stop_human_demo_playback()
         self._ui_timer.stop()
         self._sam3_health_timer.stop()

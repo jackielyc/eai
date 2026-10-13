@@ -757,9 +757,21 @@
       "kind": "spin",
       "value": 8
     },
+    "real_robot_a2d_radio": {
+      "kind": "radio",
+      "checked": false
+    },
+    "real_robot_r1_radio": {
+      "kind": "radio",
+      "checked": true
+    },
     "real_eval_task_edit": {
       "kind": "line",
       "text": ""
+    },
+    "real_eval_cam_url_edit": {
+      "kind": "line",
+      "text": "http://127.0.0.1:8090/cam.mjpg"
     },
     "arm_text_cmd_edit": {
       "kind": "line",

@@ -9,7 +9,21 @@
 | 文件 | 作用 |
 |------|------|
 | `remote_api_chat_example.py` | 可运行客户端 + CLI |
+| `local_webcam_mjpeg_server.py` | 本机摄像头 → MJPEG HTTP 流 |
+| `local_webcam_forward_ui.py` | 本机图形按钮：启动推流 + SSH 反向隧道（Remote SSH / Mac 推荐） |
 | `README.md` | 本说明 |
+
+### 本机摄像头转发（Mac → 远端 eai）
+
+eai「本地摄像头」tab 提供同样两个按钮；若 UI 在远端，请在 **Mac 本机** 运行助手：
+
+```bash
+cd /path/to/eai
+python3 examples/local_webcam_forward_ui.py
+# 1) 启动推流  2) 填写 user@远端 后启动隧道
+```
+
+远端再打开「本地摄像头」或「真机评测」预览 `http://127.0.0.1:8090/cam.mjpg`。
 
 ## 依赖
 
