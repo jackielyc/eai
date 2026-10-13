@@ -36,9 +36,12 @@ _last_push_t = 0.0
 _instruction = ""
 
 
-# mujoco.Renderer / Isaac npy / Arena obs are already top-left origin.
-# LIBERO robosuite offscreen RGB is OpenGL (first row = bottom) and needs a flip.
-_FLIP_UD_DEFAULT_OFF = frozenset({"mujoco", "molmospaces", "isaac", "arena"})
+# mujoco.Renderer / Isaac npy / Arena obs / MolmoSpaces soft cams are already
+# top-left origin. LIBERO robosuite offscreen RGB is OpenGL (first row = bottom)
+# and needs a flip. psi_molmospaces uses the same camera_manager RGB as molmospaces.
+_FLIP_UD_DEFAULT_OFF = frozenset(
+    {"mujoco", "molmospaces", "psi_molmospaces", "isaac", "arena"}
+)
 
 
 def _truthy(name: str) -> bool:

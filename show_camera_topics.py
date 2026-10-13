@@ -25187,7 +25187,7 @@ class CameraTopicWindow(QMainWindow):
             "只启动当前后端的仿真/图形界面，不调用策略模型推理：\n"
             "· MuJoCo：官方 MJCF viewer\n"
             "· MolmoSpaces：快速演示 --viewer（首次可能要等资源索引）\n"
-            "· Psi-MolmoSpaces：本地 Psi R1 MJCF（秒开）\n"
+            "· Psi-MolmoSpaces：按任务下拉框当前项开完整场景（非裸 MJCF）\n"
             "· Arena：zero_action + Kit 窗口\n"
             "· LIBERO：开场景窗口并保持（不连 Pi）\n"
             "· RoboTwin：SAPIEN Viewer（不加载 OpenPI）\n"
@@ -36473,7 +36473,9 @@ class CameraTopicWindow(QMainWindow):
                 "与 Isaac 评测互斥；不接 /camera/* 预览。"
             ),
             "psi_molmospaces": (
-                "Psi-MolmoSpaces（init_molmospaces）：任务=psi_molmo_spaces/benchmark.json；"
+                "Psi-MolmoSpaces（init_molmospaces）：任务列表=psi_molmo_spaces/*.json；"
+                "「只开界面」与「启动」均按当前选中任务开场景；"
+                "Viewer=官方 MuJoCo GLFW · 机器人第一视角 (head_camera_rgb)；"
                 "默认策略 Psi R1 Pick Planner（无需策略服务）；"
                 "选 Psi Policy 前请先启动 psi-policy-server --port 8080。"
                 "与 Isaac 评测互斥；不接 /camera/* 预览。"
@@ -39714,6 +39716,133 @@ class CameraTopicWindow(QMainWindow):
             time.sleep(2.0)
         return False, f"等待策略服务超时: {last}"
 
+    def _start_psi_molmospaces_viewer_only(self) -> None:
+        """Open the currently selected Psi task scene (no model / no planner).
+
+        Always uses ``run_molmospaces_eval.py`` + the task combo benchmark —
+        never the bare Psi R1 MJCF quick_viewer path.
+        """
+        root = self._resolve_molmospaces_root()
+        if not os.path.isdir(root):
+            self._on_mujoco_status(f"Psi-MolmoSpaces 目录不存在: {root}")
+            return
+        if self._mujoco_launcher.is_running():
+            self._on_mujoco_status("MuJoCo / MolmoSpaces 正在运行，请先停止")
+            return
+        task = None
+        if hasattr(self, "molmospaces_task_combo"):
+            task = self.molmospaces_task_combo.currentData()
+        if not isinstance(task, dict) or not task.get("path"):
+            self._on_mujoco_status("请先在任务下拉框选择一个 Psi 评测任务")
+            return
+        bench = str(task["path"])
+        if not molmospaces_benchmark_ready(bench):
+            self._append_mujoco_log(
+                f"[psi_molmospaces] 任务数据未就绪: {bench}"
+            )
+            self._on_mujoco_status(f"任务未下载: {task.get('label')}")
+            return
+        ok_r1, r1_msg = ensure_psi_r1_robot_assets(root)
+        if not ok_r1:
+            self._append_mujoco_log(f"[psi_molmospaces] {r1_msg}")
+            self._on_mujoco_status("缺少 Psi R1 机器人资源")
+            return
+        py = self._resolve_molmospaces_python()
+        wrapper = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "tools",
+            "run_molmospaces_eval.py",
+        )
+        if not os.path.isfile(wrapper):
+            self._on_mujoco_status(f"未找到: {wrapper}")
+            return
+        # PsiR1 robot+scene from planner config; VIEWER_ONLY swaps in DummyPolicy.
+        policy = PSI_MOLMOSPACES_DEFAULT_POLICY
+        out_dir = PSI_MOLMOSPACES_EVAL_OUTPUT_DIR
+        os.makedirs(out_dir, exist_ok=True)
+        max_eps = 1
+        if hasattr(self, "molmospaces_episodes_spin"):
+            max_eps = max(1, int(self.molmospaces_episodes_spin.value()))
+        argv = [
+            py,
+            wrapper,
+            policy,
+            "--benchmark_dir",
+            bench,
+            "--no_wandb",
+            "--num_workers",
+            "1",
+            "--output_dir",
+            out_dir,
+            "--max_episodes",
+            str(max_eps),
+        ]
+        extra = task.get("extra") or ()
+        argv.extend(str(x) for x in extra)
+        vgl = (
+            "/usr/bin/vglrun"
+            if os.path.isfile("/usr/bin/vglrun")
+            else "/opt/VirtualGL/bin/vglrun"
+            if os.path.isfile("/opt/VirtualGL/bin/vglrun")
+            else ""
+        )
+        if vgl:
+            argv = [vgl, "-d", os.environ.get("MUJOCO_VGL_DEVICE") or "egl", *argv]
+        self.mujoco_log_edit.clear()
+        self._append_mujoco_log(
+            "[psi_molmospaces] 只开界面：按所选任务开场景（DummyPolicy，不推理）"
+        )
+        self._append_mujoco_log(f"[psi_molmospaces] task={task.get('label')}")
+        self._append_mujoco_log(f"[psi_molmospaces] benchmark={bench}")
+        self._append_mujoco_log(f"[psi_molmospaces] assets={r1_msg}")
+        self._append_mujoco_log(
+            "[psi_molmospaces] viewer: 官方 MuJoCo GLFW · 机器人第一视角 (head_camera_rgb)"
+        )
+        self._append_mujoco_log(
+            "[psi_molmospaces] 结束后保留窗口，点「停止」或关闭窗口再退出"
+        )
+        env_extra = {
+            "MUJOCO_GL": "glfw",
+            "MOLMOSPACES_ROOT": root,
+            "RYNNVALUE_HUD_BACKEND": "psi_molmospaces",
+            "MOLMOSPACES_EVAL_VIEWER": "1",
+            "MOLMOSPACES_VIEWER_ONLY": "1",
+            "MOLMOSPACES_VIEWER_FIRST_PERSON": "1",
+            "MOLMOSPACES_VIEWER_CAM": "head_camera_rgb",
+            "MOLMOSPACES_FORCE_EGL": "0",
+            "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
+            "EAI_DIR": EAI_DIR,
+            "OPENPI_DATA_HOME": os.environ.get("OPENPI_DATA_HOME")
+            or OPENPI_DATA_HOME_DEFAULT,
+            "PYTHONPATH": root,
+            "PYTHONNOUSERSITE": "1",
+            **molmospaces_cache_env(),
+        }
+        if self._sim_rynnvalue_hud_enabled():
+            if not self._ensure_live_hud_reward_or_abort("psi_molmospaces"):
+                return
+            hud_env = self._rynnvalue_live_hud_child_env("psi_molmospaces")
+            if hud_env:
+                env_extra.update(hud_env)
+                self._expand_workspace_panel()
+                self._append_mujoco_log(
+                    "[psi_molmospaces] RynnValue Live HUD "
+                    f"url={hud_env.get('RYNNVALUE_SERVER_URL')}"
+                )
+        tools = os.path.join(EAI_DIR, "tools")
+        prev = env_extra.get("PYTHONPATH") or ""
+        env_extra["PYTHONPATH"] = os.pathsep.join(
+            [root, tools]
+            + [p for p in prev.split(os.pathsep) if p and p not in (root, tools)]
+        )
+        self._mujoco_launcher.start_cwd_command(
+            cwd=root,
+            argv=argv,
+            label=f"psi_molmospaces viewer {task.get('id')}",
+            env_extra=env_extra,
+        )
+        self._update_mujoco_ui()
+
     def _on_molmospaces_run_clicked(self, *, viewer_only: bool = False) -> None:
         if (
             self._sim_eval_launcher.is_running()
@@ -39727,6 +39856,10 @@ class CameraTopicWindow(QMainWindow):
                 "请先将仿真后端切换为 MolmoSpaces / Psi-MolmoSpaces"
             )
             return
+        # Psi「只开界面」：独立路径，强制用任务 combo 的 benchmark 开场景。
+        if viewer_only and backend == "psi_molmospaces":
+            self._start_psi_molmospaces_viewer_only()
+            return
         spaces_tag = (
             "psi_molmospaces" if backend == "psi_molmospaces" else "molmospaces"
         )
@@ -39734,22 +39867,11 @@ class CameraTopicWindow(QMainWindow):
             "Psi-MolmoSpaces" if backend == "psi_molmospaces" else "MolmoSpaces"
         )
         root = self._resolve_molmospaces_root()
-        # 只开界面：强制快速演示 --viewer（不走策略评测）。
-        # Psi-MolmoSpaces：走本地 Psi R1 MJCF（秒开），避免 droid pipeline
-        # 先卡在资源/LMDB 索引上几分钟都不出窗口。
+        # 只开界面：其它 MolmoSpaces 仍走快速演示 --viewer。
         if viewer_only:
             recipe = "quick_viewer"
-            if backend == "psi_molmospaces" and hasattr(self, "molmospaces_robot_combo"):
-                idx_psi = self.molmospaces_robot_combo.findData("psi_r1")
-                if idx_psi >= 0:
-                    self.molmospaces_robot_combo.setCurrentIndex(idx_psi)
             self._append_mujoco_log(
                 f"[{spaces_tag}] 只开界面：快速演示 --viewer，不调用模型"
-                + (
-                    "（Psi → 本地 MJCF）"
-                    if backend == "psi_molmospaces"
-                    else ""
-                )
             )
         else:
             recipe = "quick_viewer"
@@ -39854,7 +39976,26 @@ class CameraTopicWindow(QMainWindow):
                 policy = str(
                     self.molmospaces_policy_combo.currentData() or policy
                 )
-            if is_lingbot_va_policy(policy):
+            # 只开界面：不启远程模型 / VA / VPP2；Psi 任务必须用 Psi R1 配置加载场景。
+            if viewer_only and backend == "psi_molmospaces":
+                needs_remote = (
+                    is_lingbot_va_policy(policy)
+                    or is_vpp2_policy(policy)
+                    or is_psi_policy_id(policy)
+                    or is_pi_policy_id(policy)
+                )
+                franka_only = (
+                    "DummyBenchmarkEvalConfig" in policy
+                    or "TeleopPolicyEvalConfig" in policy
+                )
+                if needs_remote or franka_only:
+                    self._append_mujoco_log(
+                        f"[{spaces_tag}] 只开界面：策略 "
+                        f"{policy.split(':')[-1]} 不适合无模型开窗，"
+                        f"改用 {PSI_MOLMOSPACES_DEFAULT_POLICY.split(':')[-1]}"
+                    )
+                    policy = PSI_MOLMOSPACES_DEFAULT_POLICY
+            if (not viewer_only) and is_lingbot_va_policy(policy):
                 self.mujoco_log_edit.clear()
                 self._append_mujoco_log(
                     f"[{spaces_tag}/LingBot-VA] 启动 wan_va（serve_only）；"
@@ -39866,7 +40007,7 @@ class CameraTopicWindow(QMainWindow):
                     label=f"{spaces_tag}-va",
                 )
                 return
-            if is_vpp2_policy(policy):
+            if (not viewer_only) and is_vpp2_policy(policy):
                 self.mujoco_log_edit.clear()
                 self._append_mujoco_log(
                     f"[{spaces_tag}/VPP2] 启动 policy server（serve_only）；"
@@ -39879,7 +40020,7 @@ class CameraTopicWindow(QMainWindow):
                 )
                 return
             pi_ckpt = ""
-            if is_psi_policy_id(policy):
+            if (not viewer_only) and is_psi_policy_id(policy):
                 # PsiPolicy connects to psi-policy-server (openpi-compatible WS).
                 # Do NOT start openpi serve_policy here.
                 self.mujoco_log_edit.clear()
@@ -39904,7 +40045,7 @@ class CameraTopicWindow(QMainWindow):
                     self._on_mujoco_status(f"Psi Policy 服务未就绪: {msg}")
                     return
                 self._append_mujoco_log(f"[psi-policy] 预检通过: {msg}")
-            elif is_pi_policy_id(policy):
+            elif (not viewer_only) and is_pi_policy_id(policy):
                 self.mujoco_log_edit.clear()
                 self._append_mujoco_log("[pi] 选用 Pi：先确认模型/服务可调用…")
                 ok, msg = self._ensure_pi_policy_ready(
@@ -39960,7 +40101,11 @@ class CameraTopicWindow(QMainWindow):
             )
             if vgl:
                 argv = [vgl, "-d", os.environ.get("MUJOCO_VGL_DEVICE") or "egl", *argv]
-            label = f"{spaces_tag} eval {task.get('id')}"
+            label = (
+                f"{spaces_tag} viewer {task.get('id')}"
+                if viewer_only
+                else f"{spaces_tag} eval {task.get('id')}"
+            )
             if not is_pi_policy_id(policy):
                 self.mujoco_log_edit.clear()
             self._append_mujoco_log(f"[{spaces_tag}] task={task.get('label')}")
@@ -39974,19 +40119,33 @@ class CameraTopicWindow(QMainWindow):
             self._append_mujoco_log(
                 f"[{spaces_tag}] 结束后保留窗口，点「停止」或关闭窗口再退出"
             )
-            if not self._ensure_live_hud_reward_or_abort(spaces_tag):
+            if backend == "psi_molmospaces":
+                self._append_mujoco_log(
+                    f"[{spaces_tag}] viewer: 官方 MuJoCo GLFW · 机器人第一视角 (head_camera_rgb)"
+                )
+            # GLFW path also needs RYNNVALUE_LIVE_HUD (viewer feed is hooked in
+            # molmospaces_viewer_cam); previously viewer_only skipped HUD env.
+            hud_env = (
+                {}
+                if not self._sim_rynnvalue_hud_enabled()
+                else self._rynnvalue_live_hud_child_env(spaces_tag)
+            )
+            if hud_env and not self._ensure_live_hud_reward_or_abort(spaces_tag):
                 return
-            hud_env = self._rynnvalue_live_hud_child_env(spaces_tag)
+            # Psi：官方 MuJoCo GLFW + 头部第一视角；其它 Spaces 默认仍可 FORCE_EGL。
+            force_egl = "0" if backend == "psi_molmospaces" else "1"
+            if backend == "psi_molmospaces":
+                viewer_fp, viewer_cam = "1", "head_camera_rgb"
+            else:
+                viewer_fp, viewer_cam = "0", "front"
             env_extra = {
                 "MUJOCO_GL": "glfw",
                 "MOLMOSPACES_ROOT": root,
                 "RYNNVALUE_HUD_BACKEND": spaces_tag,
                 "MOLMOSPACES_EVAL_VIEWER": "1",
-                # Front third-person by default; set FIRST_PERSON=1 for head/exo.
-                "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
-                "MOLMOSPACES_VIEWER_CAM": "front",
-                # TurboVNC: force EGL+Tk window (GLFW often invisible here).
-                "MOLMOSPACES_FORCE_EGL": "1",
+                "MOLMOSPACES_VIEWER_FIRST_PERSON": viewer_fp,
+                "MOLMOSPACES_VIEWER_CAM": viewer_cam,
+                "MOLMOSPACES_FORCE_EGL": force_egl,
                 # Keep last frame until GUI「停止」or window close.
                 "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
                 "EAI_DIR": EAI_DIR,
@@ -39997,6 +40156,8 @@ class CameraTopicWindow(QMainWindow):
                 "PYTHONNOUSERSITE": "1",
                 **molmospaces_cache_env(),
             }
+            if viewer_only:
+                env_extra["MOLMOSPACES_VIEWER_ONLY"] = "1"
             tools = os.path.join(EAI_DIR, "tools")
             prev = env_extra.get("PYTHONPATH") or ""
             env_extra["PYTHONPATH"] = os.pathsep.join(
@@ -40025,6 +40186,13 @@ class CameraTopicWindow(QMainWindow):
         if recipe == "quick_viewer":
             robot_id = self._molmospaces_selected_robot()
             local_mjcf = MOLMOSPACES_LOCAL_MJCF_ROBOTS.get(robot_id, "")
+            # Psi backend must never open bare MJCF — that drops the task scene.
+            if local_mjcf and backend == "psi_molmospaces":
+                self._append_mujoco_log(
+                    "[psi_molmospaces] 已拦截裸 MJCF quick_viewer，改用所选任务场景"
+                )
+                self._start_psi_molmospaces_viewer_only()
+                return
             if local_mjcf:
                 mjcf = local_mjcf
                 if not os.path.isfile(mjcf):

@@ -330,13 +330,23 @@ def patch_launch_passive(force_egl: bool = False) -> str:
     """Monkeypatch ``mujoco.viewer.launch_passive`` when GLX is unavailable.
 
     Returns a short status string describing the chosen backend.
-    """
-    os.environ.setdefault("MUJOCO_GL", "egl")
 
-    use_egl = force_egl or not glx_available()
-    if not use_egl:
+    - ``force_egl=True`` / ``MOLMOSPACES_FORCE_EGL=1`` → EGL+Tk fallback
+    - ``MOLMOSPACES_FORCE_EGL=0`` → always keep official MuJoCo GLFW
+      ``launch_passive`` (left/right panels; typically under VirtualGL)
+    - otherwise → GLFW when ``glx_available()``, else EGL+Tk
+    """
+    prefer_native = os.environ.get("MOLMOSPACES_FORCE_EGL", "") == "0"
+    use_egl = bool(force_egl) and not prefer_native
+    if not use_egl and (prefer_native or glx_available()):
+        os.environ["MUJOCO_GL"] = "glfw"
+        print(
+            "[molmospaces-viewer] using official MuJoCo GLFW launch_passive",
+            flush=True,
+        )
         return "glfw"
 
+    os.environ.setdefault("MUJOCO_GL", "egl")
     import mujoco.viewer as mjv
 
     mjv.launch_passive = launch_passive_egl  # type: ignore[assignment]

@@ -97,8 +97,9 @@
     },
     "lingbot_depth_topic_combo": {
       "kind": "combo",
-      "index": -1,
-      "text": ""
+      "index": 3,
+      "text": "/libero/preview",
+      "data": "/libero/preview"
     },
     "lingbot_depth_model_edit": {
       "kind": "line",
@@ -173,8 +174,8 @@
     "lingbot_video_case_combo": {
       "kind": "combo",
       "index": 0,
-      "text": "自定义路径…",
-      "data": "{'image': '', 'prompt_json': ''}"
+      "text": "example_1",
+      "data": "{'image': '', 'prompt_json': '/share_data/projects/mahjong/share/personal/liyichao/lingbot-video/assets/cases/t2v/example_1/prompt.json'}"
     },
     "lingbot_video_preset_combo": {
       "kind": "combo",
@@ -193,8 +194,8 @@
     "lingbot_video_topic_combo": {
       "kind": "combo",
       "index": 0,
-      "text": "（无预览图像）",
-      "data": ""
+      "text": "/camera/head_color",
+      "data": "/camera/head_color"
     },
     "lingbot_video_model_edit": {
       "kind": "line",
@@ -263,8 +264,8 @@
     "lingbot_world_topic_combo": {
       "kind": "combo",
       "index": 0,
-      "text": "（无预览图像）",
-      "data": ""
+      "text": "/camera/head_color",
+      "data": "/camera/head_color"
     },
     "lingbot_world_ckpt_edit": {
       "kind": "line",
@@ -380,9 +381,9 @@
     },
     "cad_existing_combo": {
       "kind": "combo",
-      "index": 1,
+      "index": 0,
       "text": "box",
-      "data": "/Users/mac/Downloads/code/eai/meshes/box/reconstructed.obj"
+      "data": "/share_data/projects/mahjong/share/personal/liyichao/eai/meshes/box/reconstructed.obj"
     },
     "train_policy_dir_edit": {
       "kind": "line",
@@ -470,12 +471,12 @@
       "kind": "combo",
       "index": 0,
       "text": "align_blocks",
-      "data": "build_tower",
+      "data": "align_blocks",
       "edit": "align_blocks"
     },
     "sim_eval_policy_combo": {
       "kind": "combo",
-      "index": 2,
+      "index": 36,
       "text": "starVLA",
       "data": "XPolicyLab/policy/starVLA"
     },
@@ -521,8 +522,9 @@
     },
     "mujoco_model_combo": {
       "kind": "combo",
-      "index": -1,
+      "index": 0,
       "text": "psi_r1_ruiyan/urdf/model.xml  (psi_r1)",
+      "data": "/share_data/projects/mahjong/share/personal/liyichao/psi_r1_ruiyan/urdf/model.xml",
       "edit": "psi_r1_ruiyan/urdf/model.xml  (psi_r1)"
     },
     "mujoco_mode_combo": {
@@ -555,8 +557,9 @@
     },
     "molmospaces_task_combo": {
       "kind": "combo",
-      "index": -1,
-      "text": ""
+      "index": 0,
+      "text": "[Psi] pick up the apple (20 ep)",
+      "data": "{'extra': (), 'id': 'psi:benchmark', 'label': '[Psi] pick up the apple (20 ep)', 'path': '/share_data/projects/mahjong/share/personal/liyichao/psi-molmospaces/psi_molmo_spaces', 'ready': True}"
     },
     "molmospaces_policy_combo": {
       "kind": "combo",
@@ -578,8 +581,9 @@
     },
     "arena_task_combo": {
       "kind": "combo",
-      "index": -1,
-      "text": ""
+      "index": 0,
+      "text": "chinese_knot_stacking",
+      "data": "chinese_knot_stacking"
     },
     "arena_policy_combo": {
       "kind": "combo",
@@ -779,7 +783,7 @@
     },
     "local_cam_ssh_target_edit": {
       "kind": "line",
-      "text": "root@42.192.34.154"
+      "text": "user@remote-host"
     },
     "local_cam_remote_port_spin": {
       "kind": "spin",
@@ -787,7 +791,7 @@
     },
     "local_cam_ssh_extra_edit": {
       "kind": "line",
-      "text": "-p 10693 -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes"
+      "text": "-o ServerAliveInterval=30 -o ExitOnForwardFailure=yes"
     },
     "local_cam_url_edit": {
       "kind": "line",
@@ -905,12 +909,13 @@
       "kind": "combo",
       "index": 0,
       "text": "本地 Qwen 基座",
-      "data": "/Users/mac/Downloads/code/models/Qwen"
+      "data": "/share_data/projects/mahjong/share/personal/liyichao/models/Qwen"
     },
     "test_qwen_model_combo": {
       "kind": "combo",
-      "index": -1,
-      "text": ""
+      "index": 4,
+      "text": "Qwen3.5-35B-A3B (全量)",
+      "data": "{'kind': 'full', 'label': 'Qwen3.5-35B-A3B', 'model_id': 'Qwen3.5-35B-A3B', 'name': 'Qwen3.5-35B-A3B', 'path': '/share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-35B-A3B', 'readable': '1', 'root': '/share_data/projects/mahjong/share/personal/liyichao/models/Qwen'}"
     },
     "ctx_loop_spin": {
       "kind": "spin",
@@ -981,8 +986,8 @@
     "reward_topic_combo": {
       "kind": "combo",
       "index": 0,
-      "text": "（无预览图像）",
-      "data": ""
+      "text": "/camera/head_color",
+      "data": "/camera/head_color"
     },
     "reward_single_path_edit": {
       "kind": "line",
@@ -1154,7 +1159,7 @@
     },
     "robometer_config_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 11,
       "text": "libero_online_rl",
       "data": "libero_online_rl",
       "edit": "libero_online_rl"
@@ -1281,7 +1286,7 @@
     },
     "roboicl_task_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 6,
       "text": "deposit_coin",
       "data": "deposit_coin",
       "edit": "deposit_coin"
@@ -1388,9 +1393,9 @@
     },
     "humanego_mps_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "(未选择)",
-      "data": ""
+      "index": 1,
+      "text": "data/serve_bread/aria/mps_serve_bread_000_vrs",
+      "data": "/share_data/projects/mahjong/share/personal/liyichao/HumanEgo/data/serve_bread/aria/mps_serve_bread_000_vrs"
     },
     "humanego_cmd_edit": {
       "kind": "line",
@@ -1400,7 +1405,7 @@
       "kind": "combo",
       "index": 0,
       "text": "eai/datasets (.rrd)",
-      "data": "/Users/mac/Downloads/code/eai/datasets"
+      "data": "/share_data/projects/mahjong/share/personal/liyichao/eai/datasets"
     },
     "dataset_root_edit": {
       "kind": "line",
@@ -1528,7 +1533,7 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "本地摄像头",
+  "control_tab": "仿真评测",
   "splitter_sizes": [
     256,
     1258,
@@ -1536,11 +1541,20 @@
   ],
   "geometry": [
     0,
-    67,
+    56,
     1920,
     1029
   ],
-  "topic_checks": {},
+  "topic_checks": {
+    "/libero/preview": true,
+    "/rynnvalue/live_hud": true,
+    "/camera/left_wrist_color": true,
+    "/camera/head_color": true,
+    "/camera/right_wrist_color": true,
+    "/camera/left_wrist_depth": true,
+    "/camera/head_depth": true,
+    "/camera/right_wrist_depth": true
+  },
   "topic_user_unchecked": [],
   "workspace_collapsed": false
 }

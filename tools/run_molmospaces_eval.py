@@ -5,11 +5,11 @@ Forwards argv to molmo_spaces/evaluation/eval_main.py after patching
 launch_passive (same EGL fallback as the datagen wrapper) and forcing
 use_passive_viewer on the eval config.
 
-Default viewer camera is front third-person (正对机器人). Override with:
+Default viewer camera can be front third-person or first-person. Override with:
   MOLMOSPACES_VIEWER_FIRST_PERSON=1     # head / exo first-person
+  MOLMOSPACES_VIEWER_CAM=head_camera_rgb
   MOLMOSPACES_VIEWER_CAM=exo_camera_1
-  MOLMOSPACES_VIEWER_CAM=wrist
-  MOLMOSPACES_VIEWER_CAM=front         # front third-person (default)
+  MOLMOSPACES_VIEWER_CAM=front         # front third-person
 """
 from __future__ import annotations
 
@@ -20,9 +20,11 @@ from pathlib import Path
 
 def main() -> int:
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
-    # Default: front third-person camera in the passive viewer.
+    # Defaults; Psi GUI sets FIRST_PERSON=1 + head_camera_rgb.
     os.environ.setdefault("MOLMOSPACES_VIEWER_FIRST_PERSON", "0")
     os.environ.setdefault("MOLMOSPACES_VIEWER_CAM", "front")
+    # Default FORCE_EGL=1 for legacy TurboVNC safety; GUI may set 0 for
+    # Psi-MolmoSpaces to prefer official MuJoCo GLFW viewer.
     os.environ.setdefault("MOLMOSPACES_FORCE_EGL", "1")
     # Keep last frame after run until window close / GUI stop.
     os.environ.setdefault("MOLMOSPACES_VIEWER_KEEP_OPEN", "1")
@@ -45,6 +47,7 @@ def main() -> int:
     sys.path.insert(0, str(here))
     sys.path.insert(0, str(ms_root))
 
+    from molmospaces_viewer_cam import patch_pipeline_viewer_cam
     from mujoco_egl_passive import patch_launch_passive
 
     backend = patch_launch_passive(force_egl=os.environ.get("MOLMOSPACES_FORCE_EGL") == "1")
@@ -57,6 +60,10 @@ def main() -> int:
         else "front_third_person"
     )
     print(f"[molmospaces-eval] viewer_cam={cam}", flush=True)
+
+    # MolmoSpaces only applies viewer_cam_dict when it has "camera"; free-cam
+    # front third-person must be applied via this patch.
+    patch_pipeline_viewer_cam()
 
     import molmo_spaces.evaluation.eval_main as eval_main
 
@@ -78,15 +85,47 @@ def main() -> int:
                 and cam_name.lower()
                 not in ("front", "front_tp", "third_person", "third", "tp", "free", "3rd")
             ):
-                cfg.viewer_cam_dict = {"camera": cam_name or "head"}
-            else:
+                # First-person: prefer Psi head cam, then common aliases / exo.
+                preferred = cam_name or "head_camera_rgb"
                 cfg.viewer_cam_dict = {
-                    "distance": 3.5,
+                    "camera": preferred,
+                    "camera_fallbacks": [
+                        preferred,
+                        "head_camera_rgb",
+                        "head",
+                        "head_rgb",
+                        "exo_camera_1",
+                    ],
+                }
+            else:
+                # 正面第三人称（备用）：setup_viewer 里跟踪机身。
+                cfg.viewer_cam_dict = {
+                    "distance": float(os.environ.get("MOLMOSPACES_VIEWER_DISTANCE") or 4.0),
                     "azimuth": 90.0,
-                    "elevation": -20.0,
+                    "elevation": float(
+                        os.environ.get("MOLMOSPACES_VIEWER_ELEVATION") or -25.0
+                    ),
                     "lookat": [0.0, 0.0, 0.7],
                     "mode": "front",
                 }
+        # 「只开界面」：保留选中任务的 robot/scene，换成 DummyPolicy（不抓取/不推理）。
+        if os.environ.get("MOLMOSPACES_VIEWER_ONLY") == "1":
+            from molmo_spaces.configs.policy_configs import DummyPolicyConfig
+
+            cfg.policy_config = DummyPolicyConfig()
+            cfg.end_on_success = False
+            # Keep the window up until GUI stop / viewer close.
+            try:
+                horizon = int(getattr(cfg, "task_horizon", 0) or 0)
+            except Exception:
+                horizon = 0
+            if horizon < 100000:
+                cfg.task_horizon = 100000
+            print(
+                "[molmospaces-eval] viewer_only=1: DummyPolicy, keep robot/scene, "
+                f"task_horizon={cfg.task_horizon}",
+                flush=True,
+            )
         return cfg
 
     eval_main.create_eval_config = _create_with_viewer
