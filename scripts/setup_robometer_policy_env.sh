@@ -23,7 +23,7 @@ PIP="${ENV_PREFIX}/bin/pip"
 export PATH="${ENV_PREFIX}/bin:${PATH}"
 
 echo ">>> Python: ${PY} ($("${PY}" -V))"
-"${PIP}" install -U pip uv
+"${PIP}" install -U pip
 
 cd "${ROOT}"
 # 子模块若为空，用 HTTPS 浅克隆
@@ -41,28 +41,23 @@ clone_one LIBERO https://github.com/nakamotoo/LIBERO.git
 clone_one dsrl_openpi https://github.com/jesbu1/dsrl_openpi.git
 clone_one robometer https://github.com/robometer/robometer.git
 
-echo ">>> uv sync（完整依赖，可能较久）"
-export UV_PYTHON="${PY}"
-unset UV_PROJECT_ENVIRONMENT || true
-uv sync --python "${PY}" || {
-  echo ">>> uv sync 失败，回退到核心 pip + editable 安装"
-  "${PIP}" install --no-cache-dir \
-    'torch' 'torchvision' \
-    'hydra-core==1.3.2' 'omegaconf' \
-    'gymnasium>=0.29' 'gym' \
-    'h5py' 'numpy' 'pyyaml' \
-    'wandb' 'tensorboard' 'loguru' 'tqdm' 'rich' \
-    'pillow' 'opencv-python-headless' 'imageio' 'imageio-ffmpeg' \
-    'transformers>=4.57.0,<5.0' 'sentence-transformers>=2.0.0,<4.0' 'huggingface-hub' \
-    'grpcio-tools' 'easydict==1.9' 'cloudpickle==2.1.0' 'future==0.18.2' \
-    'bddl==1.0.1' 'thop==0.1.1.post2209072238' 'termcolor' 'peft' 'pyrallis' \
-    'codetiming>=1.4.0' 'uvicorn>=0.35.0' 'fastapi' 'einops' \
-    'robosuite==1.4.0' 'mujoco' 'robomimic==0.2.0' 'metaworld'
-  "${PIP}" install -e ./LIBERO
-  "${PIP}" install -e ./robometer
-  "${PIP}" install -e ./dsrl_openpi/packages/openpi-client
-  "${PIP}" install -e . --no-deps
-}
+echo ">>> pip 安装核心依赖 + editable"
+"${PIP}" install --no-cache-dir \
+  'torch' 'torchvision' \
+  'hydra-core==1.3.2' 'omegaconf' \
+  'gymnasium>=0.29' 'gym' \
+  'h5py' 'numpy' 'pyyaml' \
+  'wandb' 'tensorboard' 'loguru' 'tqdm' 'rich' \
+  'pillow' 'opencv-python-headless' 'imageio' 'imageio-ffmpeg' \
+  'transformers>=4.57.0,<5.0' 'sentence-transformers>=2.0.0,<4.0' 'huggingface-hub' \
+  'grpcio-tools' 'easydict==1.9' 'cloudpickle==2.1.0' 'future==0.18.2' \
+  'bddl==1.0.1' 'thop==0.1.1.post2209072238' 'termcolor' 'peft' 'pyrallis' \
+  'codetiming>=1.4.0' 'uvicorn>=0.35.0' 'fastapi' 'einops' \
+  'robosuite==1.4.0' 'mujoco' 'robomimic==0.2.0' 'metaworld'
+"${PIP}" install -e ./LIBERO
+"${PIP}" install -e ./robometer
+"${PIP}" install -e ./dsrl_openpi/packages/openpi-client
+"${PIP}" install -e . --no-deps
 
 echo ">>> 导入自检"
 PYTHONPATH="${ROOT}${PYTHONPATH:+:${PYTHONPATH}}" "${PY}" - <<'PY'

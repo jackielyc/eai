@@ -36,7 +36,9 @@ PI_CKPT_HF_DEFAULT = "Kovavavvavava/pi05_droid_jointpos"
 PI_CKPT_HF_LOCAL_DEFAULT = str(EAI_DIR / ".cache" / "openpi" / "hf" / "pi05_droid_jointpos")
 # openpi JAX pi05_libero mirror (GCS often fails without gsutil/anon).
 PI05_LIBERO_HF_DEFAULT = "bf-jeon/pi05_libero"
-PI05_LIBERO_HF_LOCAL_DEFAULT = str(EAI_DIR / ".cache" / "openpi" / "hf" / "pi05_libero")
+PI05_LIBERO_HF_LOCAL_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_libero"
+)
 PI_SERVER_HOST_DEFAULT = "localhost"
 PI_SERVER_PORT_DEFAULT = 8080
 # Local dirs that look like Pi ckpts (may be sparse / incomplete on this host).

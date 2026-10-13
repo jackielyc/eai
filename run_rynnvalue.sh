@@ -43,7 +43,7 @@ usage() {
 选项:
   --job NAME            infer | reward_server | policy_ranking | confusion_matrix
   --root PATH           RynnValue 仓库根
-  --python PATH         Python（建议仓库 .venv；空则优先 uv run）
+  --python PATH         Python（建议 miniconda3/envs/rynnvalue）
   --model-path PATH     HuggingFace 模型目录或 repo id
   --checkpoint-path PATH  训练 checkpoint 目录（含 model.pt；可选）
   --video-path PATH     推理输入视频（infer）
@@ -102,15 +102,22 @@ fi
 JOB_NORM="$(echo "${JOB}" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
 
 if [[ -z "${PY}" ]]; then
-  if [[ -x "${ROOT}/.venv/bin/python" ]]; then
-    PY="${ROOT}/.venv/bin/python"
-  elif ! command -v uv >/dev/null 2>&1; then
-    if command -v python3 >/dev/null 2>&1; then
-      PY="$(command -v python3)"
-    else
-      echo "错误: 找不到 Python。请设置 RYNNVALUE_PYTHON 或 --python" >&2
-      exit 1
+  for cand in \
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/rynnvalue/bin/python" \
+    "/home/psibot/miniconda3/envs/rynnvalue/bin/python"
+  do
+    if [[ -x "${cand}" ]]; then
+      PY="${cand}"
+      break
     fi
+  done
+fi
+if [[ -z "${PY}" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PY="$(command -v python3)"
+  else
+    echo "错误: 找不到 Python。请设置 RYNNVALUE_PYTHON 或 --python（建议 miniconda3/envs/rynnvalue）" >&2
+    exit 1
   fi
 fi
 
@@ -159,15 +166,11 @@ mkdir -p "${LOG_DIR}"
 echo "[rynnvalue] log_dir=${LOG_DIR}"
 echo "[rynnvalue] job=${JOB_NORM} gui=${GUI}"
 echo "[rynnvalue] root=${ROOT}"
-echo "[rynnvalue] python=${PY:-uv run python}"
+echo "[rynnvalue] python=${PY}"
 
 _run_in() {
   local cwd="$1"; shift
-  if [[ -n "${PY}" ]]; then
-    (cd "${cwd}" && "${PY}" "$@")
-  else
-    (cd "${cwd}" && uv run python "$@")
-  fi
+  (cd "${cwd}" && "${PY}" "$@")
 }
 
 case "${JOB_NORM}" in
@@ -218,15 +221,11 @@ case "${JOB_NORM}" in
     if [[ ${#EXTRA_ARGS[@]} -gt 0 ]]; then
       CMD+=("${EXTRA_ARGS[@]}")
     fi
-    echo "$ cd ${ROOT}/rynn_infer && ${PY:-uv run python} ${CMD[*]}"
+    echo "$ cd ${ROOT}/rynn_infer && ${PY} ${CMD[*]}"
     # Tee output so we can surface the Saved mp4 path for the UI player.
     OUT_LOG="$(mktemp)"
     set +e
-    if [[ -n "${PY}" ]]; then
-      (cd "${ROOT}/rynn_infer" && "${PY}" "${CMD[@]}" 2>&1 | tee "${OUT_LOG}")
-    else
-      (cd "${ROOT}/rynn_infer" && uv run python "${CMD[@]}" 2>&1 | tee "${OUT_LOG}")
-    fi
+    (cd "${ROOT}/rynn_infer" && "${PY}" "${CMD[@]}" 2>&1 | tee "${OUT_LOG}")
     RC=${PIPESTATUS[0]}
     set -e
     SAVED="$(grep -E '^Saved .+\.mp4$' "${OUT_LOG}" | tail -n1 | sed 's/^Saved //' || true)"

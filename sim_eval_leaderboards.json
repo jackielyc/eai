@@ -1,6 +1,6 @@
 {
-  "updated": "2026-10-10 11:49",
-  "note": "Curated + live-refreshable industry boards for EAI 仿真评测. Native: Isaac/MuJoCo/MolmoSpaces/Arena/LIBERO/RoboTwin. Extended: SimplerEnv/CALVIN/RoboCasa/ManiSkill/Genesis/VLA-Harness 等。 可用「刷新」从公开源实时更新并写回本文件。",
+  "updated": "2026-10-12 14:22",
+  "note": "Curated + live-refreshable industry boards for EAI 仿真评测. Native: Isaac/MuJoCo/MolmoSpaces/Arena/LIBERO/RoboTwin. Extended: SimplerEnv/CALVIN/RoboCasa/ManiSkill/Genesis/VLA-Harness 等。 可用「刷新」从公开源实时更新并写回本文件。 本地仿真评测可合并进各后端 local_entries，刷新实时榜时会保留并与业内条目对比。",
   "backends": {
     "isaac": {
       "title": "Isaac / RoboDojo · 业内仿真榜单",
@@ -425,7 +425,21 @@
           "note": "EmbodiedBench 实时抓取"
         }
       ],
-      "last_live_fetch": "2026-10-10 11:48"
+      "last_live_fetch": "2026-10-10 11:48",
+      "local_entries": [
+        {
+          "rank": 0,
+          "method": "测试",
+          "score": "20",
+          "detail": "本地仿真评测",
+          "org": "本地评测",
+          "date": "2026-10-12",
+          "note": "本地评测合并",
+          "origin": "local",
+          "local_id": "manual:libero:测试:20",
+          "backend": "libero"
+        }
+      ]
     },
     "robotwin": {
       "title": "RoboTwin 2.0 · 实时 Leaderboard",

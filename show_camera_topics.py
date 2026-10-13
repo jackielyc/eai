@@ -13,12 +13,12 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / 编程冲SOTA / HumanEgo / 数据集 / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / 编程冲SOTA / HumanEgo / 数据集 / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
 仿真评测（策略=无 / 只开界面）时，「手臂/手」页通过共享目录 gui_robot_cmd.json
-遥控各仿真后端（Isaac / MuJoCo / MolmoSpaces / Arena / LIBERO / RoboTwin / 扩展评测）双臂与夹爪。
+遥控各仿真后端（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / Arena / LIBERO / RoboTwin / 扩展评测）双臂与夹爪。
 「手臂/手」页可输入文本指挥手臂相对移动和手部开合，例如「左臂向前5cm；右手张开」。
 「手臂/手」页也可选择人类演示视频，经 MediaPipe 分析后让机器人复现手部开合与手腕相对运动。
 """
@@ -1002,17 +1002,37 @@ if _EAI_TOOLS_DIR not in sys.path:
 try:
     from sim_eval_leaderboard import (  # noqa: E402
         board_for_backend as load_sim_eval_board,
+        board_for_display as load_sim_eval_board_display,
         clear_leaderboard_cache as clear_sim_eval_leaderboard_cache,
+        entry_from_manual as sim_eval_entry_from_manual,
+        entry_from_result_json as sim_eval_entry_from_result_json,
+        merge_local_entry as merge_sim_eval_local_entry,
         refresh_backend as refresh_sim_eval_backend,
+        remove_local_entry as remove_sim_eval_local_entry,
     )
 except ImportError:  # pragma: no cover
     def load_sim_eval_board(_backend: str, **_k):  # type: ignore[misc]
+        return None
+
+    def load_sim_eval_board_display(_backend: str, **_k):  # type: ignore[misc]
         return None
 
     def clear_sim_eval_leaderboard_cache() -> None:  # type: ignore[misc]
         return None
 
     def refresh_sim_eval_backend(_backend: str, **_k):  # type: ignore[misc]
+        raise RuntimeError("sim_eval_leaderboard 未找到")
+
+    def sim_eval_entry_from_result_json(*_a, **_k):  # type: ignore[misc]
+        raise RuntimeError("sim_eval_leaderboard 未找到")
+
+    def sim_eval_entry_from_manual(*_a, **_k):  # type: ignore[misc]
+        raise RuntimeError("sim_eval_leaderboard 未找到")
+
+    def merge_sim_eval_local_entry(*_a, **_k):  # type: ignore[misc]
+        raise RuntimeError("sim_eval_leaderboard 未找到")
+
+    def remove_sim_eval_local_entry(*_a, **_k):  # type: ignore[misc]
         raise RuntimeError("sim_eval_leaderboard 未找到")
 
 try:
@@ -1155,8 +1175,8 @@ try:
     )
 except ImportError:  # pragma: no cover
     LIBERO_CKPT_GS_DEFAULT = "gs://openpi-assets/checkpoints/pi05_libero"
-    LIBERO_CKPT_HF_LOCAL_DEFAULT = os.path.join(
-        EAI_DIR, ".cache", "openpi", "hf", "pi05_libero"
+    LIBERO_CKPT_HF_LOCAL_DEFAULT = (
+        "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_libero"
     )
     LIBERO_EVAL_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "libero_eval")
     LIBERO_HOST_DEFAULT = "localhost"
@@ -1164,6 +1184,8 @@ except ImportError:  # pragma: no cover
     LIBERO_POLICY_CONFIGS = (
         ("π0.5-LIBERO (pi05_libero)", "pi05_libero"),
         ("π0-LIBERO (pi0_libero)", "pi0_libero"),
+        ("LingBot-VA (WAM / wan_va)", "lingbot_va"),
+        ("VPP2 (WAM)", "vpp2"),
     )
     LIBERO_TASK_SUITES = (
         ("libero_spatial", "libero_spatial"),
@@ -1217,6 +1239,8 @@ except ImportError:  # pragma: no cover
     ROBOTWIN_POLICY_CONFIGS = (
         ("π0.5 Aloha (pi05_aloha_robotwin)", "pi05_aloha_robotwin"),
         ("π0 Aloha (pi0_aloha_robotwin)", "pi0_aloha_robotwin"),
+        ("LingBot-VA (WAM / wan_va)", "lingbot_va"),
+        ("VPP2 (WAM serve)", "vpp2"),
     )
     ROBOTWIN_TASKS = (
         ("adjust_bottle", "adjust_bottle"),
@@ -1230,12 +1254,9 @@ except ImportError:  # pragma: no cover
         raise RuntimeError("robotwin_policy_runtime 未找到")
 
     def ensure_robotwin_checkpoint(prefer: str = "", config: str = "", **_k):  # type: ignore[misc]
-        path = prefer or os.path.join(
-            EAI_DIR,
-            ".cache",
-            "robotwin",
-            "hf",
-            "RLinf-Pi05-RoboTwin-SFT-adjust_bottle",
+        path = prefer or (
+            "/share_data/projects/mahjong/share/personal/liyichao/models/"
+            "RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
         )
         if os.path.isdir(path):
             return True, path
@@ -1252,12 +1273,9 @@ except ImportError:  # pragma: no cover
 
     def resolve_robotwin_checkpoint(prefer: str = "", config: str = ""):  # type: ignore[misc]
         class _Ckpt:
-            path = prefer or os.path.join(
-                EAI_DIR,
-                ".cache",
-                "robotwin",
-                "hf",
-                "RLinf-Pi05-RoboTwin-SFT-adjust_bottle",
+            path = prefer or (
+                "/share_data/projects/mahjong/share/personal/liyichao/models/"
+                "RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
             )
             config = config or "pi05_aloha_robotwin"
             source = "fallback"
@@ -1269,6 +1287,146 @@ except ImportError:  # pragma: no cover
 
     def resolve_robotwin_root(raw: str = ""):  # type: ignore[misc]
         return raw or ROBOTWIN_ROOT_DEFAULT
+
+try:
+    from lingbot_va_policy_runtime import (  # noqa: E402
+        DEFAULT_VA_PORT as LINGBOT_VA_PORT_DEFAULT,
+        LINGBOT_VA_POLICY_ID,
+        LINGBOT_VA_POLICY_LABEL,
+        LINGBOT_VA_POLICY_REL,
+        build_backend_va_argv,
+        build_libero_va_eval_argv,
+        build_robotwin_va_eval_argv,
+        install_hint as lingbot_va_install_hint,
+        is_lingbot_va_policy,
+        probe_lingbot_va,
+        resolve_base_model as resolve_lingbot_va_base_model,
+        resolve_checkpoint as resolve_lingbot_va_checkpoint,
+        resolve_lingbot_va_conda_env,
+        resolve_lingbot_va_python,
+        resolve_lingbot_va_root,
+        resolve_paths as resolve_lingbot_va_paths,
+        robodojo_policy_rel as lingbot_va_robodojo_policy_rel,
+        va_config_for_backend,
+        va_support_level,
+    )
+except ImportError:  # pragma: no cover
+    LINGBOT_VA_PORT_DEFAULT = 10001
+    LINGBOT_VA_POLICY_ID = "lingbot_va"
+    LINGBOT_VA_POLICY_LABEL = "LingBot-VA (WAM)"
+    LINGBOT_VA_POLICY_REL = "XPolicyLab/policy/LingBot_VA"
+
+    def is_lingbot_va_policy(policy_id_or_dir: str) -> bool:  # type: ignore[misc]
+        low = (policy_id_or_dir or "").lower().replace("-", "_")
+        return "lingbot_va" in low
+
+    def lingbot_va_install_hint(_python_bin: str = "") -> str:  # type: ignore[misc]
+        return "lingbot_va_policy_runtime 未找到"
+
+    def probe_lingbot_va(_paths=None):  # type: ignore[misc]
+        return False, "lingbot_va_policy_runtime 未找到"
+
+    def resolve_lingbot_va_base_model(prefer: str = "") -> str:  # type: ignore[misc]
+        return prefer or os.environ.get("LINGBOT_VA_BASE_MODEL_PATH", "")
+
+    def resolve_lingbot_va_checkpoint(prefer: str = "", **_k) -> str:  # type: ignore[misc]
+        return prefer or os.environ.get("LINGBOT_VA_CKPT", "")
+
+    def resolve_lingbot_va_conda_env(prefer: str = "") -> str:  # type: ignore[misc]
+        return prefer or ""
+
+    def resolve_lingbot_va_python(prefer: str = "", **_k) -> str:  # type: ignore[misc]
+        return prefer or "python3"
+
+    def resolve_lingbot_va_root(raw: str = "", **_k) -> str:  # type: ignore[misc]
+        return raw or (
+            "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo/"
+            "XPolicyLab/policy/LingBot_VA"
+        )
+
+    def resolve_lingbot_va_paths(**_k):  # type: ignore[misc]
+        raise RuntimeError("lingbot_va_policy_runtime 未找到")
+
+    def lingbot_va_robodojo_policy_rel() -> str:  # type: ignore[misc]
+        return LINGBOT_VA_POLICY_REL
+
+    def va_config_for_backend(backend: str, override: str = "") -> str:  # type: ignore[misc]
+        return (override or "robotwin30_train").strip()
+
+    def va_support_level(_backend: str) -> str:  # type: ignore[misc]
+        return "serve_only"
+
+    def build_backend_va_argv(*_a, **_k):  # type: ignore[misc]
+        raise RuntimeError("lingbot_va_policy_runtime 未找到")
+
+    def build_libero_va_eval_argv(**_k):  # type: ignore[misc]
+        raise RuntimeError("lingbot_va_policy_runtime 未找到")
+
+    def build_robotwin_va_eval_argv(**_k):  # type: ignore[misc]
+        raise RuntimeError("lingbot_va_policy_runtime 未找到")
+
+try:
+    from vpp2_policy_runtime import (  # noqa: E402
+        DEFAULT_VPP2_PORT,
+        VPP2_POLICY_ID,
+        VPP2_POLICY_LABEL,
+        VPP2_POLICY_REL,
+        build_backend_vpp2_argv,
+        ensure_adapter_installed as ensure_vpp2_adapter,
+        install_hint as vpp2_install_hint,
+        is_vpp2_policy,
+        probe_vpp2,
+        resolve_paths as resolve_vpp2_paths,
+        resolve_vpp2_bundle,
+        resolve_vpp2_conda_env,
+        resolve_vpp2_python,
+        resolve_vpp2_wan_root,
+        resolve_vpp2_weights,
+        vpp2_support_level,
+    )
+except ImportError:  # pragma: no cover
+    DEFAULT_VPP2_PORT = 19960
+    VPP2_POLICY_ID = "vpp2"
+    VPP2_POLICY_LABEL = "VPP2 (WAM)"
+    VPP2_POLICY_REL = "XPolicyLab/policy/VPP2"
+
+    def is_vpp2_policy(policy_id_or_dir: str) -> bool:  # type: ignore[misc]
+        return "vpp2" in (policy_id_or_dir or "").lower()
+
+    def vpp2_install_hint(_python_bin: str = "") -> str:  # type: ignore[misc]
+        return "vpp2_policy_runtime 未找到"
+
+    def probe_vpp2(_paths=None):  # type: ignore[misc]
+        return False, "vpp2_policy_runtime 未找到"
+
+    def ensure_vpp2_adapter(**_k):  # type: ignore[misc]
+        return False, "vpp2_policy_runtime 未找到"
+
+    def resolve_vpp2_paths(**_k):  # type: ignore[misc]
+        raise RuntimeError("vpp2_policy_runtime 未找到")
+
+    def resolve_vpp2_bundle(prefer: str = "", **_k) -> str:  # type: ignore[misc]
+        return prefer or ""
+
+    def resolve_vpp2_conda_env(prefer: str = "") -> str:  # type: ignore[misc]
+        return prefer or ""
+
+    def resolve_vpp2_python(prefer: str = "", **_k) -> str:  # type: ignore[misc]
+        return prefer or "python3"
+
+    def resolve_vpp2_wan_root(prefer: str = "", **_k) -> str:  # type: ignore[misc]
+        return prefer or ""
+
+    def resolve_vpp2_weights(raw: str = "") -> str:  # type: ignore[misc]
+        return raw or (
+            "/share_data/projects/mahjong/share/personal/liyichao/models/VPP2"
+        )
+
+    def vpp2_support_level(_backend: str) -> str:  # type: ignore[misc]
+        return "serve_only"
+
+    def build_backend_vpp2_argv(*_a, **_k):  # type: ignore[misc]
+        raise RuntimeError("vpp2_policy_runtime 未找到")
 
 PSI_R1_MODEL_XML_CANDIDATES: Tuple[str, ...] = (
     os.path.join(os.path.dirname(EAI_DIR), "psi_r1_ruiyan", "urdf", "model.xml"),
@@ -1293,8 +1451,12 @@ BAGEL_FAST_IMAGE_SIZE = "224"
 BAGEL_CFG_INTERVAL_DEFAULT = 0.4
 BAGEL_IMAGE_SIZE_DEFAULT = "input"  # 有输入图时跟输入；纯文生图回退 512
 BAGEL_IMAGE_SIZE_FALLBACK = "512"
-BAGEL_VENV_PYTHON_DEFAULT = os.path.join(EAI_DIR, ".cache", "bagel_venv", "bin", "python")
-BAGEL_MODEL_CACHE_DEFAULT = os.path.join(EAI_DIR, ".cache", "bagel_models", "BAGEL-7B-MoT")
+BAGEL_VENV_PYTHON_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/bagel/bin/python"
+)
+BAGEL_MODEL_CACHE_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/models/BAGEL-7B-MoT"
+)
 BAGEL_API_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "bagel_tmp")
 ASTRA_ROBODOJO_URL = "https://cookiegg.github.io/llm-as-policies/"
 ASTRA_ROBODOJO_ZH_URL = "https://cookiegg.github.io/llm-as-policies/zh/"
@@ -1315,8 +1477,9 @@ HUMANOGO_ROOT_DEFAULT = (
 HUMANOGO_WEBSITE_URL = "https://humanego-ai.github.io/"
 HUMANOGO_GALLERY_URL = "https://leo-tx-humanego-gallery.static.hf.space/"
 HUMANOGO_PYTHON_CANDIDATES: Tuple[str, ...] = (
-    "/home/psibot/miniconda3/envs/humanego/bin/python",
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/humanego/bin/python",
+    "/home/psibot/miniconda3/envs/humanego/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python",
     "/home/psibot/miniconda3/envs/eai/bin/python",
 )
 
@@ -1330,11 +1493,7 @@ def resolve_rlinf_python(repo: str = "") -> str:
     env = (os.environ.get("RLINF_PYTHON") or "").strip()
     if env and os.path.isfile(env):
         return os.path.abspath(env)
-    root = resolve_rlinf_root(repo)
-    candidates = list(RLINF_PYTHON_CANDIDATES) + [
-        os.path.join(root, ".venv", "bin", "python"),
-    ]
-    for path in candidates:
+    for path in RLINF_PYTHON_CANDIDATES:
         if os.path.isfile(path):
             return os.path.abspath(path)
     return "python3"
@@ -1383,11 +1542,7 @@ def resolve_rise_python(repo: str = "") -> str:
         env = (os.environ.get(env_key) or "").strip()
         if env and os.path.isfile(env):
             return os.path.abspath(env)
-    root = resolve_rise_root(repo)
-    candidates = list(RISE_PYTHON_CANDIDATES) + [
-        os.path.join(root, ".venv", "bin", "python"),
-    ]
-    for path in candidates:
+    for path in RISE_PYTHON_CANDIDATES:
         if os.path.isfile(path):
             return os.path.abspath(path)
     return "python3"
@@ -1455,13 +1610,9 @@ def resolve_robometer_root(path: str = "") -> str:
 
 
 def resolve_robometer_python(repo: str = "") -> str:
-    root = resolve_robometer_root(repo)
     for path in (
         (os.environ.get("ROBOMETER_PYTHON") or "").strip(),
         *ROBOMETER_PYTHON_CANDIDATES,
-        # 仓库 .venv 常是 uv 空壳（python 链到 conda，但 site-packages 独立且无 torch）
-        os.path.join(root, ".venv", "bin", "python"),
-        os.path.join(root, "venv", "bin", "python"),
     ):
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
             return os.path.abspath(os.path.expanduser(path))
@@ -1496,11 +1647,8 @@ def resolve_rynnvalue_root(path: str = "") -> str:
 
 
 def resolve_rynnvalue_python(repo: str = "") -> str:
-    root = resolve_rynnvalue_root(repo)
     for path in (
         (os.environ.get("RYNNVALUE_PYTHON") or "").strip(),
-        os.path.join(root, ".venv", "bin", "python"),
-        os.path.join(root, "venv", "bin", "python"),
         *RYNNVALUE_PYTHON_CANDIDATES,
     ):
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
@@ -1519,12 +1667,9 @@ def resolve_roboicl_root(path: str = "") -> str:
 
 
 def resolve_roboicl_policy_python(repo: str = "") -> str:
-    root = resolve_roboicl_root(repo)
     for path in (
         (os.environ.get("ROBOICL_POLICY_PYTHON") or "").strip(),
         *ROBOICL_POLICY_PYTHON_CANDIDATES,
-        os.path.join(root, ".venv", "bin", "python"),
-        os.path.join(root, "venv", "bin", "python"),
     ):
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
             return os.path.abspath(os.path.expanduser(path))
@@ -1533,16 +1678,13 @@ def resolve_roboicl_policy_python(repo: str = "") -> str:
 
 
 def resolve_roboicl_sim_python(repo: str = "") -> str:
-    root = resolve_roboicl_root(repo)
     for path in (
         (os.environ.get("ROBOICL_SIM_PYTHON") or "").strip(),
         *ROBOICL_SIM_PYTHON_CANDIDATES,
-        os.path.join(root, ".venv", "bin", "python"),
-        os.path.join(root, "venv", "bin", "python"),
     ):
         if path and os.path.isfile(path) and os.access(path, os.X_OK):
             return os.path.abspath(os.path.expanduser(path))
-    return resolve_roboicl_policy_python(root)
+    return resolve_roboicl_policy_python(repo)
 
 
 def list_roboicl_tasks(repo: str = "") -> List[str]:
@@ -1590,23 +1732,21 @@ def _rynnvalue_ckpt_ready(path: str) -> bool:
 
 
 def resolve_rynnvalue_model(path: str = "") -> str:
-    """Prefer explicit / env / local cache HF export; empty if none ready."""
+    """Prefer explicit / env / models/ HF export; empty if none ready."""
     models_root = "/share_data/projects/mahjong/share/personal/liyichao/models"
     candidates = [
         (path or "").strip(),
         (os.environ.get("RYNNVALUE_MODEL_PATH") or "").strip(),
         RYNNVALUE_MODEL_DEFAULT,
-        os.path.join(RYNNVALUE_CACHE_DIR, "RynnValue-4B"),
         os.path.join(models_root, "RynnValue-4B"),
-        os.path.join(EAI_DIR, "weights", "RynnValue-4B"),
-        os.path.join(RYNNVALUE_CACHE_DIR, "RynnValue-8B"),
         os.path.join(models_root, "RynnValue-8B"),
+        os.path.join(EAI_DIR, "weights", "RynnValue-4B"),
         os.path.join(EAI_DIR, "weights", "RynnValue-8B"),
     ]
     for cand in candidates:
         if cand and _rynnvalue_hf_model_ready(cand):
             return os.path.abspath(os.path.expanduser(cand))
-    # Fall back to default cache path even if still downloading (UI placeholder).
+    # Fall back to default path even if still downloading (UI placeholder).
     for cand in candidates:
         if cand:
             return os.path.abspath(os.path.expanduser(cand))
@@ -1813,13 +1953,6 @@ def resolve_mujoco_python(repo: str = "") -> str:
         if env and os.path.isfile(env):
             return os.path.abspath(env)
     candidates = list(MUJOCO_PYTHON_CANDIDATES)
-    root = resolve_mujoco_root(repo)
-    candidates.extend(
-        [
-            os.path.join(root, ".venv", "bin", "python"),
-            os.path.join(root, "venv", "bin", "python"),
-        ]
-    )
     # Prefer interpreters that already have mujoco installed.
     for path in candidates:
         if not path or not os.path.isfile(path):
@@ -1925,8 +2058,130 @@ def resolve_molmospaces_benchmark(rel: str, repo_root: str = "") -> str:
     return os.path.abspath(os.path.join(base, rel_under_assets))
 
 
-def list_molmospaces_eval_tasks(repo_root: str = "") -> List[dict]:
-    """Official MS/MB benchmarks, plus any local benchmark.json not in the catalog."""
+def stage_psi_benchmark_json(json_path: str) -> str:
+    """Return a directory containing ``benchmark.json`` for eval_main --benchmark_dir.
+
+    ``psi_molmo_spaces`` often ships episode lists as ``benchmark_*.json`` files;
+    MolmoSpaces eval expects a directory with a file named ``benchmark.json``.
+    """
+    src = os.path.abspath(os.path.expanduser(json_path or ""))
+    if not src or not os.path.isfile(src):
+        return src
+    base = os.path.basename(src)
+    parent = os.path.dirname(src)
+    if base == "benchmark.json":
+        return parent
+    stem = os.path.splitext(base)[0]
+    stage = os.path.join(EAI_DIR, ".cache", "psi_molmospaces_bench", stem)
+    os.makedirs(stage, exist_ok=True)
+    dest = os.path.join(stage, "benchmark.json")
+    try:
+        if os.path.islink(dest) or os.path.isfile(dest):
+            if os.path.islink(dest) and os.path.realpath(dest) == os.path.realpath(src):
+                return stage
+            os.remove(dest)
+        os.symlink(src, dest)
+    except OSError:
+        import shutil
+
+        shutil.copy2(src, dest)
+    return stage
+
+
+def _psi_benchmark_label(stem: str, episodes: list) -> str:
+    """Human label for a Psi BK file (prefer unique language task description)."""
+    from collections import Counter
+
+    descs: Counter = Counter()
+    for ep in episodes:
+        if not isinstance(ep, dict):
+            continue
+        lang = ep.get("language") or {}
+        if not isinstance(lang, dict):
+            continue
+        desc = lang.get("task_description") or lang.get("instruction") or ""
+        if isinstance(desc, str) and desc.strip():
+            descs[desc.strip().rstrip(".")] += 1
+    n = len(episodes)
+    if len(descs) == 1:
+        only = next(iter(descs))
+        return f"[Psi] {only} ({n} ep)"
+    if stem == "benchmark":
+        return f"[Psi] psi_molmo_spaces ({n} ep)"
+    return f"[Psi] {stem} ({n} ep)"
+
+
+def list_psi_molmospaces_local_tasks(repo_root: str = "") -> List[dict]:
+    """Local Psi-MolmoSpaces benches under ``psi_molmo_spaces/`` (init_molmospaces).
+
+    On ``init_molmospaces`` the canonical bench is ``psi_molmo_spaces/benchmark.json``.
+    Extra JSON files (e.g. outputs of ``filter_benchmark_by_task.py``) are also listed.
+    """
+    tasks: List[dict] = []
+    root = os.path.abspath(os.path.expanduser(repo_root or ""))
+    if not root:
+        return tasks
+    psi_dir = os.path.join(root, "psi_molmo_spaces")
+    if not os.path.isdir(psi_dir):
+        return tasks
+    skip_names = {
+        "robot_base_pose_cache.json",
+        "ik_feasible_samples.txt",
+    }
+    try:
+        names = sorted(os.listdir(psi_dir))
+    except OSError:
+        return tasks
+    # Prefer the canonical benchmark.json first.
+    ordered = []
+    if "benchmark.json" in names:
+        ordered.append("benchmark.json")
+    ordered.extend(n for n in names if n != "benchmark.json")
+    for name in ordered:
+        if name in skip_names or not name.endswith(".json"):
+            continue
+        if "cache" in name.lower():
+            continue
+        full = os.path.join(psi_dir, name)
+        if not os.path.isfile(full):
+            continue
+        try:
+            import json
+
+            with open(full, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, list) or not data:
+                continue
+            if not isinstance(data[0], dict):
+                continue
+        except Exception:
+            continue
+        path = stage_psi_benchmark_json(full)
+        stem = os.path.splitext(name)[0]
+        tasks.append(
+            {
+                "id": f"psi:{stem}",
+                "label": _psi_benchmark_label(stem, data),
+                "path": path,
+                "ready": True,
+                "extra": (),
+            }
+        )
+    return tasks
+
+
+def list_molmospaces_eval_tasks(
+    repo_root: str = "", *, psi_only: bool = False
+) -> List[dict]:
+    """Official MS/MB benchmarks, plus any local benchmark.json not in the catalog.
+
+    When ``psi_only=True`` (Psi-MolmoSpaces backend), return only
+    ``psi_molmo_spaces`` benches — matching the init_molmospaces workflow.
+    """
+    psi_tasks = list_psi_molmospaces_local_tasks(repo_root)
+    if psi_only:
+        return psi_tasks
+
     tasks: List[dict] = []
     known_paths = set()
     for task_id, label, rel, extra in MOLMOSPACES_EVAL_TASKS:
@@ -1964,7 +2219,14 @@ def list_molmospaces_eval_tasks(repo_root: str = "") -> List[dict]:
                     "extra": (),
                 }
             )
+    if psi_tasks:
+        tasks = psi_tasks + tasks
     return tasks
+
+
+def is_psi_policy_id(policy_id: str) -> bool:
+    """True for PsiPolicyEvalConfig (needs psi-policy-server websocket, not openpi)."""
+    return "PsiPolicyEvalConfig" in (policy_id or "")
 
 
 def list_isaaclab_arena_environments(root: str) -> List[str]:
@@ -2195,15 +2457,13 @@ def resolve_humanego_python(repo: str = "") -> str:
     for cand in HUMANOGO_PYTHON_CANDIDATES:
         if cand and os.path.isfile(cand):
             return cand
-    repo = resolve_humanego_root(repo)
-    local = os.path.join(repo, ".venv", "bin", "python")
-    if os.path.isfile(local):
-        return local
     which = shutil.which("python3") or shutil.which("python") or sys.executable
     return which or sys.executable
 
 
-LINGBOT_VISION_PYTHON_DEFAULT = "/home/psibot/miniconda3/envs/eai/bin/python"
+LINGBOT_VISION_PYTHON_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python"
+)
 LINGBOT_VISION_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_vision.sh")
 LINGBOT_VISION_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_vision")
 LINGBOT_VISION_EXAMPLE = os.path.join(
@@ -2212,14 +2472,18 @@ LINGBOT_VISION_EXAMPLE = os.path.join(
 LINGBOT_DEPTH_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/lingbot-depth"
 )
-LINGBOT_DEPTH_PYTHON_DEFAULT = "/home/psibot/miniconda3/envs/eai/bin/python"
+LINGBOT_DEPTH_PYTHON_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python"
+)
 LINGBOT_DEPTH_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_depth.sh")
 LINGBOT_DEPTH_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_depth")
 LINGBOT_DEPTH_MODEL_DEFAULT = "robbyant/lingbot-depth-pretrain-vitl-14-v0.5"
 LINGBOT_MAP_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/lingbot-map"
 )
-LINGBOT_MAP_PYTHON_DEFAULT = "/home/psibot/miniconda3/envs/eai/bin/python"
+LINGBOT_MAP_PYTHON_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python"
+)
 LINGBOT_MAP_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_map.sh")
 LINGBOT_MAP_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_map")
 LINGBOT_MAP_MODEL_CACHE = os.path.join(LINGBOT_MAP_CACHE_DIR, "models")
@@ -2228,7 +2492,9 @@ LINGBOT_MAP_PORT_DEFAULT = 8080
 LINGBOT_VIDEO_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/lingbot-video"
 )
-LINGBOT_VIDEO_PYTHON_DEFAULT = "/home/psibot/miniconda3/envs/eai/bin/python"
+LINGBOT_VIDEO_PYTHON_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python"
+)
 LINGBOT_VIDEO_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_video.sh")
 LINGBOT_VIDEO_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_video")
 LINGBOT_VIDEO_MODEL_CACHE = os.path.join(LINGBOT_VIDEO_CACHE_DIR, "models")
@@ -2237,16 +2503,17 @@ LINGBOT_VIDEO_HF_DENSE = "robbyant/lingbot-video-dense-1.3b"
 LINGBOT_WORLD_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/lingbot-world-v2"
 )
-LINGBOT_WORLD_VENV_PYTHON = os.path.join(
-    LINGBOT_WORLD_ROOT_DEFAULT, ".venv", "bin", "python"
+LINGBOT_WORLD_PYTHON_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python"
 )
 LINGBOT_WORLD_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_world.sh")
 LINGBOT_WORLD_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_world")
 LINGBOT_WORLD_OUTPUT_DIR = os.path.join(LINGBOT_WORLD_CACHE_DIR, "outputs")
 RLINF_ROOT_DEFAULT = "/share_data/projects/mahjong/share/personal/liyichao/RLinf"
 RLINF_PYTHON_CANDIDATES: Tuple[str, ...] = (
-    "/home/psibot/miniconda3/envs/RLinf/bin/python",
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python",
+    "/home/psibot/miniconda3/envs/RLinf/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python",
     "/home/psibot/miniconda3/envs/eai/bin/python",
 )
 RLINF_RUN_SCRIPT = os.path.join(EAI_DIR, "run_reward_model.sh")
@@ -2282,7 +2549,9 @@ RYNNVALUE_PYTHON_CANDIDATES: Tuple[str, ...] = (
 )
 RYNNVALUE_RUN_SCRIPT = os.path.join(EAI_DIR, "run_rynnvalue.sh")
 RYNNVALUE_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "rynnvalue")
-RYNNVALUE_MODEL_DEFAULT = os.path.join(RYNNVALUE_CACHE_DIR, "RynnValue-4B")
+RYNNVALUE_MODEL_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/models/RynnValue-4B"
+)
 RYNNVALUE_CKPT_DEFAULT = os.path.join(RYNNVALUE_CACHE_DIR, "checkpoint")
 RYNNVALUE_EXAMPLE_VIDEO = os.path.join(
     RYNNVALUE_ROOT_DEFAULT,
@@ -2330,6 +2599,9 @@ MUJOCO_ROOT_DEFAULT = (
 )
 MOLMOSPACES_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/molmospaces"
+)
+PSI_MOLMOSPACES_ROOT_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/psi-molmospaces"
 )
 MOLMOSPACES_PYTHON_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/molmospaces/bin/python"
@@ -2443,6 +2715,22 @@ MOLMOSPACES_EVAL_POLICIES: Tuple[Tuple[str, str], ...] = (
         "molmo_spaces.evaluation.configs.evaluation_configs:PiPolicyEvalConfig",
     ),
     (
+        "Psi Policy",
+        "molmo_spaces.evaluation.configs.evaluation_configs:PsiPolicyEvalConfig",
+    ),
+    (
+        "Psi R1 Pick Planner",
+        "molmo_spaces.evaluation.configs.evaluation_configs:PsiR1PickPlannerEvalConfig",
+    ),
+    (
+        "LingBot-VA (WAM serve)",
+        "lingbot_va",
+    ),
+    (
+        "VPP2 (WAM serve)",
+        "vpp2",
+    ),
+    (
         "Dummy（无策略）",
         "molmo_spaces.evaluation.configs.evaluation_configs:DummyBenchmarkEvalConfig",
     ),
@@ -2452,6 +2740,18 @@ MOLMOSPACES_EVAL_POLICIES: Tuple[Tuple[str, str], ...] = (
     ),
 )
 MOLMOSPACES_EVAL_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "molmospaces_eval")
+PSI_MOLMOSPACES_EVAL_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "psi_molmospaces_eval")
+PSI_MOLMOSPACES_DEFAULT_POLICY = (
+    "molmo_spaces.evaluation.configs.evaluation_configs:PsiR1PickPlannerEvalConfig"
+)
+# PsiPolicyConfig.remote_config defaults to localhost:8080 (server CLI default is 8000 —
+# start serve_policy with --port 8080 to match).
+PSI_POLICY_SERVER_PORT_DEFAULT = int(
+    os.environ.get("PSI_POLICY_SERVER_PORT") or os.environ.get("MOLMOSPACES_PI_PORT") or 8080
+)
+PSI_POLICY_SERVER_SCRIPT = os.path.join(
+    "psi-policy-server", "scripts", "serve_policy.py"
+)
 # Default Pi ckpt: prefer fully usable local, else present local download (models/ / HF cache).
 MOLMOSPACES_PI_CKPT_DEFAULT = resolve_pi_checkpoint(prefer_present_local=True).path
 MOLMOSPACES_PI_CONFIG_DEFAULT = infer_policy_config(
@@ -2471,6 +2771,8 @@ ISAACLAB_ARENA_POLICIES: Tuple[Tuple[str, str], ...] = (
     ("zero_action（零动作）", "zero_action"),
     ("replay", "replay"),
     ("rsl_rl", "rsl_rl"),
+    ("LingBot-VA (WAM serve)", "lingbot_va"),
+    ("VPP2 (WAM serve)", "vpp2"),
 )
 LIBERO_CKPT_DEFAULT = resolve_libero_checkpoint().path
 LIBERO_CONFIG_DEFAULT = "pi05_libero"
@@ -2633,6 +2935,9 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "simulate": "仿真评测",
     "molmospaces": "仿真评测",
     "MolmoSpaces": "仿真评测",
+    "psi_molmospaces": "仿真评测",
+    "Psi-MolmoSpaces": "仿真评测",
+    "PsiMolmoSpaces": "仿真评测",
     "spaces": "仿真评测",
     "arena": "仿真评测",
     "IsaacLab-Arena": "仿真评测",
@@ -2751,12 +3056,12 @@ RISE_ROOT_DEFAULT = os.path.join(
     ROBODOJO_ROOT_DEFAULT, "XPolicyLab", "policy", "RISE", "RISE"
 )
 RISE_PYTHON_CANDIDATES: Tuple[str, ...] = (
-    "/home/psibot/miniconda3/envs/rise/bin/python",
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/rise/bin/python",
+    "/home/psibot/miniconda3/envs/rise/bin/python",
     "/home/psibot/miniconda3/envs/RISE/bin/python",
-    "/home/psibot/miniconda3/envs/RLinf/bin/python",
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python",
-    "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/envs/RoboDojo/bin/python",
+    "/home/psibot/miniconda3/envs/RLinf/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RoboDojo/bin/python",
 )
 # 本机可用的 OpenPI/RISE 风格 ckpt（目录内需有 model.safetensors；优先带 assets/）
 RISE_POLICY_CKPT_CANDIDATES: Tuple[str, ...] = (
@@ -2785,11 +3090,107 @@ RISE_REWARD_CKPT_CANDIDATES: Tuple[str, ...] = (
     ),
 )
 ROBODOJO_ENV_DEFAULT = (
-    "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/envs/RoboDojo"
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RoboDojo"
 )
 ROBODOJO_STARVLA_ENV_DEFAULT = (
-    "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/envs/starvla"
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/starvla"
 )
+ROBODOJO_LINGBOT_VA_ENV_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/lingbot_va"
+)
+ROBODOJO_OPENPI_ENV_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/openpi"
+)
+ROBODOJO_VPP2_ENV_DEFAULT = (
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/vpp2"
+)
+
+
+def _is_pi05_robodojo_policy(policy_dir: str) -> bool:
+    """True for XPolicyLab Pi_05 / Pi_0 / Pi_0_Fast policy dirs."""
+    raw = (policy_dir or "").strip().replace("\\", "/")
+    if not raw:
+        return False
+    base = os.path.basename(raw.rstrip("/")).lower().replace("-", "_")
+    return base in ("pi_05", "pi_0", "pi_0_fast", "pi05", "pi0") or "/pi_05" in raw.lower()
+
+
+def _robodojo_policy_ckpt_dir(policy_rel: str, ckpt_name: str) -> str:
+    """Absolute checkpoints/<ckpt_name> under an XPolicyLab policy dir."""
+    return os.path.join(
+        ROBODOJO_ROOT_DEFAULT,
+        policy_rel.replace("\\", "/").strip("/"),
+        "checkpoints",
+        (ckpt_name or "").strip(),
+    )
+
+
+# Local OpenPI π0.5 weights (params + assets). Not LingBot_VA.
+PI05_ROBODOJO_CKPT_DEFAULT = os.environ.get(
+    "PI05_ROBODOJO_CKPT",
+    os.path.join(EAI_DIR, ".cache", "openpi", "hf", "pi05_droid_jointpos"),
+)
+
+
+def _ckpt_owned_by_lingbot_va_not_pi05(ckpt_name: str) -> bool:
+    """True when ckpt exists under LingBot_VA but not under Pi_05 (by name or path)."""
+    name = (ckpt_name or "").strip()
+    if not name or name == "demo":
+        return False
+    if os.path.isabs(name) and os.path.isdir(name):
+        # Absolute OpenPI dirs are Pi_05-compatible, never LingBot leftovers.
+        return False
+    va = _robodojo_policy_ckpt_dir(LINGBOT_VA_POLICY_REL, name)
+    pi = _robodojo_policy_ckpt_dir("XPolicyLab/policy/Pi_05", name)
+    return os.path.exists(va) and not os.path.exists(pi)
+
+
+def _ckpt_dir_abspath(path: str) -> str:
+    """Absolute directory path for UI display (resolves symlinks when possible)."""
+    raw = os.path.expanduser((path or "").strip())
+    if not raw:
+        return ""
+    if os.path.isfile(raw):
+        parent = os.path.dirname(raw)
+        if os.path.basename(parent) == "checkpoints":
+            raw = os.path.dirname(parent)
+        else:
+            raw = parent
+    if os.path.isdir(raw):
+        try:
+            return os.path.realpath(raw)
+        except OSError:
+            return os.path.abspath(raw)
+    return os.path.abspath(raw)
+
+
+def _default_pi05_ckpt_text() -> str:
+    """Full OpenPI checkpoint directory for the ckpt text box."""
+    prefer = (PI05_ROBODOJO_CKPT_DEFAULT or "").strip()
+    if prefer and os.path.isdir(prefer):
+        return _ckpt_dir_abspath(prefer)
+    linked = _robodojo_policy_ckpt_dir(
+        "XPolicyLab/policy/Pi_05", "pi05_droid_jointpos"
+    )
+    if os.path.isdir(linked):
+        return _ckpt_dir_abspath(linked)
+    return _ckpt_dir_abspath(prefer or linked)
+
+
+def _default_lingbot_va_ckpt_text() -> str:
+    """Full LingBot_VA checkpoint directory for the ckpt text box."""
+    name = (
+        os.environ.get("LINGBOT_VA_CKPT", "RoboDojo-cotrain-arx_x5-joint-0").strip()
+        or "RoboDojo-cotrain-arx_x5-joint-0"
+    )
+    if os.path.isabs(name) and os.path.isdir(name):
+        return _ckpt_dir_abspath(name)
+    path = _robodojo_policy_ckpt_dir(LINGBOT_VA_POLICY_REL, name)
+    if os.path.isdir(path):
+        return _ckpt_dir_abspath(path)
+    return _ckpt_dir_abspath(path)
+
+
 ROBODOJO_STARVLA_HF_ROOT_DEFAULT = (
     "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/starvla_hf"
 )
@@ -2818,25 +3219,100 @@ ROBODOJO_TASK_CONFIG_DIR = os.path.join(
 ROBODOJO_EVAL_NUM_KEEP = "keep"
 
 
+STARVLA_CKPT_LABEL_DEFAULT = "hf_qwenpi_v3"
+# Canonical released pi_v3 weight (run dir has config.yaml + checkpoints/*.pt).
+STARVLA_PI_V3_RUN_DIR_DEFAULT = os.path.join(
+    ROBODOJO_STARVLA_HF_ROOT_DEFAULT, "pi_v3"
+)
+STARVLA_PI_V3_CKPT_FILE_DEFAULT = os.path.join(
+    STARVLA_PI_V3_RUN_DIR_DEFAULT, "checkpoints", "steps_100000_pytorch_model.pt"
+)
+
+
+def _default_starvla_ckpt_text() -> str:
+    """Full starVLA run directory (contains config.yaml + checkpoints/)."""
+    env = os.environ.get("STARVLA_CKPT", "").strip()
+    if env:
+        expanded = _ckpt_dir_abspath(env)
+        if os.path.isdir(expanded):
+            return expanded
+    if os.path.isdir(STARVLA_PI_V3_RUN_DIR_DEFAULT):
+        return _ckpt_dir_abspath(STARVLA_PI_V3_RUN_DIR_DEFAULT)
+    linked = _robodojo_policy_ckpt_dir(
+        "XPolicyLab/policy/starVLA", STARVLA_CKPT_LABEL_DEFAULT
+    )
+    if os.path.isdir(linked):
+        return _ckpt_dir_abspath(linked)
+    return _ckpt_dir_abspath(STARVLA_PI_V3_RUN_DIR_DEFAULT)
+
+
+def _looks_like_starvla_ckpt(ckpt: str) -> bool:
+    """True when ckpt is a starVLA label or path into starvla_hf / policy checkpoints."""
+    raw = (ckpt or "").strip()
+    if not raw:
+        return False
+    low = raw.lower().replace("\\", "/")
+    if raw in (STARVLA_CKPT_LABEL_DEFAULT, "pi_v3", "oft", "groot"):
+        return True
+    if "qwenpi" in low or "starvla_hf" in low or "/starvla/" in low:
+        return True
+    if os.path.isfile(raw) and low.endswith((".pt", ".safetensors")):
+        parent = os.path.dirname(raw).replace("\\", "/").lower()
+        return "starvla" in parent or parent.endswith("/checkpoints")
+    if os.path.isdir(raw):
+        return os.path.isfile(
+            os.path.join(raw, "checkpoints", "steps_100000_pytorch_model.pt")
+        ) or os.path.isfile(os.path.join(raw, "config.yaml"))
+    return False
+
+
 def resolve_starvla_hf_variant(ckpt: str) -> str:
     """Map UI ckpt label → eval_hf_robodojo variant (oft|groot|pi_v3)."""
     key = (ckpt or "").strip().lower().replace("-", "_")
-    if not key or key in ("demo", "default"):
+    if not key or key in ("demo", "default", STARVLA_CKPT_LABEL_DEFAULT.lower()):
         return "pi_v3"
-    if "oft" in key:
+    if "oft" in key and "pi05" not in key:
         return "oft"
     if "groot" in key or "gr00t" in key:
         return "groot"
-    if "pi" in key or "qwenpi" in key:
+    # Prefer explicit starVLA names; do not treat OpenPI pi05_* paths as pi_v3.
+    if "qwenpi" in key or "pi_v3" in key or key == "pi_v3":
+        return "pi_v3"
+    if key.startswith("pi_") or "/pi_v3" in key.replace("\\", "/"):
         return "pi_v3"
     return "pi_v3"
 
 
-def resolve_starvla_ckpt_file(variant: str = "pi_v3") -> str:
-    """Locate materialized HF .pt under STARVLA_HF_ROOT/<variant>/checkpoints/."""
+def resolve_starvla_ckpt_file(variant: str = "pi_v3", ckpt: str = "") -> str:
+    """Locate materialized HF .pt under STARVLA_HF_ROOT/<variant>/checkpoints/.
+
+    Also accepts an absolute ``.pt`` / run-dir path via ``ckpt`` or
+    ``STARVLA_CKPT_PATH``.
+    """
     env_override = os.environ.get("STARVLA_CKPT_PATH", "").strip()
     if env_override and os.path.isfile(env_override):
         return os.path.abspath(env_override)
+    raw = (ckpt or "").strip()
+    if raw:
+        if os.path.isfile(raw) and raw.lower().endswith((".pt", ".safetensors")):
+            return os.path.abspath(raw)
+        if os.path.isdir(raw):
+            preferred = os.path.join(raw, "checkpoints", "steps_100000_pytorch_model.pt")
+            if os.path.isfile(preferred):
+                return os.path.abspath(preferred)
+            # run dir may already be .../checkpoints
+            preferred2 = os.path.join(raw, "steps_100000_pytorch_model.pt")
+            if os.path.isfile(preferred2):
+                return os.path.abspath(preferred2)
+    # Policy-local symlink: checkpoints/hf_qwenpi_v3 → starvla_hf/pi_v3
+    linked = _robodojo_policy_ckpt_dir(
+        "XPolicyLab/policy/starVLA", STARVLA_CKPT_LABEL_DEFAULT
+    )
+    linked_pt = os.path.join(linked, "checkpoints", "steps_100000_pytorch_model.pt")
+    if os.path.isfile(linked_pt):
+        return os.path.abspath(linked_pt)
+    if os.path.isfile(STARVLA_PI_V3_CKPT_FILE_DEFAULT):
+        return STARVLA_PI_V3_CKPT_FILE_DEFAULT
     hf_root = os.environ.get(
         "STARVLA_HF_ROOT", ROBODOJO_STARVLA_HF_ROOT_DEFAULT
     ).strip() or ROBODOJO_STARVLA_HF_ROOT_DEFAULT
@@ -2904,7 +3380,7 @@ LOCAL_QWEN_API_BASE_DEFAULT = os.environ.get(
 )
 LOCAL_QWEN_PYTHON_DEFAULT = os.environ.get(
     "LOCAL_QWEN_PYTHON",
-    "/home/psibot/miniconda3/envs/eai/bin/python",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python",
 )
 LOCAL_QWEN_CHAT_PRESET_NAME = "本地 Qwen 服务"
 # 远程部署主机列表：(id, 显示名)。路径细节在 remote_qwen_ctl.HOST_PROFILES
@@ -3253,6 +3729,21 @@ def _configure_resizable_text_edit(
         edit.setToolTip(tooltip)
 
 
+def _add_clear_log_button_row(layout: QVBoxLayout, edit: QTextEdit) -> QPushButton:
+    """在日志文本框上方放一排右对齐的「清空日志」按钮。"""
+    row = QHBoxLayout()
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(6)
+    row.addStretch(1)
+    btn = QPushButton("清空日志")
+    btn.setFocusPolicy(Qt.NoFocus)
+    btn.setToolTip("清空下方日志内容")
+    btn.clicked.connect(edit.clear)
+    row.addWidget(btn)
+    layout.addLayout(row)
+    return btn
+
+
 def _add_text_edit_with_drag_bar(
     layout: QVBoxLayout,
     edit: QTextEdit,
@@ -3263,9 +3754,12 @@ def _add_text_edit_with_drag_bar(
     grow_down: bool = True,
     bar_before: bool = False,
     label: str = "拖动调整高度",
+    clearable: bool = False,
 ) -> Optional[_LogHeightDragBar]:
     """放入文本框；拖动手柄已移除（保留参数兼容旧调用）。"""
     del min_h, max_h, grow_down, bar_before, label  # unused — drag bars removed
+    if clearable:
+        _add_clear_log_button_row(layout, edit)
     _configure_resizable_text_edit(edit, default_h=default_h, tooltip="")
     layout.addWidget(edit)
     return None
@@ -5562,9 +6056,12 @@ def resolve_psi_policy_python(repo_dir: str) -> str:
     env = os.environ.get("PSI_POLICY_PYTHON", "").strip()
     if env:
         return env
-    venv_py = os.path.join(repo_dir, ".venv", "bin", "python")
-    if os.path.isfile(venv_py):
-        return venv_py
+    for cand in (
+        "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/psi-policy/bin/python",
+        "/home/psibot/miniconda3/envs/psi-policy/bin/python",
+    ):
+        if os.path.isfile(cand):
+            return cand
     return "python3"
 
 
@@ -14584,7 +15081,16 @@ class LocalAiLauncher(QObject):
     def is_sam3_running(self) -> bool:
         if self._process is not None and self._process.state() == QProcess.Running:
             return True
-        return _sam3_server_process_running()
+        if _sam3_server_process_running():
+            return True
+        try:
+            return bool(
+                check_sam3_server_health(
+                    resolve_sam3_viewer_server_url(), timeout_s=0.6
+                )
+            )
+        except Exception:
+            return False
 
     def start_deploy(self) -> None:
         self._ensure_ollama()
@@ -14609,7 +15115,7 @@ class LocalAiLauncher(QObject):
 
     def _ensure_ollama(self) -> None:
         if check_ollama_server_health():
-            self.status_message.emit("Ollama 已在运行")
+            self.status_message.emit("Ollama 已部署，跳过启动")
             return
         ollama_bin = shutil.which("ollama")
         if not ollama_bin:
@@ -14623,6 +15129,11 @@ class LocalAiLauncher(QObject):
             self.status_message.emit("Ollama 启动失败")
 
     def _start_sam3(self) -> None:
+        url = resolve_sam3_viewer_server_url()
+        if check_sam3_server_health(url, timeout_s=1.0):
+            self.status_message.emit(f"SAM3 已部署，跳过启动: {url}")
+            self.running_changed.emit(True)
+            return
         if self.is_sam3_running():
             self.status_message.emit("SAM3 服务已在运行")
             self.running_changed.emit(True)
@@ -15327,10 +15838,12 @@ class PsiPolicyTrainLauncher(QObject):
             launch_args = train_args
 
         quoted_args = " ".join(shlex.quote(arg) for arg in launch_args)
-        venv_activate = os.path.join(repo, ".venv", "bin", "activate")
+        conda_activate = os.path.join(
+            os.path.dirname(os.path.dirname(python_bin)), "bin", "activate"
+        )
         prefix = ""
-        if os.path.isfile(venv_activate):
-            prefix = f"source {shlex.quote(venv_activate)} && "
+        if os.path.isfile(conda_activate):
+            prefix = f"source {shlex.quote(conda_activate)} && "
         cmd = (
             f"{prefix}cd {shlex.quote(repo)} && "
             f"export PYTHONUNBUFFERED=1 && "
@@ -15409,16 +15922,15 @@ def _bagel_python_looks_wrong(path: str) -> bool:
 
 
 def resolve_bagel_python(repo: str) -> str:
-    """优先专用 venv / BAGEL_PYTHON，再常见 conda，最后当前解释器。"""
+    """优先 BAGEL_PYTHON / miniconda bagel，最后当前解释器。"""
     env = (os.environ.get("BAGEL_PYTHON") or "").strip()
     if env and os.path.isfile(env) and not _bagel_python_looks_wrong(env):
         return env
     candidates = [
         BAGEL_VENV_PYTHON_DEFAULT,
-        os.path.join(repo, ".venv", "bin", "python"),
+        "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/bagel/bin/python",
         "/home/psibot/miniconda3/envs/bagel/bin/python",
         "/home/psibot/miniconda3/envs/Bagel/bin/python",
-        "/share_data/projects/mahjong/share/personal/liyichao/envs/bagel/bin/python",
         sys.executable,
     ]
     for path in candidates:
@@ -15442,7 +15954,7 @@ def bagel_mode_label(mode: int) -> str:
 
 
 def resolve_bagel_model_path(repo: str, model_path: str = "") -> str:
-    """解析模型目录：相对仓库路径 / 绝对路径 / eai 缓存默认。"""
+    """解析模型目录：相对仓库路径 / 绝对路径 / models 默认。"""
     raw = (model_path or "").strip() or BAGEL_MODEL_DEFAULT
     if os.path.isabs(raw):
         cand = raw
@@ -15456,7 +15968,7 @@ def resolve_bagel_model_path(repo: str, model_path: str = "") -> str:
 
 
 def bagel_isolated_process_env(python_bin: str = "") -> QProcessEnvironment:
-    """去掉 RoboStack PYTHONPATH，避免 bagel_venv (3.10) 误用 ros-humble (3.11) 的 numpy。"""
+    """去掉 RoboStack PYTHONPATH，避免 bagel env (3.10) 误用 ros-humble (3.11) 的 numpy。"""
     qenv = QProcessEnvironment.systemEnvironment()
     qenv.remove("PYTHONPATH")
     qenv.remove("PYTHONHOME")
@@ -15580,6 +16092,36 @@ def bagel_probe_api_health(
     if owned != "bagel" and "bagel" not in mid:
         return None
     return body
+
+
+def bagel_probe_gradio_ready(
+    host: str = BAGEL_SERVER_HOST_DEFAULT,
+    port: int = BAGEL_SERVER_PORT_DEFAULT,
+    *,
+    timeout_s: float = 2.0,
+) -> bool:
+    """探测已部署的 Bagel Gradio（非 serve_api）。命中则应复用，勿再启一份。"""
+    # 同端口若是推理 API，不算 Gradio
+    if bagel_probe_api_health(host, port, timeout_s=min(1.5, timeout_s)) is not None:
+        return False
+    url = bagel_app_url(host, port).rstrip("/") + "/"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read(8192).decode("utf-8", errors="replace").lower()
+            if "gradio" in raw or "svelte" in raw or "bagel" in raw:
+                return True
+            # Gradio 偶发极简 HTML；端口在听且非 API 时也视为已部署
+            return int(getattr(resp, "status", 200) or 200) < 500
+    except Exception:
+        pass
+    probe_host = (host or "").strip() or BAGEL_SERVER_HOST_DEFAULT
+    if probe_host in ("0.0.0.0", "::"):
+        probe_host = "127.0.0.1"
+    try:
+        return bool(port_listening(probe_host, int(port)))
+    except Exception:
+        return False
 
 
 def bagel_kill_related_processes(sig: str = "-TERM") -> int:
@@ -15835,8 +16377,16 @@ class BagelAppLauncher(QObject):
         self._ready_emitted = False
         self._url = ""
         self._mode = 1
+        self._adopted = False
+        self._adopt_host = BAGEL_SERVER_HOST_DEFAULT
+        self._adopt_port = BAGEL_SERVER_PORT_DEFAULT
+        self._adopt_watch_timer = QTimer(self)
+        self._adopt_watch_timer.setInterval(2500)
+        self._adopt_watch_timer.timeout.connect(self._on_adopt_watch_tick)
 
     def is_running(self) -> bool:
+        if self._adopted:
+            return True
         return self._process is not None and self._process.state() == QProcess.Running
 
     def current_url(self) -> str:
@@ -15844,6 +16394,54 @@ class BagelAppLauncher(QObject):
 
     def current_mode(self) -> int:
         return int(self._mode or 1)
+
+    def try_adopt(
+        self,
+        *,
+        server_name: str = BAGEL_SERVER_HOST_DEFAULT,
+        server_port: int = BAGEL_SERVER_PORT_DEFAULT,
+        mode: int = 1,
+    ) -> bool:
+        """复用已在监听的 Bagel Gradio，避免重复加载权重。"""
+        host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
+        port = int(server_port)
+        if not bagel_probe_gradio_ready(host, port, timeout_s=2.0):
+            return False
+        self._adopted = True
+        self._adopt_host = host
+        self._adopt_port = port
+        self._mode = int(mode or 1)
+        self._url = bagel_app_url(host, port)
+        self._ready_emitted = True
+        self.log_line.emit(f"[adopt] 复用已部署 Gradio {self._url.rstrip('/')}")
+        self.status_message.emit(
+            f"Bagel Gradio 已部署，跳过启动: {self._url}  ·  "
+            f"mode={bagel_mode_label(self._mode)}"
+        )
+        self.running_changed.emit(True)
+        self.ready_url.emit(self._url)
+        if not self._adopt_watch_timer.isActive():
+            self._adopt_watch_timer.start()
+        return True
+
+    def _clear_adopted(self, *, emit_stopped: bool = True) -> None:
+        was = self._adopted
+        self._adopted = False
+        self._ready_emitted = False
+        if self._adopt_watch_timer.isActive():
+            self._adopt_watch_timer.stop()
+        if was and emit_stopped:
+            self.running_changed.emit(False)
+
+    def _on_adopt_watch_tick(self) -> None:
+        if not self._adopted:
+            self._adopt_watch_timer.stop()
+            return
+        if bagel_probe_gradio_ready(self._adopt_host, self._adopt_port, timeout_s=1.5):
+            return
+        self.log_line.emit("--- 复用的 Bagel Gradio 已不可用 ---")
+        self.status_message.emit("复用的 Bagel Gradio 已退出")
+        self._clear_adopted(emit_stopped=True)
 
     def start(
         self,
@@ -15856,12 +16454,25 @@ class BagelAppLauncher(QObject):
         mode: int = 1,
         zh: bool = False,
         share: bool = False,
+        force_new: bool = False,
     ) -> None:
-        if self.is_running():
+        if self.is_running() and not self._adopted:
             self.status_message.emit(
                 f"Bagel 已在运行 (mode={bagel_mode_label(self.current_mode())})"
             )
             return
+        if self._adopted and not force_new:
+            self.status_message.emit(
+                f"Bagel Gradio 已部署 (mode={bagel_mode_label(self.current_mode())})"
+            )
+            return
+        host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
+        port = int(server_port)
+        if not force_new and self.try_adopt(
+            server_name=host, server_port=port, mode=int(mode or 1)
+        ):
+            return
+        self._clear_adopted(emit_stopped=False)
         repo = resolve_bagel_root(repo_dir)
         app_py = os.path.join(repo, "app.py")
         if not os.path.isfile(app_py):
@@ -15882,7 +16493,7 @@ class BagelAppLauncher(QObject):
             self.log_line.emit(
                 f"[warn] 模型目录不存在: {model_abs}\n"
                 "请点「下载模型」，或按 README 下载 ByteDance-Seed/BAGEL-7B-MoT。\n"
-                f"也可用缓存路径: {BAGEL_MODEL_CACHE_DEFAULT}"
+                f"也可用模型路径: {BAGEL_MODEL_CACHE_DEFAULT}"
             )
         # Preflight: avoid cryptic ModuleNotFoundError in subprocess
         pre = (
@@ -15914,15 +16525,14 @@ class BagelAppLauncher(QObject):
             args.append("--share")
 
         quoted = " ".join(shlex.quote(a) for a in args)
-        venv_activate = ""
-        for activate in (
-            os.path.join(os.path.dirname(os.path.dirname(py)), "bin", "activate"),
-            os.path.join(repo, ".venv", "bin", "activate"),
-        ):
-            if os.path.isfile(activate):
-                venv_activate = activate
-                break
-        prefix = f"source {shlex.quote(venv_activate)} && " if venv_activate else ""
+        conda_activate = os.path.join(
+            os.path.dirname(os.path.dirname(py)), "bin", "activate"
+        )
+        prefix = (
+            f"source {shlex.quote(conda_activate)} && "
+            if os.path.isfile(conda_activate)
+            else ""
+        )
         cmd = (
             "unset PYTHONPATH PYTHONHOME || true && "
             "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY || true && "
@@ -15931,7 +16541,7 @@ class BagelAppLauncher(QObject):
             "PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 GRADIO_ANALYTICS_ENABLED=False && "
             f"{prefix}cd {shlex.quote(repo)} && "
             f"({pre}) || {{ echo '[error] Python 环境缺依赖 (gradio/torch/transformers/flash_attn)。"
-            f"请将 Python 设为 eai/.cache/bagel_venv 或先 pip install -r requirements.txt'; exit 2; }} && "
+            f"请将 Python 设为 miniconda3/envs/bagel 或先 pip install -r requirements.txt'; exit 2; }} && "
             f"exec {shlex.quote(py)} {quoted}"
         )
 
@@ -15953,6 +16563,7 @@ class BagelAppLauncher(QObject):
 
     def stop(self) -> None:
         self.status_message.emit("正在停止 Bagel Gradio，并清理相关进程…")
+        self._clear_adopted(emit_stopped=False)
         if self._process is not None and self._process.state() == QProcess.Running:
             self._process.terminate()
             QTimer.singleShot(4000, self._force_kill_process)
@@ -15966,6 +16577,7 @@ class BagelAppLauncher(QObject):
             self.status_message.emit("已请求停止 Bagel 相关进程")
 
     def shutdown(self) -> None:
+        self._clear_adopted(emit_stopped=False)
         if self._process is not None and self._process.state() == QProcess.Running:
             self._process.terminate()
             self._process.waitForFinished(3000)
@@ -16193,15 +16805,14 @@ class BagelApiLauncher(QObject):
             str(self._mode),
         ]
         quoted = " ".join(shlex.quote(a) for a in args)
-        venv_activate = ""
-        for activate in (
-            os.path.join(os.path.dirname(os.path.dirname(py)), "bin", "activate"),
-            os.path.join(repo, ".venv", "bin", "activate"),
-        ):
-            if os.path.isfile(activate):
-                venv_activate = activate
-                break
-        prefix = f"source {shlex.quote(venv_activate)} && " if venv_activate else ""
+        conda_activate = os.path.join(
+            os.path.dirname(os.path.dirname(py)), "bin", "activate"
+        )
+        prefix = (
+            f"source {shlex.quote(conda_activate)} && "
+            if os.path.isfile(conda_activate)
+            else ""
+        )
         pre = (
             f"{shlex.quote(py)} -c "
             f"{shlex.quote('import fastapi,uvicorn,torch,transformers,flash_attn')}"
@@ -16214,7 +16825,7 @@ class BagelApiLauncher(QObject):
             "PYTHONNOUSERSITE=1 PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 && "
             f"{prefix}cd {shlex.quote(repo)} && "
             f"({pre}) || {{ echo '[error] Python 环境缺依赖 (fastapi/uvicorn/torch)。"
-            f"请使用 eai/.cache/bagel_venv'; exit 2; }} && "
+            f"请使用 miniconda3/envs/bagel'; exit 2; }} && "
             f"exec {shlex.quote(py)} {quoted}"
         )
 
@@ -17162,6 +17773,8 @@ class RoboDojoEvalLauncher(QObject):
         is_starvla = (not skip_policy) and (
             "starVLA" in policy_dir or "starvla" in policy_dir.lower()
         )
+        is_lingbot_va = (not skip_policy) and is_lingbot_va_policy(policy_dir)
+        is_vpp2 = (not skip_policy) and is_vpp2_policy(policy_dir)
         # attach_external：只起 client，连已部署 server。
         # 否则（一体启动）：本进程先起 server 再起 Isaac（与旧 robodojo.sh eval 相同）。
         use_external = bool(attach_external) and (not skip_policy)
@@ -17219,14 +17832,80 @@ class RoboDojoEvalLauncher(QObject):
                     "export VK_ICD_FILENAMES=/etc/vulkan/icd.d/nvidia_icd.json",
                 ]
             )
+        lingbot_va_note = ""
+        if is_lingbot_va:
+            base_model = resolve_lingbot_va_base_model(
+                os.environ.get("LINGBOT_VA_BASE_MODEL_PATH", "")
+            )
+            if not base_model or not os.path.isdir(base_model):
+                msg = (
+                    "未设置 LingBot-VA base model。"
+                    "请 export LINGBOT_VA_BASE_MODEL_PATH=<lingbot-va-base> "
+                    f"或放到默认路径。\n{lingbot_va_install_hint()}"
+                )
+                self.status_message.emit(
+                    "未设置 LINGBOT_VA_BASE_MODEL_PATH（见日志）"
+                )
+                self.log_line.emit(f"[ERROR] {msg}")
+                return "error"
+            va_ckpt = resolve_lingbot_va_checkpoint(ckpt)
+            exports.extend(
+                [
+                    f"export LINGBOT_VA_BASE_MODEL_PATH={shlex.quote(base_model)}",
+                    f"export BASE_MODEL_PATH={shlex.quote(base_model)}",
+                    f"export LINGBOT_VA_CKPT={shlex.quote(va_ckpt)}",
+                    f"export CHECKPOINT_PATH={shlex.quote(va_ckpt)}",
+                    f"export CONFIG_NAME={shlex.quote(va_config_for_backend('isaac'))}",
+                    f"export LINGBOT_VA_VA_HOST={shlex.quote(host if use_external else '127.0.0.1')}",
+                    f"export LINGBOT_VA_VA_PORT={shlex.quote(str(port if use_external else LINGBOT_VA_PORT_DEFAULT))}",
+                    "export VA_SERVER_HOST=\"${LINGBOT_VA_VA_HOST}\"",
+                    "export VA_SERVER_PORT=\"${LINGBOT_VA_VA_PORT}\"",
+                ]
+            )
+            lingbot_va_note = (
+                f"  LINGBOT_VA_BASE_MODEL_PATH={base_model}"
+                f"  ckpt={va_ckpt}"
+            )
+            self.log_line.emit(
+                f"[LingBot-VA] RoboDojo adapter · action=joint 推荐 ·{lingbot_va_note}"
+            )
+        vpp2_note = ""
+        if is_vpp2:
+            try:
+                ensure_vpp2_adapter()
+            except Exception:
+                pass
+            try:
+                vpp2_paths = resolve_vpp2_paths()
+            except Exception as exc:  # noqa: BLE001
+                self.status_message.emit("VPP2 路径解析失败（见日志）")
+                self.log_line.emit(f"[ERROR] VPP2: {exc}\n{vpp2_install_hint()}")
+                return "error"
+            bundle = resolve_vpp2_bundle(ckpt) if ckpt else vpp2_paths.bundle
+            wan = resolve_vpp2_wan_root()
+            weights = str(resolve_vpp2_weights())
+            exports.extend(
+                [
+                    f"export VPP2_WEIGHTS={shlex.quote(weights)}",
+                    f"export VPP2_BUNDLE={shlex.quote(bundle)}",
+                    f"export VPP2_WAN_ROOT={shlex.quote(wan)}",
+                    f"export VPP2_ROOT={shlex.quote(str(vpp2_paths.code_root))}",
+                    "export VPP2_TORCH_LOAD_MMAP=1",
+                    f"export ROBODOJO_POLICY_PORT={shlex.quote(str(port if use_external else DEFAULT_VPP2_PORT))}",
+                ]
+            )
+            vpp2_note = f"  VPP2_BUNDLE={bundle}  wan={wan}"
+            self.log_line.emit(
+                f"[VPP2] RoboDojo adapter · action=ee 必须 ·{vpp2_note}"
+            )
         starvla_ckpt_note = ""
         if is_starvla:
             variant = resolve_starvla_hf_variant(ckpt)
-            ckpt_path = resolve_starvla_ckpt_file(variant)
+            ckpt_path = resolve_starvla_ckpt_file(variant, ckpt=ckpt)
             if not ckpt_path:
                 msg = (
                     f"未找到 starVLA HF 权重（variant={variant}）。"
-                    f"请准备 {ROBODOJO_STARVLA_HF_ROOT_DEFAULT}/{variant}/checkpoints/*.pt"
+                    f"请准备 {STARVLA_PI_V3_CKPT_FILE_DEFAULT}"
                     " 或设置 STARVLA_CKPT_PATH"
                 )
                 self.status_message.emit(msg)
@@ -17466,6 +18145,10 @@ class RoboDojoEvalLauncher(QObject):
         self.log_line.emit(log_cmd)
         if starvla_ckpt_note:
             self.log_line.emit(starvla_ckpt_note)
+        if lingbot_va_note:
+            self.log_line.emit(lingbot_va_note)
+        if vpp2_note:
+            self.log_line.emit(vpp2_note)
         policy_label = "(无 / 进程内零动作，不启策略服务)" if skip_policy else policy_dir
         self.log_line.emit(
             f"  mode={'GUI' if self._use_gui else 'headless'} "
@@ -19087,6 +19770,20 @@ class RynnValueLauncher(QObject):
             self.status_message.emit(f"无效仓库: {root}")
             return
         job_norm = (job or "infer").strip().lower().replace("-", "_")
+        # Persistent reward_server: reuse healthy deploy (avoid second GPU load).
+        if job_norm in ("reward_server", "server", "serve"):
+            url = f"http://127.0.0.1:{max(1, int(port))}"
+            ok_srv, msg_srv, info_srv = probe_rynnvalue_reward_server(
+                url, timeout_s=2.0
+            )
+            if ok_srv:
+                self.log_line.emit(f"[adopt] {msg_srv}")
+                self.status_message.emit(f"RynnValue 已部署，跳过启动: {msg_srv}")
+                return
+            if info_srv.get("listening"):
+                self.log_line.emit(f"[skip] {msg_srv}")
+                self.status_message.emit(msg_srv)
+                return
         model = (model_path or "").strip()
         if job_norm in ("infer", "inference", "demo", "policy_ranking", "ranking",
                         "confusion_matrix", "confusion") and not model:
@@ -20231,8 +20928,8 @@ class LingbotWorldLauncher(QObject):
         qenv.remove("PYTHONHOME")
         qenv.insert("PYTHONNOUSERSITE", "1")
         qenv.insert("LINGBOT_WORLD_ROOT", LINGBOT_WORLD_ROOT_DEFAULT)
-        if os.path.isfile(LINGBOT_WORLD_VENV_PYTHON):
-            qenv.insert("LINGBOT_WORLD_PYTHON", LINGBOT_WORLD_VENV_PYTHON)
+        if os.path.isfile(LINGBOT_WORLD_PYTHON_DEFAULT):
+            qenv.insert("LINGBOT_WORLD_PYTHON", LINGBOT_WORLD_PYTHON_DEFAULT)
 
         self._result = None
         proc = QProcess(self)
@@ -20826,6 +21523,7 @@ class CameraTopicWindow(QMainWindow):
             min_h=80,
             max_h=900,
             label="拖动调整 Vision 日志高度",
+            clearable=True,
         )
 
         self._lingbot_launcher = LingbotVisionLauncher(self)
@@ -21018,6 +21716,7 @@ class CameraTopicWindow(QMainWindow):
             min_h=80,
             max_h=900,
             label="拖动调整 Depth 日志高度",
+            clearable=True,
         )
 
         self._lingbot_depth_launcher = LingbotDepthLauncher(self)
@@ -21180,6 +21879,7 @@ class CameraTopicWindow(QMainWindow):
             min_h=80,
             max_h=900,
             label="拖动调整 Map 日志高度",
+            clearable=True,
         )
 
         self._lingbot_map_launcher = LingbotMapLauncher(self)
@@ -21398,6 +22098,7 @@ class CameraTopicWindow(QMainWindow):
             min_h=72,
             max_h=900,
             label="拖动调整 Video 日志高度",
+            clearable=True,
         )
         self.lingbot_video_log_edit.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding
@@ -21602,6 +22303,7 @@ class CameraTopicWindow(QMainWindow):
             min_h=72,
             max_h=900,
             label="拖动调整 World 日志高度",
+            clearable=True,
         )
         self.lingbot_world_log_edit.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Expanding
@@ -21666,7 +22368,7 @@ class CameraTopicWindow(QMainWindow):
         )
         self.bagel_python_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.bagel_python_edit.setToolTip(
-            "运行 app.py 的解释器。推荐 eai/.cache/bagel_venv；也可设 BAGEL_PYTHON"
+            "运行 app.py 的解释器。推荐 miniconda3/envs/bagel；也可设 BAGEL_PYTHON"
         )
         bagel_path_row.addWidget(self.bagel_python_edit, 1)
         self.bagel_python_browse_btn = QPushButton("…")
@@ -21686,7 +22388,8 @@ class CameraTopicWindow(QMainWindow):
         self.bagel_model_edit = QLineEdit(_default_model)
         self.bagel_model_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.bagel_model_edit.setToolTip(
-            "相对仓库路径或绝对路径。默认可用 eai/.cache/bagel_models/BAGEL-7B-MoT"
+            "相对仓库路径或绝对路径。默认可用 "
+            ".../liyichao/models/BAGEL-7B-MoT"
         )
         bagel_model_row.addWidget(self.bagel_model_edit, 1)
         self.bagel_model_browse_btn = QPushButton("…")
@@ -21695,7 +22398,8 @@ class CameraTopicWindow(QMainWindow):
         bagel_model_row.addWidget(self.bagel_model_browse_btn)
         self.bagel_download_btn = QPushButton("下载模型")
         self.bagel_download_btn.setToolTip(
-            "从 HuggingFace / hf-mirror 下载 ByteDance-Seed/BAGEL-7B-MoT 到缓存目录"
+            "从 HuggingFace / hf-mirror 下载 ByteDance-Seed/BAGEL-7B-MoT "
+            "到 .../liyichao/models/BAGEL-7B-MoT"
         )
         self.bagel_download_btn.clicked.connect(self._on_bagel_download_clicked)
         bagel_model_row.addWidget(self.bagel_download_btn)
@@ -22427,6 +23131,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_backend_isaac_radio = QRadioButton("Isaac / RoboDojo")
         self.sim_backend_mujoco_radio = QRadioButton("MuJoCo")
         self.sim_backend_spaces_radio = QRadioButton("MolmoSpaces")
+        self.sim_backend_psi_spaces_radio = QRadioButton("Psi-MolmoSpaces")
         self.sim_backend_arena_radio = QRadioButton("IsaacLab-Arena")
         self.sim_backend_libero_radio = QRadioButton("LIBERO")
         self.sim_backend_robotwin_radio = QRadioButton("RoboTwin")
@@ -22436,6 +23141,7 @@ class CameraTopicWindow(QMainWindow):
         self._sim_backend_group.addButton(self.sim_backend_isaac_radio, 0)
         self._sim_backend_group.addButton(self.sim_backend_mujoco_radio, 1)
         self._sim_backend_group.addButton(self.sim_backend_spaces_radio, 2)
+        self._sim_backend_group.addButton(self.sim_backend_psi_spaces_radio, 7)
         self._sim_backend_group.addButton(self.sim_backend_arena_radio, 3)
         self._sim_backend_group.addButton(self.sim_backend_libero_radio, 4)
         self._sim_backend_group.addButton(self.sim_backend_robotwin_radio, 5)
@@ -22443,6 +23149,7 @@ class CameraTopicWindow(QMainWindow):
         self.sim_backend_isaac_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_mujoco_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_spaces_radio.toggled.connect(self._on_sim_backend_changed)
+        self.sim_backend_psi_spaces_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_arena_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_libero_radio.toggled.connect(self._on_sim_backend_changed)
         self.sim_backend_robotwin_radio.toggled.connect(self._on_sim_backend_changed)
@@ -22450,6 +23157,7 @@ class CameraTopicWindow(QMainWindow):
         sim_backend_row.addWidget(self.sim_backend_isaac_radio)
         sim_backend_row.addWidget(self.sim_backend_mujoco_radio)
         sim_backend_row.addWidget(self.sim_backend_spaces_radio)
+        sim_backend_row.addWidget(self.sim_backend_psi_spaces_radio)
         sim_backend_row.addWidget(self.sim_backend_arena_radio)
         sim_backend_row.addWidget(self.sim_backend_libero_radio)
         sim_backend_row.addWidget(self.sim_backend_robotwin_radio)
@@ -22515,7 +23223,8 @@ class CameraTopicWindow(QMainWindow):
         self.sim_leaderboard_refresh_btn.setStyleSheet(f"color: {UI_ACCENT_BLUE};")
         self.sim_leaderboard_refresh_btn.setToolTip(
             "从公开榜单源实时抓取当前后端结果，更新表格并写回\n"
-            "eai/sim_eval_leaderboards.json（后台线程，不卡 UI）"
+            "eai/sim_eval_leaderboards.json（后台线程，不卡 UI）。\n"
+            "已合并的本地评测会保留，并与实时业内条目重新排序对比。"
         )
         self.sim_leaderboard_refresh_btn.clicked.connect(
             self._on_sim_leaderboard_refresh_clicked
@@ -22524,17 +23233,40 @@ class CameraTopicWindow(QMainWindow):
         self.sim_leaderboard_reload_btn = QPushButton("本地")
         self.sim_leaderboard_reload_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_leaderboard_reload_btn.setToolTip(
-            "仅重新读取本地 eai/sim_eval_leaderboards.json（不联网）"
+            "仅重新读取本地 eai/sim_eval_leaderboards.json（不联网）\n"
+            "已合并的本地评测会与业内条目放在同一表对比"
         )
         self.sim_leaderboard_reload_btn.clicked.connect(
             self._on_sim_leaderboard_reload_clicked
         )
         _lb_meta.addWidget(self.sim_leaderboard_reload_btn)
+        self.sim_leaderboard_merge_btn = QPushButton("合并本地")
+        self.sim_leaderboard_merge_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_leaderboard_merge_btn.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        self.sim_leaderboard_merge_btn.setToolTip(
+            "把当前后端的本地仿真评测结果合并进榜单：\n"
+            "· Isaac：优先用下方选中的 RoboDojo `_result.json`\n"
+            "· 其他后端：手动填写方法名与指标\n"
+            "刷新实时榜单时会保留本地行，并与业内条目重新排序对比"
+        )
+        self.sim_leaderboard_merge_btn.clicked.connect(
+            self._on_sim_leaderboard_merge_clicked
+        )
+        _lb_meta.addWidget(self.sim_leaderboard_merge_btn)
+        self.sim_leaderboard_remove_local_btn = QPushButton("移除本地")
+        self.sim_leaderboard_remove_local_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_leaderboard_remove_local_btn.setToolTip(
+            "从榜单中移除当前选中的本地评测行（不影响业内条目）"
+        )
+        self.sim_leaderboard_remove_local_btn.clicked.connect(
+            self._on_sim_leaderboard_remove_local_clicked
+        )
+        _lb_meta.addWidget(self.sim_leaderboard_remove_local_btn)
         self._sim_leaderboard_refreshing = False
         _lb_outer.addLayout(_lb_meta)
-        self.sim_leaderboard_table = QTableWidget(0, 6)
+        self.sim_leaderboard_table = QTableWidget(0, 7)
         self.sim_leaderboard_table.setHorizontalHeaderLabels(
-            ["#", "方法", "指标", "说明", "机构", "日期"]
+            ["#", "来源", "方法", "指标", "说明", "机构", "日期"]
         )
         self.sim_leaderboard_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.sim_leaderboard_table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -22552,17 +23284,18 @@ class CameraTopicWindow(QMainWindow):
         )
         _hdr = self.sim_leaderboard_table.horizontalHeader()
         _hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        _hdr.setSectionResizeMode(1, QHeaderView.Stretch)
-        _hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        _hdr.setSectionResizeMode(3, QHeaderView.Stretch)
-        _hdr.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        _hdr.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        _hdr.setSectionResizeMode(2, QHeaderView.Stretch)
+        _hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        _hdr.setSectionResizeMode(4, QHeaderView.Stretch)
         _hdr.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        _hdr.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         self.sim_leaderboard_table.setMinimumHeight(72)
-        self.sim_leaderboard_table.setMaximumHeight(220)
-        self.sim_leaderboard_table.setFixedHeight(112)
+        self.sim_leaderboard_table.setMaximumHeight(260)
+        self.sim_leaderboard_table.setFixedHeight(140)
         self.sim_leaderboard_table.setToolTip(
-            "业内公开发布的实际结果快照；切换仿真后端会切换对应榜单。"
-            "完整协议与最新排名以「打开来源」为准。"
+            "业内实时/快照 + 已合并的本地评测，同一表按指标排序对比。"
+            "绿色「本地」行为本机仿真结果；切换后端会切换对应榜单。"
         )
         _lb_outer.addWidget(self.sim_leaderboard_table)
         self.sim_leaderboard_note_label = QLabel("")
@@ -22573,6 +23306,7 @@ class CameraTopicWindow(QMainWindow):
         _lb_outer.addWidget(self.sim_leaderboard_note_label)
         self.sim_leaderboard_group.toggled.connect(self._on_sim_leaderboard_toggled)
         self._sim_leaderboard_source_url = ""
+        self._sim_leaderboard_row_meta: List[Dict[str, Any]] = []
         sim_form_l.addWidget(self.sim_leaderboard_group)
 
         self.sim_backend_stack = QStackedWidget()
@@ -22701,6 +23435,15 @@ class CameraTopicWindow(QMainWindow):
             self.sim_eval_policy_combo.addItem(
                 "starVLA", "XPolicyLab/policy/starVLA"
             )
+            self.sim_eval_policy_combo.addItem(
+                "LingBot_VA", LINGBOT_VA_POLICY_REL
+            )
+            self.sim_eval_policy_combo.addItem("VPP2", VPP2_POLICY_REL)
+        # Ensure LingBot_VA / VPP2 always selectable even if scan missed them.
+        if self.sim_eval_policy_combo.findData(LINGBOT_VA_POLICY_REL) < 0:
+            self.sim_eval_policy_combo.addItem("LingBot_VA", LINGBOT_VA_POLICY_REL)
+        if self.sim_eval_policy_combo.findData(VPP2_POLICY_REL) < 0:
+            self.sim_eval_policy_combo.addItem("VPP2", VPP2_POLICY_REL)
         # 默认仍选 demo_policy（「无」= 仅启评测、不启策略服务）
         idx_demo = self.sim_eval_policy_combo.findData(
             "XPolicyLab/policy/demo_policy"
@@ -22720,13 +23463,19 @@ class CameraTopicWindow(QMainWindow):
         sim_run_row.addWidget(self.sim_eval_policy_combo)
         sim_run_row.addWidget(QLabel("ckpt"))
         self.sim_eval_ckpt_edit = QLineEdit("demo")
-        self.sim_eval_ckpt_edit.setFixedWidth(120)
-        self.sim_eval_ckpt_edit.setToolTip(
-            "checkpoint 名，如 demo / hf_qwenpi_v3。\n"
-            "starVLA 的 hf_qwenpi_v3 会自动映射到 "
-            "RoboDojo_cache/starvla_hf/pi_v3/checkpoints/*.pt"
+        self.sim_eval_ckpt_edit.setMinimumWidth(320)
+        self.sim_eval_ckpt_edit.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
         )
-        sim_run_row.addWidget(self.sim_eval_ckpt_edit)
+        self.sim_eval_ckpt_edit.setToolTip(
+            "显示完整 checkpoint 目录绝对路径。\n"
+            "starVLA：…/RoboDojo_cache/starvla_hf/pi_v3\n"
+            "Pi_05：…/openpi/hf/pi05_droid_jointpos（含 params/）\n"
+            "LingBot_VA：…/LingBot_VA/checkpoints/<run>；"
+            "需 LINGBOT_VA_BASE_MODEL_PATH。\n"
+            "VPP2：ckpt=joint2b_s100000；需 VPP2_BUNDLE / VPP2_WAN_ROOT。"
+        )
+        sim_run_row.addWidget(self.sim_eval_ckpt_edit, 1)
         sim_run_row.addWidget(QLabel("action"))
         self.sim_eval_action_combo = ImeSafeComboBox()
         self.sim_eval_action_combo.addItem("ee", "ee")
@@ -22736,7 +23485,8 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_use_gui_check.setChecked(True)
         self.sim_eval_use_gui_check.setFocusPolicy(Qt.NoFocus)
         self.sim_eval_use_gui_check.setToolTip(
-            "勾选：Isaac Sim GUI（starVLA→run_gui_starvla_pi_v3.sh，其它→run_gui_eval.sh）。\n"
+            "勾选：Isaac Sim GUI（starVLA→run_gui_starvla_pi_v3.sh，"
+            "LingBot_VA/其它→run_gui_eval.sh）。\n"
             "默认 VirtualGL→NVIDIA 硬件加速视口（ROBODOJO_USE_VGL=1）。\n"
             "不勾选：headless（无 Isaac 窗口；相机预览仍可通过桥接看到）。"
         )
@@ -22875,6 +23625,17 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_open_video_btn.setToolTip("窗口内播放选中 mp4（双击列表项亦可）")
         self.sim_eval_open_video_btn.clicked.connect(self._on_sim_eval_open_video_clicked)
         sim_eval_filter_row.addWidget(self.sim_eval_open_video_btn)
+        self.sim_eval_merge_board_btn = QPushButton("合并到榜单")
+        self.sim_eval_merge_board_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_merge_board_btn.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        self.sim_eval_merge_board_btn.setToolTip(
+            "将当前选中运行的 _result.json 合并进上方「业内评测榜单」，\n"
+            "与实时/快照业内条目并排对比；刷新实时榜后本地行会保留。"
+        )
+        self.sim_eval_merge_board_btn.clicked.connect(
+            self._on_sim_leaderboard_merge_clicked
+        )
+        sim_eval_filter_row.addWidget(self.sim_eval_merge_board_btn)
         isaac_lower_l.addLayout(sim_eval_filter_row)
 
         sim_eval_split = QSplitter(Qt.Horizontal)
@@ -23025,6 +23786,17 @@ class CameraTopicWindow(QMainWindow):
             "仅「EGL 回退」才用 Tk 自绘界面。"
         )
         mj_model_row.addWidget(self.mujoco_mode_combo)
+        mj_model_row.addWidget(QLabel("策略"))
+        self.mujoco_policy_combo = ImeSafeComboBox()
+        self.mujoco_policy_combo.addItem("无（仅 viewer）", "")
+        self.mujoco_policy_combo.addItem(LINGBOT_VA_POLICY_LABEL, LINGBOT_VA_POLICY_ID)
+        self.mujoco_policy_combo.addItem(VPP2_POLICY_LABEL, VPP2_POLICY_ID)
+        self.mujoco_policy_combo.setToolTip(
+            "LingBot-VA / VPP2：启动策略服务（serve_only）。"
+            "原始 MJCF viewer 无 closed-loop adapter；"
+            "完整评测请用 LIBERO / RoboTwin / Isaac。"
+        )
+        mj_model_row.addWidget(self.mujoco_policy_combo)
         mj_page_l.addLayout(mj_model_row)
         mj_page_l.addStretch(1)
         self.sim_backend_stack.addWidget(mj_page)
@@ -23328,7 +24100,12 @@ class CameraTopicWindow(QMainWindow):
         self.libero_config_combo = ImeSafeComboBox()
         for label, cfg_id in LIBERO_POLICY_CONFIGS:
             self.libero_config_combo.addItem(label, cfg_id)
-        self.libero_config_combo.setToolTip("openpi TrainConfig 名（pi05_libero / pi0_libero）")
+        self.libero_config_combo.setToolTip(
+            "openpi TrainConfig（pi05_libero / pi0_libero）或 LingBot-VA（wan_va）"
+        )
+        self.libero_config_combo.currentIndexChanged.connect(
+            self._on_libero_config_changed
+        )
         libero_task_row.addWidget(self.libero_config_combo)
         libero_task_row.addWidget(QLabel("模式"))
         self.libero_mode_combo = ImeSafeComboBox()
@@ -23629,6 +24406,16 @@ class CameraTopicWindow(QMainWindow):
             "harness：AllenAI vla-evaluation-harness Docker 镜像。"
         )
         ext_param_row.addWidget(self.ext_bench_mode_combo)
+        ext_param_row.addWidget(QLabel("策略"))
+        self.ext_bench_policy_combo = ImeSafeComboBox()
+        self.ext_bench_policy_combo.addItem("默认 / 本地脚本", "")
+        self.ext_bench_policy_combo.addItem(LINGBOT_VA_POLICY_LABEL, LINGBOT_VA_POLICY_ID)
+        self.ext_bench_policy_combo.addItem(VPP2_POLICY_LABEL, VPP2_POLICY_ID)
+        self.ext_bench_policy_combo.setToolTip(
+            "选 LingBot-VA / VPP2：LIBERO* 走官方 eval；"
+            "其它扩展后端为 serve_only（策略 websocket）。"
+        )
+        ext_param_row.addWidget(self.ext_bench_policy_combo)
         ext_param_row.addWidget(QLabel("任务"))
         self.ext_bench_task_edit = QLineEdit("")
         self.ext_bench_task_edit.setPlaceholderText("可选 task / suite 名")
@@ -23672,6 +24459,7 @@ class CameraTopicWindow(QMainWindow):
         ext_note = QLabel(
             "扩展后端通过 tools/run_external_bench.py 统一启动；"
             "业内榜单来自 EmbodiedBench / AllenAI VLA Harness。"
+            "策略可选 LingBot-VA（WAM）：LIBERO* 走官方 client，其余 serve_only。"
             "完整策略闭环需自行 clone 对应仓库或拉取 harness Docker。"
             "下方共享「启动」按钮与 MuJoCo 系日志区。"
         )
@@ -23848,6 +24636,9 @@ class CameraTopicWindow(QMainWindow):
         log_pane_l = QVBoxLayout(log_pane)
         log_pane_l.setContentsMargins(0, 0, 0, 0)
         log_pane_l.setSpacing(2)
+        self.mujoco_clear_log_btn = _add_clear_log_button_row(
+            log_pane_l, self.mujoco_log_edit
+        )
         log_pane_l.addWidget(self.mujoco_log_edit, 1)
 
         self._sim_body_split = _always_visible_splitter(Qt.Vertical)
@@ -24649,6 +25440,7 @@ class CameraTopicWindow(QMainWindow):
             min_h=80,
             max_h=900,
             label="拖动调整推理日志高度",
+            clearable=True,
         )
         # 推理部署后端在 chat_panel 创建后由 QwenDeployController 统一接管
         self._qwen_deploy = None  # type: ignore
@@ -25064,6 +25856,7 @@ class CameraTopicWindow(QMainWindow):
             min_h=80,
             max_h=900,
             label="拖动调整 Reward 日志高度",
+            clearable=True,
         )
 
         self._reward_launcher = RewardModelLauncher(self)
@@ -25323,6 +26116,9 @@ class CameraTopicWindow(QMainWindow):
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
             f"border: 1px solid {UI_BORDER}; }}"
         )
+        self.reward_wf_clear_log_btn = _add_clear_log_button_row(
+            rwf_outer, self.reward_wf_log_edit
+        )
         rwf_outer.addWidget(self.reward_wf_log_edit, 1)
 
         self._reward_wf_launcher = RewardWorkflowLauncher(self)
@@ -25516,6 +26312,9 @@ class CameraTopicWindow(QMainWindow):
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
             f"border: 1px solid {UI_BORDER}; }}"
         )
+        self.dojo_rl_clear_log_btn = _add_clear_log_button_row(
+            dojo_rl_outer, self.dojo_rl_log_edit
+        )
         dojo_rl_outer.addWidget(self.dojo_rl_log_edit, 1)
 
         self._dojo_rl_launcher = RoboDojoOnlineRLLauncher(self)
@@ -25547,7 +26346,7 @@ class CameraTopicWindow(QMainWindow):
             "「图形窗口」对 eval 等有效；train/train_async（LIBERO 离屏）会强制 egl，"
             "避免与本 GUI 的 OpenGL 冲突触发 cudnn Invalid handle。"
             "默认仓库为 robometer-policy-learning；Python 优先 "
-            "miniconda3/envs/robometer-policy（勿用未同步完的仓库 .venv）。"
+            "miniconda3/envs/robometer-policy。"
             "额外参数写在 Hydra 一行，例: env.env_name=libero_90 env.task_id=28。"
         )
         rm_hint.setWordWrap(True)
@@ -25703,6 +26502,9 @@ class CameraTopicWindow(QMainWindow):
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
             f"border: 1px solid {UI_BORDER}; }}"
         )
+        self.robometer_clear_log_btn = _add_clear_log_button_row(
+            rm_outer, self.robometer_log_edit
+        )
         rm_outer.addWidget(self.robometer_log_edit, 1)
 
         self._robometer_launcher = RoboMeterPolicyLauncher(self)
@@ -25721,7 +26523,7 @@ class CameraTopicWindow(QMainWindow):
         rv_hint = QLabel(
             "RynnValue：对机器人视频预测剩余完成时间，并生成 Analysis（描述 / Match / Success）。"
             "勾选「图形窗口」时，推理结束后自动播放趋势视频；评测任务会开启 save_videos。"
-            "默认模型为本地缓存 RynnValue-4B；Python 优先 miniconda3/envs/rynnvalue。"
+            "默认模型为 .../liyichao/models/RynnValue-4B；Python 优先 miniconda3/envs/rynnvalue。"
         )
         rv_hint.setWordWrap(True)
         rv_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
@@ -25787,7 +26589,7 @@ class CameraTopicWindow(QMainWindow):
         rv_model_row.addWidget(QLabel("模型"))
         self.rynnvalue_model_edit = QLineEdit(resolve_rynnvalue_model())
         self.rynnvalue_model_edit.setPlaceholderText(
-            "本地 HF 目录（默认 .cache/rynnvalue/RynnValue-4B）"
+            "本地 HF 目录（默认 .../liyichao/models/RynnValue-4B）"
         )
         self.rynnvalue_model_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         rv_model_row.addWidget(self.rynnvalue_model_edit, 1)
@@ -25969,6 +26771,9 @@ class CameraTopicWindow(QMainWindow):
         self.rynnvalue_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
             f"border: 1px solid {UI_BORDER}; }}"
+        )
+        self.rynnvalue_clear_log_btn = _add_clear_log_button_row(
+            rv_outer, self.rynnvalue_log_edit
         )
         rv_outer.addWidget(self.rynnvalue_log_edit, 1)
 
@@ -26229,6 +27034,9 @@ class CameraTopicWindow(QMainWindow):
         self.roboicl_log_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
             f"border: 1px solid {UI_BORDER}; }}"
+        )
+        self.roboicl_clear_log_btn = _add_clear_log_button_row(
+            ricl_outer, self.roboicl_log_edit
         )
         ricl_outer.addWidget(self.roboicl_log_edit, 1)
 
@@ -26822,6 +27630,8 @@ class CameraTopicWindow(QMainWindow):
         self._apply_only_tabs(self._only_tabs)
         self._restore_control_tabs_order()
         self._restore_viewer_ui_state()
+        # After restore: fix Pi_05 + LingBot-only ckpt (or clear incompatible leftovers).
+        self._sanitize_sim_eval_policy_ckpt_pair()
         self._control_tabs_order_guard = False
         self.control_tabs.tabBar().tabMoved.connect(self._on_control_tab_moved)
         self.chat_panel.status_message.connect(self.status_bar.showMessage)
@@ -27048,8 +27858,10 @@ class CameraTopicWindow(QMainWindow):
 
     def _update_bagel_run_ui(self, *_args) -> None:
         running = self._bagel_launcher.is_running()
+        adopted = bool(getattr(self._bagel_launcher, "_adopted", False))
         ready = running or bool(self._bagel_launcher.current_url())
-        self.bagel_start_btn.setEnabled(not running)
+        # 复用中仍允许再点启动（会再次探测）；仅本窗口自启进程时禁用
+        self.bagel_start_btn.setEnabled(not running or adopted)
         self.bagel_stop_btn.setEnabled(running)
         self.bagel_open_btn.setEnabled(ready)
         if hasattr(self, "bagel_pick_image_btn"):
@@ -27069,7 +27881,7 @@ class CameraTopicWindow(QMainWindow):
             self.bagel_zh_check,
             self.bagel_share_check,
         ):
-            w.setEnabled(not running)
+            w.setEnabled(not running or adopted)
         if running:
             self.bagel_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
             if not self._bagel_ready_poll_timer.isActive():
@@ -27184,6 +27996,22 @@ class CameraTopicWindow(QMainWindow):
         proc.start("bash", ["-lc", cmd])
 
     def _on_bagel_start_clicked(self) -> None:
+        host = self.bagel_host_edit.text().strip() or BAGEL_SERVER_HOST_DEFAULT
+        port = int(self.bagel_port_spin.value())
+        # 已部署 Gradio：直接复用，无需因 API 占用而拦截
+        if bagel_probe_gradio_ready(host, port):
+            self._bagel_launcher.start(
+                repo_dir=self.bagel_root_edit.text(),
+                model_path=self.bagel_model_edit.text(),
+                python_bin=self.bagel_python_edit.text(),
+                server_name=host,
+                server_port=port,
+                mode=int(self.bagel_mode_combo.currentData() or 1),
+                zh=self.bagel_zh_check.isChecked(),
+                share=self.bagel_share_check.isChecked(),
+            )
+            self._update_bagel_run_ui()
+            return
         if getattr(self, "_bagel_api_launcher", None) is not None and self._bagel_api_launcher.is_running():
             QMessageBox.warning(
                 self,
@@ -27195,8 +28023,8 @@ class CameraTopicWindow(QMainWindow):
             repo_dir=self.bagel_root_edit.text(),
             model_path=self.bagel_model_edit.text(),
             python_bin=self.bagel_python_edit.text(),
-            server_name=self.bagel_host_edit.text().strip() or BAGEL_SERVER_HOST_DEFAULT,
-            server_port=int(self.bagel_port_spin.value()),
+            server_name=host,
+            server_port=port,
             mode=int(self.bagel_mode_combo.currentData() or 1),
             zh=self.bagel_zh_check.isChecked(),
             share=self.bagel_share_check.isChecked(),
@@ -28932,6 +29760,54 @@ class CameraTopicWindow(QMainWindow):
     def _on_sim_clear_log_clicked(self) -> None:
         self.sim_log_edit.clear()
 
+    def _set_sim_eval_ckpt_path(self, path: str) -> None:
+        """Write a full directory path into the ckpt box."""
+        text = _ckpt_dir_abspath(path) if path else ""
+        if text:
+            self.sim_eval_ckpt_edit.setText(text)
+        elif path:
+            self.sim_eval_ckpt_edit.setText(path)
+
+    def _sanitize_sim_eval_policy_ckpt_pair(self) -> None:
+        """After UI restore: keep each policy on its own full ckpt directory."""
+        policy = str(self.sim_eval_policy_combo.currentData() or "")
+        ckpt = self.sim_eval_ckpt_edit.text().strip()
+        if not policy:
+            return
+        if "starVLA" in policy:
+            if (not ckpt) or (not _looks_like_starvla_ckpt(ckpt)) or (
+                not os.path.isabs(ckpt)
+            ):
+                self._set_sim_eval_ckpt_path(_default_starvla_ckpt_text())
+            else:
+                self._set_sim_eval_ckpt_path(ckpt)
+            act_idx = self.sim_eval_action_combo.findData("joint")
+            if act_idx >= 0:
+                self.sim_eval_action_combo.setCurrentIndex(act_idx)
+            return
+        if _is_pi05_robodojo_policy(policy) and (
+            (not ckpt)
+            or ckpt == "demo"
+            or (not os.path.isabs(ckpt))
+            or "RoboDojo-cotrain" in ckpt
+            or _ckpt_owned_by_lingbot_va_not_pi05(ckpt)
+            or _looks_like_starvla_ckpt(ckpt)
+        ):
+            self._set_sim_eval_ckpt_path(_default_pi05_ckpt_text())
+            act_idx = self.sim_eval_action_combo.findData("joint")
+            if act_idx >= 0:
+                self.sim_eval_action_combo.setCurrentIndex(act_idx)
+            return
+        if is_lingbot_va_policy(policy) and (
+            (not ckpt) or (not os.path.isabs(ckpt)) or ckpt in ("demo", "hf_qwenpi_v3")
+        ):
+            self._set_sim_eval_ckpt_path(_default_lingbot_va_ckpt_text())
+            return
+        if (not is_lingbot_va_policy(policy)) and _ckpt_owned_by_lingbot_va_not_pi05(
+            ckpt
+        ):
+            self._on_sim_eval_policy_changed()
+
     def _on_sim_eval_policy_changed(self, _index: int = 0) -> None:
         policy = str(self.sim_eval_policy_combo.currentData() or "")
         no_policy = not policy
@@ -28943,13 +29819,66 @@ class CameraTopicWindow(QMainWindow):
         if no_policy:
             return
         if "starVLA" in policy:
-            if not self.sim_eval_ckpt_edit.text().strip() or self.sim_eval_ckpt_edit.text().strip() == "demo":
-                self.sim_eval_ckpt_edit.setText("hf_qwenpi_v3")
+            cur = self.sim_eval_ckpt_edit.text().strip()
+            if (
+                (not cur)
+                or cur == "demo"
+                or (not _looks_like_starvla_ckpt(cur))
+                or (not os.path.isabs(cur))
+            ):
+                self._set_sim_eval_ckpt_path(_default_starvla_ckpt_text())
+            else:
+                self._set_sim_eval_ckpt_path(cur)
+            idx = self.sim_eval_action_combo.findData("joint")
+            if idx >= 0:
+                self.sim_eval_action_combo.setCurrentIndex(idx)
+        elif is_lingbot_va_policy(policy):
+            cur = self.sim_eval_ckpt_edit.text().strip()
+            if (
+                (not cur)
+                or cur in ("demo", "hf_qwenpi_v3", "joint2b_s100000")
+                or (not os.path.isabs(cur))
+            ):
+                self._set_sim_eval_ckpt_path(_default_lingbot_va_ckpt_text())
+            else:
+                self._set_sim_eval_ckpt_path(cur)
+            idx = self.sim_eval_action_combo.findData("joint")
+            if idx >= 0:
+                self.sim_eval_action_combo.setCurrentIndex(idx)
+        elif is_vpp2_policy(policy):
+            cur = self.sim_eval_ckpt_edit.text().strip()
+            if (not cur) or cur in ("demo", "hf_qwenpi_v3") or "RoboDojo-cotrain" in cur:
+                self.sim_eval_ckpt_edit.setText(
+                    os.environ.get("VPP2_CKPT", "joint2b_s100000")
+                )
+            idx = self.sim_eval_action_combo.findData("ee")
+            if idx >= 0:
+                self.sim_eval_action_combo.setCurrentIndex(idx)
+        elif _is_pi05_robodojo_policy(policy):
+            cur = self.sim_eval_ckpt_edit.text().strip()
+            if (
+                (not cur)
+                or cur == "demo"
+                or (not os.path.isabs(cur))
+                or "hf_" in cur
+                or "RoboDojo-cotrain" in cur
+                or _ckpt_owned_by_lingbot_va_not_pi05(cur)
+                or _looks_like_starvla_ckpt(cur)
+            ):
+                self._set_sim_eval_ckpt_path(_default_pi05_ckpt_text())
+            else:
+                self._set_sim_eval_ckpt_path(cur)
             idx = self.sim_eval_action_combo.findData("joint")
             if idx >= 0:
                 self.sim_eval_action_combo.setCurrentIndex(idx)
         else:
-            if not self.sim_eval_ckpt_edit.text().strip() or "hf_" in self.sim_eval_ckpt_edit.text():
+            cur = self.sim_eval_ckpt_edit.text().strip()
+            if (
+                (not cur)
+                or "hf_" in cur
+                or "RoboDojo-cotrain" in cur
+                or _ckpt_owned_by_lingbot_va_not_pi05(cur)
+            ):
                 self.sim_eval_ckpt_edit.setText("demo")
             idx = self.sim_eval_action_combo.findData("ee")
             if idx >= 0:
@@ -28957,6 +29886,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _update_sim_eval_run_ui(self, *_args) -> None:
         running = self._sim_eval_launcher.is_running()
+        was_running = bool(getattr(self, "_sim_eval_was_running", False))
         stopping = bool(getattr(self._sim_eval_launcher, "_stopping", False))
         no_policy = not str(self.sim_eval_policy_combo.currentData() or "")
         self.sim_eval_stop_run_btn.setEnabled(running)
@@ -29009,6 +29939,18 @@ class CameraTopicWindow(QMainWindow):
                     pass
             self._update_enable_status_ui()
             self._update_arm_move_btns_ui()
+            # 评测刚结束：刷新结果树，提示可合并进榜单对比
+            if was_running and not stopping:
+                try:
+                    self._refresh_sim_eval_tree()
+                except Exception:
+                    pass
+                if hasattr(self, "status_bar") and self.status_bar is not None:
+                    self.status_bar.showMessage(
+                        "评测已结束：在结果中选中含 _result.json 的运行，点「合并到榜单」"
+                        "可与业内/实时榜并排对比",
+                        8000,
+                    )
             # 评测未跑时，若相机桥仍在或共享帧仍在，继续预览；否则停
             # 仅 Isaac 后端订阅/轮询共享帧，避免 MuJoCo/MolmoSpaces 假预览。
             if self._sim_backend_id() != "isaac":
@@ -29031,6 +29973,7 @@ class CameraTopicWindow(QMainWindow):
                     self._sim_npy_preview_timer.stop()
                     self._sim_preview_retry_timer.stop()
                     self._sim_preview_retry_left = 0
+        self._sim_eval_was_running = bool(running)
 
     def _ensure_workspace_expanded(self) -> None:
         if getattr(self, "_workspace_collapsed", False):
@@ -29331,16 +30274,52 @@ class CameraTopicWindow(QMainWindow):
                 getattr(self, "sim_eval_use_gui_check", None) is not None
                 and self.sim_eval_use_gui_check.isChecked()
             )
+            # Pi_05 must use OpenPI ckpt — replace LingBot_VA leftovers in-place.
+            ckpt_preview = self.sim_eval_ckpt_edit.text().strip() or "demo"
+            if (not skip_policy) and _is_pi05_robodojo_policy(policy_dir) and (
+                ckpt_preview == "demo"
+                or "RoboDojo-cotrain" in ckpt_preview
+                or _ckpt_owned_by_lingbot_va_not_pi05(ckpt_preview)
+            ):
+                fixed = _default_pi05_ckpt_text()
+                self.sim_eval_ckpt_edit.setText(fixed)
+                act_idx = self.sim_eval_action_combo.findData("joint")
+                if act_idx >= 0:
+                    self.sim_eval_action_combo.setCurrentIndex(act_idx)
+                self._append_sim_log(
+                    f"[策略] Pi_05 不使用 LingBot_VA ckpt={ckpt_preview}；"
+                    f"已改为 OpenPI 权重 {fixed}"
+                )
         policy_env = ROBODOJO_ENV_DEFAULT
         if (not skip_policy) and "starVLA" in policy_dir and os.path.isdir(
             ROBODOJO_STARVLA_ENV_DEFAULT
         ):
             policy_env = ROBODOJO_STARVLA_ENV_DEFAULT
+        elif (not skip_policy) and is_lingbot_va_policy(policy_dir):
+            va_env = resolve_lingbot_va_conda_env(ROBODOJO_LINGBOT_VA_ENV_DEFAULT)
+            if va_env and os.path.isdir(va_env):
+                policy_env = va_env
+        elif (not skip_policy) and _is_pi05_robodojo_policy(policy_dir):
+            if os.path.isdir(ROBODOJO_OPENPI_ENV_DEFAULT):
+                policy_env = ROBODOJO_OPENPI_ENV_DEFAULT
+        elif (not skip_policy) and is_vpp2_policy(policy_dir):
+            vpp2_env = resolve_vpp2_conda_env(ROBODOJO_VPP2_ENV_DEFAULT)
+            if vpp2_env and os.path.isdir(vpp2_env):
+                policy_env = vpp2_env
+            try:
+                ensure_vpp2_adapter(robodojo_root=ROBODOJO_ROOT_DEFAULT)
+            except Exception:
+                pass
         # 一体启动：评测进程内先起策略再起 Isaac（旧 robodojo.sh eval）；不依赖「部署启动」
         bundled = bool(
             (not skip_policy)
             and getattr(self, "sim_eval_bundled_check", None) is not None
             and self.sim_eval_bundled_check.isChecked()
+        )
+        policy_port = (
+            DEFAULT_VPP2_PORT
+            if (not skip_policy) and is_vpp2_policy(policy_dir)
+            else ROBODOJO_POLICY_PORT_DEFAULT
         )
         start_kwargs = dict(
             bridge_dir=bridge_dir,
@@ -29355,7 +30334,7 @@ class CameraTopicWindow(QMainWindow):
             reuse_existing=True,
             attach_external=False,
             policy_host=ROBODOJO_POLICY_HOST_DEFAULT,
-            policy_port=ROBODOJO_POLICY_PORT_DEFAULT,
+            policy_port=policy_port,
         )
 
         # 已由本窗口管理：热切换（不拦策略检查）
@@ -29632,13 +30611,28 @@ class CameraTopicWindow(QMainWindow):
         policy_env = ROBODOJO_ENV_DEFAULT
         if "starVLA" in policy_dir and os.path.isdir(ROBODOJO_STARVLA_ENV_DEFAULT):
             policy_env = ROBODOJO_STARVLA_ENV_DEFAULT
+        elif is_lingbot_va_policy(policy_dir):
+            va_env = resolve_lingbot_va_conda_env(ROBODOJO_LINGBOT_VA_ENV_DEFAULT)
+            if va_env and os.path.isdir(va_env):
+                policy_env = va_env
+        elif _is_pi05_robodojo_policy(policy_dir):
+            if os.path.isdir(ROBODOJO_OPENPI_ENV_DEFAULT):
+                policy_env = ROBODOJO_OPENPI_ENV_DEFAULT
+        elif is_vpp2_policy(policy_dir):
+            vpp2_env = resolve_vpp2_conda_env(ROBODOJO_VPP2_ENV_DEFAULT)
+            if vpp2_env and os.path.isdir(vpp2_env):
+                policy_env = vpp2_env
         root = ROBODOJO_ROOT_DEFAULT
         robodojo_sh = os.path.join(root, "scripts", "robodojo.sh")
         if not os.path.isfile(robodojo_sh):
             self._append_sim_log(f"[策略] 未找到 {robodojo_sh}")
             return
         host = ROBODOJO_POLICY_HOST_DEFAULT
-        port = ROBODOJO_POLICY_PORT_DEFAULT
+        port = (
+            DEFAULT_VPP2_PORT
+            if is_vpp2_policy(policy_dir)
+            else ROBODOJO_POLICY_PORT_DEFAULT
+        )
 
         if (
             hasattr(self, "_robodojo_policy_launcher")
@@ -29696,11 +30690,19 @@ class CameraTopicWindow(QMainWindow):
             f"export ROBODOJO_POLICY_ENV={shlex.quote(policy_env)}",
         ]
         if "starVLA" in policy_dir:
+            if not _looks_like_starvla_ckpt(ckpt):
+                ckpt = _default_starvla_ckpt_text()
+                self.sim_eval_ckpt_edit.setText(ckpt)
+                self._append_sim_log(
+                    f"[策略] starVLA ckpt 已纠正为 {ckpt}（对应 "
+                    f"{STARVLA_PI_V3_CKPT_FILE_DEFAULT}）"
+                )
             variant = resolve_starvla_hf_variant(ckpt)
-            ckpt_path = resolve_starvla_ckpt_file(variant)
+            ckpt_path = resolve_starvla_ckpt_file(variant, ckpt=ckpt)
             if not ckpt_path:
                 self._append_sim_log(
-                    f"[策略] 未找到 starVLA 权重 variant={variant}，无法部署"
+                    f"[策略] 未找到 starVLA 权重 variant={variant}，"
+                    f"期望 {STARVLA_PI_V3_CKPT_FILE_DEFAULT}"
                 )
                 return
             exports.extend(
@@ -29714,6 +30716,79 @@ class CameraTopicWindow(QMainWindow):
                     "export STARVLA_UNNORM_KEY=arx_x5",
                 ]
             )
+            self._append_sim_log(f"[策略] STARVLA_CKPT_PATH={ckpt_path}")
+        if is_lingbot_va_policy(policy_dir):
+            base_model = resolve_lingbot_va_base_model(
+                os.environ.get("LINGBOT_VA_BASE_MODEL_PATH", "")
+            )
+            if not base_model or not os.path.isdir(base_model):
+                self._append_sim_log(
+                    "[策略] LingBot-VA 需要 LINGBOT_VA_BASE_MODEL_PATH；"
+                    f"{lingbot_va_install_hint()}"
+                )
+                return
+            va_ckpt = resolve_lingbot_va_checkpoint(ckpt)
+            exports.extend(
+                [
+                    f"export LINGBOT_VA_BASE_MODEL_PATH={shlex.quote(base_model)}",
+                    f"export BASE_MODEL_PATH={shlex.quote(base_model)}",
+                    f"export LINGBOT_VA_CKPT={shlex.quote(va_ckpt)}",
+                    f"export CHECKPOINT_PATH={shlex.quote(va_ckpt)}",
+                    f"export CONFIG_NAME={shlex.quote(va_config_for_backend('isaac'))}",
+                    f"export LINGBOT_VA_VA_PORT={shlex.quote(str(LINGBOT_VA_PORT_DEFAULT))}",
+                ]
+            )
+            self._append_sim_log(
+                f"[策略] LingBot-VA base={base_model} ckpt={va_ckpt}"
+            )
+        if is_vpp2_policy(policy_dir):
+            try:
+                ok_ad, ad_msg = ensure_vpp2_adapter(robodojo_root=root)
+                self._append_sim_log(
+                    f"[策略] VPP2 adapter {'OK' if ok_ad else 'NEED'} · {ad_msg}"
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._append_sim_log(f"[策略] VPP2 adapter: {exc}")
+            bundle = resolve_vpp2_bundle(ckpt)
+            wan = resolve_vpp2_wan_root()
+            weights = str(resolve_vpp2_weights())
+            ok_probe, probe_msg = probe_vpp2()
+            if not ok_probe:
+                self._append_sim_log(
+                    f"[策略] VPP2 未就绪: {probe_msg}\n{vpp2_install_hint()}"
+                )
+                return
+            exports.extend(
+                [
+                    f"export VPP2_WEIGHTS={shlex.quote(weights)}",
+                    f"export VPP2_BUNDLE={shlex.quote(bundle)}",
+                    f"export VPP2_WAN_ROOT={shlex.quote(wan)}",
+                    "export VPP2_TORCH_LOAD_MMAP=1",
+                ]
+            )
+            # Prefer official vpp2.cli server (sets deploy.yml overrides).
+            try:
+                argv_v, cwd_v, env_v, note_v = build_backend_vpp2_argv(
+                    "isaac",
+                    python_bin=resolve_vpp2_python(conda_env=policy_env),
+                    port=port,
+                    gpu="0",
+                )
+                self._append_sim_log(f"[策略] {note_v}")
+                clean_env = {k: v for k, v in env_v.items() if v is not None}
+                self._robodojo_policy_launcher.start_cwd_command(
+                    cwd=str(cwd_v),
+                    argv=argv_v,
+                    label="vpp2-server",
+                    env_extra=clean_env,
+                )
+                self._update_sim_policy_deploy_ui()
+                return
+            except Exception as exc:  # noqa: BLE001
+                self._append_sim_log(
+                    f"[策略] VPP2 official server 失败，回退 robodojo.sh: {exc}"
+                )
+            self._append_sim_log(f"[策略] VPP2 bundle={bundle} wan={wan}")
         run_cmd = (
             f"exec bash {shlex.quote(robodojo_sh)} server "
             f"--policy-dir {shlex.quote(policy_dir)} "
@@ -30768,6 +31843,23 @@ class CameraTopicWindow(QMainWindow):
                 )
             api = remote_qwen_api_base_for_host(host_id)
             label = spec.get("label") or key
+            # Reuse healthy tunnel before re-deploy.
+            if check_local_qwen_server_health(api):
+                info = fetch_local_qwen_server_info(api) or {}
+                mid = str(info.get("model") or label)
+                self._append_test_infer_log(
+                    f"远程 Qwen 已部署，跳过启动: {api} ({mid})"
+                )
+                self._remote_qwen_launcher.start(
+                    model_key=key,
+                    host_id=host_id,
+                    model_dir=spec.get("path"),
+                    model_id=spec.get("model_id"),
+                    model_label=spec.get("label"),
+                )
+                self._update_test_qwen_ui()
+                QTimer.singleShot(500, self._try_switch_chat_to_remote_qwen)
+                return
             self._append_test_infer_log(
                 f"远程部署: {host_id} / {label}，隧道 {api}"
             )
@@ -30780,6 +31872,25 @@ class CameraTopicWindow(QMainWindow):
             )
             self._update_test_qwen_ui()
             QTimer.singleShot(2500, self._try_switch_chat_to_remote_qwen)
+            return
+
+        api = resolve_local_qwen_viewer_api_base()
+        if check_local_qwen_server_health(api):
+            info = fetch_local_qwen_server_info(api) or {}
+            mid = str(info.get("model") or spec.get("label") or key)
+            self._append_test_infer_log(
+                f"本地 Qwen 已部署，跳过启动: {api} ({mid})"
+            )
+            if spec.get("path"):
+                self._local_qwen_launcher.start(
+                    model_dir=spec.get("path"),
+                    model_id=spec.get("model_id"),
+                    model_label=spec.get("label"),
+                )
+            else:
+                self._local_qwen_launcher.start(model_key=key)
+            self._update_test_qwen_ui()
+            QTimer.singleShot(500, self._try_switch_chat_to_local_qwen)
             return
 
         path = spec.get("path") or local_qwen_model_dir_for_key(key)
@@ -31346,6 +32457,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_local_ai_deploy_clicked(self) -> None:
         if self._local_ai_launcher.is_sam3_running():
+            # 已部署（本窗口进程 / 外部进程 / HTTP 健康）→ 停止，不重复启动
             self._local_ai_launcher.stop()
             self._update_local_ai_deploy_btn()
             self._refresh_sam3_status()
@@ -33324,13 +34436,20 @@ class CameraTopicWindow(QMainWindow):
                     text = "空闲 · MuJoCo"
                 elif backend == "molmospaces":
                     text = "空闲 · MolmoSpaces"
+                elif backend == "psi_molmospaces":
+                    text = "空闲 · Psi-MolmoSpaces"
                 elif backend == "arena":
                     text = "空闲 · IsaacLab-Arena"
                 elif backend == "libero":
                     text = "空闲 · LIBERO"
                 elif backend == "robotwin":
                     text = "空闲 · RoboTwin"
-                elif backend not in ("isaac", "mujoco", "molmospaces"):
+                elif backend not in (
+                    "isaac",
+                    "mujoco",
+                    "molmospaces",
+                    "psi_molmospaces",
+                ):
                     text = f"空闲 · {backend}"
             self.mujoco_status_label.setText(text)
         if hasattr(self, "status_bar") and self.status_bar is not None:
@@ -33353,11 +34472,23 @@ class CameraTopicWindow(QMainWindow):
             return "libero"
         if getattr(self, "sim_backend_arena_radio", None) is not None and self.sim_backend_arena_radio.isChecked():
             return "arena"
+        if (
+            getattr(self, "sim_backend_psi_spaces_radio", None) is not None
+            and self.sim_backend_psi_spaces_radio.isChecked()
+        ):
+            return "psi_molmospaces"
         if getattr(self, "sim_backend_spaces_radio", None) is not None and self.sim_backend_spaces_radio.isChecked():
             return "molmospaces"
         if getattr(self, "sim_backend_mujoco_radio", None) is not None and self.sim_backend_mujoco_radio.isChecked():
             return "mujoco"
         return "isaac"
+
+    def _is_spaces_sim_backend(self, backend: str = "") -> bool:
+        """MolmoSpaces or its Psi fork (share the same stack page / launcher)."""
+        return (backend or self._sim_backend_id()) in (
+            "molmospaces",
+            "psi_molmospaces",
+        )
 
     def _is_extended_sim_backend(self, backend: str = "") -> bool:
         key = backend or self._sim_backend_id()
@@ -33365,6 +34496,7 @@ class CameraTopicWindow(QMainWindow):
             "isaac",
             "mujoco",
             "molmospaces",
+            "psi_molmospaces",
             "arena",
             "libero",
             "robotwin",
@@ -33389,6 +34521,8 @@ class CameraTopicWindow(QMainWindow):
             getattr(self, "sim_leaderboard_source_btn", None),
             getattr(self, "sim_leaderboard_refresh_btn", None),
             getattr(self, "sim_leaderboard_reload_btn", None),
+            getattr(self, "sim_leaderboard_merge_btn", None),
+            getattr(self, "sim_leaderboard_remove_local_btn", None),
             getattr(self, "sim_leaderboard_table", None),
             getattr(self, "sim_leaderboard_note_label", None),
         ):
@@ -33447,10 +34581,13 @@ class CameraTopicWindow(QMainWindow):
                     pass
                 self._apply_sim_leaderboard_board(result["board"])
                 fetched = str(result["board"].get("_fetched_at") or "")
+                n_local = int(result["board"].get("_local_count") or 0)
                 if hasattr(self, "status_bar") and self.status_bar is not None:
+                    extra = f" · 含 {n_local} 条本地对比" if n_local else ""
                     self.status_bar.showMessage(
-                        f"业内榜单已刷新 · {backend}"
-                        + (f" · {fetched}" if fetched else ""),
+                        f"实时榜单已刷新 · {backend}"
+                        + (f" · {fetched}" if fetched else "")
+                        + extra,
                         5000,
                     )
             else:
@@ -33495,11 +34632,23 @@ class CameraTopicWindow(QMainWindow):
             or ""
         )
         source_label = str(board.get("source_label") or "来源")
+        n_ind = board.get("_industry_count")
+        n_loc = board.get("_local_count")
+        if n_ind is None or n_loc is None:
+            raw_entries = board.get("entries") or []
+            n_loc = sum(
+                1
+                for e in raw_entries
+                if isinstance(e, dict) and str(e.get("origin") or "") == "local"
+            )
+            n_ind = max(0, len([e for e in raw_entries if isinstance(e, dict)]) - int(n_loc))
         meta_bits = [b for b in (metric, protocol) if b]
         if board.get("_live") or board.get("_fetched_at"):
             meta_bits.append(f"实时 {updated}" if updated else "实时")
         elif updated:
             meta_bits.append(f"快照 {updated}")
+        if int(n_loc or 0) > 0:
+            meta_bits.append(f"业内 {int(n_ind)} + 本地 {int(n_loc)}")
         self.sim_leaderboard_meta_label.setText(" · ".join(meta_bits))
         self._sim_leaderboard_source_url = str(board.get("source_url") or "").strip()
         self.sim_leaderboard_source_btn.setEnabled(bool(self._sim_leaderboard_source_url))
@@ -33507,24 +34656,71 @@ class CameraTopicWindow(QMainWindow):
         tip_url = self._sim_leaderboard_source_url or "无来源链接"
         self.sim_leaderboard_source_btn.setToolTip(f"{source_label}\n{tip_url}")
 
+        # Prefer pre-combined entries; otherwise combine industry + local_entries.
         entries = [e for e in (board.get("entries") or []) if isinstance(e, dict)]
+        if not board.get("_combined"):
+            local_rows = [
+                e for e in (board.get("local_entries") or []) if isinstance(e, dict)
+            ]
+            if local_rows:
+                try:
+                    from sim_eval_leaderboard import combine_board_entries
+
+                    industry = [
+                        e
+                        for e in entries
+                        if str(e.get("origin") or "") != "local"
+                    ]
+                    entries = combine_board_entries(industry, local_rows)
+                    n_ind = len(industry)
+                    n_loc = len(local_rows)
+                except Exception:
+                    pass
+
+        self._sim_leaderboard_row_meta = []
         self.sim_leaderboard_table.setRowCount(len(entries))
+        local_bg = QColor("#1e3a28")
+        local_fg = QColor(UI_ACCENT_GREEN)
         for row, entry in enumerate(entries):
+            origin = str(entry.get("origin") or "").strip().lower()
+            is_local = origin == "local" or bool(entry.get("local_id"))
+            origin_label = "本地" if is_local else "业内"
             cells = [
                 str(entry.get("rank", row + 1)),
+                origin_label,
                 str(entry.get("method") or ""),
                 str(entry.get("score") or ""),
                 str(entry.get("detail") or ""),
                 str(entry.get("org") or ""),
                 str(entry.get("date") or ""),
             ]
-            tip = str(entry.get("note") or "").strip()
+            tip_bits = [
+                t
+                for t in (
+                    str(entry.get("note") or "").strip(),
+                    str(entry.get("result_path") or "").strip(),
+                    str(entry.get("local_id") or "").strip() if is_local else "",
+                )
+                if t
+            ]
+            tip = "\n".join(tip_bits)
+            self._sim_leaderboard_row_meta.append(
+                {
+                    "origin": "local" if is_local else "industry",
+                    "local_id": str(entry.get("local_id") or ""),
+                    "method": str(entry.get("method") or ""),
+                }
+            )
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)
                 if tip:
                     item.setToolTip(tip)
-                if col == 0:
+                if col in (0, 1):
                     item.setTextAlignment(int(Qt.AlignCenter))
+                if is_local:
+                    item.setBackground(local_bg)
+                    if col == 1:
+                        item.setForeground(local_fg)
                 self.sim_leaderboard_table.setItem(row, col, item)
         notes = []
         if board.get("_global_note"):
@@ -33533,30 +34729,38 @@ class CameraTopicWindow(QMainWindow):
             notes.append(
                 "已从公开源实时更新"
                 + (f"（{board.get('_fetched_at')}）" if board.get("_fetched_at") else "")
+                + "；本地评测行已保留并重新排名"
             )
-        highlighted = [
-            f"{e.get('method')}: {e.get('note')}"
+        if int(n_loc or 0) > 0:
+            notes.append(
+                f"对比视图：业内 {int(n_ind)} 条 + 本地 {int(n_loc)} 条（绿色「本地」行）"
+            )
+        local_notes = [
+            f"{e.get('method')}: {e.get('score')}"
             for e in entries
-            if str(e.get("note") or "").strip()
+            if str(e.get("origin") or "") == "local" or e.get("local_id")
         ]
-        if highlighted:
-            notes.append("备注 · " + "；".join(highlighted[:4]))
+        if local_notes:
+            notes.append("本地 · " + "；".join(local_notes[:6]))
         self.sim_leaderboard_note_label.setText("\n".join(notes))
 
     def _refresh_sim_leaderboard(self, backend: str = "") -> None:
-        """Fill the shared industry leaderboard for the current sim backend."""
+        """Fill the shared industry+local leaderboard for the current sim backend."""
         if not hasattr(self, "sim_leaderboard_table"):
             return
         key = (backend or self._sim_backend_id() or "isaac").strip().lower()
         board = None
         try:
-            board = load_sim_eval_board(key)
+            board = load_sim_eval_board_display(key)
+            if not board:
+                board = load_sim_eval_board(key)
         except Exception as exc:
             self.sim_leaderboard_meta_label.setText(f"榜单加载失败: {exc}")
             self.sim_leaderboard_table.setRowCount(0)
             self.sim_leaderboard_note_label.setText("")
             self._sim_leaderboard_source_url = ""
             self.sim_leaderboard_source_btn.setEnabled(False)
+            self._sim_leaderboard_row_meta = []
             return
 
         if not board:
@@ -33568,9 +34772,147 @@ class CameraTopicWindow(QMainWindow):
             self.sim_leaderboard_note_label.setText("")
             self._sim_leaderboard_source_url = ""
             self.sim_leaderboard_source_btn.setEnabled(False)
+            self._sim_leaderboard_row_meta = []
             return
 
         self._apply_sim_leaderboard_board(board)
+
+    def _sim_eval_selected_result_json(self) -> str:
+        """Absolute path to selected RoboDojo `_result.json`, or empty."""
+        tree = getattr(self, "sim_eval_tree", None)
+        if tree is None:
+            return ""
+        item = tree.currentItem()
+        if item is None:
+            return ""
+        path = str(item.data(0, Qt.UserRole) or "")
+        if not path:
+            return ""
+        result_json = os.path.join(path, "_result.json")
+        if os.path.isfile(result_json):
+            return result_json
+        if os.path.isfile(path) and path.endswith("_result.json"):
+            return path
+        return ""
+
+    def _on_sim_leaderboard_merge_clicked(self) -> None:
+        """Merge current (or manual) local eval result into the board for compare."""
+        backend = self._sim_backend_id()
+        result_json = self._sim_eval_selected_result_json()
+        entry: Optional[Dict[str, Any]] = None
+        try:
+            if result_json and backend in ("isaac", "mujoco"):
+                # Prefer auto-fill from RoboDojo result; allow rename.
+                draft = sim_eval_entry_from_result_json(
+                    result_json, backend=backend
+                )
+                method, ok = QInputDialog.getText(
+                    self,
+                    "合并到评测榜单",
+                    "方法名（将与业内条目并排对比）:",
+                    text=str(draft.get("method") or ""),
+                )
+                if not ok:
+                    return
+                method = (method or "").strip()
+                if method:
+                    draft["method"] = method
+                entry = draft
+            else:
+                # Manual merge for any backend (and when no result selected).
+                default_method = ""
+                default_score = ""
+                if result_json:
+                    try:
+                        draft = sim_eval_entry_from_result_json(
+                            result_json, backend=backend
+                        )
+                        default_method = str(draft.get("method") or "")
+                        default_score = str(draft.get("score") or "")
+                        entry = draft
+                    except Exception:
+                        entry = None
+                if entry is None:
+                    method, ok = QInputDialog.getText(
+                        self,
+                        "合并到评测榜单",
+                        f"后端「{backend}」· 方法名:",
+                        text=default_method,
+                    )
+                    if not ok or not (method or "").strip():
+                        return
+                    score, ok2 = QInputDialog.getText(
+                        self,
+                        "合并到评测榜单",
+                        "指标（如 48.0% 或 38.26 / 30.95%）:",
+                        text=default_score,
+                    )
+                    if not ok2 or not (score or "").strip():
+                        return
+                    detail, ok3 = QInputDialog.getText(
+                        self,
+                        "合并到评测榜单",
+                        "说明（可选）:",
+                        text="本地仿真评测",
+                    )
+                    if not ok3:
+                        return
+                    entry = sim_eval_entry_from_manual(
+                        backend=backend,
+                        method=method.strip(),
+                        score=score.strip(),
+                        detail=(detail or "").strip(),
+                    )
+                else:
+                    method, ok = QInputDialog.getText(
+                        self,
+                        "合并到评测榜单",
+                        f"后端「{backend}」· 方法名:",
+                        text=str(entry.get("method") or ""),
+                    )
+                    if not ok:
+                        return
+                    if (method or "").strip():
+                        entry["method"] = method.strip()
+            board = merge_sim_eval_local_entry(backend, entry)
+            self._apply_sim_leaderboard_board(board)
+            if hasattr(self, "status_bar") and self.status_bar is not None:
+                self.status_bar.showMessage(
+                    f"已合并本地评测到「{backend}」榜单 · {entry.get('method')} · {entry.get('score')}",
+                    6000,
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "合并到榜单", f"合并失败: {exc}")
+
+    def _on_sim_leaderboard_remove_local_clicked(self) -> None:
+        """Remove the selected local row from the combined leaderboard."""
+        table = getattr(self, "sim_leaderboard_table", None)
+        if table is None:
+            return
+        row = table.currentRow()
+        meta_list = getattr(self, "_sim_leaderboard_row_meta", None) or []
+        if row < 0 or row >= len(meta_list):
+            QMessageBox.information(
+                self, "移除本地", "请先在榜单中选中一行「本地」评测。"
+            )
+            return
+        meta = meta_list[row]
+        if str(meta.get("origin") or "") != "local" or not meta.get("local_id"):
+            QMessageBox.information(
+                self, "移除本地", "当前选中的是业内条目，只能移除本地评测行。"
+            )
+            return
+        backend = self._sim_backend_id()
+        try:
+            board = remove_sim_eval_local_entry(backend, str(meta["local_id"]))
+            self._apply_sim_leaderboard_board(board)
+            if hasattr(self, "status_bar") and self.status_bar is not None:
+                self.status_bar.showMessage(
+                    f"已移除本地行 · {meta.get('method') or meta.get('local_id')}",
+                    4000,
+                )
+        except Exception as exc:
+            QMessageBox.warning(self, "移除本地", f"移除失败: {exc}")
 
     def _on_sim_extended_combo_changed(self, *_args) -> None:
         if (
@@ -33630,12 +34972,15 @@ class CameraTopicWindow(QMainWindow):
             "isaac": 0,
             "mujoco": 1,
             "molmospaces": 2,
+            "psi_molmospaces": 2,
             "arena": 3,
             "libero": 4,
             "robotwin": 5,
         }.get(backend, 6 if extended else 0)
         if hasattr(self, "sim_backend_stack"):
             self.sim_backend_stack.setCurrentIndex(idx)
+        if self._is_spaces_sim_backend(backend):
+            self._sync_spaces_backend_defaults(backend)
         if hasattr(self, "_refresh_sim_leaderboard"):
             self._refresh_sim_leaderboard(backend)
         hints = {
@@ -33649,6 +34994,12 @@ class CameraTopicWindow(QMainWindow):
             ),
             "molmospaces": (
                 "MolmoSpaces：任务下拉框列出可评测 benchmark，启动时只跑当前选中的一项。"
+                "与 Isaac 评测互斥；不接 /camera/* 预览。"
+            ),
+            "psi_molmospaces": (
+                "Psi-MolmoSpaces（init_molmospaces）：任务=psi_molmo_spaces/benchmark.json；"
+                "默认策略 Psi R1 Pick Planner（无需策略服务）；"
+                "选 Psi Policy 前请先启动 psi-policy-server --port 8080。"
                 "与 Isaac 评测互斥；不接 /camera/* 预览。"
             ),
             "arena": (
@@ -33678,6 +35029,7 @@ class CameraTopicWindow(QMainWindow):
         show_mj = backend in (
             "mujoco",
             "molmospaces",
+            "psi_molmospaces",
             "arena",
             "libero",
             "robotwin",
@@ -33699,6 +35051,7 @@ class CameraTopicWindow(QMainWindow):
             start_labels = {
                 "mujoco": "启动 MuJoCo",
                 "molmospaces": "启动 MolmoSpaces",
+                "psi_molmospaces": "启动 Psi-MolmoSpaces",
                 "arena": "启动 Arena",
                 "libero": "启动 LIBERO",
                 "robotwin": "启动 RoboTwin",
@@ -33721,6 +35074,8 @@ class CameraTopicWindow(QMainWindow):
                 self.mujoco_status_label.setText("空闲 · MuJoCo")
             elif backend == "molmospaces":
                 self.mujoco_status_label.setText("空闲 · MolmoSpaces")
+            elif backend == "psi_molmospaces":
+                self.mujoco_status_label.setText("空闲 · Psi-MolmoSpaces")
             elif backend == "arena":
                 self.mujoco_status_label.setText("空闲 · IsaacLab-Arena")
             elif backend == "libero":
@@ -33773,6 +35128,7 @@ class CameraTopicWindow(QMainWindow):
             "sim_backend_isaac_radio",
             "sim_backend_mujoco_radio",
             "sim_backend_spaces_radio",
+            "sim_backend_psi_spaces_radio",
             "sim_backend_arena_radio",
             "sim_backend_libero_radio",
             "sim_backend_robotwin_radio",
@@ -33801,7 +35157,14 @@ class CameraTopicWindow(QMainWindow):
             and (not isaac_running)
             and (
                 backend
-                in ("mujoco", "molmospaces", "arena", "libero", "robotwin")
+                in (
+                    "mujoco",
+                    "molmospaces",
+                    "psi_molmospaces",
+                    "arena",
+                    "libero",
+                    "robotwin",
+                )
                 or self._is_extended_sim_backend(backend)
             )
         )
@@ -33851,7 +35214,15 @@ class CameraTopicWindow(QMainWindow):
             ):
                 self._set_rynnvalue_workspace_hud_active(False)
         startable = (not running) and (
-            backend in ("mujoco", "molmospaces", "arena", "libero", "robotwin")
+            backend
+            in (
+                "mujoco",
+                "molmospaces",
+                "psi_molmospaces",
+                "arena",
+                "libero",
+                "robotwin",
+            )
             or self._is_extended_sim_backend(backend)
         )
         if hasattr(self, "mujoco_start_btn"):
@@ -33945,7 +35316,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_mujoco_unified_start_clicked(self) -> None:
         backend = self._sim_backend_id()
-        if backend == "molmospaces":
+        if self._is_spaces_sim_backend(backend):
             self._on_molmospaces_run_clicked()
         elif backend == "arena":
             self._on_arena_run_clicked()
@@ -33965,7 +35336,7 @@ class CameraTopicWindow(QMainWindow):
             self._start_sim_eval(viewer_only=True)
         elif backend == "mujoco":
             self._on_mujoco_start_clicked(viewer_only=True)
-        elif backend == "molmospaces":
+        elif self._is_spaces_sim_backend(backend):
             self._on_molmospaces_run_clicked(viewer_only=True)
         elif backend == "arena":
             self._on_arena_run_clicked(viewer_only=True)
@@ -33980,7 +35351,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_mujoco_open_selected_dir(self) -> None:
         backend = self._sim_backend_id()
-        if backend == "molmospaces":
+        if self._is_spaces_sim_backend(backend):
             root = self._resolve_molmospaces_root()
         elif backend == "arena":
             root = self._resolve_arena_root()
@@ -34105,6 +35476,63 @@ class CameraTopicWindow(QMainWindow):
             else True
         )
         harness = mode == "harness"
+        policy = ""
+        if hasattr(self, "ext_bench_policy_combo"):
+            policy = str(self.ext_bench_policy_combo.currentData() or "")
+        if (not viewer_only) and is_lingbot_va_policy(policy) and mode in (
+            "eval",
+            "probe",
+            "hint",
+        ):
+            if mode == "hint":
+                self._append_mujoco_log(lingbot_va_install_hint(py))
+                self._on_mujoco_status("已打印 LingBot-VA 安装指引")
+                return
+            if mode == "probe":
+                ok_va, va_msg = probe_lingbot_va()
+                self._append_mujoco_log(f"[{backend}/LingBot-VA] {va_msg}")
+                self._on_mujoco_status(
+                    "LingBot-VA 就绪" if ok_va else "LingBot-VA 未就绪"
+                )
+                return
+            self._append_mujoco_log(f"--- 扩展评测 {backend} · LingBot-VA ---")
+            self._launch_lingbot_va_backend(
+                backend,
+                task=task,
+                task_suite=task,
+                label=f"ext-va:{backend}",
+            )
+            if hasattr(self, "ext_bench_status_label"):
+                self.ext_bench_status_label.setText(
+                    f"运行中 · {backend} · LingBot-VA"
+                )
+            return
+        if (not viewer_only) and is_vpp2_policy(policy) and mode in (
+            "eval",
+            "probe",
+            "hint",
+        ):
+            if mode == "hint":
+                self._append_mujoco_log(vpp2_install_hint(py))
+                self._on_mujoco_status("已打印 VPP2 安装指引")
+                return
+            if mode == "probe":
+                ok_v, v_msg = probe_vpp2()
+                self._append_mujoco_log(f"[{backend}/VPP2] {v_msg}")
+                self._on_mujoco_status("VPP2 就绪" if ok_v else "VPP2 未就绪")
+                return
+            self._append_mujoco_log(f"--- 扩展评测 {backend} · VPP2 ---")
+            self._launch_vpp2_backend(
+                backend,
+                task=task,
+                task_suite=task,
+                label=f"ext-vpp2:{backend}",
+            )
+            if hasattr(self, "ext_bench_status_label"):
+                self.ext_bench_status_label.setText(
+                    f"运行中 · {backend} · VPP2"
+                )
+            return
         try:
             plan = build_external_bench_argv(
                 backend,
@@ -34115,6 +35543,7 @@ class CameraTopicWindow(QMainWindow):
                 episodes=episodes,
                 viewer=viewer or viewer_only,
                 harness=harness,
+                policy=policy,
             )
         except Exception as exc:
             self._on_mujoco_status(f"构建启动命令失败: {exc}")
@@ -34361,6 +35790,18 @@ class CameraTopicWindow(QMainWindow):
                 hasattr(self, "arena_headless_check")
                 and self.arena_headless_check.isChecked()
             )
+        if (not viewer_only) and is_lingbot_va_policy(policy):
+            self.mujoco_log_edit.clear()
+            self._append_mujoco_log(
+                "[arena/LingBot-VA] 启动 wan_va（serve_only）；"
+                "Arena Kit 暂无原生 VA policy_type，仅起推理服务"
+            )
+            self._launch_lingbot_va_backend(
+                "arena",
+                task=env_name,
+                label="arena-va",
+            )
+            return
         steps = 200
         if hasattr(self, "arena_steps_spin"):
             steps = int(self.arena_steps_spin.value())
@@ -34569,6 +36010,7 @@ class CameraTopicWindow(QMainWindow):
             "isaac",
             "mujoco",
             "molmospaces",
+            "psi_molmospaces",
             "arena",
             "libero",
             "robotwin",
@@ -35223,6 +36665,13 @@ class CameraTopicWindow(QMainWindow):
         if not hasattr(self, "_rynnvalue_launcher"):
             return False, "RynnValue launcher 未初始化"
         url = self._sim_rynnvalue_server_url()
+        # Prefer an already-healthy deploy (UI-owned or external) — do not reload GPU.
+        ok_ext, msg_ext, _info_ext = probe_rynnvalue_reward_server(url, timeout_s=2.5)
+        if ok_ext:
+            self._append_mujoco_log(f"[rynnvalue] 已部署，跳过启动: {msg_ext}")
+            self._set_sim_rynnvalue_status(f"● {msg_ext}", level="ok")
+            self._update_sim_rynnvalue_hud_controls()
+            return True, msg_ext
         if self._rynnvalue_launcher.is_running():
             ok, msg, _info = probe_rynnvalue_reward_server(url)
             if ok:
@@ -35233,6 +36682,12 @@ class CameraTopicWindow(QMainWindow):
                 "若正在跑 infer/评测，请先在「RynnValue」页停止再部署 reward_server。",
             )
         _host, port = parse_rynnvalue_server_url(url)
+        if port_listening(_host, int(port)):
+            return (
+                False,
+                f"{_host}:{port} 已占用但 /health 未就绪（可能仍在加载，或非 RynnValue）。"
+                "请先「停止模型」再部署，或等待就绪。",
+            )
         model = self._rynnvalue_deploy_model_path()
         ckpt = self._rynnvalue_deploy_ckpt_path()
         if not model and not ckpt:
@@ -35493,6 +36948,55 @@ class CameraTopicWindow(QMainWindow):
             self._update_mujoco_ui()
             return
 
+        # LingBot-VA: official wan_va server + LIBERO client (not OpenPI).
+        if is_lingbot_va_policy(cfg):
+            ok_va, va_msg = probe_lingbot_va()
+            self._append_mujoco_log(f"[libero/LingBot-VA] {va_msg}")
+            if not ok_va:
+                self._append_mujoco_log(lingbot_va_install_hint())
+                self._on_mujoco_status("LingBot-VA 未就绪（见日志）")
+                return
+            task_end = int(task_id) + max(1, int(max_tasks))
+            try:
+                argv, cwd, env_extra = build_libero_va_eval_argv(
+                    task_suite=suite,
+                    checkpoint=ckpt,
+                    test_num=trials,
+                    task_start=int(task_id),
+                    task_end=task_end,
+                    python_bin=resolve_lingbot_va_python(),
+                    start_server=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._on_mujoco_status(f"无法组装 LingBot-VA LIBERO 命令: {exc}")
+                return
+            clean_env = {k: v for k, v in env_extra.items() if v is not None}
+            clean_env["EAI_DIR"] = EAI_DIR
+            clean_env.update(self._sim_bridge_child_env())
+            self._append_mujoco_log(
+                f"[libero/LingBot-VA] suite={suite} task_id={task_id} "
+                f"trials={trials} ckpt={ckpt}"
+            )
+            self._expand_workspace_panel()
+            self._mujoco_launcher.start_cwd_command(
+                cwd=str(cwd),
+                argv=argv,
+                label=f"libero-va {suite}",
+                env_extra=clean_env,
+            )
+            self._update_mujoco_ui()
+            return
+
+        # VPP2: official scripts/libero/eval.sh
+        if is_vpp2_policy(cfg):
+            self._launch_vpp2_backend(
+                "libero",
+                task=suite,
+                task_suite=suite,
+                label=f"libero-vpp2 {suite}",
+            )
+            return
+
         # libero 客户端环境无 jax/openpi；「local」改为自动部署 serve + remote 评测。
         eval_mode = mode
         if mode == "local":
@@ -35613,6 +37117,38 @@ class CameraTopicWindow(QMainWindow):
         )
         self._update_mujoco_ui()
 
+    def _on_libero_config_changed(self, *_args) -> None:
+        cfg = self._libero_config_id()
+        if is_vpp2_policy(cfg):
+            if hasattr(self, "libero_ckpt_edit"):
+                cur = self.libero_ckpt_edit.text().strip()
+                if (not cur) or "pi05_libero" in cur or "pi0_libero" in cur:
+                    self.libero_ckpt_edit.setText(
+                        resolve_vpp2_bundle(
+                            os.environ.get("VPP2_BUNDLE", "joint2b_s100000")
+                        )
+                    )
+            if hasattr(self, "libero_mode_combo"):
+                idx = self.libero_mode_combo.findData("local")
+                if idx >= 0:
+                    self.libero_mode_combo.setCurrentIndex(idx)
+            return
+        if not is_lingbot_va_policy(cfg):
+            return
+        if hasattr(self, "libero_ckpt_edit"):
+            cur = self.libero_ckpt_edit.text().strip()
+            if (not cur) or "pi05_libero" in cur or "pi0_libero" in cur:
+                self.libero_ckpt_edit.setText(
+                    resolve_lingbot_va_checkpoint(
+                        os.environ.get("LINGBOT_VA_CKPT", "")
+                    )
+                )
+        if hasattr(self, "libero_mode_combo"):
+            # VA path manages its own wan_va server.
+            idx = self.libero_mode_combo.findData("local")
+            if idx >= 0:
+                self.libero_mode_combo.setCurrentIndex(idx)
+
     def _robotwin_ckpt_text(self) -> str:
         if hasattr(self, "robotwin_ckpt_edit"):
             return self.robotwin_ckpt_edit.text().strip()
@@ -35718,6 +37254,51 @@ class CameraTopicWindow(QMainWindow):
             num_envs = 1
             if hasattr(self, "robotwin_num_envs_spin"):
                 self.robotwin_num_envs_spin.setValue(1)
+
+        if is_vpp2_policy(cfg):
+            self._append_mujoco_log(
+                "[robotwin/VPP2] serve_only：启动 VPP2 policy server；"
+                "RoboTwin 无官方 closed-loop adapter"
+            )
+            self._launch_vpp2_backend(
+                "robotwin", task=task, label="robotwin-vpp2"
+            )
+            return
+
+        if is_lingbot_va_policy(cfg):
+            ok_va, va_msg = probe_lingbot_va()
+            self._append_mujoco_log(f"[robotwin/LingBot-VA] {va_msg}")
+            if not ok_va:
+                self._append_mujoco_log(lingbot_va_install_hint())
+                self._on_mujoco_status("LingBot-VA 未就绪（见日志）")
+                return
+            try:
+                argv, cwd, env_extra = build_robotwin_va_eval_argv(
+                    task=task,
+                    checkpoint=ckpt,
+                    config_name=va_config_for_backend("robotwin"),
+                    python_bin=resolve_lingbot_va_python(),
+                    gpu=str(gpu),
+                    start_server=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._on_mujoco_status(f"无法组装 LingBot-VA RoboTwin 命令: {exc}")
+                return
+            clean_env = {k: v for k, v in env_extra.items() if v is not None}
+            clean_env["EAI_DIR"] = EAI_DIR
+            clean_env.update(self._sim_bridge_child_env())
+            self._append_mujoco_log(
+                f"[robotwin/LingBot-VA] task={task} gpu={gpu} ckpt={ckpt}"
+            )
+            self._expand_workspace_panel()
+            self._mujoco_launcher.start_cwd_command(
+                cwd=str(cwd),
+                argv=argv,
+                label=f"robotwin-va {task}",
+                env_extra=clean_env,
+            )
+            self._update_mujoco_ui()
+            return
 
         py = resolve_robotwin_python()
         ok_deps, dep_msg = probe_robotwin_deps(
@@ -35903,8 +37484,62 @@ class CameraTopicWindow(QMainWindow):
         raw = ""
         if hasattr(self, "molmospaces_root_edit"):
             raw = self.molmospaces_root_edit.text().strip()
-        raw = raw or os.environ.get("MOLMOSPACES_ROOT", "") or MOLMOSPACES_ROOT_DEFAULT
+        backend = self._sim_backend_id() if hasattr(self, "_sim_backend_id") else ""
+        if backend == "psi_molmospaces":
+            raw = (
+                raw
+                or os.environ.get("PSI_MOLMOSPACES_ROOT", "")
+                or os.environ.get("MOLMOSPACES_ROOT", "")
+                or PSI_MOLMOSPACES_ROOT_DEFAULT
+            )
+        else:
+            raw = raw or os.environ.get("MOLMOSPACES_ROOT", "") or MOLMOSPACES_ROOT_DEFAULT
         return os.path.abspath(os.path.expanduser(raw))
+
+    def _sync_spaces_backend_defaults(self, backend: str) -> None:
+        """Swap MolmoSpaces / Psi-MolmoSpaces root + default policy when radios flip."""
+        if not hasattr(self, "molmospaces_root_edit"):
+            return
+        cur = self.molmospaces_root_edit.text().strip()
+        cur_norm = os.path.abspath(os.path.expanduser(cur)) if cur else ""
+        molmo_default = os.path.abspath(MOLMOSPACES_ROOT_DEFAULT)
+        psi_default = os.path.abspath(PSI_MOLMOSPACES_ROOT_DEFAULT)
+        if backend == "psi_molmospaces":
+            if (not cur_norm) or cur_norm == molmo_default or cur_norm.rstrip(
+                "/"
+            ).endswith("/molmospaces"):
+                self.molmospaces_root_edit.setText(PSI_MOLMOSPACES_ROOT_DEFAULT)
+            if hasattr(self, "molmospaces_policy_combo"):
+                idx = self.molmospaces_policy_combo.findData(
+                    PSI_MOLMOSPACES_DEFAULT_POLICY
+                )
+                if idx >= 0:
+                    self.molmospaces_policy_combo.setCurrentIndex(idx)
+            if hasattr(self, "molmospaces_root_edit"):
+                self.molmospaces_root_edit.setToolTip(
+                    "Psi-MolmoSpaces 仓库路径（默认 "
+                    f"{PSI_MOLMOSPACES_ROOT_DEFAULT}）"
+                )
+        elif backend == "molmospaces":
+            if (not cur_norm) or cur_norm == psi_default or cur_norm.rstrip(
+                "/"
+            ).endswith("/psi-molmospaces"):
+                self.molmospaces_root_edit.setText(MOLMOSPACES_ROOT_DEFAULT)
+            if hasattr(self, "molmospaces_policy_combo"):
+                idx = self.molmospaces_policy_combo.findData(
+                    "molmo_spaces.evaluation.configs.evaluation_configs:PiPolicyEvalConfig"
+                )
+                if idx >= 0:
+                    self.molmospaces_policy_combo.setCurrentIndex(idx)
+            if hasattr(self, "molmospaces_root_edit"):
+                self.molmospaces_root_edit.setToolTip(
+                    "MolmoSpaces 仓库路径（默认 "
+                    f"{MOLMOSPACES_ROOT_DEFAULT}）"
+                )
+        if hasattr(self, "_refresh_molmospaces_tasks"):
+            self._refresh_molmospaces_tasks()
+        if hasattr(self, "_on_molmospaces_policy_changed"):
+            self._on_molmospaces_policy_changed()
 
     def _resolve_molmospaces_python(self) -> str:
         # Prefer MuJoCo tab Python if it looks like molmospaces env; else default.
@@ -35947,7 +37582,9 @@ class CameraTopicWindow(QMainWindow):
         current_id = ""
         if isinstance(current, dict):
             current_id = str(current.get("id") or "")
-        tasks = list_molmospaces_eval_tasks(root)
+        backend = self._sim_backend_id() if hasattr(self, "_sim_backend_id") else ""
+        psi_only = backend == "psi_molmospaces"
+        tasks = list_molmospaces_eval_tasks(root, psi_only=psi_only)
         self.molmospaces_task_combo.blockSignals(True)
         self.molmospaces_task_combo.clear()
         ready_n = 0
@@ -35965,8 +37602,9 @@ class CameraTopicWindow(QMainWindow):
                     self.molmospaces_task_combo.setCurrentIndex(i)
                     break
         self.molmospaces_task_combo.blockSignals(False)
+        tag = "psi_molmospaces" if psi_only else "molmospaces"
         self._append_mujoco_log(
-            f"[molmospaces] 已列出 {len(tasks)} 个评测任务（本地数据就绪 {ready_n}）"
+            f"[{tag}] 已列出 {len(tasks)} 个评测任务（本地数据就绪 {ready_n}）"
         )
 
     def _repair_molmospaces_cache_manifest(self) -> List[str]:
@@ -36096,10 +37734,149 @@ class CameraTopicWindow(QMainWindow):
         policy = ""
         if hasattr(self, "molmospaces_policy_combo"):
             policy = str(self.molmospaces_policy_combo.currentData() or "")
-        show = is_pi_policy_id(policy)
+        show = (
+            is_pi_policy_id(policy)
+            and (not is_lingbot_va_policy(policy))
+            and (not is_vpp2_policy(policy))
+        )
         if hasattr(self, "molmospaces_pi_row"):
             self.molmospaces_pi_row.setVisible(show)
         self._update_molmospaces_pi_deploy_ui()
+
+    def _launch_vpp2_backend(
+        self,
+        backend: str,
+        *,
+        task: str = "",
+        task_suite: str = "",
+        label: str = "",
+    ) -> bool:
+        """Start VPP2 for any sim backend. Returns True if launched."""
+        try:
+            ensure_vpp2_adapter()
+        except Exception:
+            pass
+        ok_v, v_msg = probe_vpp2()
+        self._append_mujoco_log(f"[{backend}/VPP2] {v_msg}")
+        if not ok_v:
+            self._append_mujoco_log(vpp2_install_hint())
+            self._on_mujoco_status("VPP2 未就绪（见日志）")
+            return False
+        try:
+            argv, cwd, env_extra, note = build_backend_vpp2_argv(
+                backend,
+                python_bin=resolve_vpp2_python(),
+                port=DEFAULT_VPP2_PORT,
+                task=task,
+                task_suite=task_suite,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._on_mujoco_status(f"无法组装 VPP2 命令: {exc}")
+            self._append_mujoco_log(str(exc))
+            return False
+        clean_env = {k: v for k, v in env_extra.items() if v is not None}
+        clean_env["EAI_DIR"] = EAI_DIR
+        try:
+            clean_env.update(self._sim_bridge_child_env())
+        except Exception:
+            pass
+        self._append_mujoco_log(note)
+        self._append_mujoco_log("cmd: " + " ".join(argv))
+        level = vpp2_support_level(backend)
+        if level == "serve_only":
+            self._on_mujoco_status(
+                f"VPP2 policy server 启动中（{backend} · serve_only）"
+            )
+        else:
+            self._on_mujoco_status(f"VPP2 评测启动 · {backend}")
+        self._mujoco_launcher.start_cwd_command(
+            cwd=str(cwd),
+            argv=argv,
+            label=label or f"vpp2:{backend}",
+            env_extra=clean_env,
+        )
+        self._update_mujoco_ui()
+        return True
+
+    def _launch_lingbot_va_backend(
+        self,
+        backend: str,
+        *,
+        task: str = "",
+        task_suite: str = "",
+        checkpoint: str = "",
+        label: str = "",
+    ) -> bool:
+        """Start LingBot-VA for any sim backend. Returns True if launched."""
+        ok_va, va_msg = probe_lingbot_va()
+        self._append_mujoco_log(f"[{backend}/LingBot-VA] {va_msg}")
+        if not ok_va:
+            self._append_mujoco_log(lingbot_va_install_hint())
+            self._on_mujoco_status("LingBot-VA 未就绪（见日志）")
+            return False
+
+        va_host = (
+            os.environ.get("LINGBOT_VA_VA_HOST", "").strip()
+            or os.environ.get("VA_SERVER_HOST", "").strip()
+            or "127.0.0.1"
+        )
+        try:
+            va_port = int(
+                os.environ.get("LINGBOT_VA_VA_PORT")
+                or os.environ.get("VA_SERVER_PORT")
+                or LINGBOT_VA_PORT_DEFAULT
+            )
+        except (TypeError, ValueError):
+            va_port = int(LINGBOT_VA_PORT_DEFAULT)
+        # Reuse an already-deployed wan_va instead of loading a second copy (OOM).
+        if port_listening(va_host, va_port):
+            self._append_mujoco_log(
+                f"[{backend}/LingBot-VA] wan_va 已在 "
+                f"ws://{va_host}:{va_port}，跳过重复启动"
+            )
+            self._on_mujoco_status(
+                f"LingBot-VA 已部署 ws://{va_host}:{va_port}（复用）"
+            )
+            self._update_mujoco_ui()
+            return True
+
+        try:
+            argv, cwd, env_extra, note = build_backend_va_argv(
+                backend,
+                checkpoint=checkpoint or resolve_lingbot_va_checkpoint(""),
+                task=task,
+                task_suite=task_suite,
+                python_bin=resolve_lingbot_va_python(),
+                start_server=True,
+                port=va_port,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._on_mujoco_status(f"无法组装 LingBot-VA 命令: {exc}")
+            self._append_mujoco_log(str(exc))
+            return False
+        clean_env = {k: v for k, v in env_extra.items() if v is not None}
+        clean_env["EAI_DIR"] = EAI_DIR
+        try:
+            clean_env.update(self._sim_bridge_child_env())
+        except Exception:
+            pass
+        self._append_mujoco_log(note)
+        self._append_mujoco_log("cmd: " + " ".join(argv))
+        level = va_support_level(backend)
+        if level == "serve_only":
+            self._on_mujoco_status(
+                f"LingBot-VA wan_va 服务启动中（{backend} · serve_only）"
+            )
+        else:
+            self._on_mujoco_status(f"LingBot-VA 评测启动 · {backend}")
+        self._mujoco_launcher.start_cwd_command(
+            cwd=str(cwd),
+            argv=argv,
+            label=label or f"lingbot-va:{backend}",
+            env_extra=clean_env,
+        )
+        self._update_mujoco_ui()
+        return True
 
     def _molmospaces_pi_ckpt_text(self) -> str:
         if hasattr(self, "molmospaces_pi_ckpt_edit"):
@@ -36460,15 +38237,24 @@ class CameraTopicWindow(QMainWindow):
         ):
             self._on_mujoco_status("Isaac 评测/相机桥正在运行，请先停止")
             return
-        if self._sim_backend_id() != "molmospaces":
-            self._on_mujoco_status("请先将仿真后端切换为 MolmoSpaces")
+        backend = self._sim_backend_id()
+        if not self._is_spaces_sim_backend(backend):
+            self._on_mujoco_status(
+                "请先将仿真后端切换为 MolmoSpaces / Psi-MolmoSpaces"
+            )
             return
+        spaces_tag = (
+            "psi_molmospaces" if backend == "psi_molmospaces" else "molmospaces"
+        )
+        spaces_label = (
+            "Psi-MolmoSpaces" if backend == "psi_molmospaces" else "MolmoSpaces"
+        )
         root = self._resolve_molmospaces_root()
         # 只开界面：强制快速演示 --viewer（不走 Pi 评测）。
         if viewer_only:
             recipe = "quick_viewer"
             self._append_mujoco_log(
-                "[molmospaces] 只开界面：快速演示 --viewer，不调用模型"
+                f"[{spaces_tag}] 只开界面：快速演示 --viewer，不调用模型"
             )
         else:
             recipe = "quick_viewer"
@@ -36477,7 +38263,7 @@ class CameraTopicWindow(QMainWindow):
                     self.molmospaces_recipe_combo.currentData() or "quick_viewer"
                 )
         if not os.path.isdir(root):
-            self._on_mujoco_status(f"MolmoSpaces 目录不存在: {root}")
+            self._on_mujoco_status(f"{spaces_label} 目录不存在: {root}")
             return
         if recipe == "open_dir":
             QDesktopServices.openUrl(QUrl.fromLocalFile(root))
@@ -36534,7 +38320,12 @@ class CameraTopicWindow(QMainWindow):
         repaired: List[str] = []
         if recipe == "eval_task":
             robot_id = self._molmospaces_selected_robot()
-            if robot_id in MOLMOSPACES_LOCAL_MJCF_ROBOTS:
+            # Psi-MolmoSpaces fork has first-class Psi R1; local MJCF is only a
+            # MolmoSpaces quick_viewer fallback and should not block eval there.
+            if (
+                robot_id in MOLMOSPACES_LOCAL_MJCF_ROBOTS
+                and backend != "psi_molmospaces"
+            ):
                 self._on_mujoco_status(
                     f"本体「{robot_id}」仅支持快速演示（本地 MJCF），请改选内置机型再评测"
                 )
@@ -36543,13 +38334,13 @@ class CameraTopicWindow(QMainWindow):
             if hasattr(self, "molmospaces_task_combo"):
                 task = self.molmospaces_task_combo.currentData()
             if not isinstance(task, dict) or not task.get("path"):
-                self._on_mujoco_status("请选择一个 MolmoSpaces 评测任务")
+                self._on_mujoco_status(f"请选择一个 {spaces_label} 评测任务")
                 return
             bench = str(task["path"])
             if not molmospaces_benchmark_ready(bench):
                 self._append_mujoco_log(
-                    f"[molmospaces] 任务数据未就绪: {bench}\n"
-                    "  在 molmospaces 仓库执行一次资源初始化后再刷新:\n"
+                    f"[{spaces_tag}] 任务数据未就绪: {bench}\n"
+                    "  在仓库执行一次资源初始化后再刷新:\n"
                     f"  {py} -m molmo_spaces.molmo_spaces_constants"
                 )
                 self._on_mujoco_status(f"任务未下载: {task.get('label')}")
@@ -36559,8 +38350,57 @@ class CameraTopicWindow(QMainWindow):
                 policy = str(
                     self.molmospaces_policy_combo.currentData() or policy
                 )
+            if is_lingbot_va_policy(policy):
+                self.mujoco_log_edit.clear()
+                self._append_mujoco_log(
+                    f"[{spaces_tag}/LingBot-VA] 启动 wan_va（serve_only）；"
+                    f"{spaces_label} 尚无官方 VA closed-loop adapter"
+                )
+                self._launch_lingbot_va_backend(
+                    spaces_tag,
+                    task=str(task.get("id") or ""),
+                    label=f"{spaces_tag}-va",
+                )
+                return
+            if is_vpp2_policy(policy):
+                self.mujoco_log_edit.clear()
+                self._append_mujoco_log(
+                    f"[{spaces_tag}/VPP2] 启动 policy server（serve_only）；"
+                    f"{spaces_label} 尚无官方 VPP2 closed-loop adapter"
+                )
+                self._launch_vpp2_backend(
+                    spaces_tag,
+                    task=str(task.get("id") or ""),
+                    label=f"{spaces_tag}-vpp2",
+                )
+                return
             pi_ckpt = ""
-            if is_pi_policy_id(policy):
+            if is_psi_policy_id(policy):
+                # PsiPolicy connects to psi-policy-server (openpi-compatible WS).
+                # Do NOT start openpi serve_policy here.
+                self.mujoco_log_edit.clear()
+                host = "localhost"
+                port = PSI_POLICY_SERVER_PORT_DEFAULT
+                self._append_mujoco_log(
+                    f"[psi-policy] 选用 Psi Policy：探测 ws://{host}:{port} …"
+                )
+                ok, msg = probe_pi_server(host, port, timeout_s=4.0)
+                if not ok:
+                    serve = os.path.join(root, PSI_POLICY_SERVER_SCRIPT)
+                    self._append_mujoco_log(f"[psi-policy] 预检失败: {msg}")
+                    self._append_mujoco_log(
+                        "[psi-policy] 请先在另一终端启动（端口须与 "
+                        f"PsiPolicyConfig.remote_config 一致，默认 {port}）:\n"
+                        f"  cd {shlex.quote(os.path.join(root, 'psi-policy-server'))}\n"
+                        f"  python scripts/serve_policy.py --port {port} "
+                        "policy:checkpoint --policy.config=<cfg> "
+                        "--policy.dir=<ckpt_or_dir>\n"
+                        f"  # 或: {shlex.quote(serve)} --port {port}"
+                    )
+                    self._on_mujoco_status(f"Psi Policy 服务未就绪: {msg}")
+                    return
+                self._append_mujoco_log(f"[psi-policy] 预检通过: {msg}")
+            elif is_pi_policy_id(policy):
                 self.mujoco_log_edit.clear()
                 self._append_mujoco_log("[pi] 选用 Pi：先确认模型/服务可调用…")
                 ok, msg = self._ensure_pi_policy_ready(
@@ -36580,7 +38420,12 @@ class CameraTopicWindow(QMainWindow):
             if not os.path.isfile(wrapper):
                 self._on_mujoco_status(f"未找到: {wrapper}")
                 return
-            os.makedirs(MOLMOSPACES_EVAL_OUTPUT_DIR, exist_ok=True)
+            out_dir = (
+                PSI_MOLMOSPACES_EVAL_OUTPUT_DIR
+                if backend == "psi_molmospaces"
+                else MOLMOSPACES_EVAL_OUTPUT_DIR
+            )
+            os.makedirs(out_dir, exist_ok=True)
             argv = [
                 py,
                 wrapper,
@@ -36591,7 +38436,7 @@ class CameraTopicWindow(QMainWindow):
                 "--num_workers",
                 "1",
                 "--output_dir",
-                MOLMOSPACES_EVAL_OUTPUT_DIR,
+                out_dir,
             ]
             if pi_ckpt:
                 argv.extend(["--checkpoint_path", pi_ckpt])
@@ -36611,26 +38456,27 @@ class CameraTopicWindow(QMainWindow):
             )
             if vgl:
                 argv = [vgl, "-d", os.environ.get("MUJOCO_VGL_DEVICE") or "egl", *argv]
-            label = f"molmospaces eval {task.get('id')}"
+            label = f"{spaces_tag} eval {task.get('id')}"
             if not is_pi_policy_id(policy):
                 self.mujoco_log_edit.clear()
-            self._append_mujoco_log(f"[molmospaces] task={task.get('label')}")
-            self._append_mujoco_log(f"[molmospaces] benchmark={bench}")
-            self._append_mujoco_log(f"[molmospaces] policy={policy}")
+            self._append_mujoco_log(f"[{spaces_tag}] task={task.get('label')}")
+            self._append_mujoco_log(f"[{spaces_tag}] benchmark={bench}")
+            self._append_mujoco_log(f"[{spaces_tag}] policy={policy}")
             if pi_ckpt:
-                self._append_mujoco_log(f"[molmospaces] checkpoint={pi_ckpt}")
+                self._append_mujoco_log(f"[{spaces_tag}] checkpoint={pi_ckpt}")
             self._append_mujoco_log(
-                f"[molmospaces] max_episodes={'全部' if max_eps <= 0 else max_eps}"
+                f"[{spaces_tag}] max_episodes={'全部' if max_eps <= 0 else max_eps}"
             )
             self._append_mujoco_log(
-                "[molmospaces] 结束后保留窗口，点「停止」或关闭窗口再退出"
+                f"[{spaces_tag}] 结束后保留窗口，点「停止」或关闭窗口再退出"
             )
-            if not self._ensure_live_hud_reward_or_abort("molmospaces"):
+            if not self._ensure_live_hud_reward_or_abort(spaces_tag):
                 return
-            hud_env = self._rynnvalue_live_hud_child_env("molmospaces")
+            hud_env = self._rynnvalue_live_hud_child_env(spaces_tag)
             env_extra = {
                 "MUJOCO_GL": "glfw",
                 "MOLMOSPACES_ROOT": root,
+                "RYNNVALUE_HUD_BACKEND": spaces_tag,
                 "MOLMOSPACES_EVAL_VIEWER": "1",
                 # Front third-person by default; set FIRST_PERSON=1 for head/exo.
                 "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
@@ -36650,7 +38496,7 @@ class CameraTopicWindow(QMainWindow):
                 env_extra.update(hud_env)
                 self._expand_workspace_panel()
                 self._append_mujoco_log(
-                    f"[molmospaces] RynnValue Live HUD "
+                    f"[{spaces_tag}] RynnValue Live HUD "
                     f"url={hud_env.get('RYNNVALUE_SERVER_URL')}"
                 )
             self._mujoco_launcher.start_cwd_command(
@@ -36778,12 +38624,13 @@ class CameraTopicWindow(QMainWindow):
         self._append_mujoco_log(
             "[molmospaces] 结束后保留窗口，点「停止」或关闭窗口再退出"
         )
-        if not self._ensure_live_hud_reward_or_abort("molmospaces"):
+        if not self._ensure_live_hud_reward_or_abort(spaces_tag):
             return
-        hud_env = self._rynnvalue_live_hud_child_env("molmospaces")
+        hud_env = self._rynnvalue_live_hud_child_env(spaces_tag)
         env_extra = {
             "MUJOCO_GL": "glfw",
             "MOLMOSPACES_ROOT": root,
+            "RYNNVALUE_HUD_BACKEND": spaces_tag,
             "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
             "MOLMOSPACES_VIEWER_CAM": "front",
             "MOLMOSPACES_FORCE_EGL": "1",
@@ -36840,6 +38687,25 @@ class CameraTopicWindow(QMainWindow):
             return
         if self._sim_backend_id() != "mujoco":
             self._on_mujoco_status("请先将仿真后端切换为 MuJoCo")
+            return
+        policy = ""
+        if hasattr(self, "mujoco_policy_combo"):
+            policy = str(self.mujoco_policy_combo.currentData() or "")
+        if (not viewer_only) and is_lingbot_va_policy(policy):
+            self.mujoco_log_edit.clear()
+            self._append_mujoco_log(
+                "[mujoco/LingBot-VA] 启动 wan_va（serve_only）；"
+                "MJCF viewer 无 VA closed-loop，完整评测请用 LIBERO/RoboTwin/Isaac"
+            )
+            self._launch_lingbot_va_backend("mujoco", label="mujoco-va")
+            return
+        if (not viewer_only) and is_vpp2_policy(policy):
+            self.mujoco_log_edit.clear()
+            self._append_mujoco_log(
+                "[mujoco/VPP2] 启动 policy server（serve_only）；"
+                "MJCF viewer 无 VPP2 closed-loop，完整评测请用 LIBERO/Isaac"
+            )
+            self._launch_vpp2_backend("mujoco", label="mujoco-vpp2")
             return
         mjcf = self._resolve_mujoco_mjcf_path()
         if not mjcf or not os.path.isfile(mjcf):
@@ -37435,6 +39301,22 @@ class CameraTopicWindow(QMainWindow):
             self._on_rynnvalue_status("RynnValue 正在运行")
             return
         job = str(self.rynnvalue_job_combo.currentData() or "infer").strip()
+        port = int(self.rynnvalue_port_spin.value())
+        # reward_server：先探测已部署实例，命中则跳过启动（无需再填 model）
+        if job in ("reward_server", "server", "serve"):
+            url = f"http://127.0.0.1:{port}"
+            ok_srv, msg_srv, info_srv = probe_rynnvalue_reward_server(
+                url, timeout_s=2.0
+            )
+            if ok_srv:
+                self._append_rynnvalue_log(f"[adopt] 已部署，跳过启动: {msg_srv}")
+                self._on_rynnvalue_status(f"已部署，跳过启动: {msg_srv}")
+                self._update_rynnvalue_ui()
+                return
+            if info_srv.get("listening"):
+                self._append_rynnvalue_log(f"[skip] {msg_srv}")
+                self._on_rynnvalue_status(msg_srv)
+                return
         model = self.rynnvalue_model_edit.text().strip()
         if not model and job not in ("reward_server",):
             self._append_rynnvalue_log("[ERROR] 请填写模型路径")

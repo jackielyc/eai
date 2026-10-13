@@ -25,7 +25,7 @@
 
 ```bash
 bash run_hy_embodied_vlm.sh --clone
-bash run_hy_embodied_vlm.sh --install   # 需 uv
+bash run_hy_embodied_vlm.sh --install   # miniconda envs/vllm + pip
 TP=4 bash run_hy_embodied_vlm.sh
 ```
 

@@ -29,7 +29,6 @@ LIBERO_CONFIG_DIR_DEFAULT = EAI_DIR / ".cache" / "libero"
 LIBERO_EVAL_OUTPUT_DIR = EAI_DIR / ".cache" / "libero_eval"
 
 LIBERO_PYTHON_CANDIDATES: Tuple[str, ...] = (
-    str(EAI_DIR / ".cache" / "envs" / "libero" / "bin" / "python"),
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/libero/bin/python",
     "/home/psibot/miniconda3/envs/libero/bin/python",
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/openpi/bin/python",
@@ -48,17 +47,19 @@ LIBERO_TASK_SUITES: Tuple[Tuple[str, str], ...] = (
 LIBERO_POLICY_CONFIGS: Tuple[Tuple[str, str], ...] = (
     ("π0.5-LIBERO (pi05_libero)", "pi05_libero"),
     ("π0-LIBERO (pi0_libero)", "pi0_libero"),
+    ("LingBot-VA (WAM / wan_va)", "lingbot_va"),
+    ("VPP2 (WAM)", "vpp2"),
 )
 
 LIBERO_CKPT_GS_DEFAULT = "gs://openpi-assets/checkpoints/pi05_libero"
 # Official openpi JAX layout mirror (params/ + assets/); GCS often needs anon/gsutil.
 LIBERO_CKPT_HF_DEFAULT = "bf-jeon/pi05_libero"
-LIBERO_CKPT_HF_LOCAL_DEFAULT = str(EAI_DIR / ".cache" / "openpi" / "hf" / "pi05_libero")
+MODELS_DIR = Path("/share_data/projects/mahjong/share/personal/liyichao/models")
+LIBERO_CKPT_HF_LOCAL_DEFAULT = str(MODELS_DIR / "pi05_libero")
 LIBERO_CKPT_LOCAL_CANDIDATES: Tuple[str, ...] = (
     LIBERO_CKPT_HF_LOCAL_DEFAULT,
-    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_libero",
+    str(MODELS_DIR / "pi0_libero"),
     str(EAI_DIR / ".cache" / "openpi" / "openpi-assets" / "checkpoints" / "pi05_libero"),
-    "/share_data/projects/mahjong/share/personal/liyichao/models/pi0_libero",
     str(EAI_DIR / ".cache" / "openpi" / "openpi-assets" / "checkpoints" / "pi0_libero"),
 )
 
@@ -107,7 +108,6 @@ def resolve_libero_src(openpi_root: Optional[Path] = None) -> Path:
     for cand in (
         root / "third_party" / "libero",
         LIBERO_SRC_DEFAULT,
-        resolve_rlinf_root() / ".venv" / "libero",
     ):
         if cand.is_dir():
             return cand.resolve()

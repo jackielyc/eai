@@ -42,7 +42,10 @@ NATIVE_BACKENDS: Tuple[SimBackendSpec, ...] = (
         label="Isaac / RoboDojo",
         kind="native",
         stack_page="isaac",
-        hint="Isaac / RoboDojo：启动评测后进程常驻，直到「停止评测」。",
+        hint=(
+            "Isaac / RoboDojo：启动评测后进程常驻，直到「停止评测」。"
+            "策略可选 LingBot_VA / VPP2（VPP2 需 VPP2_BUNDLE + Wan 权重）。"
+        ),
         source_url=(
             "https://galaxygeneralrobotics.github.io/astra-policy/"
             "index.html?view=gripper-manipulation"
@@ -59,7 +62,10 @@ NATIVE_BACKENDS: Tuple[SimBackendSpec, ...] = (
         label="MuJoCo",
         kind="native",
         stack_page="mujoco",
-        hint="MuJoCo：本地 MJCF 交互 viewer。榜单默认对照 Meta-World。",
+        hint=(
+            "MuJoCo：本地 MJCF 交互 viewer。榜单默认对照 Meta-World。"
+            "LingBot-VA / VPP2：serve_only；完整评测请切 LIBERO* / Isaac。"
+        ),
         embodied_slug="meta-world",
         source_url="https://embodiedbench.vercel.app/en/benchmarks/meta-world",
         source_label="EmbodiedBench Meta-World",
@@ -72,7 +78,10 @@ NATIVE_BACKENDS: Tuple[SimBackendSpec, ...] = (
         label="MolmoSpaces",
         kind="native",
         stack_page="molmospaces",
-        hint="MolmoSpaces：任务下拉框列出可评测 benchmark。",
+        hint=(
+            "MolmoSpaces：任务下拉框列出可评测 benchmark。"
+            "策略含 LingBot-VA / VPP2（serve_only）。"
+        ),
         source_url="https://molmospaces.allen.ai/leaderboard",
         source_label="molmospaces.allen.ai",
         harness_image="molmospaces",
@@ -82,11 +91,40 @@ NATIVE_BACKENDS: Tuple[SimBackendSpec, ...] = (
         camera_key="exo_camera_1",
     ),
     SimBackendSpec(
+        key="psi_molmospaces",
+        label="Psi-MolmoSpaces",
+        kind="native",
+        stack_page="molmospaces",
+        hint=(
+            "Psi-MolmoSpaces（init_molmospaces）：评测入口 eval_main + "
+            "psi_molmo_spaces/benchmark.json；默认 Psi R1 Pick Planner；"
+            "Psi Policy 需先起 psi-policy-server --port 8080。"
+        ),
+        source_url="https://molmospaces.allen.ai/leaderboard",
+        source_label="molmospaces.allen.ai / psi-molmospaces",
+        harness_image="molmospaces",
+        default_roots=(
+            f"{_LIY}/psi-molmospaces",
+            f"{_LIY}/molmospaces",
+        ),
+        install_hint=(
+            "git clone ssh://git@code.psibot.net:10022/dev-simulation/psi-molmospaces.git\n"
+            "conda/env 可与 molmospaces 共用；评测入口仍为 molmo_spaces/evaluation/eval_main.py"
+        ),
+        engine="mujoco",
+        robot_description="a Psi R1 Ruiyan manipulator in Psi-MolmoSpaces",
+        camera_description="the exo / third-person scene camera",
+        camera_key="exo_camera_1",
+    ),
+    SimBackendSpec(
         key="arena",
         label="IsaacLab-Arena",
         kind="native",
         stack_page="arena",
-        hint="IsaacLab-Arena：已注册 environment 列表评测。",
+        hint=(
+            "IsaacLab-Arena：已注册 environment 列表评测。"
+            "策略含 LingBot-VA / VPP2（serve_only）。"
+        ),
         source_url="https://isaac-sim.github.io/IsaacLab-Arena/main/index.html",
         source_label="Isaac Lab-Arena docs",
         engine="isaac",
@@ -99,7 +137,10 @@ NATIVE_BACKENDS: Tuple[SimBackendSpec, ...] = (
         label="LIBERO",
         kind="native",
         stack_page="libero",
-        hint="LIBERO：对齐 RLinf openpi eval。",
+        hint=(
+            "LIBERO：对齐 RLinf openpi eval；配置可选 LingBot-VA / VPP2"
+            "（VPP2 走官方 scripts/libero/eval.sh）。"
+        ),
         embodied_slug="libero",
         source_url="https://embodiedbench.vercel.app/en/benchmarks/libero",
         source_label="EmbodiedBench LIBERO",
@@ -114,7 +155,10 @@ NATIVE_BACKENDS: Tuple[SimBackendSpec, ...] = (
         label="RoboTwin",
         kind="native",
         stack_page="robotwin",
-        hint="RoboTwin：OpenPI + ALOHA / SAPIEN。",
+        hint=(
+            "RoboTwin：OpenPI + ALOHA / SAPIEN；配置可选 LingBot-VA / VPP2"
+            "（VPP2 为 serve_only）。"
+        ),
         embodied_slug="robotwin-2",
         source_url="https://robotwin-platform.github.io/leaderboard",
         source_label="RoboTwin / EmbodiedBench",
@@ -472,6 +516,10 @@ _BY_KEY: Dict[str, SimBackendSpec] = {b.key: b for b in ALL_BACKENDS}
 _ALIASES: Dict[str, str] = {
     "robodojo": "isaac",
     "spaces": "molmospaces",
+    "psi-molmospaces": "psi_molmospaces",
+    "psi_spaces": "psi_molmospaces",
+    "psimolmospaces": "psi_molmospaces",
+    "psi-molmo-spaces": "psi_molmospaces",
     "simplerenv": "simpler",
     "simpler-env": "simpler",
     "simpler_env": "simpler",

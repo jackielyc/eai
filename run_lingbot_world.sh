@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# 在独立 Python 进程中跑 LingBot-World-V2（优先用仓库自带 .venv）。
+# 在独立 Python 进程中跑 LingBot-World-V2（优先 miniconda envs/eai）。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER="${SCRIPT_DIR}/lingbot_world_worker.py"
 ROOT="${LINGBOT_WORLD_ROOT:-/share_data/projects/mahjong/share/personal/liyichao/lingbot-world-v2}"
-VENV_PY="${ROOT}/.venv/bin/python"
-EAI_PY="/home/psibot/miniconda3/envs/eai/bin/python"
+EAI_PY="/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python"
+EAI_PY_FALLBACK="/home/psibot/miniconda3/envs/eai/bin/python"
 PY="${LINGBOT_WORLD_PYTHON:-}"
 
 unset PYTHONPATH PYTHONHOME || true
@@ -14,14 +14,14 @@ export LINGBOT_WORLD_ROOT="$ROOT"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 if [[ -z "$PY" ]]; then
-  if [[ -x "$VENV_PY" ]]; then
-    PY="$VENV_PY"
-  elif [[ -x "$EAI_PY" ]]; then
+  if [[ -x "$EAI_PY" ]]; then
     PY="$EAI_PY"
+  elif [[ -x "$EAI_PY_FALLBACK" ]]; then
+    PY="$EAI_PY_FALLBACK"
   elif command -v python3 >/dev/null 2>&1; then
     PY="$(command -v python3)"
   else
-    echo "错误: 找不到 Python。请设置 LINGBOT_WORLD_PYTHON" >&2
+    echo "错误: 找不到 Python。请设置 LINGBOT_WORLD_PYTHON（建议 miniconda3/envs/eai）" >&2
     exit 1
   fi
 fi

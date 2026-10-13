@@ -180,6 +180,66 @@ def _mode_harness(args: argparse.Namespace) -> int:
     return _run(argv)
 
 
+def _mode_lingbot_va(args: argparse.Namespace) -> int:
+    """Delegate to tools/run_lingbot_va_eval.py for policy=lingbot_va."""
+    va = _HERE / "run_lingbot_va_eval.py"
+    if not va.is_file():
+        _log(f"missing {va}")
+        return 2
+    py = resolve_python(args.python)
+    mode = "probe" if args.mode == "probe" else "eval"
+    if args.mode == "hint":
+        try:
+            from lingbot_va_policy_runtime import install_hint as va_hint
+
+            print(va_hint(py), flush=True)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"lingbot_va hint failed: {exc}")
+        return 0
+    argv = [
+        py,
+        str(va),
+        f"--backend={args.backend}",
+        f"--mode={mode}",
+    ]
+    if args.task:
+        if str(args.backend).startswith("libero"):
+            argv.append(f"--task-suite={args.task}")
+        else:
+            argv.append(f"--task={args.task}")
+    return _run(argv, cwd=str(_EAI))
+
+
+def _mode_vpp2(args: argparse.Namespace) -> int:
+    """Delegate to tools/run_vpp2_eval.py for policy=vpp2."""
+    runner = _HERE / "run_vpp2_eval.py"
+    if not runner.is_file():
+        _log(f"missing {runner}")
+        return 2
+    py = resolve_python(args.python)
+    mode = "probe" if args.mode == "probe" else "eval"
+    if args.mode == "hint":
+        try:
+            from vpp2_policy_runtime import install_hint as vpp2_hint
+
+            print(vpp2_hint(py), flush=True)
+        except Exception as exc:  # noqa: BLE001
+            _log(f"vpp2 hint failed: {exc}")
+        return 0
+    argv = [
+        py,
+        str(runner),
+        f"--backend={args.backend}",
+        f"--mode={mode}",
+    ]
+    if args.task:
+        if str(args.backend).startswith("libero"):
+            argv.append(f"--task-suite={args.task}")
+        else:
+            argv.append(f"--task={args.task}")
+    return _run(argv, cwd=str(_EAI))
+
+
 def _mode_eval_or_viewer(args: argparse.Namespace, *, viewer: bool) -> int:
     key = normalize_backend_key(args.backend)
     if key == "vla_harness":
@@ -212,6 +272,11 @@ def main() -> int:
     p.add_argument("--episodes", type=int, default=1)
     p.add_argument("--viewer", action="store_true", default=True)
     p.add_argument("--no-viewer", action="store_true")
+    p.add_argument(
+        "--policy",
+        default="",
+        help="optional policy id (e.g. lingbot_va / vpp2)",
+    )
     p.add_argument("extra", nargs="*", help="extra args forwarded to local script")
     args = p.parse_args()
     if args.no_viewer:
@@ -221,7 +286,12 @@ def main() -> int:
         _log(f"unknown backend: {args.backend}")
         return 2
 
-    _log(f"backend={args.backend} mode={args.mode}")
+    pol = (args.policy or os.environ.get("EAI_EXTERNAL_POLICY") or "").strip()
+    _log(f"backend={args.backend} mode={args.mode} policy={pol or '-'}")
+    if pol and "lingbot_va" in pol.lower().replace("-", "_"):
+        return _mode_lingbot_va(args)
+    if pol and "vpp2" in pol.lower().replace("-", "_"):
+        return _mode_vpp2(args)
     if args.mode == "probe":
         return _mode_probe(args)
     if args.mode == "hint":

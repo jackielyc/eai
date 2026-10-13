@@ -58,6 +58,12 @@ HUD_PROFILES: Dict[str, HudBackendProfile] = {
         camera_description="the exo / third-person scene camera",
         camera_key="exo_camera_1",
     ),
+    "psi_molmospaces": HudBackendProfile(
+        name="psi_molmospaces",
+        robot_description="a Psi R1 Ruiyan manipulator in Psi-MolmoSpaces",
+        camera_description="the exo / third-person scene camera",
+        camera_key="exo_camera_1",
+    ),
     "mujoco": HudBackendProfile(
         name="mujoco",
         robot_description="a robot in MuJoCo",

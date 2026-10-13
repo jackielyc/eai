@@ -13,7 +13,7 @@
 #
 # 用法:
 #   bash run_hy_embodied_vlm.sh --clone     # 克隆官方仓库到 third_party/
-#   bash run_hy_embodied_vlm.sh --install   # 安装 vLLM + 插件 (需 uv)
+#   bash run_hy_embodied_vlm.sh --install   # 安装 vLLM + 插件 (miniconda envs/vllm)
 #   bash run_hy_embodied_vlm.sh             # 启动服务
 #   bash run_hy_embodied_vlm.sh --check
 #   TP=2 PORT=8080 MODEL_PATH=/path/to/weights bash run_hy_embodied_vlm.sh
@@ -26,6 +26,9 @@ HOST="${HOST:-${HY_EMBODIED_VLM_HOST:-127.0.0.1}}"
 TP="${TP:-4}"
 MODEL_PATH="${MODEL_PATH:-tencent/Hy-Embodied-VLM-1.0}"
 SERVED_NAME="${SERVED_NAME:-hy_a3b}"
+CONDA_ROOT="${CONDA_ROOT:-/share_data/projects/mahjong/share/personal/liyichao/miniconda3}"
+VLLM_ENV="${HY_EMBODIED_CONDA_ENV:-${CONDA_ROOT}/envs/vllm}"
+PY="${HY_EMBODIED_PYTHON:-${VLLM_ENV}/bin/python}"
 
 DO_CLONE=0
 DO_INSTALL=0
@@ -40,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --port) PORT="$2"; shift 2 ;;
     --tp) TP="$2"; shift 2 ;;
     --model) MODEL_PATH="$2"; shift 2 ;;
+    --python) PY="$2"; shift 2 ;;
     -h|--help)
       sed -n '2,20p' "$0"
       exit 0
@@ -76,13 +80,21 @@ PLUGIN_DIR="${REPO_DIR}/Hy-Embodied-VLM-1.0/inference/vllm"
 SERVE_SH="${PLUGIN_DIR}/serve.sh"
 
 if [[ "$DO_INSTALL" == "1" ]]; then
-  if ! command -v uv >/dev/null 2>&1; then
-    echo "需要 uv: curl -LsSf https://astral.sh/uv/install.sh | sh"
-    exit 1
+  CONDA_BIN="${CONDA_ROOT}/bin/conda"
+  if [[ ! -x "${PY}" ]]; then
+    if [[ ! -x "${CONDA_BIN}" ]]; then
+      echo "错误: 找不到 conda (${CONDA_BIN}) 或 Python (${PY})" >&2
+      exit 1
+    fi
+    echo ">>> 创建 conda 环境: ${VLLM_ENV}"
+    export CONDA_NO_PLUGINS="${CONDA_NO_PLUGINS:-true}"
+    "${CONDA_BIN}" create -y --solver=classic -p "${VLLM_ENV}" python=3.11 pip
+    PY="${VLLM_ENV}/bin/python"
   fi
-  echo ">>> 安装 vllm==0.14.1 + 插件"
-  uv pip install "vllm==0.14.1" --torch-backend auto
-  uv pip install -e "$PLUGIN_DIR"
+  echo ">>> 安装 vllm==0.14.1 + 插件 (python=${PY})"
+  "${PY}" -m pip install -U pip
+  "${PY}" -m pip install "vllm==0.14.1"
+  "${PY}" -m pip install -e "$PLUGIN_DIR"
   echo "安装完成"
   exit 0
 fi
@@ -92,9 +104,15 @@ if [[ ! -f "$SERVE_SH" ]]; then
   exit 1
 fi
 
+if [[ -x "${PY}" ]]; then
+  export PATH="$(cd "$(dirname "${PY}")" && pwd):${PATH}"
+  export HY_EMBODIED_PYTHON="${PY}"
+fi
+
 echo ">>> 启动 Hy-Embodied-VLM-1.0"
 echo "    MODEL_PATH=$MODEL_PATH"
 echo "    TP=$TP  PORT=$PORT  SERVED_NAME=$SERVED_NAME"
+echo "    python=${PY}"
 echo "    API: http://${HOST}:${PORT}/v1   model=$SERVED_NAME"
 echo "    对话面板选: Hy-Embodied-VLM-1.0"
 

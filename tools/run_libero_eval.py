@@ -131,10 +131,15 @@ _LIBERO_GUI_WINDOW = "offscreen render"
 _gui_center_state = {"left": 0, "moved": 0}
 # User closed the on-screen viewer (title-bar X / Esc / q). Once set, skip imshow
 # so robosuite render() cannot pop the window back open.
+# seen_open: window was stably visible at least once.
+# missing_streak: consecutive "not visible" reads after seen_open. We skip
+# imshow on the first miss (so OpenCV cannot recreate the window); dismiss
+# after a short streak to absorb QT flicker during create/move.
 _gui_dismiss_state = {"dismissed": False, "seen_open": False, "missing_streak": 0}
-_opencv_renderer_close_patched = False
+_opencv_renderer_patched = False
 # Shared JPEG for eai 工作区「图像预览」(written every few steps).
 _PREVIEW_WRITE_STATE = {"last_at": 0.0, "path": "", "logged_ok": 0, "logged_err": 0}
+_GUI_CLOSE_STREAK = 2
 
 
 def _libero_preview_path() -> pathlib.Path:
@@ -181,10 +186,65 @@ def _write_libero_preview_rgb(rgb: Any, *, min_interval_s: float = 0.1) -> None:
             _PREVIEW_WRITE_STATE["logged_err"] = 1
 
 
+def _libero_gui_window_visible() -> bool:
+    """True when HighGUI reports the LIBERO viewer window as visible."""
+    try:
+        import cv2
+
+        visible = cv2.getWindowProperty(
+            _LIBERO_GUI_WINDOW, cv2.WND_PROP_VISIBLE
+        )
+        return float(visible) >= 1.0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _note_libero_gui_visible() -> None:
+    _gui_dismiss_state["seen_open"] = True
+    _gui_dismiss_state["missing_streak"] = 0
+
+
+def _note_libero_gui_missing() -> bool:
+    """Track a not-visible read. Returns True if the GUI should be dismissed.
+
+    Always increments the streak when the window was previously seen open.
+    Callers must skip ``imshow`` whenever this returns True *or* when
+    ``missing_streak > 0`` after a prior open — use ``_should_skip_libero_imshow``.
+    """
+    if not _gui_dismiss_state["seen_open"]:
+        return False
+    _gui_dismiss_state["missing_streak"] = int(
+        _gui_dismiss_state["missing_streak"] or 0
+    ) + 1
+    if int(_gui_dismiss_state["missing_streak"]) >= _GUI_CLOSE_STREAK:
+        _dismiss_libero_gui("title-bar X")
+        return True
+    return False
+
+
+def _should_skip_libero_imshow() -> bool:
+    """True when imshow must be skipped so a closed window is not recreated."""
+    if _gui_dismiss_state["dismissed"]:
+        return True
+    if not _gui_dismiss_state["seen_open"]:
+        return False
+    if _libero_gui_window_visible():
+        _note_libero_gui_visible()
+        return False
+    # Not visible after a prior open: never imshow again; maybe dismiss.
+    _note_libero_gui_missing()
+    return True
+
+
 def _patch_opencv_renderer_close() -> None:
-    """Stop robosuite from ``destroyAllWindows()`` (that also kills Live HUD)."""
-    global _opencv_renderer_close_patched
-    if _opencv_renderer_close_patched:
+    """Patch robosuite OpenCVRenderer for dismissible GUI + Live HUD safety.
+
+    - ``close``: destroy only the LIBERO window (not ``destroyAllWindows``).
+    - ``render``: detect title-bar X / Esc / q *before* ``imshow``. Otherwise
+      the next ``imshow`` recreates the window and the user cannot close it.
+    """
+    global _opencv_renderer_patched
+    if _opencv_renderer_patched:
         return
     try:
         from robosuite.utils.opencv_renderer import OpenCVRenderer
@@ -202,10 +262,47 @@ def _patch_opencv_renderer_close() -> None:
         except Exception:  # noqa: BLE001
             pass
 
+    def _render(self) -> None:  # noqa: ANN001
+        if _gui_dismiss_state["dismissed"]:
+            return
+        try:
+            import cv2
+            import numpy as np
+        except Exception:  # noqa: BLE001
+            return
+
+        # Critical: if the user closed the window, skip imshow — OpenCV would
+        # otherwise recreate it and make the title-bar X ineffective.
+        if _should_skip_libero_imshow():
+            return
+
+        if self.sim is None:
+            return
+        im = self.sim.render(
+            camera_name=self.camera_name, height=self.height, width=self.width
+        )[..., ::-1]
+        im = np.flip(im, axis=0)
+        cv2.imshow(_LIBERO_GUI_WINDOW, im)
+        key = int(cv2.waitKey(1) & 0xFF)
+        if self.keypress_callback:
+            try:
+                self.keypress_callback(key)
+            except Exception:  # noqa: BLE001
+                pass
+        if key in (27, ord("q"), ord("Q")):
+            _dismiss_libero_gui("Esc/q")
+            return
+        if _libero_gui_window_visible():
+            _note_libero_gui_visible()
+        else:
+            # waitKey may have processed the close; skip future imshow.
+            _note_libero_gui_missing()
+
     OpenCVRenderer.close = _close  # type: ignore[method-assign]
-    _opencv_renderer_close_patched = True
+    OpenCVRenderer.render = _render  # type: ignore[method-assign]
+    _opencv_renderer_patched = True
     logging.info(
-        "Patched OpenCVRenderer.close to destroy only %r (keep Live HUD)",
+        "Patched OpenCVRenderer.render/close for dismissible %r (keep Live HUD)",
         _LIBERO_GUI_WINDOW,
     )
 
@@ -244,25 +341,23 @@ def _dismiss_libero_gui(reason: str = "") -> None:
 def _libero_gui_window_is_open() -> bool:
     if _gui_dismiss_state["dismissed"]:
         return False
-    try:
-        import cv2
-
-        visible = cv2.getWindowProperty(
-            _LIBERO_GUI_WINDOW, cv2.WND_PROP_VISIBLE
-        )
-        return float(visible) >= 1.0
-    except Exception:  # noqa: BLE001
-        return False
+    return _libero_gui_window_visible()
 
 
 def _pump_libero_gui_close_events() -> bool:
-    """Detect Esc/q / title-bar X. Returns True if the GUI was dismissed."""
+    """Detect Esc/q / title-bar X. Returns True if the GUI was dismissed.
+
+    Prefer the patched ``OpenCVRenderer.render`` path; this is a fallback for
+    loops that call ``waitKey`` without going through render.
+    """
     if _gui_dismiss_state["dismissed"]:
         return True
     try:
         import cv2
     except Exception:  # noqa: BLE001
         return False
+    if _should_skip_libero_imshow():
+        return bool(_gui_dismiss_state["dismissed"])
     try:
         key = int(cv2.waitKey(1) & 0xFF)
     except Exception:  # noqa: BLE001
@@ -270,19 +365,10 @@ def _pump_libero_gui_close_events() -> bool:
     if key in (27, ord("q"), ord("Q")):
         _dismiss_libero_gui("Esc/q")
         return True
-    if _libero_gui_window_is_open():
-        _gui_dismiss_state["seen_open"] = True
-        _gui_dismiss_state["missing_streak"] = 0
+    if _libero_gui_window_visible():
+        _note_libero_gui_visible()
     else:
-        # QT often reports -1 during create/move; require a stable open first,
-        # then several consecutive misses before treating as user X.
-        _gui_dismiss_state["missing_streak"] += 1
-        if (
-            _gui_dismiss_state["seen_open"]
-            and _gui_dismiss_state["missing_streak"] >= 8
-        ):
-            _dismiss_libero_gui("title-bar X")
-            return True
+        _note_libero_gui_missing()
     return bool(_gui_dismiss_state["dismissed"])
 
 
@@ -356,12 +442,21 @@ def _render_gui_frame(env) -> bool:
     render = getattr(inner, "render", None) or getattr(env, "render", None)
     if callable(render):
         try:
+            # Patched OpenCVRenderer.render skips imshow after title-bar X and
+            # handles Esc/q; unpatched path falls back to pump below.
             render()
         except Exception as exc:  # noqa: BLE001
             logging.debug("render skipped: %s", exc)
-            return not _pump_libero_gui_close_events()
+    if _libero_gui_dismissed():
+        return False
+    # Fallback when OpenCVRenderer was not patched (no class-level render hook).
+    if not _opencv_renderer_patched and _pump_libero_gui_close_events():
+        return False
+    if _gui_dismiss_state["missing_streak"]:
+        # Closed / flickering: do not moveWindow (QT -1) or imshow again.
+        return not _libero_gui_dismissed()
     _maybe_center_libero_gui()
-    return not _pump_libero_gui_close_events()
+    return not _libero_gui_dismissed()
 
 
 def _hold_gui_until_stop(env) -> None:

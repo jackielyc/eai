@@ -104,8 +104,7 @@ if [[ -z "${POLICY_PY}" ]]; then
   for cand in \
     "${ROBOICL_POLICY_PYTHON:-}" \
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/env_isaaclab/bin/python" \
-    "${ROOT}/.venv/bin/python" \
-    "${ROOT}/venv/bin/python"
+    "/home/psibot/miniconda3/envs/env_isaaclab/bin/python"
   do
     if [[ -n "${cand}" && -x "${cand}" ]]; then
       POLICY_PY="${cand}"
@@ -117,7 +116,7 @@ if [[ -z "${POLICY_PY}" ]]; then
   if command -v python3 >/dev/null 2>&1; then
     POLICY_PY="$(command -v python3)"
   else
-    echo "错误: 找不到 policy Python。请设置 ROBOICL_POLICY_PYTHON 或 --policy-python" >&2
+    echo "错误: 找不到 policy Python。请设置 ROBOICL_POLICY_PYTHON 或 --policy-python（建议 miniconda3/envs/env_isaaclab）" >&2
     exit 1
   fi
 fi
@@ -126,8 +125,7 @@ if [[ -z "${SIM_PY}" ]]; then
   for cand in \
     "${ROBOICL_SIM_PYTHON:-}" \
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/env_isaaclab/bin/python" \
-    "${ROOT}/.venv/bin/python" \
-    "${ROOT}/venv/bin/python"
+    "/home/psibot/miniconda3/envs/env_isaaclab/bin/python"
   do
     if [[ -n "${cand}" && -x "${cand}" ]]; then
       SIM_PY="${cand}"

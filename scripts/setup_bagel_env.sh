@@ -2,8 +2,8 @@
 # 为 Bagel tab 准备独立 Python 环境（不要用 ros-humble）。
 set -euo pipefail
 EAI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PY310="${BAGEL_BASE_PYTHON:-/home/psibot/miniconda3/envs/Qwen2.5-VL/bin/python}"
-VENV="${BAGEL_VENV:-${EAI_DIR}/.cache/bagel_venv}"
+PY310="${BAGEL_BASE_PYTHON:-/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/Qwen2.5-VL/bin/python}"
+VENV="${BAGEL_VENV:-/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/bagel}"
 PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 export PIP_CACHE_DIR="${PIP_CACHE_DIR:-${EAI_DIR}/.cache/pip}"
 mkdir -p "$(dirname "$VENV")" "$PIP_CACHE_DIR"
@@ -62,4 +62,4 @@ PY
 echo ">>> 完成。Bagel tab 的 Python 请填:"
 echo "    $VENV/bin/python"
 echo "模型默认:"
-echo "    ${EAI_DIR}/.cache/bagel_models/BAGEL-7B-MoT"
+echo "    /share_data/projects/mahjong/share/personal/liyichao/models/BAGEL-7B-MoT"

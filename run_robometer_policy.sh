@@ -24,13 +24,13 @@ usage() {
                         train_async | relabel_server
   --config NAME         Hydra config（robometer_policy_learning/configs/*.yaml）
   --root PATH           robometer-policy-learning 仓库根
-  --python PATH         Python 解释器（建议仓库 .venv 或 robometer-policy conda）
+  --python PATH         Python 解释器（建议 miniconda3/envs/robometer-policy）
   --gui                 评测等任务弹出 MuJoCo 窗口（glfw）；train 固定 egl 离屏
   -h, --help            显示帮助
 
 工作目录为仓库根。入口见 scripts/train.py、scripts/train_dsrl.py、
 scripts/eval_pi0.py、scripts/eval_trained_dsrl.py。
-默认 Python：miniconda3/envs/robometer-policy → 仓库 .venv。
+默认 Python：miniconda3/envs/robometer-policy。
 EOF
 }
 
@@ -92,19 +92,14 @@ if [[ ! -f "${SCRIPT_PATH}" ]]; then
 fi
 
 if [[ -z "${PY}" ]]; then
-  # 优先独立 conda 环境（完整依赖）；仓库 .venv 可能只是 uv 空壳且看不到 conda site-packages
   if [[ -x "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/robometer-policy/bin/python" ]]; then
     PY="/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/robometer-policy/bin/python"
   elif [[ -x "/home/psibot/miniconda3/envs/robometer-policy/bin/python" ]]; then
     PY="/home/psibot/miniconda3/envs/robometer-policy/bin/python"
-  elif [[ -x "${ROOT}/.venv/bin/python" ]]; then
-    PY="${ROOT}/.venv/bin/python"
-  elif [[ -x "${ROOT}/venv/bin/python" ]]; then
-    PY="${ROOT}/venv/bin/python"
   elif command -v python3 >/dev/null 2>&1; then
     PY="$(command -v python3)"
   else
-    echo "错误: 找不到 Python。请设置 ROBOMETER_PYTHON 或 --python" >&2
+    echo "错误: 找不到 Python。请设置 ROBOMETER_PYTHON 或 --python（建议 miniconda3/envs/robometer-policy）" >&2
     exit 1
   fi
 fi

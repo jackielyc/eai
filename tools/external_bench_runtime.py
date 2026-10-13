@@ -139,6 +139,7 @@ def build_eval_argv(
     episodes: int = 1,
     viewer: bool = True,
     harness: bool = False,
+    policy: str = "",
     extra: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """Return a launch plan: {cwd, argv, env, note}."""
@@ -156,6 +157,13 @@ def build_eval_argv(
     }
     if root_p:
         env["EXTERNAL_BENCH_ROOT"] = root_p
+    pol = (policy or "").strip()
+    if pol:
+        env["EAI_EXTERNAL_POLICY"] = pol
+        if "lingbot_va" in pol.lower().replace("-", "_"):
+            env["LINGBOT_VA_BACKEND"] = key
+        if "vpp2" in pol.lower().replace("-", "_"):
+            env["VPP2_BACKEND"] = key
 
     runner = str(_EAI / "tools" / "run_external_bench.py")
 
@@ -166,6 +174,56 @@ def build_eval_argv(
             "argv": argv,
             "env": env,
             "note": f"AllenAI harness docker · {spec.harness_image}",
+            "python": py,
+        }
+
+    # LingBot-VA: prefer dedicated eval entry (GUI usually short-circuits earlier).
+    if pol and "lingbot_va" in pol.lower().replace("-", "_") and mode in (
+        "eval",
+        "probe",
+    ):
+        va_runner = str(_EAI / "tools" / "run_lingbot_va_eval.py")
+        argv = [
+            py,
+            va_runner,
+            f"--backend={key}",
+            f"--mode={'probe' if mode == 'probe' else 'eval'}",
+        ]
+        if task:
+            if key.startswith("libero"):
+                argv.append(f"--task-suite={task}")
+            else:
+                argv.append(f"--task={task}")
+        return {
+            "cwd": root_p or str(_EAI),
+            "argv": argv,
+            "env": env,
+            "note": f"{spec.label} · LingBot-VA via run_lingbot_va_eval.py",
+            "python": py,
+        }
+
+    # VPP2: dedicated eval / serve entry.
+    if pol and "vpp2" in pol.lower().replace("-", "_") and mode in (
+        "eval",
+        "probe",
+    ):
+        vpp2_runner = str(_EAI / "tools" / "run_vpp2_eval.py")
+        argv = [
+            py,
+            vpp2_runner,
+            f"--backend={key}",
+            f"--mode={'probe' if mode == 'probe' else 'eval'}",
+        ]
+        if task:
+            if key.startswith("libero"):
+                argv.append(f"--task-suite={task}")
+            else:
+                argv.append(f"--task={task}")
+        return {
+            "cwd": root_p or str(_EAI),
+            "argv": argv,
+            "env": env,
+            "note": f"{spec.label} · VPP2 via run_vpp2_eval.py",
             "python": py,
         }
 
@@ -187,6 +245,8 @@ def build_eval_argv(
         argv.append("--viewer")
     else:
         argv.append("--no-viewer")
+    if pol:
+        argv.extend(["--policy", pol])
     argv.extend(list(extra))
 
     return {

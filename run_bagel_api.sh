@@ -8,7 +8,7 @@
 #
 # 环境变量:
 #   BAGEL_DIR          Bagel 仓库根目录
-#   BAGEL_PYTHON       Python（推荐 eai/.cache/bagel_venv）
+#   BAGEL_PYTHON       Python（推荐 miniconda3/envs/bagel）
 #   BAGEL_MODEL_PATH   权重目录
 #   BAGEL_API_HOST     默认 127.0.0.1
 #   BAGEL_API_PORT     默认 7861（避开 Gradio 7860）
@@ -17,8 +17,8 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BAGEL_DIR="${BAGEL_DIR:-/share_data/projects/mahjong/share/personal/liyichao/Bagel}"
-BAGEL_PYTHON="${BAGEL_PYTHON:-${SCRIPT_DIR}/.cache/bagel_venv/bin/python}"
-BAGEL_MODEL_PATH="${BAGEL_MODEL_PATH:-${SCRIPT_DIR}/.cache/bagel_models/BAGEL-7B-MoT}"
+BAGEL_PYTHON="${BAGEL_PYTHON:-/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/bagel/bin/python}"
+BAGEL_MODEL_PATH="${BAGEL_MODEL_PATH:-/share_data/projects/mahjong/share/personal/liyichao/models/BAGEL-7B-MoT}"
 BAGEL_API_HOST="${BAGEL_API_HOST:-127.0.0.1}"
 BAGEL_API_PORT="${BAGEL_API_PORT:-7861}"
 BAGEL_MODE="${BAGEL_MODE:-1}"

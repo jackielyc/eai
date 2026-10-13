@@ -4,7 +4,7 @@
 set -euo pipefail
 
 EAI_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-ENV="${LIBERO_ENV:-$EAI_DIR/.cache/envs/libero}"
+ENV="${LIBERO_ENV:-/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/libero}"
 OPENPI_ROOT="${OPENPI_ROOT:-/share_data/projects/mahjong/share/personal/liyichao/psi-lab/openpi}"
 LIBERO_SRC="${LIBERO_PATH:-$OPENPI_ROOT/third_party/libero}"
 OPENPI_CLIENT="$OPENPI_ROOT/packages/openpi-client"

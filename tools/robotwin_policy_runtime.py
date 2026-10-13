@@ -28,9 +28,9 @@ ROBOTWIN_EVAL_OUTPUT_DIR = EAI_DIR / ".cache" / "robotwin_eval"
 
 ROBOTWIN_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python",
-    str(RLINF_ROOT_DEFAULT / ".venv" / "bin" / "python"),
     "/home/psibot/miniconda3/envs/RLinf/bin/python",
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/openpi/bin/python",
+    "/home/psibot/miniconda3/envs/openpi/bin/python",
 )
 
 # (label, task_name) — tasks with ready Hydra env YAMLs under examples/embodiment/config/env/
@@ -50,6 +50,8 @@ ROBOTWIN_TASKS: Tuple[Tuple[str, str], ...] = (
 ROBOTWIN_POLICY_CONFIGS: Tuple[Tuple[str, str], ...] = (
     ("π0.5 Aloha (pi05_aloha_robotwin)", "pi05_aloha_robotwin"),
     ("π0 Aloha (pi0_aloha_robotwin)", "pi0_aloha_robotwin"),
+    ("LingBot-VA (WAM / wan_va)", "lingbot_va"),
+    ("VPP2 (WAM serve)", "vpp2"),
 )
 
 # Preferred Hydra config basename (no .yaml) for OpenPI eval.
@@ -61,11 +63,10 @@ _TASK_HYDRA_EVAL: Dict[Tuple[str, str], str] = {
 }
 
 ROBOTWIN_CKPT_HF_DEFAULT = "RLinf/RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
+MODELS_DIR = Path("/share_data/projects/mahjong/share/personal/liyichao/models")
 ROBOTWIN_CKPT_LOCAL_CANDIDATES: Tuple[str, ...] = (
-    str(EAI_DIR / ".cache" / "robotwin" / "hf" / "RLinf-Pi05-RoboTwin-SFT-adjust_bottle"),
-    "/share_data/projects/mahjong/share/personal/liyichao/models/RLinf-Pi05-RoboTwin-SFT-adjust_bottle",
-    "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_aloha_robotwin",
-    str(EAI_DIR / ".cache" / "openpi" / "hf" / "pi05_aloha_robotwin"),
+    str(MODELS_DIR / "RLinf-Pi05-RoboTwin-SFT-adjust_bottle"),
+    str(MODELS_DIR / "pi05_aloha_robotwin"),
 )
 
 # ASSETS_PATH must be a *root that contains* ``assets/objects`` (RoboTwin repo root

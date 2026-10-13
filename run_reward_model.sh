@@ -4,8 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER="${SCRIPT_DIR}/reward_model_worker.py"
 ROOT="${RLINF_ROOT:-/share_data/projects/mahjong/share/personal/liyichao/RLinf}"
-DEFAULT_PY="/home/psibot/miniconda3/envs/RLinf/bin/python"
-FALLBACK_PY="/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python"
+DEFAULT_PY="/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python"
+FALLBACK_PY="/home/psibot/miniconda3/envs/RLinf/bin/python"
 PY="${RLINF_PYTHON:-}"
 
 unset PYTHONPATH PYTHONHOME || true

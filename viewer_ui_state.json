@@ -193,9 +193,9 @@
     },
     "lingbot_video_topic_combo": {
       "kind": "combo",
-      "index": 2,
-      "text": "/camera/head_color",
-      "data": "/camera/head_color"
+      "index": 0,
+      "text": "/libero/preview",
+      "data": "/libero/preview"
     },
     "lingbot_video_model_edit": {
       "kind": "line",
@@ -263,9 +263,9 @@
     },
     "lingbot_world_topic_combo": {
       "kind": "combo",
-      "index": 2,
-      "text": "/camera/head_color",
-      "data": "/camera/head_color"
+      "index": 0,
+      "text": "/libero/preview",
+      "data": "/libero/preview"
     },
     "lingbot_world_ckpt_edit": {
       "kind": "line",
@@ -281,11 +281,11 @@
     },
     "bagel_python_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/bagel_venv/bin/python"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/bagel/bin/python"
     },
     "bagel_model_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/bagel_models/BAGEL-7B-MoT"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/models/BAGEL-7B-MoT"
     },
     "bagel_host_edit": {
       "kind": "line",
@@ -433,6 +433,10 @@
       "kind": "radio",
       "checked": false
     },
+    "sim_backend_psi_spaces_radio": {
+      "kind": "radio",
+      "checked": false
+    },
     "sim_backend_arena_radio": {
       "kind": "radio",
       "checked": false
@@ -465,26 +469,26 @@
     },
     "sim_eval_task_combo": {
       "kind": "combo",
-      "index": 3,
-      "text": "build_tower",
-      "data": "build_tower",
-      "edit": "build_tower"
+      "index": 2,
+      "text": "arrange_largest_number_random",
+      "data": "arrange_largest_number_random",
+      "edit": "arrange_largest_number_random"
     },
     "sim_eval_policy_combo": {
       "kind": "combo",
-      "index": 6,
-      "text": "demo_policy",
-      "data": "XPolicyLab/policy/demo_policy"
+      "index": 36,
+      "text": "starVLA",
+      "data": "XPolicyLab/policy/starVLA"
     },
     "sim_eval_ckpt_edit": {
       "kind": "line",
-      "text": "demo"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RoboDojo_cache/starvla_hf/pi_v3"
     },
     "sim_eval_action_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "ee",
-      "data": "ee"
+      "index": 1,
+      "text": "joint",
+      "data": "joint"
     },
     "sim_eval_use_gui_check": {
       "kind": "check",
@@ -492,7 +496,7 @@
     },
     "sim_eval_bundled_check": {
       "kind": "check",
-      "checked": false
+      "checked": true
     },
     "sim_eval_root_edit": {
       "kind": "line",
@@ -529,9 +533,15 @@
       "text": "官方 viewer (VGL)",
       "data": "python"
     },
+    "mujoco_policy_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "无（仅 viewer）",
+      "data": ""
+    },
     "molmospaces_root_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/molmospaces"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/psi-molmospaces"
     },
     "molmospaces_recipe_combo": {
       "kind": "combo",
@@ -547,15 +557,15 @@
     },
     "molmospaces_task_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 1,
       "text": "Close (Close-v1)",
       "data": "{'extra': (), 'id': 'close_v1', 'label': 'Close (Close-v1)', 'path': '/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/molmospaces/assets/L3NoYXJlX2RhdGEvcHJvamVjdHMvbWFoam9uZy9zaGFyZS9wZXJzb25hbC9saXlpY2hhby9tb2xtb3NwYWNlcw/benchmarks/molmospaces-bench-v1/ithor/FrankaCloseDataGenConfig/FrankaCloseDataGenConfig_20260123_json_benchmark', 'ready': True}"
     },
     "molmospaces_policy_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "Pi",
-      "data": "molmo_spaces.evaluation.configs.evaluation_configs:PiPolicyEvalConfig"
+      "index": 2,
+      "text": "Psi R1 Pick Planner",
+      "data": "molmo_spaces.evaluation.configs.evaluation_configs:PsiR1PickPlannerEvalConfig"
     },
     "molmospaces_episodes_spin": {
       "kind": "spin",
@@ -563,7 +573,7 @@
     },
     "molmospaces_pi_ckpt_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/openpi/hf/pi05_libero"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_libero"
     },
     "arena_root_edit": {
       "kind": "line",
@@ -633,7 +643,7 @@
     },
     "libero_ckpt_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/openpi/hf/pi05_libero"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_libero"
     },
     "libero_max_tasks_spin": {
       "kind": "spin",
@@ -685,7 +695,7 @@
     },
     "robotwin_ckpt_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/robotwin/hf/RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/models/RLinf-Pi05-RoboTwin-SFT-adjust_bottle"
     },
     "robotwin_num_envs_spin": {
       "kind": "spin",
@@ -712,6 +722,12 @@
       "index": 0,
       "text": "探测依赖 (probe)",
       "data": "probe"
+    },
+    "ext_bench_policy_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "默认 / 本地脚本",
+      "data": ""
     },
     "ext_bench_task_edit": {
       "kind": "line",
@@ -807,7 +823,7 @@
     },
     "human_demo_move_arm_check": {
       "kind": "check",
-      "checked": true
+      "checked": false
     },
     "human_demo_scale_spin": {
       "kind": "dspin",
@@ -883,7 +899,7 @@
     },
     "reward_python_edit": {
       "kind": "line",
-      "text": "/home/psibot/miniconda3/envs/RLinf/bin/python"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python"
     },
     "reward_type_combo": {
       "kind": "combo",
@@ -933,9 +949,9 @@
     },
     "reward_topic_combo": {
       "kind": "combo",
-      "index": 2,
-      "text": "/camera/head_color",
-      "data": "/camera/head_color"
+      "index": 0,
+      "text": "/libero/preview",
+      "data": "/libero/preview"
     },
     "reward_single_path_edit": {
       "kind": "line",
@@ -973,7 +989,7 @@
     },
     "reward_wf_python_edit": {
       "kind": "line",
-      "text": "/home/psibot/miniconda3/envs/RLinf/bin/python"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python"
     },
     "reward_wf_mode_combo": {
       "kind": "combo",
@@ -1048,7 +1064,7 @@
     },
     "dojo_rl_python_edit": {
       "kind": "line",
-      "text": "/home/psibot/miniconda3/envs/RLinf/bin/python"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python"
     },
     "dojo_rl_mode_combo": {
       "kind": "combo",
@@ -1146,9 +1162,9 @@
     },
     "rynnvalue_job_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "视频推理（rynn_infer）",
-      "data": "infer"
+      "index": 1,
+      "text": "Reward 服务（start_server）",
+      "data": "reward_server"
     },
     "rynnvalue_cuda_edit": {
       "kind": "line",
@@ -1160,7 +1176,7 @@
     },
     "rynnvalue_model_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/rynnvalue/RynnValue-4B"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/models/RynnValue-4B"
     },
     "rynnvalue_ckpt_edit": {
       "kind": "line",
@@ -1212,7 +1228,7 @@
     },
     "rynnvalue_log_dir_edit": {
       "kind": "line",
-      "text": ""
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RynnValue/rynn_infer/outputs"
     },
     "roboicl_root_edit": {
       "kind": "line",
@@ -1309,7 +1325,7 @@
     },
     "humanego_python_edit": {
       "kind": "line",
-      "text": "/home/psibot/miniconda3/envs/eai/bin/python"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python"
     },
     "humanego_action_combo": {
       "kind": "combo",
@@ -1484,25 +1500,19 @@
   "control_tab": "手臂/手",
   "splitter_sizes": [
     256,
-    943,
-    695
+    1258,
+    380
   ],
   "geometry": [
     0,
-    56,
+    51,
     1920,
     1029
   ],
   "topic_checks": {
     "/libero/preview": true,
-    "/rynnvalue/live_hud": true,
-    "/camera/left_wrist_color": true,
-    "/camera/head_color": true,
-    "/camera/right_wrist_color": true,
-    "/camera/left_wrist_depth": false,
-    "/camera/head_depth": false,
-    "/camera/right_wrist_depth": false
+    "/rynnvalue/live_hud": true
   },
   "topic_user_unchecked": [],
-  "workspace_collapsed": true
+  "workspace_collapsed": false
 }

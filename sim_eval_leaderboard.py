@@ -88,6 +88,7 @@ def board_for_backend(
             or (embodiedbench_url(spec.embodied_slug) if spec.embodied_slug else ""),
             "source_label": spec.source_label or "官方 / EmbodiedBench",
             "entries": [],
+            "local_entries": [],
             "_backend": key,
             "_updated": data.get("updated") or "",
             "_global_note": data.get("note") or "",
@@ -96,6 +97,8 @@ def board_for_backend(
     out["_backend"] = key
     out["_updated"] = data.get("updated") or ""
     out["_global_note"] = data.get("note") or ""
+    if not isinstance(out.get("local_entries"), list):
+        out["local_entries"] = []
     return out
 
 
@@ -105,6 +108,333 @@ def entries_for_backend(backend: str, *, path: str = "") -> List[Dict[str, Any]]
         return []
     rows = board.get("entries") or []
     return [r for r in rows if isinstance(r, dict)]
+
+
+def local_entries_for_backend(backend: str, *, path: str = "") -> List[Dict[str, Any]]:
+    board = board_for_backend(backend, path=path)
+    if not board:
+        return []
+    rows = board.get("local_entries") or []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+_PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+_NUM_RE = re.compile(r"(\d+(?:\.\d+)?)")
+
+
+def parse_score_value(score: str) -> Optional[float]:
+    """Extract a comparable numeric score (prefer SR%) from a board score string."""
+    text = (score or "").strip()
+    if not text:
+        return None
+    pcts = _PCT_RE.findall(text)
+    if pcts:
+        return float(pcts[-1])
+    if " / " in text:
+        # Isaac style: "38.26 / 30.95%" already handled by pct; fallback to left score
+        left = text.split(" / ", 1)[0].strip()
+        m = _NUM_RE.search(left)
+        if m:
+            return float(m.group(1))
+    if "·" in text:
+        tail = text.split("·")[-1].strip()
+        m = _NUM_RE.search(tail)
+        if m:
+            val = float(m.group(1))
+            return val if val <= 100 else None
+    m = _NUM_RE.search(text)
+    if not m:
+        return None
+    val = float(m.group(1))
+    return val if val <= 100 else None
+
+
+def combine_board_entries(
+    industry: List[Dict[str, Any]],
+    local: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Merge industry + local rows, re-rank by parseable score (desc), tag origin."""
+    pooled: List[Tuple[float, int, Dict[str, Any]]] = []
+    for i, row in enumerate(industry or []):
+        if not isinstance(row, dict):
+            continue
+        e = dict(row)
+        e["origin"] = "industry"
+        e.pop("local_id", None)
+        score_val = parse_score_value(str(e.get("score") or ""))
+        # Unparseable industry rows keep relative order at the bottom of their tier
+        key = score_val if score_val is not None else -1.0
+        pooled.append((key, i, e))
+    for j, row in enumerate(local or []):
+        if not isinstance(row, dict):
+            continue
+        e = dict(row)
+        e["origin"] = "local"
+        score_val = parse_score_value(str(e.get("score") or ""))
+        key = score_val if score_val is not None else -1.0
+        # Local rows sort after industry on ties (stable compare)
+        pooled.append((key, 10_000 + j, e))
+    pooled.sort(key=lambda t: (-t[0], t[1]))
+    out: List[Dict[str, Any]] = []
+    for rank, (_sv, _ord, e) in enumerate(pooled, 1):
+        e["rank"] = rank
+        out.append(e)
+    return out
+
+
+def board_for_display(backend: str, *, path: str = "") -> Optional[Dict[str, Any]]:
+    """Board with industry + local entries merged for side-by-side comparison."""
+    board = board_for_backend(backend, path=path)
+    if not board:
+        return None
+    industry = [e for e in (board.get("entries") or []) if isinstance(e, dict)]
+    local = [e for e in (board.get("local_entries") or []) if isinstance(e, dict)]
+    out = dict(board)
+    out["entries"] = combine_board_entries(industry, local)
+    out["_industry_count"] = len(industry)
+    out["_local_count"] = len(local)
+    out["_combined"] = True
+    if local:
+        title = str(out.get("title") or "业内评测榜单")
+        if "本地对比" not in title:
+            out["title"] = f"{title} · 含本地对比"
+    return out
+
+
+def _local_id_for_path(result_path: str) -> str:
+    abs_path = os.path.abspath(os.path.expanduser(result_path or ""))
+    return abs_path
+
+
+def entry_from_result_json(
+    result_json_path: str,
+    *,
+    backend: str = "isaac",
+    method: str = "",
+    org: str = "本地评测",
+    note: str = "",
+) -> Dict[str, Any]:
+    """Build a local leaderboard entry from a RoboDojo-style `_result.json`."""
+    path = os.path.abspath(os.path.expanduser(result_json_path or ""))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        raise ValueError("_result.json root must be an object")
+
+    run_dir = os.path.dirname(path)
+    # .../<task>/<policy>/<robot>/<config>/<run_id>/_result.json
+    parts = run_dir.replace("\\", "/").split("/")
+    task = parts[-5] if len(parts) >= 5 else ""
+    policy = parts[-4] if len(parts) >= 4 else ""
+    robot = parts[-3] if len(parts) >= 3 else ""
+    run_id = parts[-1] if parts else ""
+
+    sr = data.get("success_rate")
+    score = data.get("score")
+    eval_time = data.get("eval_time")
+    try:
+        sr_f = float(sr) if sr is not None else None
+    except (TypeError, ValueError):
+        sr_f = None
+    try:
+        score_f = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score_f = None
+
+    if sr_f is not None and score_f is not None:
+        score_str = f"{score_f:.2f} / {sr_f * 100.0:.2f}%"
+    elif sr_f is not None:
+        score_str = f"{sr_f * 100.0:.2f}%"
+    elif score_f is not None:
+        score_str = f"{score_f:.2f}"
+    else:
+        score_str = "?"
+
+    method_name = (method or "").strip()
+    if not method_name:
+        method_name = f"{policy or 'local'} · {task or 'run'}"
+
+    detail_bits = []
+    if task:
+        detail_bits.append(f"task={task}")
+    if robot:
+        detail_bits.append(f"robot={robot}")
+    if eval_time is not None:
+        detail_bits.append(f"n={eval_time}")
+    if run_id:
+        detail_bits.append(run_id[:48])
+
+    stamp = _now_stamp().split(" ")[0]
+    return {
+        "rank": 0,
+        "method": method_name,
+        "score": score_str,
+        "detail": " · ".join(detail_bits) or "本地仿真评测",
+        "org": org or "本地评测",
+        "date": stamp,
+        "note": (note or "本地评测合并").strip(),
+        "origin": "local",
+        "local_id": _local_id_for_path(run_dir),
+        "result_path": run_dir,
+        "backend": _normalize_backend(backend),
+        "success_rate": sr_f,
+        "score_value": score_f,
+    }
+
+
+def entry_from_manual(
+    *,
+    backend: str,
+    method: str,
+    score: str,
+    detail: str = "",
+    org: str = "本地评测",
+    note: str = "本地评测合并",
+    local_id: str = "",
+) -> Dict[str, Any]:
+    """Build a local entry from manual fields (any sim backend)."""
+    key = _normalize_backend(backend)
+    name = (method or "").strip()
+    if not name:
+        raise ValueError("method required")
+    score_s = (score or "").strip()
+    if not score_s:
+        raise ValueError("score required")
+    lid = (local_id or "").strip() or f"manual:{key}:{name}:{score_s}"
+    return {
+        "rank": 0,
+        "method": name,
+        "score": score_s,
+        "detail": (detail or "手动合并的本地评测").strip(),
+        "org": org or "本地评测",
+        "date": _now_stamp().split(" ")[0],
+        "note": (note or "本地评测合并").strip(),
+        "origin": "local",
+        "local_id": lid,
+        "backend": key,
+    }
+
+
+def _read_json_unlocked(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return {"note": "", "backends": {}}
+    if not isinstance(data, dict):
+        return {"backends": {}}
+    return data
+
+
+def _write_json_unlocked(path: str, data: Dict[str, Any]) -> None:
+    tmp = path + f".tmp.{os.getpid()}.{threading.get_ident()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def merge_local_entry(
+    backend: str,
+    entry: Dict[str, Any],
+    *,
+    path: str = "",
+) -> Dict[str, Any]:
+    """Upsert a local eval entry into the board JSON (keeps industry rows intact)."""
+    key = _normalize_backend(backend)
+    if not isinstance(entry, dict):
+        raise ValueError("entry must be a dict")
+    use = (path or "").strip() or _DEFAULT_PATH
+    local_id = str(entry.get("local_id") or "").strip()
+    if not local_id:
+        local_id = _local_id_for_path(str(entry.get("result_path") or entry.get("method") or ""))
+    stored_entry = dict(entry)
+    stored_entry["origin"] = "local"
+    stored_entry["local_id"] = local_id
+    stored_entry["backend"] = key
+    if not stored_entry.get("date"):
+        stored_entry["date"] = _now_stamp().split(" ")[0]
+    if not stored_entry.get("note"):
+        stored_entry["note"] = "本地评测合并"
+
+    with _JSON_LOCK:
+        data = _read_json_unlocked(use)
+        backends = data.setdefault("backends", {})
+        if not isinstance(backends, dict):
+            backends = {}
+            data["backends"] = backends
+        block = backends.get(key)
+        if not isinstance(block, dict):
+            spec = get_backend(key)
+            block = {
+                "title": f"{(spec.label if spec else key)} · 业内评测榜单",
+                "metric": (spec.embodied_metric if spec else None) or "Success Rate",
+                "protocol": "",
+                "source_url": (spec.source_url if spec else "") or "",
+                "source_label": (spec.source_label if spec else "") or "",
+                "entries": [],
+                "local_entries": [],
+            }
+            backends[key] = block
+        locals_list = block.get("local_entries")
+        if not isinstance(locals_list, list):
+            locals_list = []
+        replaced = False
+        new_locals: List[Dict[str, Any]] = []
+        for row in locals_list:
+            if isinstance(row, dict) and str(row.get("local_id") or "") == local_id:
+                new_locals.append(stored_entry)
+                replaced = True
+            elif isinstance(row, dict):
+                new_locals.append(row)
+        if not replaced:
+            new_locals.append(stored_entry)
+        block["local_entries"] = new_locals
+        backends[key] = block
+        data["updated"] = _now_stamp()
+        note = str(data.get("note") or "")
+        if "本地评测" not in note:
+            data["note"] = (
+                (note + " ").strip()
+                + " 本地仿真评测可合并进各后端 local_entries，刷新实时榜时会保留并与业内条目对比。"
+            ).strip()
+        _write_json_unlocked(use, data)
+
+    clear_leaderboard_cache()
+    return board_for_display(key, path=use) or {}
+
+
+def remove_local_entry(
+    backend: str,
+    local_id: str,
+    *,
+    path: str = "",
+) -> Dict[str, Any]:
+    """Remove one local entry by local_id."""
+    key = _normalize_backend(backend)
+    lid = (local_id or "").strip()
+    if not lid:
+        raise ValueError("local_id required")
+    use = (path or "").strip() or _DEFAULT_PATH
+    with _JSON_LOCK:
+        data = _read_json_unlocked(use)
+        backends = data.setdefault("backends", {})
+        block = backends.get(key) if isinstance(backends, dict) else None
+        if not isinstance(block, dict):
+            raise KeyError(f"no board for backend: {key}")
+        locals_list = block.get("local_entries") or []
+        block["local_entries"] = [
+            r
+            for r in locals_list
+            if not (isinstance(r, dict) and str(r.get("local_id") or "") == lid)
+        ]
+        backends[key] = block
+        data["updated"] = _now_stamp()
+        _write_json_unlocked(use, data)
+    clear_leaderboard_cache()
+    return board_for_display(key, path=use) or {}
 
 
 def _normalize_backend(backend: str) -> str:
@@ -656,6 +986,7 @@ _FETCHERS: Dict[str, Callable[..., Dict[str, Any]]] = {
     "isaac": fetch_isaac_live,
     "mujoco": fetch_mujoco_live,
     "molmospaces": fetch_molmospaces_live,
+    "psi_molmospaces": fetch_molmospaces_live,
     "arena": fetch_arena_live,
     "libero": fetch_libero_live,
     "robotwin": fetch_robotwin_live,
@@ -678,7 +1009,11 @@ def refresh_backend(
     persist: bool = True,
     limit: int = 12,
 ) -> Dict[str, Any]:
-    """Fetch live board for one backend, optionally merge into JSON on disk."""
+    """Fetch live board for one backend, optionally merge into JSON on disk.
+
+    Local eval entries (`local_entries`) are preserved across refresh and returned
+    already combined with industry rows for side-by-side comparison.
+    """
     key = _normalize_backend(backend)
     fetcher = _FETCHERS.get(key)
     if fetcher is None:
@@ -692,12 +1027,34 @@ def refresh_backend(
     if persist:
         _persist_board(key, board, path=path)
         clear_leaderboard_cache()
+        display = board_for_display(key, path=path)
+        if display:
+            display["_live"] = True
+            display["_fetched_at"] = board.get("_fetched_at") or display.get(
+                "last_live_fetch"
+            )
+            return display
         data = load_leaderboards(path)
         board["_updated"] = data.get("updated") or board.get("_fetched_at") or ""
         board["_global_note"] = data.get("note") or ""
-    else:
-        board["_updated"] = board.get("_fetched_at") or _now_stamp()
-        board["_global_note"] = "实时抓取（未写入本地 JSON）"
+        return board
+    # Non-persist: still overlay in-memory local entries for compare
+    board["_updated"] = board.get("_fetched_at") or _now_stamp()
+    board["_global_note"] = "实时抓取（未写入本地 JSON）"
+    try:
+        locals_list = local_entries_for_backend(key, path=path)
+    except Exception:
+        locals_list = []
+    if locals_list:
+        industry = [e for e in (board.get("entries") or []) if isinstance(e, dict)]
+        board["local_entries"] = locals_list
+        board["entries"] = combine_board_entries(industry, locals_list)
+        board["_industry_count"] = len(industry)
+        board["_local_count"] = len(locals_list)
+        board["_combined"] = True
+        title = str(board.get("title") or "")
+        if "本地对比" not in title:
+            board["title"] = f"{title} · 含本地对比"
     return board
 
 
@@ -717,17 +1074,22 @@ def refresh_all(
 def _persist_board(backend: str, board: Dict[str, Any], *, path: str = "") -> None:
     use = (path or "").strip() or _DEFAULT_PATH
     with _JSON_LOCK:
-        try:
-            with open(use, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except FileNotFoundError:
-            data = {"note": "", "backends": {}}
-        if not isinstance(data, dict):
-            data = {"backends": {}}
+        data = _read_json_unlocked(use)
         backends = data.setdefault("backends", {})
         if not isinstance(backends, dict):
             backends = {}
             data["backends"] = backends
+        prev = backends.get(backend) if isinstance(backends.get(backend), dict) else {}
+        # Keep previously merged local eval rows unless caller explicitly passes them.
+        if "local_entries" in board and isinstance(board.get("local_entries"), list):
+            local_entries = [
+                e for e in board.get("local_entries") or [] if isinstance(e, dict)
+            ]
+        else:
+            prev_locals = prev.get("local_entries") if isinstance(prev, dict) else []
+            local_entries = [
+                e for e in (prev_locals or []) if isinstance(e, dict)
+            ]
         stored = {
             "title": board.get("title"),
             "metric": board.get("metric"),
@@ -735,6 +1097,7 @@ def _persist_board(backend: str, board: Dict[str, Any], *, path: str = "") -> No
             "source_url": board.get("source_url"),
             "source_label": board.get("source_label"),
             "entries": board.get("entries") or [],
+            "local_entries": local_entries,
             "last_live_fetch": board.get("_fetched_at") or _now_stamp(),
         }
         backends[backend] = stored
@@ -745,11 +1108,12 @@ def _persist_board(backend: str, board: Dict[str, Any], *, path: str = "") -> No
                 (note + " ").strip()
                 + " 可用「刷新」从公开源实时更新并写回本文件。"
             ).strip()
-        tmp = use + f".tmp.{os.getpid()}.{threading.get_ident()}"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-        os.replace(tmp, use)
+        if local_entries and "本地评测" not in str(data.get("note") or ""):
+            data["note"] = (
+                str(data.get("note") or "").strip()
+                + " 本地仿真评测可合并进各后端 local_entries，刷新实时榜时会保留并与业内条目对比。"
+            ).strip()
+        _write_json_unlocked(use, data)
 
 
 if __name__ == "__main__":

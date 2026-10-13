@@ -204,6 +204,16 @@ class TestStudioPage(QWidget):
             f"border: 1px solid {sct.UI_BORDER}; "
             f"border-radius: {sct.UI_RADIUS}; }}"
         )
+        log_hdr = QHBoxLayout()
+        log_hdr.setContentsMargins(0, 0, 0, 0)
+        log_hdr.setSpacing(6)
+        log_hdr.addStretch(1)
+        self.clear_log_btn = QPushButton("清空日志")
+        self.clear_log_btn.setFocusPolicy(Qt.NoFocus)
+        self.clear_log_btn.setToolTip("清空下方日志内容")
+        self.clear_log_btn.clicked.connect(self.log_edit.clear)
+        log_hdr.addWidget(self.clear_log_btn)
+        root.addLayout(log_hdr)
         root.addWidget(self.log_edit)
 
         view = DeployView(

@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKER="${SCRIPT_DIR}/lingbot_vision_worker.py"
 ROOT="${LINGBOT_VISION_ROOT:-/share_data/projects/mahjong/share/personal/liyichao/lingbot-vision}"
-DEFAULT_PY="/home/psibot/miniconda3/envs/eai/bin/python"
+DEFAULT_PY="/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python"
 PY="${LINGBOT_VISION_PYTHON:-}"
 
 unset PYTHONPATH PYTHONHOME || true
