@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""在「有摄像头的本机」上采集并提供 MJPEG HTTP 流，供远端手骨架遥控使用。
+"""在「有摄像头的本机」上采集并提供 MJPEG HTTP 流，供远端 eai UI 使用。
 
-典型 VNC 场景（摄像头在笔记本，UI 跑在远端）::
+典型场景（摄像头在 Mac/笔记本，UI 跑在远端 Remote SSH / VNC）::
 
-  # 本机终端 1：推流
+  # 本机终端 1：推流（macOS 一般 --device 0）
   python3 examples/local_webcam_mjpeg_server.py --device 0 --port 8090
 
   # 本机终端 2：把本机 8090 映射到远端 localhost:8090
   ssh -N -R 8090:127.0.0.1:8090 user@remote-host
 
-  # 远端 UI：手骨架遥控 → 相机选「网络流」
-  # URL: http://127.0.0.1:8090/cam.mjpg → 开始识别
+  # 远端 UI：
+  # · 真机评测 →「本地摄像头预览」
+  # · 或 手骨架遥控 → 相机选「网络流」
+  # URL: http://127.0.0.1:8090/cam.mjpg
 
-依赖: opencv-python / opencv-contrib-python（与 eai conda 一致即可）。
+依赖: opencv-python / opencv-contrib-python。
+macOS：首次运行请在「系统设置 → 隐私与安全性 → 摄像头」允许终端/Python。
 """
 
 from __future__ import annotations
 
 import argparse
+import platform
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,13 +34,29 @@ def _open_capture(device: int | str):
     if isinstance(device, str) and device.isdigit():
         device = int(device)
     if isinstance(device, int):
-        cap = cv2.VideoCapture(device, cv2.CAP_V4L2)
-        if not cap.isOpened():
-            cap.release()
-            cap = cv2.VideoCapture(device)
-    else:
-        cap = cv2.VideoCapture(device)
-    return cap
+        backends = []
+        system = platform.system()
+        if system == "Darwin":
+            backends.append(getattr(cv2, "CAP_AVFOUNDATION", None))
+        elif system == "Linux":
+            backends.append(getattr(cv2, "CAP_V4L2", None))
+        backends.append(None)  # 默认后端
+        last = None
+        for backend in backends:
+            if backend is None and last is not None:
+                try:
+                    last.release()
+                except Exception:
+                    pass
+            if backend is None:
+                cap = cv2.VideoCapture(device)
+            else:
+                cap = cv2.VideoCapture(device, backend)
+            last = cap
+            if cap.isOpened():
+                return cap
+        return last if last is not None else cv2.VideoCapture(device)
+    return cv2.VideoCapture(device)
 
 
 def main() -> int:

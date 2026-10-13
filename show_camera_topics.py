@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测 / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / 编程冲SOTA / HumanEgo / 数据集 / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D / R1） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -202,6 +202,7 @@ from PyQt5.QtWidgets import (
     QTableWidgetItem,
     QTabWidget,
     QPlainTextEdit,
+    QTextBrowser,
     QTextEdit,
     QToolButton,
     QTreeWidget,
@@ -1976,9 +1977,8 @@ def resolve_mujoco_python(repo: str = "") -> str:
     return "python3"
 
 
-def molmospaces_cache_env() -> dict:
-    """Env so MolmoSpaces reads eai/.cache instead of ~/.cache."""
-    cache = os.path.join(EAI_DIR, ".cache", "molmo-spaces-resources")
+def molmospaces_assets_dir() -> str:
+    """Resolved ``MLSPACES_ASSETS_DIR`` used by MolmoSpaces / Psi-MolmoSpaces."""
     assets_parent = os.path.join(EAI_DIR, ".cache", "molmospaces", "assets")
     assets = assets_parent
     if os.path.isdir(assets_parent):
@@ -1992,10 +1992,68 @@ def molmospaces_cache_env() -> dict:
             subs = []
         if len(subs) == 1:
             assets = subs[0]
+    return assets
+
+
+def molmospaces_cache_env() -> dict:
+    """Env so MolmoSpaces reads eai/.cache instead of ~/.cache."""
+    cache = os.path.join(EAI_DIR, ".cache", "molmo-spaces-resources")
     return {
         "MLSPACES_CACHE_DIR": cache,
-        "MLSPACES_ASSETS_DIR": assets,
+        "MLSPACES_ASSETS_DIR": molmospaces_assets_dir(),
     }
+
+
+def ensure_psi_r1_robot_assets(repo_root: str = "") -> Tuple[bool, str]:
+    """Ensure ``ASSETS_DIR/robots/psi_r1_ruiyan`` exists for Psi eval.
+
+    Official molmospaces-resources does not ship Psi R1; the fork keeps it under
+    ``symlink/resources/robots/psi_r1_ruiyan``. Symlink that (or a local
+    ``psi_r1_ruiyan`` checkout) into the EAI assets cache.
+    """
+    assets = molmospaces_assets_dir()
+    dest = os.path.join(assets, "robots", "psi_r1_ruiyan")
+    model = os.path.join(dest, "urdf", "model.xml")
+    if os.path.isfile(model):
+        return True, dest
+
+    root = os.path.abspath(os.path.expanduser(repo_root or ""))
+    candidates: List[str] = []
+    if root:
+        candidates.append(
+            os.path.join(root, "symlink", "resources", "robots", "psi_r1_ruiyan")
+        )
+    candidates.extend(
+        [
+            os.path.join(os.path.dirname(EAI_DIR), "psi_r1_ruiyan"),
+            os.path.join(EAI_DIR, "assets", "psi_r1_ruiyan"),
+        ]
+    )
+    src = ""
+    for cand in candidates:
+        if os.path.isfile(os.path.join(cand, "urdf", "model.xml")):
+            src = cand
+            break
+    if not src:
+        return False, (
+            "未找到 psi_r1_ruiyan（需含 urdf/model.xml）。"
+            "请确认 psi-molmospaces/symlink/resources/robots/psi_r1_ruiyan 存在。"
+        )
+
+    robots_dir = os.path.join(assets, "robots")
+    os.makedirs(robots_dir, exist_ok=True)
+    try:
+        if os.path.islink(dest) or os.path.exists(dest):
+            if os.path.islink(dest) or os.path.isfile(dest):
+                os.remove(dest)
+            else:
+                return False, f"目标已存在且不是链接，请手动处理: {dest}"
+        os.symlink(src, dest)
+    except OSError as exc:
+        return False, f"无法链接 psi_r1_ruiyan → {dest}: {exc}"
+    if not os.path.isfile(model):
+        return False, f"链接后仍缺少 {model}"
+    return True, dest
 
 
 def molmospaces_asset_roots(repo_root: str = "") -> List[str]:
@@ -3475,6 +3533,14 @@ STACK_SERVICES_LAUNCH = "arm_hand_services.launch.py"
 STACK_SERVICES_LOG = "/var/psi/log/arm_hand_services/latest.log"
 # 兼容手动启动完整 base_services 时的状态检测
 LEGACY_BASE_SERVICES_LAUNCH = "base_services.launch.py"
+
+# 真机评测机器人后端（与仿真后端独立）
+REAL_ROBOT_BACKEND_A2D = "a2d"
+REAL_ROBOT_BACKEND_R1 = "r1"
+REAL_ROBOT_BACKEND_LABELS = {
+    REAL_ROBOT_BACKEND_A2D: "A2D",
+    REAL_ROBOT_BACKEND_R1: "R1",
+}
 ROBOT_FK_JOINTS_TOPIC = "/fk/joint_states"
 ROBOT_LEFT_HAND_TOPIC = "/ry_hand/left/joint_states"
 ROBOT_RIGHT_HAND_TOPIC = "/ry_hand/right/joint_states"
@@ -5049,18 +5115,20 @@ SKELETON_LOCAL_CAM_PREFIX = "local_webcam:"
 SKELETON_NETWORK_CAM_SOURCE = "network_stream"
 SKELETON_NETWORK_URL_DEFAULT = "http://127.0.0.1:8090/cam.mjpg"
 SKELETON_NETWORK_HELP = (
-    "VNC 不能转发摄像头。请把本机画面推成网络流，再在远端识别：\n\n"
-    "【本机（有摄像头）】\n"
-    "1) 启动 MJPEG 服务:\n"
+    "VNC / Remote SSH 不能直接转发摄像头。请把本机画面推成网络流，再在远端使用：\n\n"
+    "【本机（有摄像头，macOS / Linux）】\n"
+    "1) 启动 MJPEG 服务（在 eai 仓库目录）:\n"
     "   python3 examples/local_webcam_mjpeg_server.py --device 0 --port 8090\n"
+    "   macOS：device 一般为 0（内置摄像头）；权限请在「系统设置 → 隐私与安全性 → 摄像头」允许终端。\n"
     "2) SSH 反向隧道（把本机 8090 映射到远端 localhost:8090）:\n"
-    "   ssh -N -R 8090:127.0.0.1:8090 <user@远端>\n\n"
+    "   ssh -N -R 8090:127.0.0.1:8090 <user@远端>\n"
+    "   若已用 Cursor/VS Code Remote SSH，另开终端执行上面这条即可（端口冲突时改 8091）。\n\n"
     "【远端 UI】\n"
-    "相机选「网络流」，URL 填:\n"
-    "   http://127.0.0.1:8090/cam.mjpg\n"
-    "然后点「开始识别」。\n\n"
+    "· 手骨架遥控：相机选「网络流」，URL 填 http://127.0.0.1:8090/cam.mjpg → 开始识别\n"
+    "· 真机评测：点「本地摄像头预览」（同一 URL）\n\n"
     "也支持 rtsp://...（需 OpenCV/FFmpeg 可读）。"
 )
+REAL_EVAL_LOCAL_CAM_HELP = SKELETON_NETWORK_HELP
 RIGHT_HAND_ANGLE_A_DEFAULT = 0
 RIGHT_HAND_ANGLE_B_DEFAULT = 45
 
@@ -14671,6 +14739,121 @@ def resolve_a2d_workspace_dir() -> str:
     return "/opt/psi/rt/a2d-tele"
 
 
+def normalize_real_robot_backend(backend: str) -> str:
+    key = (backend or "").strip().lower()
+    if key in ("r1", "psi_r1", "psi-r1", "ruiyan_r1"):
+        return REAL_ROBOT_BACKEND_R1
+    return REAL_ROBOT_BACKEND_A2D
+
+
+def real_robot_backend_label(backend: str) -> str:
+    key = normalize_real_robot_backend(backend)
+    return REAL_ROBOT_BACKEND_LABELS.get(key, key.upper())
+
+
+def resolve_r1_scripts_pack_dir() -> Optional[str]:
+    """R1 真机 scripts_pack；可通过 R1_SCRIPTS_DIR 覆盖。"""
+    env_dir = os.environ.get("R1_SCRIPTS_DIR", "").strip()
+    if env_dir and os.path.isdir(env_dir):
+        return os.path.abspath(env_dir)
+    here = os.path.dirname(os.path.abspath(__file__))
+    psibot_home = os.environ.get("PSIBOT_HOME", "/home/psibot").strip() or "/home/psibot"
+    candidates = [
+        os.path.join(psibot_home, "workspace_liyichao/r1-tele/install/scripts_pack/share/scripts_pack/scripts"),
+        os.path.join(psibot_home, "workspace_liyichao/install/scripts_pack/share/scripts_pack/scripts"),
+        os.path.abspath(os.path.join(here, "..", "install", "scripts_pack", "share", "scripts_pack", "scripts")),
+        os.path.expanduser("~/workspace_liyichao/r1-tele/install/scripts_pack/share/scripts_pack/scripts"),
+        "/opt/psi/rt/r1-tele/install/scripts_pack/share/scripts_pack/scripts",
+    ]
+    stack_script = STACK_SERVICES_SCRIPT
+    resolved_candidates: List[str] = []
+    for path in candidates:
+        resolved = os.path.abspath(path)
+        if resolved in resolved_candidates:
+            continue
+        resolved_candidates.append(resolved)
+        if os.path.isfile(os.path.join(resolved, stack_script)):
+            return resolved
+    for resolved in resolved_candidates:
+        if os.path.isdir(resolved):
+            return resolved
+    return None
+
+
+def resolve_r1_workspace_dir() -> str:
+    """R1 真机工作区；优先 r1-tele install。"""
+    env_ws = os.environ.get("R1_WORKSPACE_DIR", "").strip()
+    if env_ws and os.path.isfile(os.path.join(env_ws, "install/setup.bash")):
+        return os.path.abspath(env_ws)
+    for candidate in (
+        "/opt/psi/rt/r1-tele",
+        os.path.expanduser("~/workspace_liyichao/r1-tele"),
+        os.path.join(
+            os.environ.get("PSIBOT_HOME", "/home/psibot").strip() or "/home/psibot",
+            "workspace_liyichao/r1-tele",
+        ),
+    ):
+        if os.path.isfile(os.path.join(candidate, "install/setup.bash")):
+            return candidate
+    return "/opt/psi/rt/r1-tele"
+
+
+def resolve_real_robot_scripts_dir(backend: str = REAL_ROBOT_BACKEND_A2D) -> Optional[str]:
+    if normalize_real_robot_backend(backend) == REAL_ROBOT_BACKEND_R1:
+        return resolve_r1_scripts_pack_dir()
+    return resolve_scripts_pack_dir()
+
+
+def resolve_real_robot_workspace_dir(backend: str = REAL_ROBOT_BACKEND_A2D) -> str:
+    if normalize_real_robot_backend(backend) == REAL_ROBOT_BACKEND_R1:
+        return resolve_r1_workspace_dir()
+    return resolve_a2d_workspace_dir()
+
+
+def build_real_robot_ros_shell_prefix(backend: str = REAL_ROBOT_BACKEND_A2D) -> str:
+    """按真机后端拼 source + DDS 环境（A2D / R1 工作区不同）。"""
+    key = normalize_real_robot_backend(backend)
+    parts = ["set -e", "source /opt/ros/humble/setup.bash"]
+    if key == REAL_ROBOT_BACKEND_R1:
+        setups = (
+            "/opt/psi/rt/r1-tele/install/setup.bash",
+            os.path.expanduser("~/workspace_liyichao/r1-tele/install/setup.bash"),
+            os.path.expanduser("~/workspace_liyichao/install/setup.bash"),
+        )
+        scripts_env = "R1_SCRIPTS_DIR"
+    else:
+        setups = (
+            "/opt/psi/rt/a2d-tele/install/setup.bash",
+            os.path.expanduser("~/workspace_liyichao/a2d-tele/install/setup.bash"),
+            os.path.expanduser("~/workspace_liyichao/install/setup.bash"),
+        )
+        scripts_env = "A2D_SCRIPTS_DIR"
+    for setup in setups:
+        if os.path.isfile(setup):
+            parts.append(f"source {setup}")
+    scripts_dir = resolve_real_robot_scripts_dir(key)
+    if scripts_dir:
+        parts.append(f"export {scripts_env}={scripts_dir}")
+    dds = os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE", "").strip()
+    if dds and os.path.isfile(dds):
+        parts.append(f"export FASTRTPS_DEFAULT_PROFILES_FILE={dds}")
+    parts.append("export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}")
+    return " && ".join(parts)
+
+
+def real_robot_stack_ready_hint(backend: str) -> str:
+    """真机栈脚本是否可解析的提示文案。"""
+    key = normalize_real_robot_backend(backend)
+    label = real_robot_backend_label(key)
+    scripts = resolve_real_robot_scripts_dir(key)
+    if scripts and os.path.isfile(os.path.join(scripts, ROBOT_SERVICE_SCRIPT)):
+        return f"{label} 栈脚本: {scripts}"
+    env_name = "R1_SCRIPTS_DIR" if key == REAL_ROBOT_BACKEND_R1 else "A2D_SCRIPTS_DIR"
+    if scripts:
+        return f"{label} 已找到 scripts 目录但缺少 {ROBOT_SERVICE_SCRIPT}（{scripts}）"
+    return f"{label} 未找到栈脚本，请设置 {env_name}"
+
+
 def default_rrd_dataset_dir() -> str:
     env_dir = os.environ.get("RRD_DATASET_DIR", "").strip()
     if env_dir and os.path.isdir(env_dir):
@@ -14699,6 +14882,184 @@ def dataset_browser_presets() -> List[Tuple[str, str]]:
         seen.add(abs_path)
         out.append((label, abs_path))
     return out
+
+
+def embodied_open_datasets_notes_path() -> str:
+    """开源具身数据集分析文档路径。"""
+    return os.path.join(EAI_DIR, "docs", "embodied-open-datasets-notes.md")
+
+
+def _html_escape_text(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _inline_md_to_html(text: str) -> str:
+    """极简行内 Markdown：链接、粗体、行内代码。"""
+    import re
+
+    s = _html_escape_text(text)
+    s = re.sub(
+        r"\[([^\]]+)\]\((https?://[^)\s]+)\)",
+        r'<a href="\2" style="color:#7cb8ff;">\1</a>',
+        s,
+    )
+    s = re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+    s = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", s)
+    # 裸 URL（未在 a 标签内）
+    s = re.sub(
+        r'(?<!["\'>])(https?://[^\s<]+)',
+        r'<a href="\1" style="color:#7cb8ff;">\1</a>',
+        s,
+    )
+    return s
+
+
+def markdown_notes_to_html(md: str) -> str:
+    """把分析笔记 Markdown 转成适合深色 UI 的简易 HTML（含表格）。"""
+    import re
+
+    lines = md.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # UI 中不展示 Cursor Canvas 路径块
+    skip_canvas = False
+    filtered: List[str] = []
+    for line in lines:
+        if "配套 Canvas" in line or "canvases/" in line:
+            skip_canvas = True
+            continue
+        if skip_canvas:
+            if line.startswith("```"):
+                # 跳过整段 code fence
+                if filtered and filtered[-1].strip() == "```":
+                    filtered.pop()
+                skip_canvas = False
+                continue
+            if line.startswith("---") or line.startswith("#"):
+                skip_canvas = False
+            else:
+                continue
+        filtered.append(line)
+
+    body: List[str] = []
+    i = 0
+    in_code = False
+    code_buf: List[str] = []
+
+    def flush_code() -> None:
+        nonlocal code_buf
+        if not code_buf:
+            return
+        body.append(
+            "<pre style='background:#111214;border:1px solid #333;padding:10px;"
+            "border-radius:4px;overflow-x:auto;color:#c8c8c8;'>"
+            + _html_escape_text("\n".join(code_buf))
+            + "</pre>"
+        )
+        code_buf = []
+
+    while i < len(filtered):
+        line = filtered[i]
+        if line.strip().startswith("```"):
+            if in_code:
+                flush_code()
+                in_code = False
+            else:
+                in_code = True
+            i += 1
+            continue
+        if in_code:
+            code_buf.append(line)
+            i += 1
+            continue
+
+        # 表格：表头 + |---| 分隔行
+        sep = filtered[i + 1] if i + 1 < len(filtered) else ""
+        is_table = (
+            "|" in line
+            and "-" in sep
+            and bool(re.match(r"^[\s|:\-]+$", sep.strip()))
+        )
+        if is_table:
+            rows: List[List[str]] = []
+            while i < len(filtered) and "|" in filtered[i]:
+                raw = filtered[i].strip()
+                if re.match(r"^[\s|:\-]+$", raw) and "-" in raw:
+                    i += 1
+                    continue
+                cells = [c.strip() for c in raw.strip("|").split("|")]
+                rows.append(cells)
+                i += 1
+            if rows:
+                body.append(
+                    "<table style='border-collapse:collapse;width:100%;"
+                    "margin:8px 0 14px 0;font-size:12px;'>"
+                )
+                for ri, row in enumerate(rows):
+                    body.append("<tr>")
+                    tag = "th" if ri == 0 else "td"
+                    bg = (
+                        "#25262b"
+                        if ri == 0
+                        else ("#1e1f23" if ri % 2 == 0 else "#1a1b1e")
+                    )
+                    for cell in row:
+                        body.append(
+                            f"<{tag} style='border:1px solid #3a3b40;padding:6px 8px;"
+                            f"background:{bg};text-align:left;vertical-align:top;'>"
+                            f"{_inline_md_to_html(cell)}</{tag}>"
+                        )
+                    body.append("</tr>")
+                body.append("</table>")
+            continue
+
+        if line.startswith("# "):
+            body.append(
+                f"<h1 style='color:#f0f0f0;font-size:18px;margin:12px 0 8px 0;'>"
+                f"{_inline_md_to_html(line[2:].strip())}</h1>"
+            )
+        elif line.startswith("## "):
+            body.append(
+                f"<h2 style='color:#e8e8e8;font-size:15px;margin:16px 0 8px 0;"
+                f"border-bottom:1px solid #333;padding-bottom:4px;'>"
+                f"{_inline_md_to_html(line[3:].strip())}</h2>"
+            )
+        elif line.startswith("### "):
+            body.append(
+                f"<h3 style='color:#ddd;font-size:13px;margin:12px 0 6px 0;'>"
+                f"{_inline_md_to_html(line[4:].strip())}</h3>"
+            )
+        elif line.strip() == "---":
+            body.append("<hr style='border:none;border-top:1px solid #333;margin:14px 0;'/>")
+        elif line.startswith("> "):
+            body.append(
+                "<div style='color:#aaa;border-left:3px solid #4a6a8a;padding:4px 10px;"
+                f"margin:6px 0;'>{_inline_md_to_html(line[2:].strip())}</div>"
+            )
+        elif re.match(r"^[-*] ", line.strip()):
+            body.append(
+                f"<div style='margin:2px 0 2px 12px;'>• {_inline_md_to_html(line.strip()[2:])}</div>"
+            )
+        elif not line.strip():
+            body.append("<div style='height:6px;'></div>")
+        else:
+            body.append(
+                f"<p style='margin:4px 0;line-height:1.55;'>{_inline_md_to_html(line)}</p>"
+            )
+        i += 1
+
+    if in_code:
+        flush_code()
+
+    return (
+        "<html><body style='background:#1a1b1e;color:#ececec;"
+        "font-family:Sans-Serif;font-size:13px;padding:8px 12px;'>"
+        + "\n".join(body)
+        + "</body></html>"
+    )
 
 
 _DATASET_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"})
@@ -17919,8 +18280,14 @@ class RoboDojoEvalLauncher(QObject):
                 os.environ.get("STARVLA_BASE_VLM", "").strip()
                 or ROBODOJO_STARVLA_BASE_VLM_DEFAULT
             )
+            starvla_env = (
+                policy_env
+                if policy_env and os.path.isfile(os.path.join(policy_env, "bin", "python"))
+                else ROBODOJO_STARVLA_ENV_DEFAULT
+            )
             exports.extend(
                 [
+                    f"export STARVLA_ENV={shlex.quote(starvla_env)}",
                     f"export STARVLA_HF_ROOT={shlex.quote(hf_root)}",
                     f"export STARVLA_BASE_VLM={shlex.quote(base_vlm)}",
                     f"export STARVLA_CKPT_PATH={shlex.quote(ckpt_path)}",
@@ -17932,7 +18299,9 @@ class RoboDojoEvalLauncher(QObject):
                     f"export STARVLA_ROBODOJO_HEADLESS={'1' if not self._use_gui else '0'}",
                 ]
             )
-            starvla_ckpt_note = f"  STARVLA_CKPT_PATH={ckpt_path}"
+            starvla_ckpt_note = (
+                f"  STARVLA_CKPT_PATH={ckpt_path}  STARVLA_ENV={starvla_env}"
+            )
             # 已单独部署策略时：走通用 GUI/eval（只起 client），勿再跑 run_gui_starvla
             # （后者会再起一套 server）。
             if use_external and self._use_gui:
@@ -24585,7 +24954,8 @@ class CameraTopicWindow(QMainWindow):
         self.mujoco_viewer_only_btn.setToolTip(
             "只启动当前后端的仿真/图形界面，不调用策略模型推理：\n"
             "· MuJoCo：官方 MJCF viewer\n"
-            "· MolmoSpaces：快速演示 --viewer\n"
+            "· MolmoSpaces：快速演示 --viewer（首次可能要等资源索引）\n"
+            "· Psi-MolmoSpaces：本地 Psi R1 MJCF（秒开）\n"
             "· Arena：zero_action + Kit 窗口\n"
             "· LIBERO：开场景窗口并保持（不连 Pi）\n"
             "· RoboTwin：SAPIEN Viewer（不加载 OpenPI）\n"
@@ -24688,13 +25058,31 @@ class CameraTopicWindow(QMainWindow):
         real_outer.setContentsMargins(8, 6, 8, 6)
         real_outer.setSpacing(6)
 
-        real_hint = QLabel(
-            "真机评测使用现场 ROS 相机（/camera/*_color），无需 Isaac 桥。"
-            " 请确认机器人栈已启动、手臂/手已使能，并在「测试」页部署推理服务。"
+        self.real_eval_hint_label = QLabel("")
+        self.real_eval_hint_label.setWordWrap(True)
+        self.real_eval_hint_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        real_outer.addWidget(self.real_eval_hint_label)
+
+        real_backend_row = _FlowLayout(spacing=10)
+        real_backend_row.addWidget(QLabel("机器人后端"))
+        self.real_robot_a2d_radio = QRadioButton("A2D")
+        self.real_robot_r1_radio = QRadioButton("R1")
+        self.real_robot_a2d_radio.setChecked(True)
+        self.real_robot_a2d_radio.setToolTip(
+            "A2D 真机：a2d-tele / A2D_SCRIPTS_DIR，现场 /camera/*_color + HAL 臂手栈。"
         )
-        real_hint.setWordWrap(True)
-        real_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        real_outer.addWidget(real_hint)
+        self.real_robot_r1_radio.setToolTip(
+            "R1 真机：r1-tele / R1_SCRIPTS_DIR（可设 R1_WORKSPACE_DIR）。"
+            " 与 A2D 工作区独立；栈脚本就绪后可直接启动。"
+        )
+        self._real_robot_backend_group = QButtonGroup(self)
+        self._real_robot_backend_group.addButton(self.real_robot_a2d_radio, 0)
+        self._real_robot_backend_group.addButton(self.real_robot_r1_radio, 1)
+        self.real_robot_a2d_radio.toggled.connect(self._on_real_robot_backend_changed)
+        self.real_robot_r1_radio.toggled.connect(self._on_real_robot_backend_changed)
+        real_backend_row.addWidget(self.real_robot_a2d_radio)
+        real_backend_row.addWidget(self.real_robot_r1_radio)
+        real_outer.addLayout(real_backend_row)
 
         real_task_row = QHBoxLayout()
         real_task_row.setSpacing(6)
@@ -24715,8 +25103,8 @@ class CameraTopicWindow(QMainWindow):
         real_ctrl_row.addWidget(self.real_eval_refresh_btn)
         self.real_eval_stack_btn = QPushButton("启动机器人栈")
         self.real_eval_stack_btn.setFocusPolicy(Qt.NoFocus)
-        self.real_eval_stack_btn.setToolTip("与「回放」页相同：拉起 robot stack")
-        self.real_eval_stack_btn.clicked.connect(self._on_robot_stack_clicked)
+        self.real_eval_stack_btn.setToolTip("按所选机器人后端拉起 robot stack")
+        self.real_eval_stack_btn.clicked.connect(self._on_real_eval_stack_clicked)
         real_ctrl_row.addWidget(self.real_eval_stack_btn)
         self.real_eval_start_btn = QPushButton("开始评测")
         self.real_eval_start_btn.setFocusPolicy(Qt.NoFocus)
@@ -24741,6 +25129,46 @@ class CameraTopicWindow(QMainWindow):
         self.real_eval_ready_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         real_outer.addWidget(self.real_eval_ready_label)
 
+        real_cam_row = QHBoxLayout()
+        real_cam_row.setSpacing(6)
+        real_cam_row.addWidget(QLabel("本地摄像头"))
+        self.real_eval_cam_url_edit = QLineEdit(SKELETON_NETWORK_URL_DEFAULT)
+        self.real_eval_cam_url_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.real_eval_cam_url_edit.setPlaceholderText(
+            "http://127.0.0.1:8090/cam.mjpg  （Mac 本机推流经 SSH -R）"
+        )
+        self.real_eval_cam_url_edit.setToolTip(REAL_EVAL_LOCAL_CAM_HELP)
+        real_cam_row.addWidget(self.real_eval_cam_url_edit, 1)
+        self.real_eval_cam_help_btn = QPushButton("用法")
+        self.real_eval_cam_help_btn.setFocusPolicy(Qt.NoFocus)
+        self.real_eval_cam_help_btn.setToolTip("Mac/本机摄像头经 SSH 隧道到远端的步骤")
+        self.real_eval_cam_help_btn.clicked.connect(self._on_real_eval_local_cam_help)
+        real_cam_row.addWidget(self.real_eval_cam_help_btn)
+        self.real_eval_cam_preview_btn = QPushButton("本地摄像头预览")
+        self.real_eval_cam_preview_btn.setFocusPolicy(Qt.NoFocus)
+        self.real_eval_cam_preview_btn.setToolTip(
+            "打开下方预览：读取本机经隧道转发的 MJPEG/RTSP，或本机 /dev/video*"
+        )
+        self.real_eval_cam_preview_btn.clicked.connect(self._on_real_eval_local_cam_toggled)
+        real_cam_row.addWidget(self.real_eval_cam_preview_btn)
+        real_outer.addLayout(real_cam_row)
+
+        self.real_eval_cam_status_label = QLabel("本地摄像头: 未开启")
+        self.real_eval_cam_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.real_eval_cam_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        real_outer.addWidget(self.real_eval_cam_status_label)
+
+        self.real_eval_cam_preview_label = QLabel(
+            "点击「本地摄像头预览」显示本机画面（Remote SSH/VNC 需先推流，点「用法」）"
+        )
+        self.real_eval_cam_preview_label.setAlignment(Qt.AlignCenter)
+        self.real_eval_cam_preview_label.setMinimumHeight(200)
+        self.real_eval_cam_preview_label.setStyleSheet(
+            f"QLabel {{ background-color: {UI_BG_INPUT}; border: 1px solid {UI_BORDER}; "
+            f"color: {UI_TEXT_MUTED}; }}"
+        )
+        real_outer.addWidget(self.real_eval_cam_preview_label, 1)
+
         self.real_eval_log_edit = QTextEdit()
         self.real_eval_log_edit.setReadOnly(True)
         self.real_eval_log_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
@@ -24762,6 +25190,13 @@ class CameraTopicWindow(QMainWindow):
         self._real_eval_timer = QTimer(self)
         self._real_eval_timer.setInterval(2000)
         self._real_eval_timer.timeout.connect(self._refresh_real_eval_status)
+        self._real_eval_local_cap = None
+        self._real_eval_local_cam_active = False
+        self._real_eval_local_cam_busy = False
+        self._real_eval_local_cam_timer = QTimer(self)
+        self._real_eval_local_cam_timer.setInterval(66)  # ~15 Hz
+        self._real_eval_local_cam_timer.timeout.connect(self._on_real_eval_local_cam_tick)
+        self._on_real_robot_backend_changed()
 
         control_tab = QWidget()
         control_layout = QVBoxLayout(control_tab)
@@ -27316,19 +27751,69 @@ class CameraTopicWindow(QMainWindow):
         self._on_humanego_refresh_mps()
         control_tabs.addTab(humanego_tab, "HumanEgo")
 
-        # ---- 数据集浏览 ----
+        # ---- 数据集（开源梳理 + 本地浏览）----
         dataset_tab = QWidget()
         dataset_tab.setObjectName("datasetTab")
         dataset_outer = QVBoxLayout(dataset_tab)
-        dataset_outer.setContentsMargins(8, 6, 8, 6)
-        dataset_outer.setSpacing(6)
+        dataset_outer.setContentsMargins(4, 4, 4, 4)
+        dataset_outer.setSpacing(4)
+        self.dataset_inner_tabs = QTabWidget()
+        self.dataset_inner_tabs.setObjectName("datasetInnerTabs")
+
+        # -- 开源梳理 --
+        survey_page = QWidget()
+        survey_layout = QVBoxLayout(survey_page)
+        survey_layout.setContentsMargins(8, 6, 8, 6)
+        survey_layout.setSpacing(6)
+        survey_hint = QLabel(
+            "开源具身数据集梳理：选型结论、按本体下载/Mix、体积约数。"
+            "内容来自 docs/embodied-open-datasets-notes.md，链接可点击打开。"
+        )
+        survey_hint.setWordWrap(True)
+        survey_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        survey_layout.addWidget(survey_hint)
+        survey_btn_row = QHBoxLayout()
+        survey_btn_row.setSpacing(6)
+        self.dataset_survey_refresh_btn = QPushButton("刷新文档")
+        self.dataset_survey_refresh_btn.setToolTip("重新加载分析 Markdown")
+        self.dataset_survey_refresh_btn.clicked.connect(
+            self._refresh_dataset_open_survey
+        )
+        survey_btn_row.addWidget(self.dataset_survey_refresh_btn)
+        self.dataset_survey_open_btn = QPushButton("打开 Markdown")
+        self.dataset_survey_open_btn.setToolTip("用系统默认应用打开源文档")
+        self.dataset_survey_open_btn.clicked.connect(
+            self._on_dataset_open_survey_file
+        )
+        survey_btn_row.addWidget(self.dataset_survey_open_btn)
+        self.dataset_survey_path_label = QLabel("")
+        self.dataset_survey_path_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.dataset_survey_path_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse
+        )
+        survey_btn_row.addWidget(self.dataset_survey_path_label, 1)
+        survey_layout.addLayout(survey_btn_row)
+        self.dataset_survey_view = QTextBrowser()
+        self.dataset_survey_view.setOpenExternalLinks(True)
+        self.dataset_survey_view.setStyleSheet(
+            f"QTextBrowser {{ background-color: {UI_BG_LOG}; color: {UI_TEXT_PRIMARY}; "
+            f"border: 1px solid {UI_BORDER}; }}"
+        )
+        survey_layout.addWidget(self.dataset_survey_view, 1)
+        self.dataset_inner_tabs.addTab(survey_page, "开源梳理")
+
+        # -- 本地浏览 --
+        browser_page = QWidget()
+        browser_layout = QVBoxLayout(browser_page)
+        browser_layout.setContentsMargins(8, 6, 8, 6)
+        browser_layout.setSpacing(6)
         ds_hint = QLabel(
             "浏览本地数据集目录（.rrd / 图像 / Bagel 历史 JSON 等）。"
             "可选中图像送入 sub image，或把 .rrd 设为回放文件。"
         )
         ds_hint.setWordWrap(True)
         ds_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        dataset_outer.addWidget(ds_hint)
+        browser_layout.addWidget(ds_hint)
 
         ds_root_row = QHBoxLayout()
         ds_root_row.setSpacing(6)
@@ -27359,7 +27844,7 @@ class CameraTopicWindow(QMainWindow):
         self.dataset_up_btn = QPushButton("上级")
         self.dataset_up_btn.clicked.connect(self._on_dataset_up_clicked)
         ds_root_row.addWidget(self.dataset_up_btn)
-        dataset_outer.addLayout(ds_root_row)
+        browser_layout.addLayout(ds_root_row)
 
         ds_filter_row = QHBoxLayout()
         ds_filter_row.setSpacing(6)
@@ -27379,7 +27864,7 @@ class CameraTopicWindow(QMainWindow):
             self._on_dataset_filter_changed
         )
         ds_filter_row.addWidget(self.dataset_type_combo)
-        dataset_outer.addLayout(ds_filter_row)
+        browser_layout.addLayout(ds_filter_row)
 
         ds_split = QSplitter(Qt.Horizontal)
         self.dataset_list = QListWidget()
@@ -27444,11 +27929,15 @@ class CameraTopicWindow(QMainWindow):
         ds_split.addWidget(ds_right)
         ds_split.setStretchFactor(0, 1)
         ds_split.setStretchFactor(1, 2)
-        dataset_outer.addWidget(ds_split, 1)
+        browser_layout.addWidget(ds_split, 1)
+        self.dataset_inner_tabs.addTab(browser_page, "本地浏览")
 
+        dataset_outer.addWidget(self.dataset_inner_tabs, 1)
         self._dataset_cwd = ""
         control_tabs.addTab(dataset_tab, "数据集")
-        # 同步预设到根目录并刷新列表
+        # 默认可看到开源梳理；同步预设并刷新本地列表
+        self.dataset_inner_tabs.setCurrentIndex(0)
+        self._refresh_dataset_open_survey()
         for i in range(self.dataset_preset_combo.count()):
             if os.path.abspath(str(self.dataset_preset_combo.itemData(i) or "")) == os.path.abspath(
                 self.dataset_root_edit.text().strip() or ""
@@ -28410,6 +28899,42 @@ class CameraTopicWindow(QMainWindow):
             QMessageBox.warning(self, "HumanEgo", f"目录不存在: {repo}")
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(repo))
+
+    def _refresh_dataset_open_survey(self) -> None:
+        """加载并渲染 docs/embodied-open-datasets-notes.md 到数据集 → 开源梳理。"""
+        path = embodied_open_datasets_notes_path()
+        if hasattr(self, "dataset_survey_path_label"):
+            self.dataset_survey_path_label.setText(path)
+        view = getattr(self, "dataset_survey_view", None)
+        if view is None:
+            return
+        if not os.path.isfile(path):
+            view.setHtml(
+                "<html><body style='background:#1a1b1e;color:#ccc;padding:12px;'>"
+                f"<p>未找到分析文档：</p><pre>{_html_escape_text(path)}</pre>"
+                "<p>请确认 <code>docs/embodied-open-datasets-notes.md</code> 存在。</p>"
+                "</body></html>"
+            )
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(f"开源梳理文档缺失: {path}", 5000)
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                md = f.read()
+            view.setHtml(markdown_notes_to_html(md))
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(f"已加载开源梳理: {path}", 3000)
+        except Exception as exc:
+            view.setPlainText(f"读取失败: {path}\n{exc}")
+            if hasattr(self, "status_bar"):
+                self.status_bar.showMessage(f"开源梳理加载失败: {exc}", 5000)
+
+    def _on_dataset_open_survey_file(self) -> None:
+        path = embodied_open_datasets_notes_path()
+        if not os.path.isfile(path):
+            QMessageBox.warning(self, "数据集", f"文档不存在:\n{path}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(path)))
 
     def _dataset_current_root(self) -> str:
         text = self.dataset_root_edit.text().strip() if hasattr(self, "dataset_root_edit") else ""
@@ -30707,6 +31232,7 @@ class CameraTopicWindow(QMainWindow):
                 return
             exports.extend(
                 [
+                    f"export STARVLA_ENV={shlex.quote(policy_env)}",
                     f"export STARVLA_HF_ROOT={shlex.quote(ROBODOJO_STARVLA_HF_ROOT_DEFAULT)}",
                     f"export STARVLA_BASE_VLM={shlex.quote(ROBODOJO_STARVLA_BASE_VLM_DEFAULT)}",
                     f"export STARVLA_CKPT_PATH={shlex.quote(ckpt_path)}",
@@ -30716,7 +31242,9 @@ class CameraTopicWindow(QMainWindow):
                     "export STARVLA_UNNORM_KEY=arx_x5",
                 ]
             )
-            self._append_sim_log(f"[策略] STARVLA_CKPT_PATH={ckpt_path}")
+            self._append_sim_log(
+                f"[策略] STARVLA_CKPT_PATH={ckpt_path} STARVLA_ENV={policy_env}"
+            )
         if is_lingbot_va_policy(policy_dir):
             base_model = resolve_lingbot_va_base_model(
                 os.environ.get("LINGBOT_VA_BASE_MODEL_PATH", "")
@@ -31122,7 +31650,122 @@ class CameraTopicWindow(QMainWindow):
         scrollbar = self.real_eval_log_edit.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
+    def _real_robot_backend_id(self) -> str:
+        if getattr(self, "real_robot_r1_radio", None) is not None and self.real_robot_r1_radio.isChecked():
+            return REAL_ROBOT_BACKEND_R1
+        return REAL_ROBOT_BACKEND_A2D
+
+    def _real_robot_backend_has_stack_scripts(self, backend: str = "") -> bool:
+        key = normalize_real_robot_backend(backend or self._real_robot_backend_id())
+        scripts = resolve_real_robot_scripts_dir(key)
+        return bool(scripts and os.path.isfile(os.path.join(scripts, ROBOT_SERVICE_SCRIPT)))
+
+    def _on_real_robot_backend_changed(self, *_args) -> None:
+        if not hasattr(self, "real_eval_hint_label"):
+            return
+        backend = self._real_robot_backend_id()
+        label = real_robot_backend_label(backend)
+        if backend == REAL_ROBOT_BACKEND_R1:
+            self.real_eval_hint_label.setText(
+                "R1 真机评测：使用 r1-tele / R1_SCRIPTS_DIR（可选 R1_WORKSPACE_DIR）。"
+                " 现场 ROS 相机（/camera/*_color），无需 Isaac 桥；"
+                "请确认栈已启动、手臂/手已使能，并在「测试」页部署推理服务。"
+            )
+            self.real_eval_stack_btn.setToolTip(
+                "启动 R1 robot stack（R1_SCRIPTS_DIR / r1-tele）"
+            )
+        else:
+            self.real_eval_hint_label.setText(
+                "A2D 真机评测：使用 a2d-tele / A2D_SCRIPTS_DIR。"
+                " 现场 ROS 相机（/camera/*_color），无需 Isaac 桥；"
+                "请确认栈已启动、手臂/手已使能，并在「测试」页部署推理服务。"
+            )
+            self.real_eval_stack_btn.setToolTip(
+                "启动 A2D robot stack（与「回放」页相同：A2D_SCRIPTS_DIR / a2d-tele）"
+            )
+        # 评测进行中禁止切换后端
+        can_switch = not self._real_eval_active
+        self.real_robot_a2d_radio.setEnabled(can_switch)
+        self.real_robot_r1_radio.setEnabled(can_switch)
+        has_scripts = self._real_robot_backend_has_stack_scripts(backend)
+        if backend == REAL_ROBOT_BACKEND_R1 and not has_scripts:
+            self.real_eval_stack_btn.setEnabled(True)  # 仍可点，点击后给出配置提示
+            self.real_eval_stack_btn.setText(f"启动{label}栈")
+        elif not self._real_eval_active:
+            self.real_eval_stack_btn.setText(f"启动{label}栈")
+        self._refresh_real_eval_status()
+
+    def _on_real_eval_stack_clicked(self) -> None:
+        backend = self._real_robot_backend_id()
+        label = real_robot_backend_label(backend)
+        if backend == REAL_ROBOT_BACKEND_A2D:
+            self._append_real_eval_log(f"[栈] 后端={label}，走 A2D RobotStackLauncher")
+            self._on_robot_stack_clicked()
+            return
+        # R1：若已配置同源脚本布局则直接拉起；否则给出配置提示
+        scripts = resolve_real_robot_scripts_dir(backend)
+        robot_script = (
+            os.path.join(scripts, ROBOT_SERVICE_SCRIPT) if scripts else ""
+        )
+        if not scripts or not os.path.isfile(robot_script):
+            hint = real_robot_stack_ready_hint(backend)
+            msg = (
+                f"R1 真机栈未配置：{hint}\n\n"
+                "请设置环境变量 R1_SCRIPTS_DIR 指向含 "
+                f"{ROBOT_SERVICE_SCRIPT} 的 scripts 目录，"
+                "或安装 /opt/psi/rt/r1-tele（可选 R1_WORKSPACE_DIR）。"
+            )
+            self._append_real_eval_log(f"[栈] {hint}")
+            self.status_bar.showMessage("R1 真机栈未配置", 6000)
+            QMessageBox.information(self, "R1 机器人栈", msg)
+            return
+        # 与 A2D 相同脚本约定时，复用现有 launcher（shell prefix 仍偏 A2D；
+        # 若 R1 与 A2D 脚本同构，可先用当前 launcher；正式分离后再切 build_real_robot_ros_shell_prefix）
+        self._append_real_eval_log(
+            f"[栈] 后端={label} scripts={scripts}；尝试启动（与 A2D 同构脚本）"
+        )
+        self._launch_real_robot_stack_detached(backend)
+
+    def _launch_real_robot_stack_detached(self, backend: str) -> None:
+        """按后端 shell prefix 直接拉起 robot-service / 臂手栈（不阻塞 UI）。"""
+        key = normalize_real_robot_backend(backend)
+        label = real_robot_backend_label(key)
+        scripts = resolve_real_robot_scripts_dir(key)
+        if not scripts:
+            self.status_bar.showMessage(f"{label} 未找到 scripts 目录", 5000)
+            return
+        robot_script = os.path.join(scripts, ROBOT_SERVICE_SCRIPT)
+        stack_script = os.path.join(scripts, STACK_SERVICES_SCRIPT)
+        prefix = build_real_robot_ros_shell_prefix(key)
+        if self.node.is_hal_arm_ready() and os.path.isfile(stack_script):
+            script_dir = os.path.dirname(stack_script)
+            cmd = (
+                f"{prefix} && cd {script_dir} && "
+                f"exec bash {os.path.basename(stack_script)}"
+            )
+            if QProcess.startDetached("bash", ["-lc", cmd], script_dir):
+                self._append_real_eval_log(f"[栈] 已启动 {label} 臂手服务: {stack_script}")
+                self.status_bar.showMessage(f"正在启动 {label} 臂手服务栈…", 5000)
+            else:
+                self.status_bar.showMessage(f"{label} 臂手栈启动失败", 5000)
+            return
+        if not os.path.isfile(robot_script):
+            self.status_bar.showMessage(f"{label} 缺少 {ROBOT_SERVICE_SCRIPT}", 5000)
+            return
+        script_dir = os.path.dirname(robot_script)
+        cmd = (
+            f"{prefix} && cd {script_dir} && "
+            f"exec bash {os.path.basename(robot_script)}"
+        )
+        if QProcess.startDetached("bash", ["-lc", cmd], script_dir):
+            self._append_real_eval_log(f"[栈] 已启动 {label} robot-service: {robot_script}")
+            self.status_bar.showMessage(f"正在启动 {label} robot-service（约 3 分钟）…", 5000)
+        else:
+            self.status_bar.showMessage(f"{label} robot-service 启动失败", 5000)
+
     def _refresh_real_eval_status(self) -> None:
+        backend = self._real_robot_backend_id()
+        label = real_robot_backend_label(backend)
         cams = 0
         try:
             names = list(dict(self.node.get_topic_names_and_types()))
@@ -31135,6 +31778,8 @@ class CameraTopicWindow(QMainWindow):
         )
         mode = self.node.get_control_mode_label()
         parts = [
+            f"后端={label}",
+            real_robot_stack_ready_hint(backend),
             f"/camera*_color={cams}",
             arm,
             hand,
@@ -31142,14 +31787,16 @@ class CameraTopicWindow(QMainWindow):
         ]
         if self._real_eval_active:
             parts.append("评测中")
-            self.real_eval_status_label.setText("状态: 评测中")
+            self.real_eval_status_label.setText(f"状态: 评测中（{label}）")
             self.real_eval_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
         else:
-            self.real_eval_status_label.setText("状态: 未开始")
+            self.real_eval_status_label.setText(f"状态: 未开始（{label}）")
             self.real_eval_status_label.setStyleSheet("")
         self.real_eval_ready_label.setText("  |  ".join(parts))
 
     def _on_real_eval_start_clicked(self) -> None:
+        backend = self._real_robot_backend_id()
+        label = real_robot_backend_label(backend)
         warnings: List[str] = []
         try:
             names = list(dict(self.node.get_topic_names_and_types()))
@@ -31162,6 +31809,8 @@ class CameraTopicWindow(QMainWindow):
             warnings.append("手臂未使能")
         if not self.node.is_hand_enabled():
             warnings.append("手部未使能")
+        if backend == REAL_ROBOT_BACKEND_R1 and not self._real_robot_backend_has_stack_scripts(backend):
+            warnings.append(real_robot_stack_ready_hint(backend))
         task = self.real_eval_task_edit.text().strip()
         if warnings:
             for w in warnings:
@@ -31173,9 +31822,11 @@ class CameraTopicWindow(QMainWindow):
         self.real_eval_start_btn.setEnabled(False)
         self.real_eval_stop_btn.setEnabled(True)
         self.real_eval_task_edit.setEnabled(False)
+        self.real_robot_a2d_radio.setEnabled(False)
+        self.real_robot_r1_radio.setEnabled(False)
         if not self._real_eval_timer.isActive():
             self._real_eval_timer.start()
-        msg = f"开始真机评测" + (f"：{task}" if task else "")
+        msg = f"开始真机评测[{label}]" + (f"：{task}" if task else "")
         self._append_real_eval_log(f"--- {msg} ---")
         self.status_bar.showMessage(msg, 4000)
         self._refresh_real_eval_status()
@@ -31183,17 +31834,187 @@ class CameraTopicWindow(QMainWindow):
     def _on_real_eval_stop_clicked(self) -> None:
         if not self._real_eval_active:
             return
+        backend = self._real_robot_backend_id()
+        label = real_robot_backend_label(backend)
         self._real_eval_active = False
         self.real_eval_start_btn.setEnabled(True)
         self.real_eval_stop_btn.setEnabled(False)
         self.real_eval_task_edit.setEnabled(True)
+        self.real_robot_a2d_radio.setEnabled(True)
+        self.real_robot_r1_radio.setEnabled(True)
         self._real_eval_timer.stop()
-        self._append_real_eval_log("--- 真机评测已停止 ---")
-        self.status_bar.showMessage("真机评测已停止", 3000)
-        self._refresh_real_eval_status()
+        self._append_real_eval_log(f"--- 真机评测已停止[{label}] ---")
+        self.status_bar.showMessage(f"真机评测已停止（{label}）", 3000)
+        self._on_real_robot_backend_changed()
 
     def _on_real_eval_clear_log_clicked(self) -> None:
         self.real_eval_log_edit.clear()
+
+    def _on_real_eval_local_cam_help(self) -> None:
+        QMessageBox.information(
+            self, "本机摄像头 → 远端（真机评测）", REAL_EVAL_LOCAL_CAM_HELP
+        )
+
+    def _close_real_eval_local_cam(self) -> None:
+        cap = self._real_eval_local_cap
+        self._real_eval_local_cap = None
+        if cap is None:
+            return
+        try:
+            cap.release()
+        except Exception:
+            pass
+
+    def _stop_real_eval_local_cam(self) -> None:
+        self._real_eval_local_cam_active = False
+        self._real_eval_local_cam_busy = False
+        if hasattr(self, "_real_eval_local_cam_timer"):
+            self._real_eval_local_cam_timer.stop()
+        self._close_real_eval_local_cam()
+        if hasattr(self, "real_eval_cam_preview_btn"):
+            self.real_eval_cam_preview_btn.setText("本地摄像头预览")
+        if hasattr(self, "real_eval_cam_status_label"):
+            self.real_eval_cam_status_label.setText("本地摄像头: 未开启")
+            self.real_eval_cam_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        if hasattr(self, "real_eval_cam_preview_label"):
+            self.real_eval_cam_preview_label.setPixmap(QPixmap())
+            self.real_eval_cam_preview_label.setText(
+                "点击「本地摄像头预览」显示本机画面（Remote SSH/VNC 需先推流，点「用法」）"
+            )
+        if hasattr(self, "real_eval_cam_url_edit"):
+            self.real_eval_cam_url_edit.setEnabled(True)
+
+    def _open_real_eval_local_cam_source(self, url_or_dev: str) -> Tuple[bool, str]:
+        """打开网络流 URL，或本机 /dev/video* / 数字 index。"""
+        src = (url_or_dev or "").strip()
+        if not src:
+            return False, "请填写网络流 URL（例如 http://127.0.0.1:8090/cam.mjpg）"
+        self._close_real_eval_local_cam()
+        cap = None
+        try:
+            is_url = "://" in src or src.lower().endswith((".mjpg", ".mjpeg"))
+            if is_url:
+                cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+                if not cap.isOpened():
+                    if cap is not None:
+                        cap.release()
+                    cap = cv2.VideoCapture(src)
+            else:
+                # 本机设备：/dev/videoN 或纯数字 index
+                index: object = src
+                if src.isdigit():
+                    index = int(src)
+                elif src.startswith("/dev/video") and src[len("/dev/video") :].isdigit():
+                    index = int(src[len("/dev/video") :])
+                if isinstance(index, int):
+                    cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+                    if not cap.isOpened():
+                        cap.release()
+                        cap = cv2.VideoCapture(index)
+                else:
+                    cap = cv2.VideoCapture(src)
+            if not cap.isOpened():
+                hint = (
+                    f"无法打开:\n{src}\n\n"
+                    "Remote SSH / VNC 下请先在 Mac 本机推流并建立 SSH -R 隧道（点「用法」）。"
+                )
+                return False, hint
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            deadline = time.time() + (8.0 if is_url else 2.0)
+            frame = None
+            ok = False
+            while time.time() < deadline:
+                ok, frame = cap.read()
+                if ok and frame is not None and getattr(frame, "size", 0) > 0:
+                    break
+                time.sleep(0.05)
+            if not ok or frame is None or getattr(frame, "size", 0) == 0:
+                cap.release()
+                return False, f"已连接但读不到画面:\n{src}"
+            self._real_eval_local_cap = cap
+            return True, src
+        except Exception as exc:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            return False, f"打开摄像头失败: {exc}"
+
+    def _on_real_eval_local_cam_toggled(self) -> None:
+        if self._real_eval_local_cam_active:
+            self._stop_real_eval_local_cam()
+            self._append_real_eval_log("[本地摄像头] 已停止预览")
+            self.status_bar.showMessage("本地摄像头预览已停止", 3000)
+            return
+        url = self.real_eval_cam_url_edit.text().strip() or SKELETON_NETWORK_URL_DEFAULT
+        self.real_eval_cam_url_edit.setText(url)
+        self.real_eval_cam_status_label.setText(f"本地摄像头: 连接中… {url}")
+        self.real_eval_cam_status_label.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        self.status_bar.showMessage(f"正在连接本地摄像头流: {url}")
+        QApplication.processEvents()
+        ok, msg = self._open_real_eval_local_cam_source(url)
+        if not ok:
+            # 远端无流时，若存在 /dev/video0（如 v4l2loopback）则尝试本机
+            fallback = None
+            if os.path.exists("/dev/video0"):
+                fallback = "0"
+            if fallback is not None and url != fallback:
+                self._append_real_eval_log(f"[本地摄像头] 流失败，尝试 /dev/video0 …")
+                ok2, msg2 = self._open_real_eval_local_cam_source(fallback)
+                if ok2:
+                    ok, msg = ok2, msg2
+                else:
+                    QMessageBox.warning(self, "本地摄像头预览", f"{msg}\n\n本机回退也失败:\n{msg2}")
+                    self.real_eval_cam_status_label.setText("本地摄像头: 连接失败")
+                    self.real_eval_cam_status_label.setStyleSheet(f"color: {UI_ACCENT_RED};")
+                    return
+            else:
+                QMessageBox.warning(self, "本地摄像头预览", msg)
+                self.real_eval_cam_status_label.setText("本地摄像头: 连接失败")
+                self.real_eval_cam_status_label.setStyleSheet(f"color: {UI_ACCENT_RED};")
+                return
+        self._real_eval_local_cam_active = True
+        self.real_eval_cam_url_edit.setEnabled(False)
+        self.real_eval_cam_preview_btn.setText("停止预览")
+        short = msg if len(msg) <= 56 else msg[:53] + "..."
+        self.real_eval_cam_status_label.setText(f"本地摄像头: 预览中 @ {short}")
+        self.real_eval_cam_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        self.real_eval_cam_preview_label.setText("")
+        self._real_eval_local_cam_timer.start()
+        self._append_real_eval_log(f"[本地摄像头] 预览已开启: {msg}")
+        self.status_bar.showMessage("本地摄像头预览已开启", 3000)
+
+    def _on_real_eval_local_cam_tick(self) -> None:
+        if not self._real_eval_local_cam_active or self._real_eval_local_cam_busy:
+            return
+        cap = self._real_eval_local_cap
+        if cap is None:
+            return
+        self._real_eval_local_cam_busy = True
+        try:
+            ok, frame = cap.read()
+            if not ok or frame is None or getattr(frame, "size", 0) == 0:
+                self.real_eval_cam_status_label.setText("本地摄像头: 等待画面…")
+                return
+            max_w = max(320, self.real_eval_cam_preview_label.width() - 8)
+            h, w = frame.shape[:2]
+            if w > max_w:
+                scale = max_w / float(w)
+                frame = cv2.resize(
+                    frame,
+                    (max_w, max(1, int(h * scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            self.real_eval_cam_preview_label.setPixmap(cv2_to_qpixmap(frame))
+        except Exception as exc:
+            self.real_eval_cam_status_label.setText(f"本地摄像头: 读帧错误 {exc}")
+            self.real_eval_cam_status_label.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        finally:
+            self._real_eval_local_cam_busy = False
 
     def _init_qwen_deploy_controller(self) -> None:
         """测试 Tab 挂载共享推理控制器（测试工作室为独立窗口，见 test_studio/run_test_studio.sh）。"""
@@ -32497,6 +33318,7 @@ class CameraTopicWindow(QMainWindow):
         except Exception as exc:
             print(f"[viewer_ui_state] save failed: {exc}", flush=True)
         self._stop_skeleton_tracking()
+        self._stop_real_eval_local_cam()
         self._stop_human_demo_playback()
         self._ui_timer.stop()
         self._sam3_health_timer.stop()
@@ -37509,6 +38331,14 @@ class CameraTopicWindow(QMainWindow):
                 "/"
             ).endswith("/molmospaces"):
                 self.molmospaces_root_edit.setText(PSI_MOLMOSPACES_ROOT_DEFAULT)
+            if hasattr(self, "molmospaces_recipe_combo"):
+                idx = self.molmospaces_recipe_combo.findData("eval_task")
+                if idx >= 0:
+                    self.molmospaces_recipe_combo.setCurrentIndex(idx)
+            if hasattr(self, "molmospaces_robot_combo"):
+                idx = self.molmospaces_robot_combo.findData("psi_r1")
+                if idx >= 0:
+                    self.molmospaces_robot_combo.setCurrentIndex(idx)
             if hasattr(self, "molmospaces_policy_combo"):
                 idx = self.molmospaces_policy_combo.findData(
                     PSI_MOLMOSPACES_DEFAULT_POLICY
@@ -38250,11 +39080,22 @@ class CameraTopicWindow(QMainWindow):
             "Psi-MolmoSpaces" if backend == "psi_molmospaces" else "MolmoSpaces"
         )
         root = self._resolve_molmospaces_root()
-        # 只开界面：强制快速演示 --viewer（不走 Pi 评测）。
+        # 只开界面：强制快速演示 --viewer（不走策略评测）。
+        # Psi-MolmoSpaces：走本地 Psi R1 MJCF（秒开），避免 droid pipeline
+        # 先卡在资源/LMDB 索引上几分钟都不出窗口。
         if viewer_only:
             recipe = "quick_viewer"
+            if backend == "psi_molmospaces" and hasattr(self, "molmospaces_robot_combo"):
+                idx_psi = self.molmospaces_robot_combo.findData("psi_r1")
+                if idx_psi >= 0:
+                    self.molmospaces_robot_combo.setCurrentIndex(idx_psi)
             self._append_mujoco_log(
                 f"[{spaces_tag}] 只开界面：快速演示 --viewer，不调用模型"
+                + (
+                    "（Psi → 本地 MJCF）"
+                    if backend == "psi_molmospaces"
+                    else ""
+                )
             )
         else:
             recipe = "quick_viewer"
@@ -38345,6 +39186,15 @@ class CameraTopicWindow(QMainWindow):
                 )
                 self._on_mujoco_status(f"任务未下载: {task.get('label')}")
                 return
+            if backend == "psi_molmospaces":
+                ok_r1, r1_msg = ensure_psi_r1_robot_assets(root)
+                if not ok_r1:
+                    self._append_mujoco_log(f"[psi_molmospaces] {r1_msg}")
+                    self._on_mujoco_status("缺少 Psi R1 机器人资源")
+                    return
+                self._append_mujoco_log(
+                    f"[psi_molmospaces] psi_r1_ruiyan assets={r1_msg}"
+                )
             policy = "molmo_spaces.evaluation.configs.evaluation_configs:DummyBenchmarkEvalConfig"
             if hasattr(self, "molmospaces_policy_combo"):
                 policy = str(
@@ -38488,10 +39338,21 @@ class CameraTopicWindow(QMainWindow):
                 "EAI_DIR": EAI_DIR,
                 "OPENPI_DATA_HOME": os.environ.get("OPENPI_DATA_HOME")
                 or OPENPI_DATA_HOME_DEFAULT,
-                "PYTHONPATH": "",
+                # Prefer checkout root over conda editable install (often upstream molmospaces).
+                "PYTHONPATH": root,
                 "PYTHONNOUSERSITE": "1",
                 **molmospaces_cache_env(),
             }
+            tools = os.path.join(EAI_DIR, "tools")
+            prev = env_extra.get("PYTHONPATH") or ""
+            env_extra["PYTHONPATH"] = os.pathsep.join(
+                [root, tools]
+                + [
+                    p
+                    for p in prev.split(os.pathsep)
+                    if p and p not in (root, tools)
+                ]
+            )
             if hud_env:
                 env_extra.update(hud_env)
                 self._expand_workspace_panel()
@@ -38549,6 +39410,11 @@ class CameraTopicWindow(QMainWindow):
             if not os.path.isfile(pipeline):
                 self._on_mujoco_status(f"未找到: {pipeline}")
                 return
+            self._append_mujoco_log(
+                f"[{spaces_tag}] 本体={robot_id} → MolmoSpaces pipeline --viewer\n"
+                "  首次会建/校验资源与 LMDB 索引，可能要 1–3 分钟才弹出窗口；"
+                "请看下方日志进度，勿重复点击。"
+            )
             repaired = self._repair_molmospaces_cache_manifest()
             ok, msg = self._check_molmospaces_resources(py)
             if not ok:
@@ -38636,7 +39502,8 @@ class CameraTopicWindow(QMainWindow):
             "MOLMOSPACES_FORCE_EGL": "1",
             "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
             "EAI_DIR": EAI_DIR,
-            "PYTHONPATH": "",
+            # Prefer checkout root over conda editable install (often upstream molmospaces).
+            "PYTHONPATH": root,
             "PYTHONNOUSERSITE": "1",
             **molmospaces_cache_env(),
             **self._sim_bridge_child_env(),
@@ -38644,13 +39511,18 @@ class CameraTopicWindow(QMainWindow):
         tools = os.path.join(EAI_DIR, "tools")
         prev = env_extra.get("PYTHONPATH") or ""
         env_extra["PYTHONPATH"] = os.pathsep.join(
-            [tools] + [p for p in prev.split(os.pathsep) if p and p != tools]
+            [root, tools]
+            + [
+                p
+                for p in prev.split(os.pathsep)
+                if p and p not in (root, tools)
+            ]
         )
         if hud_env:
             env_extra.update(hud_env)
             self._expand_workspace_panel()
             self._append_mujoco_log(
-                f"[molmospaces] RynnValue Live HUD "
+                f"[{spaces_tag}] RynnValue Live HUD "
                 f"url={hud_env.get('RYNNVALUE_SERVER_URL')}"
             )
         self._mujoco_launcher.start_cwd_command(
@@ -41024,6 +41896,22 @@ class CameraTopicWindow(QMainWindow):
             self.robot_stack_btn.setText("服务栈启动中…")
         else:
             self.robot_stack_btn.setText("启动机器人栈")
+        # 真机评测页：A2D 后端同步栈按钮状态；R1 用独立脚本路径时保持可点
+        if hasattr(self, "real_eval_stack_btn"):
+            backend = self._real_robot_backend_id()
+            label = real_robot_backend_label(backend)
+            if backend == REAL_ROBOT_BACKEND_A2D:
+                self.real_eval_stack_btn.setEnabled(not busy)
+                if base == "运行中":
+                    self.real_eval_stack_btn.setText(f"{label}栈已运行")
+                elif robot == "启动中":
+                    self.real_eval_stack_btn.setText(f"{label} robot 启动中…")
+                elif base == "启动中":
+                    self.real_eval_stack_btn.setText(f"{label}服务栈启动中…")
+                else:
+                    self.real_eval_stack_btn.setText(f"启动{label}栈")
+            elif not self._real_eval_active:
+                self.real_eval_stack_btn.setText(f"启动{label}栈")
 
     def _on_refresh_clicked(self) -> None:
         prefix = self.prefix_edit.text().strip() or "/camera"

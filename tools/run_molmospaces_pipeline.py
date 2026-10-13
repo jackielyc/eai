@@ -38,14 +38,18 @@ def main() -> int:
         print(f"[molmospaces-wrapper] pipeline not found: {pipeline}", file=sys.stderr)
         return 2
 
+    # Prefer MOLMOSPACES_ROOT over the conda editable install (often upstream
+    # molmospaces). Psi-MolmoSpaces needs its own molmo_spaces on sys.path.
     sys.path.insert(0, str(here))
     sys.path.insert(0, str(ms_root / "scripts" / "datagen"))
+    sys.path.insert(0, str(ms_root))
 
     from mujoco_egl_passive import patch_launch_passive
 
     backend = patch_launch_passive(force_egl=os.environ.get("MOLMOSPACES_FORCE_EGL") == "1")
     print(f"[molmospaces-wrapper] viewer_backend={backend}", flush=True)
     print(f"[molmospaces-wrapper] pipeline={pipeline}", flush=True)
+    print(f"[molmospaces-wrapper] molmo_spaces_root={ms_root}", flush=True)
 
     # Forward argv after this script name.
     sys.argv = [str(pipeline), *sys.argv[1:]]

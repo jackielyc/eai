@@ -6,6 +6,7 @@
     "仿真评测",
     "真机评测",
     "手臂/手",
+    "数据集",
     "RynnValue",
     "RoboICL",
     "仿真强化学习训练",
@@ -24,7 +25,6 @@
     "CAD",
     "手骨架遥控",
     "ICL",
-    "数据集",
     "HumanEgo",
     "PhysicalRSI",
     "编程冲SOTA"

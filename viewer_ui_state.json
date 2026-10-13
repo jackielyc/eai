@@ -97,7 +97,7 @@
     },
     "lingbot_depth_topic_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 3,
       "text": "/libero/preview",
       "data": "/libero/preview"
     },
@@ -193,7 +193,7 @@
     },
     "lingbot_video_topic_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 3,
       "text": "/libero/preview",
       "data": "/libero/preview"
     },
@@ -263,7 +263,7 @@
     },
     "lingbot_world_topic_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 3,
       "text": "/libero/preview",
       "data": "/libero/preview"
     },
@@ -435,7 +435,7 @@
     },
     "sim_backend_psi_spaces_radio": {
       "kind": "radio",
-      "checked": false
+      "checked": true
     },
     "sim_backend_arena_radio": {
       "kind": "radio",
@@ -443,7 +443,7 @@
     },
     "sim_backend_libero_radio": {
       "kind": "radio",
-      "checked": true
+      "checked": false
     },
     "sim_backend_robotwin_radio": {
       "kind": "radio",
@@ -469,10 +469,10 @@
     },
     "sim_eval_task_combo": {
       "kind": "combo",
-      "index": 2,
-      "text": "arrange_largest_number_random",
-      "data": "arrange_largest_number_random",
-      "edit": "arrange_largest_number_random"
+      "index": 0,
+      "text": "align_blocks",
+      "data": "align_blocks",
+      "edit": "align_blocks"
     },
     "sim_eval_policy_combo": {
       "kind": "combo",
@@ -551,15 +551,15 @@
     },
     "molmospaces_robot_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "Franka Droid",
-      "data": "droid"
+      "index": 6,
+      "text": "Psi R1 (本地 MJCF)",
+      "data": "psi_r1"
     },
     "molmospaces_task_combo": {
       "kind": "combo",
-      "index": 1,
-      "text": "Close (Close-v1)",
-      "data": "{'extra': (), 'id': 'close_v1', 'label': 'Close (Close-v1)', 'path': '/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/molmospaces/assets/L3NoYXJlX2RhdGEvcHJvamVjdHMvbWFoam9uZy9zaGFyZS9wZXJzb25hbC9saXlpY2hhby9tb2xtb3NwYWNlcw/benchmarks/molmospaces-bench-v1/ithor/FrankaCloseDataGenConfig/FrankaCloseDataGenConfig_20260123_json_benchmark', 'ready': True}"
+      "index": 0,
+      "text": "[Psi] pick up the apple (20 ep)",
+      "data": "{'extra': (), 'id': 'psi:benchmark', 'label': '[Psi] pick up the apple (20 ep)', 'path': '/share_data/projects/mahjong/share/personal/liyichao/psi-molmospaces/psi_molmo_spaces', 'ready': True}"
     },
     "molmospaces_policy_combo": {
       "kind": "combo",
@@ -949,7 +949,7 @@
     },
     "reward_topic_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 3,
       "text": "/libero/preview",
       "data": "/libero/preview"
     },
@@ -1497,7 +1497,7 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "手臂/手",
+  "control_tab": "真机评测",
   "splitter_sizes": [
     256,
     1258,
@@ -1505,13 +1505,19 @@
   ],
   "geometry": [
     0,
-    51,
+    56,
     1920,
     1029
   ],
   "topic_checks": {
     "/libero/preview": true,
-    "/rynnvalue/live_hud": true
+    "/rynnvalue/live_hud": true,
+    "/camera/left_wrist_color": true,
+    "/camera/head_color": true,
+    "/camera/right_wrist_color": true,
+    "/camera/left_wrist_depth": true,
+    "/camera/head_depth": true,
+    "/camera/right_wrist_depth": true
   },
   "topic_user_unchecked": [],
   "workspace_collapsed": false
