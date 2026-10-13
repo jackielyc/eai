@@ -5,7 +5,7 @@
 在有摄像头的本机（推荐 macOS）运行本界面，对应远端 eai「本地摄像头」tab 的两项能力：
 
   1) 启动 MJPEG 推流  →  examples/local_webcam_mjpeg_server.py
-  2) 启动 SSH 反向隧道 →  ssh -N -R <port>:127.0.0.1:<port> user@remote
+  2) 启动 SSH 反向隧道 →  ssh -N -R 8090:127.0.0.1:8090 -p 10693 root@42.192.34.154
 
 用法::
 
@@ -29,6 +29,8 @@ from tkinter import messagebox, scrolledtext, ttk
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _EAI_DIR = os.path.dirname(_HERE)
 _MJPEG_SCRIPT = os.path.join(_HERE, "local_webcam_mjpeg_server.py")
+_SSH_TARGET_DEFAULT = "root@42.192.34.154"
+_SSH_EXTRA_DEFAULT = "-p 10693 -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes"
 
 
 class LocalWebcamForwardApp:
@@ -76,7 +78,9 @@ class LocalWebcamForwardApp:
         r2 = ttk.Frame(g2)
         r2.pack(fill=tk.X)
         ttk.Label(r2, text="远端").pack(side=tk.LEFT)
-        self.ssh_target_var = tk.StringVar(value=os.environ.get("EAI_SSH_REVERSE_TARGET", "user@remote-host"))
+        self.ssh_target_var = tk.StringVar(
+            value=os.environ.get("EAI_SSH_REVERSE_TARGET", _SSH_TARGET_DEFAULT)
+        )
         ttk.Entry(r2, textvariable=self.ssh_target_var, width=28).pack(side=tk.LEFT, padx=4)
         ttk.Label(r2, text="远端端口").pack(side=tk.LEFT, padx=(8, 0))
         self.remote_port_var = tk.StringVar(value="8090")
@@ -89,7 +93,7 @@ class LocalWebcamForwardApp:
         r2b = ttk.Frame(g2)
         r2b.pack(fill=tk.X, pady=(6, 0))
         ttk.Label(r2b, text="额外 ssh 参数").pack(side=tk.LEFT)
-        self.ssh_extra_var = tk.StringVar(value="-o ServerAliveInterval=30 -o ExitOnForwardFailure=yes")
+        self.ssh_extra_var = tk.StringVar(value=_SSH_EXTRA_DEFAULT)
         ttk.Entry(r2b, textvariable=self.ssh_extra_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
 
         # --- 日志 ---
@@ -199,7 +203,7 @@ class LocalWebcamForwardApp:
         if not target or "@" not in target or "remote-host" in target:
             messagebox.showwarning(
                 "隧道",
-                "请填写真实远端，例如:\n  yourname@10.0.0.5\n或设置环境变量 EAI_SSH_REVERSE_TARGET",
+                "请填写真实远端，例如:\n  root@42.192.34.154\n或设置环境变量 EAI_SSH_REVERSE_TARGET",
             )
             return
         try:

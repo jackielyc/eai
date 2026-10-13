@@ -8,7 +8,7 @@
   python3 examples/local_webcam_mjpeg_server.py --device 0 --port 8090
 
   # 本机终端 2：把本机 8090 映射到远端 localhost:8090
-  ssh -N -R 8090:127.0.0.1:8090 user@remote-host
+  ssh -N -R 8090:127.0.0.1:8090 -p 10693 root@42.192.34.154
 
   # 远端 UI：
   # · 真机评测 →「本地摄像头预览」
@@ -145,7 +145,7 @@ def main() -> int:
     )
     print(
         "远端 VNC 场景请在本机另开: "
-        f"ssh -N -R {args.port}:127.0.0.1:{args.port} user@remote",
+        f"ssh -N -R {args.port}:127.0.0.1:{args.port} -p 10693 root@42.192.34.154",
         flush=True,
     )
     try:

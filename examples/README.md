@@ -20,7 +20,7 @@ eai「本地摄像头」tab 提供同样两个按钮；若 UI 在远端，请在
 ```bash
 cd /path/to/eai
 python3 examples/local_webcam_forward_ui.py
-# 1) 启动推流  2) 填写 user@远端 后启动隧道
+# 1) 启动推流  2) 启动隧道（默认 ssh -N -R 8090:127.0.0.1:8090 -p 10693 root@42.192.34.154）
 ```
 
 远端再打开「本地摄像头」或「真机评测」预览 `http://127.0.0.1:8090/cam.mjpg`。

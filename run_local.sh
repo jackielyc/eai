@@ -3,6 +3,7 @@
 #
 # 默认：不做依赖/hostctl/topic 等校验，直接启动界面（尽快）。
 # 对照: run_in_docker.sh（ROS/camera 在容器内时用 Docker 版）
+# 支持: Linux（默认 RoboStack share_data 快路径）与 macOS（自动探测本机 conda ROS）
 #
 # 用法:
 #   bash run_local.sh
@@ -19,20 +20,44 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EAI_DIR="$(readlink -f "${SCRIPT_DIR}")"
-PSIBOT_HOME="${PSIBOT_HOME:-/home/psibot}"
+# macOS BSD readlink 无可靠 -f；pwd -P 两端都可用
+EAI_DIR="$(cd "${SCRIPT_DIR}" && pwd -P)"
+UNAME_S="$(uname -s 2>/dev/null || echo unknown)"
+IS_DARWIN=0
+[[ "${UNAME_S}" == "Darwin" ]] && IS_DARWIN=1
+
+if [[ -z "${PSIBOT_HOME:-}" ]]; then
+    if [[ "${IS_DARWIN}" -eq 1 ]]; then
+        PSIBOT_HOME="${HOME}"
+    else
+        PSIBOT_HOME="/home/psibot"
+    fi
+fi
 A2D_SCRIPTS_DIR="${A2D_SCRIPTS_DIR:-${PSIBOT_HOME}/workspace_liyichao/install/scripts_pack/share/scripts_pack/scripts}"
 A2D_SDK_HOME="${A2D_SDK_HOME:-${PSIBOT_HOME}/a2d_sdk}"
 HOST_DDS_XML="${SCRIPT_DIR}/dds/fastdds_profiles_host.xml"
+MAC_DDS_XML="${SCRIPT_DIR}/dds/fastdds_profiles_mac.xml"
 A2D_DDS_XML="${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"
-ROS_HUMBLE_CONDA="${ROS_HUMBLE_CONDA:-/share_data/projects/mahjong/share/personal/liyichao/envs/ros-humble}"
+# Linux 默认保持原 share_data 路径（不做存在性探测，避免拖慢启动）
+_LINUX_ROS_CONDA_DEFAULT="/share_data/projects/mahjong/share/personal/liyichao/envs/ros-humble"
 USER_PYTHON="${PYTHON:-}"
 ROS_MODE=""
-_t0="$(date +%s%3N 2>/dev/null || date +%s)"
+
+# BSD date 的 +%s%3N 会产出 "….3N" 且 exit 0；只认纯 13 位毫秒时间戳
+_now_epoch() {
+    local t
+    t="$(date +%s%3N 2>/dev/null || true)"
+    if [[ "${t}" =~ ^[0-9]{13}$ ]]; then
+        printf '%s\n' "${t}"
+    else
+        date +%s
+    fi
+}
+_t0="$(_now_epoch)"
 
 _log_elapsed() {
     local now
-    now="$(date +%s%3N 2>/dev/null || date +%s)"
+    now="$(_now_epoch)"
     if [[ "${#_t0}" -ge 13 && "${#now}" -ge 13 ]]; then
         echo ">>> 启动耗时 $((now - _t0)) ms"
     else
@@ -40,20 +65,108 @@ _log_elapsed() {
     fi
 }
 
+_prepend_lib_path() {
+    local extra="$1"
+    [[ -n "${extra}" ]] || return 0
+    if [[ "${IS_DARWIN}" -eq 1 ]]; then
+        export DYLD_FALLBACK_LIBRARY_PATH="${extra}${DYLD_FALLBACK_LIBRARY_PATH:+:${DYLD_FALLBACK_LIBRARY_PATH}}"
+    else
+        export LD_LIBRARY_PATH="${extra}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+    fi
+}
+
+_conda_python_site_packages() {
+    # $2=fast：不执行 python（Linux share_data 冷启动要快）
+    local prefix="$1"
+    local mode="${2:-}"
+    local py ver major minor
+    if [[ "${mode}" == "fast" ]]; then
+        printf '%s\n' \
+            "${prefix}/lib/python311/site-packages" \
+            "${prefix}/lib/python3.11/site-packages"
+        return 0
+    fi
+    py="${prefix}/bin/python"
+    if [[ -x "${py}" ]]; then
+        ver="$("${py}" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || true)"
+        if [[ -n "${ver}" ]]; then
+            major="${ver%%.*}"
+            minor="${ver#*.}"
+            printf '%s\n' \
+                "${prefix}/lib/python${major}${minor}/site-packages" \
+                "${prefix}/lib/python${ver}/site-packages"
+            return 0
+        fi
+    fi
+    printf '%s\n' \
+        "${prefix}/lib/python311/site-packages" \
+        "${prefix}/lib/python3.11/site-packages"
+}
+
+_pick_mac_ros_conda() {
+    # 优先：显式 ROS_HUMBLE_CONDA → 当前 CONDA_PREFIX → 常见本机 env
+    local c
+    for c in \
+        "${ROS_HUMBLE_CONDA:-}" \
+        "${CONDA_PREFIX:-}" \
+        "/opt/homebrew/Caskroom/miniconda/base/envs/ros2-jazzy" \
+        "/opt/homebrew/Caskroom/miniconda/base/envs/ros2-humble" \
+        "${HOME}/miniconda3/envs/ros2-jazzy" \
+        "${HOME}/miniconda3/envs/ros2-humble" \
+        "${HOME}/mambaforge/envs/ros2-jazzy" \
+        "${HOME}/mambaforge/envs/ros2-humble" \
+        "${HOME}/anaconda3/envs/ros2-jazzy" \
+        "${HOME}/anaconda3/envs/ros2-humble"
+    do
+        [[ -n "${c}" && -x "${c}/bin/python" ]] || continue
+        if [[ -d "${c}/lib/python3.12/site-packages/PyQt5" \
+           || -d "${c}/lib/python3.11/site-packages/PyQt5" \
+           || -d "${c}/lib/python3.10/site-packages/PyQt5" ]]; then
+            printf '%s\n' "${c}"
+            return 0
+        fi
+    done
+    for c in \
+        "${ROS_HUMBLE_CONDA:-}" \
+        "${CONDA_PREFIX:-}" \
+        "/opt/homebrew/Caskroom/miniconda/base/envs/ros2-jazzy" \
+        "/opt/homebrew/Caskroom/miniconda/base/envs/ros2-humble" \
+        "${HOME}/miniconda3/envs/ros2-jazzy" \
+        "${HOME}/miniconda3/envs/ros2-humble"
+    do
+        [[ -n "${c}" && -x "${c}/bin/python" ]] || continue
+        printf '%s\n' "${c}"
+        return 0
+    done
+    return 1
+}
+
 _apply_conda_humble_fast_env() {
     local prefix="$1"
+    local distro="${2:-humble}"
+    local site_mode="${3:-fast}"
+    local os_tag="linux"
+    local pp="" site
+    [[ "${IS_DARWIN}" -eq 1 ]] && os_tag="osx"
     export CONDA_PREFIX="${prefix}"
     export PATH="${prefix}/bin${PATH:+:${PATH}}"
     export AMENT_PREFIX_PATH="${prefix}${AMENT_PREFIX_PATH:+:${AMENT_PREFIX_PATH}}"
     export ROS_ETC_DIR="${prefix}/etc/ros"
-    export ROS_DISTRO=humble
+    export ROS_DISTRO="${distro}"
     export ROS_VERSION=2
     export ROS_PYTHON_VERSION=3
     export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
-    export ROS_OS_OVERRIDE="${ROS_OS_OVERRIDE:-conda:linux}"
+    export ROS_OS_OVERRIDE="${ROS_OS_OVERRIDE:-conda:${os_tag}}"
     export GSETTINGS_SCHEMA_DIR="${prefix}/share/glib-2.0/schemas${GSETTINGS_SCHEMA_DIR:+:${GSETTINGS_SCHEMA_DIR}}"
-    export LD_LIBRARY_PATH="${prefix}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-    local pp="${prefix}/lib/python311/site-packages:${prefix}/lib/python3.11/site-packages"
+    _prepend_lib_path "${prefix}/lib"
+    while IFS= read -r site; do
+        [[ -n "${site}" ]] || continue
+        if [[ -z "${pp}" ]]; then
+            pp="${site}"
+        else
+            pp="${pp}:${site}"
+        fi
+    done < <(_conda_python_site_packages "${prefix}" "${site_mode}")
     export PYTHONPATH="${pp}${PYTHONPATH:+:${PYTHONPATH}}"
 }
 
@@ -66,15 +179,33 @@ _apply_qt_paths() {
         unset QT_QPA_PLATFORM_PLUGIN_PATH
     fi
     if [[ -n "${qt_lib}" ]]; then
-        export LD_LIBRARY_PATH="${qt_lib}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        _prepend_lib_path "${qt_lib}"
     fi
     if [[ -n "${qt_platforms}" ]]; then
         export QT_QPA_PLATFORM_PLUGIN_PATH="${qt_platforms}"
     fi
 }
 
+_resolve_conda_pyqt_root() {
+    local prefix="$1"
+    local site root
+    while IFS= read -r site; do
+        for root in \
+            "${site}/PyQt5/Qt5" \
+            "${site}/PyQt5/Qt"
+        do
+            if [[ -d "${root}/plugins/platforms" ]]; then
+                printf '%s\n' "${root}"
+                return 0
+            fi
+        done
+    done < <(_conda_python_site_packages "${prefix}")
+    return 1
+}
+
 # ---------------------------------------------------------------------------
-# ROS：默认假定 RoboStack conda；不 stat/探测（加快 share_data）
+# ROS：Linux 默认假定 RoboStack conda（不 stat，加快 share_data）；
+#      macOS 自动探测本机 conda ROS（jazzy/humble）
 # ---------------------------------------------------------------------------
 if [[ -n "${ROS_SETUP_BASH:-}" ]]; then
     ROS_SETUP="${ROS_SETUP_BASH}"
@@ -85,15 +216,43 @@ if [[ -n "${ROS_SETUP_BASH:-}" ]]; then
     else
         ROS_MODE="custom"
     fi
+elif [[ "${IS_DARWIN}" -eq 1 ]]; then
+    if [[ -z "${ROS_HUMBLE_CONDA:-}" ]]; then
+        ROS_HUMBLE_CONDA="$(_pick_mac_ros_conda)" || {
+            echo "错误: macOS 未找到可用的 conda ROS 环境（需含 bin/python）。" >&2
+            echo "请设置 ROS_HUMBLE_CONDA / CONDA_PREFIX / PYTHON，或安装 ros2-jazzy / ros2-humble。" >&2
+            exit 1
+        }
+    fi
+    export CONDA_PREFIX="${ROS_HUMBLE_CONDA}"
+    ROS_SETUP="${CONDA_PREFIX}/setup.bash"
+    if [[ "${CONDA_PREFIX}" == *jazzy* ]]; then
+        ROS_MODE="conda_jazzy"
+    else
+        ROS_MODE="conda_humble"
+    fi
 else
+    ROS_HUMBLE_CONDA="${ROS_HUMBLE_CONDA:-${_LINUX_ROS_CONDA_DEFAULT}}"
     export CONDA_PREFIX="${ROS_HUMBLE_CONDA}"
     ROS_SETUP="${CONDA_PREFIX}/setup.bash"
     ROS_MODE="conda_humble"
 fi
 
 set +u
-if [[ "${ROS_MODE}" == "conda_humble" && "${FORCE_ROS_SOURCE:-0}" != "1" ]]; then
-    _apply_conda_humble_fast_env "${CONDA_PREFIX}"
+if [[ "${ROS_MODE}" == "conda_humble" && "${IS_DARWIN}" -eq 0 && "${FORCE_ROS_SOURCE:-0}" != "1" ]]; then
+    # Linux RoboStack：跳过 source，直接拼环境（share_data 上 source 很慢）
+    _apply_conda_humble_fast_env "${CONDA_PREFIX}" humble
+elif [[ "${ROS_MODE}" == "conda_jazzy" || "${ROS_MODE}" == "conda_humble" ]]; then
+    # macOS / 强制 source：走 setup.bash（本机盘很快，且能正确设置 dylib）
+    if [[ -f "${ROS_SETUP}" ]]; then
+        # shellcheck disable=SC1090
+        source "${ROS_SETUP}"
+    else
+        # macOS 回退：探测真实 python 版本（本机盘，可接受一次 python -c）
+        _apply_conda_humble_fast_env "${CONDA_PREFIX}" \
+            "$([[ "${ROS_MODE}" == "conda_jazzy" ]] && echo jazzy || echo humble)" \
+            probe
+    fi
 else
     # shellcheck disable=SC1090
     source "${ROS_SETUP}"
@@ -113,7 +272,7 @@ set -e
 
 if [[ -n "${USER_PYTHON}" ]]; then
     PYTHON="${USER_PYTHON}"
-elif [[ "${ROS_MODE}" == "conda_humble" ]]; then
+elif [[ "${ROS_MODE}" == "conda_humble" || "${ROS_MODE}" == "conda_jazzy" ]]; then
     PYTHON="${CONDA_PREFIX}/bin/python"
 elif [[ -x /usr/bin/python3.10 ]]; then
     PYTHON=/usr/bin/python3.10
@@ -121,10 +280,21 @@ else
     PYTHON="$(command -v python3)"
 fi
 
-export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+# Linux 默认 FastDDS；macOS 默认 CycloneDDS —
+# RoboStack FastDDS 在 macOS 上 destroy_subscription 会永久卡住，Qt 主线程抢不到 GIL → 界面假死
+if [[ "${IS_DARWIN}" -eq 1 ]]; then
+    export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+else
+    export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+fi
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
-# 与 fast-env / setup 一致：若已设置则保留，否则默认 0（可见跨机 topic）
-export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
+# Linux：默认 0（可见跨机 topic）。macOS：默认本机发现，避免 Wi‑Fi/VPN 子网扫描拖慢 DDS
+if [[ "${IS_DARWIN}" -eq 1 ]]; then
+    export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-1}"
+    export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
+else
+    export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
+fi
 export A2D_SCRIPTS_DIR
 export PSIBOT_HOME
 export HOME="${HOME:-${PSIBOT_HOME}}"
@@ -141,19 +311,37 @@ if [[ -z "${PYTHONPYCACHEPREFIX:-}" ]]; then
     mkdir -p "${PYTHONPYCACHEPREFIX}" 2>/dev/null || true
 fi
 
-if [[ -f "${HOST_DDS_XML}" ]]; then
-    export FASTRTPS_DEFAULT_PROFILES_FILE="${HOST_DDS_XML}"
-elif [[ -f "${A2D_DDS_XML}" ]]; then
-    export FASTRTPS_DEFAULT_PROFILES_FILE="${A2D_DDS_XML}"
+# DDS XML：仅 FastDDS 需要。macOS 默认 Cyclone，不挂 Linux SHM host 配置
+if [[ "${RMW_IMPLEMENTATION}" == *fastrtps* ]]; then
+    if [[ -z "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
+        if [[ "${IS_DARWIN}" -eq 1 ]]; then
+            if [[ -f "${MAC_DDS_XML}" ]]; then
+                export FASTRTPS_DEFAULT_PROFILES_FILE="${MAC_DDS_XML}"
+            fi
+        elif [[ -f "${HOST_DDS_XML}" ]]; then
+            export FASTRTPS_DEFAULT_PROFILES_FILE="${HOST_DDS_XML}"
+        elif [[ -f "${A2D_DDS_XML}" ]]; then
+            export FASTRTPS_DEFAULT_PROFILES_FILE="${A2D_DDS_XML}"
+        fi
+    fi
 fi
 
-# Qt：直接拼路径，不做存在性校验
-if [[ "${ROS_MODE}" == "conda_humble" ]]; then
+# macOS：强制 Cocoa，避免 XQuartz DISPLAY 把平台插件带偏
+if [[ "${IS_DARWIN}" -eq 1 ]]; then
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-cocoa}"
+fi
+
+# Qt：Linux conda humble 快路径直接拼；其余环境按实际 PyQt 布局探测
+if [[ "${ROS_MODE}" == "conda_humble" && "${IS_DARWIN}" -eq 0 ]]; then
     _conda_pyqt_root="${CONDA_PREFIX}/lib/python3.11/site-packages/PyQt5/Qt5"
     _apply_qt_paths "${_conda_pyqt_root}/lib" "${_conda_pyqt_root}/plugins/platforms"
+elif [[ "${ROS_MODE}" == "conda_humble" || "${ROS_MODE}" == "conda_jazzy" ]]; then
+    if _conda_pyqt_root="$(_resolve_conda_pyqt_root "${CONDA_PREFIX}")"; then
+        _apply_qt_paths "${_conda_pyqt_root}/lib" "${_conda_pyqt_root}/plugins/platforms"
+    fi
 fi
 
-echo ">>> 本地模式 DISPLAY=${DISPLAY:-:0} Python=${PYTHON} ROS=${ROS_DISTRO:-?} (${ROS_MODE})"
+echo ">>> 本地模式 DISPLAY=${DISPLAY:-:0} Python=${PYTHON} ROS=${ROS_DISTRO:-?} (${ROS_MODE}) RMW=${RMW_IMPLEMENTATION} localhost_only=${ROS_LOCALHOST_ONLY}"
 
 # ---------------------------------------------------------------------------
 # 可选校验（默认关闭）
@@ -232,9 +420,13 @@ fi
 
 _log_elapsed
 # 启动前再钉一次 PyQt 插件路径（防止先前环境 / OpenCV 污染）
-if [[ "${ROS_MODE}" == "conda_humble" ]]; then
+if [[ "${ROS_MODE}" == "conda_humble" && "${IS_DARWIN}" -eq 0 ]]; then
     _conda_pyqt_root="${CONDA_PREFIX}/lib/python3.11/site-packages/PyQt5/Qt5"
     _apply_qt_paths "${_conda_pyqt_root}/lib" "${_conda_pyqt_root}/plugins/platforms"
+elif [[ "${ROS_MODE}" == "conda_humble" || "${ROS_MODE}" == "conda_jazzy" ]]; then
+    if _conda_pyqt_root="$(_resolve_conda_pyqt_root "${CONDA_PREFIX}")"; then
+        _apply_qt_paths "${_conda_pyqt_root}/lib" "${_conda_pyqt_root}/plugins/platforms"
+    fi
 fi
 # WebEngine：关 GPU 合成，减少无加速/远程 X 刷屏。勿默认 QT_XCB_GL_INTEGRATION=none
 # （会与 AA_ShareOpenGLContexts 冲突，启动时 SIP segfault）。无 GLX 时再显式：

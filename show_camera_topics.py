@@ -5127,7 +5127,7 @@ SKELETON_NETWORK_HELP = (
     "   python3 examples/local_webcam_mjpeg_server.py --device 0 --port 8090\n"
     "   macOS：device 一般为 0（内置摄像头）；权限请在「系统设置 → 隐私与安全性 → 摄像头」允许终端。\n"
     "2) SSH 反向隧道（把本机 8090 映射到远端 localhost:8090）:\n"
-    "   ssh -N -R 8090:127.0.0.1:8090 <user@远端>\n"
+    "   ssh -N -R 8090:127.0.0.1:8090 -p 10693 root@42.192.34.154\n"
     "   若已用 Cursor/VS Code Remote SSH，另开终端执行上面这条即可（端口冲突时改 8091）。\n\n"
     "【远端 UI】\n"
     "· 手骨架遥控：相机选「网络流」，URL 填 http://127.0.0.1:8090/cam.mjpg → 开始识别\n"
@@ -5138,12 +5138,18 @@ REAL_EVAL_LOCAL_CAM_HELP = SKELETON_NETWORK_HELP
 LOCAL_WEBCAM_MJPEG_SCRIPT = os.path.join(EAI_DIR, "examples", "local_webcam_mjpeg_server.py")
 LOCAL_WEBCAM_FORWARD_UI = os.path.join(EAI_DIR, "examples", "local_webcam_forward_ui.py")
 LOCAL_WEBCAM_DEFAULT_PORT = 8090
+LOCAL_WEBCAM_SSH_TARGET_DEFAULT = "root@42.192.34.154"
+LOCAL_WEBCAM_SSH_PORT_DEFAULT = 10693
+LOCAL_WEBCAM_SSH_EXTRA_DEFAULT = (
+    f"-p {LOCAL_WEBCAM_SSH_PORT_DEFAULT} "
+    "-o ServerAliveInterval=30 -o ExitOnForwardFailure=yes"
+)
 LOCAL_WEBCAM_TAB_HELP = (
     "本页用按钮完成本机摄像头转发（对应原先两条命令）：\n\n"
     "1) 「启动推流」→ 本机 MJPEG：\n"
     "   python3 examples/local_webcam_mjpeg_server.py --device 0 --port 8090\n"
     "2) 「启动隧道」→ SSH 反向端口：\n"
-    "   ssh -N -R 8090:127.0.0.1:8090 user@远端\n\n"
+    "   ssh -N -R 8090:127.0.0.1:8090 -p 10693 root@42.192.34.154\n\n"
     "【Remote SSH / VNC】摄像头在 Mac、eai 在远端时：\n"
     "请在 Mac 本机运行独立助手（同样两个按钮）：\n"
     "   python3 examples/local_webcam_forward_ui.py\n"
@@ -25484,10 +25490,13 @@ class CameraTopicWindow(QMainWindow):
         tunnel_row = QHBoxLayout()
         tunnel_row.setSpacing(6)
         tunnel_row.addWidget(QLabel("远端"))
-        default_ssh = os.environ.get("EAI_SSH_REVERSE_TARGET", "").strip() or "user@remote-host"
+        default_ssh = (
+            os.environ.get("EAI_SSH_REVERSE_TARGET", "").strip()
+            or LOCAL_WEBCAM_SSH_TARGET_DEFAULT
+        )
         self.local_cam_ssh_target_edit = QLineEdit(default_ssh)
         self.local_cam_ssh_target_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.local_cam_ssh_target_edit.setPlaceholderText("user@10.0.0.5  或  user@hostname")
+        self.local_cam_ssh_target_edit.setPlaceholderText("root@42.192.34.154")
         self.local_cam_ssh_target_edit.setToolTip(
             "有摄像头的本机执行时填写 eai 所在远端。也可设环境变量 EAI_SSH_REVERSE_TARGET。"
         )
@@ -25499,7 +25508,9 @@ class CameraTopicWindow(QMainWindow):
         tunnel_row.addWidget(self.local_cam_remote_port_spin)
         self.local_cam_tunnel_btn = QPushButton("启动隧道")
         self.local_cam_tunnel_btn.setFocusPolicy(Qt.NoFocus)
-        self.local_cam_tunnel_btn.setToolTip("等价于: ssh -N -R <远端端口>:127.0.0.1:<本机端口> user@host")
+        self.local_cam_tunnel_btn.setToolTip(
+            "等价于: ssh -N -R <远端端口>:127.0.0.1:<本机端口> -p 10693 root@42.192.34.154"
+        )
         self.local_cam_tunnel_btn.clicked.connect(self._on_local_cam_tunnel_toggled)
         tunnel_row.addWidget(self.local_cam_tunnel_btn)
         self.local_cam_tunnel_status = QLabel("隧道: 未启动")
@@ -25510,9 +25521,7 @@ class CameraTopicWindow(QMainWindow):
         tunnel_extra_row = QHBoxLayout()
         tunnel_extra_row.setSpacing(6)
         tunnel_extra_row.addWidget(QLabel("额外 ssh 参数"))
-        self.local_cam_ssh_extra_edit = QLineEdit(
-            "-o ServerAliveInterval=30 -o ExitOnForwardFailure=yes"
-        )
+        self.local_cam_ssh_extra_edit = QLineEdit(LOCAL_WEBCAM_SSH_EXTRA_DEFAULT)
         self.local_cam_ssh_extra_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         tunnel_extra_row.addWidget(self.local_cam_ssh_extra_edit, 1)
         tunnel_layout.addLayout(tunnel_extra_row)
