@@ -2780,6 +2780,15 @@ MOLMOSPACES_ROBOTS: Tuple[Tuple[str, str], ...] = (
     ("Bimanual YAM", "bimanual_yam"),
     ("Psi R1 (本地 MJCF)", "psi_r1"),
 )
+# Viewer camera before Psi/MolmoSpaces launch. First entry is the default.
+# data: "front" = tracking third-person; "head" = head_camera_rgb first-person.
+MOLMOSPACES_VIEWER_CAMS: Tuple[Tuple[str, str], ...] = (
+    ("正面第三视角", "front"),
+    ("头部第一视角", "head"),
+)
+# Front third-person framing: whole robot + manipulation target in view.
+MOLMOSPACES_VIEWER_FRONT_DISTANCE = "3.8"
+MOLMOSPACES_VIEWER_FRONT_ELEVATION = "-20"
 # robot_id -> MJCF path; quick_viewer opens MuJoCo instead of MolmoSpaces pipeline.
 MOLMOSPACES_LOCAL_MJCF_ROBOTS: Dict[str, str] = {
     "psi_r1": PSI_R1_MODEL_XML,
@@ -3179,15 +3188,21 @@ ISAAC_CAM_BRIDGE_KEYS: Tuple[str, ...] = (
 try:
     from isaac_cam_bridge_sink import (
         clear_gui_robot_cmd,
+        clear_sim_control,
+        is_sim_paused,
         read_sim_robot_state,
         sim_state_is_fresh,
         write_gui_robot_cmd,
+        write_sim_control,
     )
 except ImportError:  # pragma: no cover
     clear_gui_robot_cmd = None  # type: ignore[assignment]
+    clear_sim_control = None  # type: ignore[assignment]
+    is_sim_paused = None  # type: ignore[assignment]
     read_sim_robot_state = None  # type: ignore[assignment]
     sim_state_is_fresh = None  # type: ignore[assignment]
     write_gui_robot_cmd = None  # type: ignore[assignment]
+    write_sim_control = None  # type: ignore[assignment]
 SIM_TELEOP_STATE_MAX_AGE_S = 2.5
 SIM_ARM_MOVE_TICK_MS = 50
 # 仿真评测预览：左腕 → 头部 → 右腕（与图像预览网格顺序一致）
@@ -4325,6 +4340,176 @@ def local_qwen_hostctl_request(
         return False, {"ok": False, "message": str(exc)}
 
 
+def _norm_model_token(value: object) -> str:
+    """Normalize a model id or path for equality checks."""
+    text = str(value or "").strip().strip("'\"")
+    if not text:
+        return ""
+    if text.startswith("gs://"):
+        return text.rstrip("/")
+    expanded = os.path.expanduser(text)
+    if os.path.isabs(expanded):
+        try:
+            return os.path.realpath(expanded).rstrip("/")
+        except OSError:
+            return expanded.rstrip("/")
+    return text
+
+
+def model_identity_same(
+    live_id: object,
+    live_dir: object,
+    want_id: object,
+    want_dir: object,
+) -> Optional[bool]:
+    """True if the running model is the requested one.
+
+    False when both sides are known and differ. None when there is not
+    enough information to decide.
+    """
+    lid = str(live_id or "").strip()
+    wid = str(want_id or "").strip()
+    ld = _norm_model_token(live_dir)
+    wd = _norm_model_token(want_dir)
+    if ld and wd and (os.path.isabs(ld) or os.path.isabs(wd) or ld.startswith("gs:") or wd.startswith("gs:")):
+        same_dir = ld == wd or (
+            os.path.basename(ld) == os.path.basename(wd) and bool(os.path.basename(ld))
+        )
+        if not same_dir:
+            return False
+        if lid and wid and lid != wid:
+            return False
+        return True
+    if lid and wid:
+        return lid == wid
+    return None
+
+
+PERSIST_LOG_DIR = os.path.join(EAI_DIR, "log", "persist")
+
+
+def persistent_model_shell(inner: str, slot: str) -> Tuple[str, str]:
+    """Run ``inner`` in its own session and tail its log for the UI.
+
+    The QProcess child is ``tail``. Closing the UI kills only the tail;
+    the model session keeps running. The pid file records the model session.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", slot).strip("._")[:80] or "model"
+    os.makedirs(PERSIST_LOG_DIR, exist_ok=True)
+    log_path = os.path.join(PERSIST_LOG_DIR, safe + ".log")
+    pid_path = os.path.join(PERSIST_LOG_DIR, safe + ".pid")
+    quoted_inner = (
+        "trap '' PIPE; "
+        f"exec >> {shlex.quote(log_path)} 2>&1; "
+        + inner
+    )
+    cmd = (
+        "trap '' PIPE; "
+        f"mkdir -p {shlex.quote(PERSIST_LOG_DIR)}; "
+        f": > {shlex.quote(log_path)}; "
+        f"setsid bash -lc {shlex.quote(quoted_inner)} </dev/null >/dev/null 2>&1 & "
+        f"echo $! > {shlex.quote(pid_path)}; "
+        f"exec tail -n +1 -F --pid=$(cat {shlex.quote(pid_path)}) {shlex.quote(log_path)}"
+    )
+    return cmd, pid_path
+
+
+def persistent_slot_paths(slot: str) -> Tuple[str, str]:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", slot).strip("._")[:80] or "model"
+    return (
+        os.path.join(PERSIST_LOG_DIR, safe + ".log"),
+        os.path.join(PERSIST_LOG_DIR, safe + ".pid"),
+    )
+
+
+def read_persistent_pid(pid_path: str) -> int:
+    try:
+        pid = int(open(pid_path, "r", encoding="utf-8").read().strip())
+    except (OSError, ValueError):
+        return 0
+    if pid <= 1:
+        return 0
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return 0
+    return pid
+
+
+def persistent_slot_blob(slot: str) -> str:
+    """Cmdline + environ of a still-running persisted model, else empty."""
+    _log_path, pid_path = persistent_slot_paths(slot)
+    pid = read_persistent_pid(pid_path)
+    if pid <= 1:
+        return ""
+    parts: List[str] = []
+    for name in ("cmdline", "environ"):
+        try:
+            with open(f"/proc/{pid}/{name}", "rb") as fh:
+                parts.append(fh.read().replace(b"\0", b" ").decode("utf-8", "replace"))
+        except OSError:
+            continue
+    return " ".join(parts)
+
+
+def stop_persistent_model(pid_path: str) -> None:
+    """SIGTERM then SIGKILL the persisted model session (not the UI log tail)."""
+    pid = read_persistent_pid(pid_path)
+    if pid <= 1:
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pid, sig)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            return
+        except OSError:
+            try:
+                os.kill(pid, sig)
+            except OSError:
+                return
+        if sig == signal.SIGTERM:
+            time.sleep(0.15)
+
+
+def listener_cmdline(port: int) -> str:
+    """Cmdline and environ of the process listening on ``port``."""
+    try:
+        pid = _pid_listening_on_tcp_port(int(port))
+    except Exception:
+        return ""
+    if not pid or int(pid) <= 1:
+        return ""
+    parts: List[str] = []
+    for name in ("cmdline", "environ"):
+        try:
+            with open(f"/proc/{int(pid)}/{name}", "rb") as fh:
+                parts.append(fh.read().replace(b"\0", b" ").decode("utf-8", "replace"))
+        except OSError:
+            continue
+    return " ".join(parts)
+
+
+def blob_mentions_model(blob: str, model_id: str = "", model_dir: str = "") -> Optional[bool]:
+    """Whether ``blob`` looks like ``model_id`` / ``model_dir``.
+
+    None if the blob does not contain an obvious model reference.
+    """
+    text = blob or ""
+    if not text.strip():
+        return None
+    mid = str(model_id or "").strip()
+    md = _norm_model_token(model_dir)
+    if md and (md in text or os.path.basename(md) and os.path.basename(md) in text):
+        return True
+    if mid and mid in text:
+        return True
+    if md or mid:
+        return False
+    return None
+
+
 class LocalQwenServiceLauncher(QObject):
     """启动/停止本地 Qwen OpenAI 兼容推理服务。
 
@@ -4379,16 +4564,38 @@ class LocalQwenServiceLauncher(QObject):
         if check_local_qwen_server_health(self._api_base):
             info = fetch_local_qwen_server_info(self._api_base) or {}
             running_id = str(info.get("model") or "")
+            running_dir = str(info.get("model_dir") or "")
             self._starting = False
             self.running_changed.emit(True)
-            if running_id and running_id != resolved_id:
+            same = model_identity_same(
+                running_id, running_dir, resolved_id, resolved_dir or ""
+            )
+            if same is False:
+                shown = running_id or running_dir or "未知模型"
                 self.status_message.emit(
-                    f"本地 Qwen 已在运行（{running_id}）: {self._api_base}。"
-                    f"若要换成 {resolved_label}，请先停止再启动。"
+                    f"本地 Qwen 已在运行其它模型（{shown}）: {self._api_base}。"
+                    f"若要换成 {resolved_label}，请先停止再部署。"
                 )
             else:
                 self.status_message.emit(
-                    f"本地 Qwen 服务已在运行: {self._api_base} ({resolved_label})"
+                    f"同一模型已在运行，跳过重复部署: {self._api_base} ({resolved_label})"
+                )
+            return
+
+        loading_blob = persistent_slot_blob("local_qwen")
+        if loading_blob:
+            same_loading = blob_mentions_model(
+                loading_blob, resolved_id, resolved_dir or ""
+            )
+            self._starting = True
+            self.running_changed.emit(True)
+            if same_loading is False:
+                self.status_message.emit(
+                    f"已有其它模型正在启动。若要换成 {resolved_label}，请先停止再部署。"
+                )
+            else:
+                self.status_message.emit(
+                    f"同一模型正在启动，跳过重复部署: {resolved_label}"
                 )
             return
 
@@ -4465,13 +4672,16 @@ class LocalQwenServiceLauncher(QObject):
             f"--model-id {shlex.quote(resolved_id)} "
             f"--python {shlex.quote(py)}"
         )
+        # 模型在独立 session 里跑；QProcess 只 tail 日志，界面退出不杀模型。
+        shell, pid_path = persistent_model_shell(cmd, "local_qwen")
+        self._persist_pid_path = pid_path
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_process_output)
         proc.finished.connect(self._on_process_finished)
         proc.errorOccurred.connect(self._on_process_error)
         proc.setWorkingDirectory(script_dir)
-        proc.start("bash", ["-lc", cmd])
+        proc.start("setsid", ["bash", "-lc", shell])
         self._process = proc
         self._via_hostctl = False
         self.running_changed.emit(True)
@@ -4483,6 +4693,7 @@ class LocalQwenServiceLauncher(QObject):
 
     def stop(self) -> None:
         self._starting = False
+        stop_persistent_model(getattr(self, "_persist_pid_path", "") or persistent_slot_paths("local_qwen")[1])
         if self._via_hostctl or check_local_qwen_hostctl_health():
             ok, body = local_qwen_hostctl_request("/stop", method="POST", timeout_s=15.0)
             msg = str(body.get("message") or body)
@@ -4513,10 +4724,12 @@ class LocalQwenServiceLauncher(QObject):
         self.status_message.emit("已停止本地 Qwen 推理服务")
 
     def shutdown(self) -> None:
-        if self._process is not None and self._process.state() == QProcess.Running:
-            self._process.terminate()
-            self._process.waitForFinished(2000)
+        # 只结束日志 tail。推理进程在独立 session，界面退出后继续服务。
+        proc = self._process
         self._process = None
+        if proc is not None and proc.state() == QProcess.Running:
+            proc.terminate()
+            proc.waitForFinished(400)
 
     def _on_process_output(self) -> None:
         if self._process is None:
@@ -4708,16 +4921,34 @@ class RemoteQwenServiceLauncher(QObject):
         # 先探测隧道：避免上次「等待中」把 _starting 卡死，挡住已就绪的服务
         if self.is_healthy():
             info = fetch_local_qwen_server_info(self.api_base()) or {}
-            mid = str(info.get("model") or self._last_model_id)
-            self._last_model_id = mid
+            mid = str(info.get("model") or "")
+            mdir = str(info.get("model_dir") or "")
+            want_id = str(model_id or self._last_model_id or "")
+            want_dir = str(model_dir or "")
+            same = model_identity_same(mid, mdir, want_id, want_dir)
             self._starting = False
             self._fail_notified = False
             self.running_changed.emit(True)
+            if same is False:
+                shown = mid or mdir or "未知模型"
+                self.status_message.emit(
+                    f"远程已在运行其它模型（{shown}）。"
+                    f"若要换成 {model_label or want_id or deploy_key}，请先停止再部署。"
+                )
+                self.log_line.emit(
+                    f"远程模型不一致: host={self._host_id} live={shown} "
+                    f"want={want_id or want_dir or deploy_key}"
+                )
+                return
+            if mid:
+                self._last_model_id = mid
             self.status_message.emit(
-                f"远程 Qwen 已可通过隧道访问: {self.api_base()} ({mid})"
+                f"同一模型已在运行，跳过重复部署: {self.api_base()} "
+                f"({mid or self._last_model_id})"
             )
             self.log_line.emit(
-                f"远程已就绪: host={self._host_id} model={mid} api={self.api_base()}"
+                f"远程已就绪: host={self._host_id} model={mid or self._last_model_id} "
+                f"api={self.api_base()}"
             )
             return
         if self._starting:
@@ -4854,21 +5085,8 @@ class RemoteQwenServiceLauncher(QObject):
         self.status_message.emit(msg if ok else f"远程停止异常: {msg}")
 
     def shutdown(self) -> None:
-        # 不在 viewer 退出时强杀远程模型，仅断开当前主机隧道
-        try:
-            if check_remote_qwen_hostctl_health():
-                remote_qwen_hostctl_request(
-                    "/stop_tunnel",
-                    method="POST",
-                    timeout_s=30.0,
-                    payload={"host_id": self._host_id},
-                )
-                return
-            ctl = load_remote_qwen_ctl()
-            ctl.apply_host(self._host_id)
-            ctl.stop_tunnel()
-        except Exception:
-            pass
+        # 界面退出不停止远程模型，也不拆隧道，下次打开仍能看到在线状态。
+        return
 
 
 IDLE_CONTROL_MODE = 99
@@ -15587,6 +15805,9 @@ class LocalAiLauncher(QObject):
         self._start_sam3()
 
     def stop(self) -> None:
+        stop_persistent_model(
+            getattr(self, "_persist_pid_path", "") or persistent_slot_paths("sam3")[1]
+        )
         if self._process is not None:
             if self._process.state() == QProcess.Running:
                 self._process.terminate()
@@ -15598,10 +15819,12 @@ class LocalAiLauncher(QObject):
         self.status_message.emit("已停止本地 SAM3 服务")
 
     def shutdown(self) -> None:
-        if self._process is not None and self._process.state() == QProcess.Running:
-            self._process.terminate()
-            self._process.waitForFinished(1500)
+        # 只结束日志 tail。SAM3 在独立 session，界面退出后继续服务。
+        proc = self._process
         self._process = None
+        if proc is not None and proc.state() == QProcess.Running:
+            proc.terminate()
+            proc.waitForFinished(400)
 
     def _ensure_ollama(self) -> None:
         if check_ollama_server_health():
@@ -15641,14 +15864,16 @@ class LocalAiLauncher(QObject):
 
         bind_host = resolve_sam3_bind_host()
         script_dir = os.path.dirname(script)
-        cmd = f"exec bash {os.path.basename(script)} --host {bind_host}"
+        cmd = f"exec bash {shlex.quote(os.path.basename(script))} --host {shlex.quote(bind_host)}"
+        shell, pid_path = persistent_model_shell(cmd, "sam3")
+        self._persist_pid_path = pid_path
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_process_output)
         proc.finished.connect(self._on_process_finished)
         proc.errorOccurred.connect(self._on_process_error)
         proc.setWorkingDirectory(script_dir)
-        proc.start("bash", ["-lc", cmd])
+        proc.start("setsid", ["bash", "-lc", shell])
         self._process = proc
         self.running_changed.emit(True)
         viewer_url = resolve_sam3_viewer_server_url()
@@ -16584,6 +16809,30 @@ def bagel_probe_api_health(
     return body
 
 
+def bagel_listener_matches(port: int, *, mode: int, model_path: str) -> Optional[bool]:
+    """Compare a listening Bagel process with the requested mode and weights."""
+    text = listener_cmdline(int(port))
+    if not text.strip():
+        return None
+    live_mode = ""
+    found = re.search(r"--mode(?:\s+|=)(\d+)", text)
+    if found:
+        live_mode = found.group(1)
+    live_model = ""
+    found = re.search(r"--model_path(?:\s+|=)(\S+)", text)
+    if found:
+        live_model = found.group(1).strip("'\"")
+    if live_mode and int(live_mode) != int(mode or 1):
+        return False
+    if live_model and model_path:
+        return model_identity_same("", live_model, "", model_path)
+    if live_mode and int(live_mode) == int(mode or 1):
+        return True
+    if model_path and os.path.basename(model_path.rstrip("/")) in text:
+        return True
+    return None
+
+
 def bagel_probe_gradio_ready(
     host: str = BAGEL_SERVER_HOST_DEFAULT,
     port: int = BAGEL_SERVER_PORT_DEFAULT,
@@ -16901,6 +17150,12 @@ class BagelAppLauncher(QObject):
         self._adopt_host = host
         self._adopt_port = port
         self._mode = int(mode or 1)
+        found = re.search(r"--mode(?:\s+|=)(\d+)", listener_cmdline(port))
+        if found:
+            try:
+                self._mode = int(found.group(1))
+            except (TypeError, ValueError):
+                pass
         self._url = bagel_app_url(host, port)
         self._ready_emitted = True
         self.log_line.emit(f"[adopt] 复用已部署 Gradio {self._url.rstrip('/')}")
@@ -16946,22 +17201,34 @@ class BagelAppLauncher(QObject):
         share: bool = False,
         force_new: bool = False,
     ) -> None:
-        if self.is_running() and not self._adopted:
-            self.status_message.emit(
-                f"Bagel 已在运行 (mode={bagel_mode_label(self.current_mode())})"
-            )
-            return
-        if self._adopted and not force_new:
-            self.status_message.emit(
-                f"Bagel Gradio 已部署 (mode={bagel_mode_label(self.current_mode())})"
-            )
-            return
         host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
         port = int(server_port)
-        if not force_new and self.try_adopt(
-            server_name=host, server_port=port, mode=int(mode or 1)
+        repo_for_match = resolve_bagel_root(repo_dir)
+        model_for_match = (model_path or "").strip() or BAGEL_MODEL_DEFAULT
+        model_abs_for_match = resolve_bagel_model_path(repo_for_match, model_for_match)
+        if not force_new and (
+            self.is_running() or bagel_probe_gradio_ready(host, port)
         ):
-            return
+            same = bagel_listener_matches(
+                port, mode=int(mode or 1), model_path=model_abs_for_match
+            )
+            if same is False:
+                self.status_message.emit(
+                    "Bagel Gradio 已在运行其它模型或模式。请先停止再部署。"
+                )
+                return
+            if self.try_adopt(server_name=host, server_port=port, mode=int(mode or 1)):
+                self.status_message.emit(
+                    f"同一模型已部署，跳过重复部署: {self._url}  ·  "
+                    f"mode={bagel_mode_label(self.current_mode())}"
+                )
+                return
+            if self.is_running():
+                self.status_message.emit(
+                    f"同一模型正在启动，跳过重复部署 "
+                    f"(mode={bagel_mode_label(self.current_mode())})"
+                )
+                return
         self._clear_adopted(emit_stopped=False)
         repo = resolve_bagel_root(repo_dir)
         app_py = os.path.join(repo, "app.py")
@@ -17035,6 +17302,8 @@ class BagelAppLauncher(QObject):
             f"exec {shlex.quote(py)} {quoted}"
         )
 
+        shell, pid_path = persistent_model_shell(cmd, "bagel_gradio")
+        self._persist_pid_path = pid_path
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_process_output)
@@ -17042,7 +17311,7 @@ class BagelAppLauncher(QObject):
         proc.errorOccurred.connect(self._on_process_error)
         proc.setWorkingDirectory(repo)
         proc.setProcessEnvironment(bagel_isolated_process_env(py))
-        proc.start("setsid", ["bash", "-lc", cmd])
+        proc.start("setsid", ["bash", "-lc", shell])
         self._process = proc
         self.running_changed.emit(True)
         self.log_line.emit(f"$ cd {repo}")
@@ -17053,6 +17322,10 @@ class BagelAppLauncher(QObject):
 
     def stop(self) -> None:
         self.status_message.emit("正在停止 Bagel Gradio，并清理相关进程…")
+        stop_persistent_model(
+            getattr(self, "_persist_pid_path", "")
+            or persistent_slot_paths("bagel_gradio")[1]
+        )
         self._clear_adopted(emit_stopped=False)
         if self._process is not None and self._process.state() == QProcess.Running:
             self._process.terminate()
@@ -17067,18 +17340,13 @@ class BagelAppLauncher(QObject):
             self.status_message.emit("已请求停止 Bagel 相关进程")
 
     def shutdown(self) -> None:
+        # 只结束日志 tail，不 pkill。Gradio 在独立 session，界面退出后继续服务。
         self._clear_adopted(emit_stopped=False)
-        if self._process is not None and self._process.state() == QProcess.Running:
-            self._process.terminate()
-            self._process.waitForFinished(3000)
-            if self._process is not None and self._process.state() == QProcess.Running:
-                self._process.kill()
-                self._process.waitForFinished(1000)
-        bagel_kill_related_processes(sig="-TERM")
-        time.sleep(0.3)
-        bagel_kill_related_processes(sig="-KILL")
+        proc = self._process
         self._process = None
-        self.running_changed.emit(False)
+        if proc is not None and proc.state() == QProcess.Running:
+            proc.terminate()
+            proc.waitForFinished(400)
 
     def _maybe_emit_ready(self, line: str) -> None:
         if self._ready_emitted:
@@ -17235,22 +17503,52 @@ class BagelApiLauncher(QObject):
         mode: int = 1,
         force_new: bool = False,
     ) -> None:
-        if self.is_running() and not self._adopted:
-            self.status_message.emit(
-                f"Bagel 推理 API 已在运行 (mode={bagel_mode_label(self.current_mode())})"
-            )
-            return
-        if self._adopted and not force_new:
-            self.status_message.emit(
-                f"已复用推理 API (mode={bagel_mode_label(self.current_mode())})"
-            )
-            return
-
         host = (server_name or BAGEL_SERVER_HOST_DEFAULT).strip() or BAGEL_SERVER_HOST_DEFAULT
         port = int(server_port)
-
-        if not force_new and self.try_adopt(server_name=host, server_port=port):
-            return
+        repo_for_match = resolve_bagel_root(repo_dir)
+        model_for_match = (model_path or "").strip() or BAGEL_MODEL_DEFAULT
+        model_abs_for_match = resolve_bagel_model_path(repo_for_match, model_for_match)
+        if not force_new:
+            body = bagel_probe_api_health(host, port, timeout_s=2.0)
+            if body is not None:
+                same = model_identity_same(
+                    str(body.get("mode") or ""),
+                    str(body.get("model_path") or ""),
+                    str(int(mode or 1)),
+                    model_abs_for_match,
+                )
+                if same is False:
+                    live = (
+                        body.get("model_path")
+                        or body.get("model")
+                        or body.get("mode")
+                        or "未知模型"
+                    )
+                    self.status_message.emit(
+                        f"推理 API 已在运行其它模型（{live}）。请先停止再部署。"
+                    )
+                    return
+                if self.try_adopt(server_name=host, server_port=port):
+                    self.status_message.emit(
+                        f"同一模型已部署，跳过重复部署: {self._url}  ·  "
+                        f"mode={bagel_mode_label(self.current_mode())}"
+                    )
+                    return
+            elif self.is_running() or persistent_slot_blob("bagel_api"):
+                same_loading = bagel_listener_matches(
+                    port, mode=int(mode or 1), model_path=model_abs_for_match
+                )
+                if same_loading is False:
+                    self.status_message.emit(
+                        "推理 API 正在加载其它模型。请先停止再部署。"
+                    )
+                    return
+                self.status_message.emit(
+                    f"同一模型正在启动，跳过重复部署 "
+                    f"(mode={bagel_mode_label(int(mode or 1))})"
+                )
+                self.running_changed.emit(True)
+                return
 
         repo = resolve_bagel_root(repo_dir)
         serve_py = os.path.join(repo, "serve_api.py")
@@ -17319,6 +17617,8 @@ class BagelApiLauncher(QObject):
             f"exec {shlex.quote(py)} {quoted}"
         )
 
+        shell, pid_path = persistent_model_shell(cmd, "bagel_api")
+        self._persist_pid_path = pid_path
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_process_output)
@@ -17326,7 +17626,7 @@ class BagelApiLauncher(QObject):
         proc.errorOccurred.connect(self._on_process_error)
         proc.setWorkingDirectory(repo)
         proc.setProcessEnvironment(bagel_isolated_process_env(py))
-        proc.start("setsid", ["bash", "-lc", cmd])
+        proc.start("setsid", ["bash", "-lc", shell])
         self._process = proc
         self.running_changed.emit(True)
         self.log_line.emit(f"$ cd {repo}")
@@ -17338,6 +17638,10 @@ class BagelApiLauncher(QObject):
     def stop(self) -> None:
         """停止本窗口管理的进程，并清理所有相关 Bagel 模型进程。"""
         self.status_message.emit("正在停止全部 Bagel 相关进程…")
+        stop_persistent_model(
+            getattr(self, "_persist_pid_path", "")
+            or persistent_slot_paths("bagel_api")[1]
+        )
         if self._adopt_watch_timer.isActive():
             self._adopt_watch_timer.stop()
         if self._process is not None and self._process.state() == QProcess.Running:
@@ -17354,21 +17658,14 @@ class BagelApiLauncher(QObject):
             self.status_message.emit("已请求停止全部 Bagel 相关进程")
 
     def shutdown(self) -> None:
+        # 只结束日志 tail，不 pkill。推理 API 在独立 session，界面退出后继续服务。
         if self._adopt_watch_timer.isActive():
             self._adopt_watch_timer.stop()
-        if self._process is not None and self._process.state() == QProcess.Running:
-            self._process.terminate()
-            self._process.waitForFinished(3000)
-            if self._process is not None and self._process.state() == QProcess.Running:
-                self._process.kill()
-                self._process.waitForFinished(1000)
-        bagel_kill_related_processes(sig="-TERM")
-        time.sleep(0.4)
-        bagel_kill_related_processes(sig="-KILL")
+        proc = self._process
         self._process = None
-        self._adopted = False
-        self._ready_emitted = False
-        self.running_changed.emit(False)
+        if proc is not None and proc.state() == QProcess.Running:
+            proc.terminate()
+            proc.waitForFinished(400)
 
     def _force_kill_all_related(self) -> None:
         hits = bagel_kill_related_processes(sig="-KILL")
@@ -17430,6 +17727,74 @@ class BagelApiLauncher(QObject):
                 self.running_changed.emit(False)
                 self.log_line.emit("--- Bagel 推理 API 已被强制终止 ---")
                 self.status_message.emit("Bagel 推理 API 已强制停止")
+
+
+class RynnValueQtHudWindow(QWidget):
+    """Top-level Live HUD popup (Qt).
+
+    EAI / ros-humble ships headless OpenCV (no HighGUI), so Isaac/RoboDojo
+    cannot use ``cv2.namedWindow``. This window shows the same overlay RGB.
+    """
+
+    closed_by_user = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(
+            parent,
+            Qt.Window | Qt.WindowStaysOnTopHint,
+        )
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setWindowTitle("RynnValue Live HUD")
+        self.setMinimumSize(480, 360)
+        self.resize(640, 480)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._label = QLabel("等待 Isaac cam_head.npy…")
+        self._label.setAlignment(Qt.AlignCenter)
+        self._label.setMinimumSize(320, 240)
+        self._label.setStyleSheet(
+            f"background-color: {UI_BG_INPUT}; color: {UI_TEXT_MUTED};"
+        )
+        layout.addWidget(self._label)
+        self._user_closed = False
+
+    def set_overlay_rgb(self, rgb: Optional[np.ndarray]) -> None:
+        if rgb is None or self._user_closed:
+            return
+        arr = np.ascontiguousarray(rgb)
+        if arr.ndim != 3 or arr.shape[-1] < 3:
+            return
+        h, w, _ch = arr.shape
+        qimg = QImage(
+            arr.data, w, h, 3 * w, QImage.Format_RGB888
+        ).copy()
+        pix = QPixmap.fromImage(qimg)
+        self._label.setPixmap(
+            pix.scaled(
+                self._label.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+        )
+
+    def set_status_title(
+        self,
+        remaining_s: Optional[float] = None,
+        error: str = "",
+    ) -> None:
+        err = (error or "").strip()
+        if err:
+            self.setWindowTitle(f"RynnValue  ERR: {err[:64]}")
+        elif remaining_s is not None:
+            self.setWindowTitle(f"RynnValue  rem={float(remaining_s):.2f}s")
+        else:
+            self.setWindowTitle("RynnValue  waiting…")
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        if not self._user_closed:
+            self._user_closed = True
+            self.closed_by_user.emit()
+        super().closeEvent(event)
 
 
 class VideoPlayerWidget(QWidget):
@@ -18152,9 +18517,12 @@ def robodojo_policy_matches_listener(
 class RoboDojoEvalLauncher(QObject):
     """启动/停止 RoboDojo 单任务评测（GUI: run_gui_eval.sh / headless: robodojo.sh eval）。
 
-    默认 EVAL_NUM=keep：评测进程与子进程常驻，直到调用 stop()/shutdown()。
-    也可接管（adopt）系统里已在运行的 eval_client，避免重复拉起 Isaac。
+    默认 EVAL_NUM=keep：评测进程与 Isaac 常驻，直到显式点「停止评测」(stop())。
+    EAI 界面退出 (shutdown) 不杀 Isaac：进程经 persistent_model_shell 脱离 UI。
+    启动时优先接管已在运行的 eval_client / 持久化 session / Isaac Kit，避免重复拉起。
     """
+
+    PERSIST_SLOT = "robodojo_eval"
 
     log_line = pyqtSignal(str)
     status_message = pyqtSignal(str)
@@ -18171,6 +18539,9 @@ class RoboDojoEvalLauncher(QObject):
         self._last_start_kwargs: Optional[dict] = None
         self._external_pids: List[int] = []
         self._adopted = False
+        # Isaac/eval 在 UI 退出后仍保留；仅「停止评测」会真正杀掉。
+        self._keep_on_exit = True
+        self._persist_pid_path = persistent_slot_paths(self.PERSIST_SLOT)[1]
         self._adopt_watch_timer = QTimer(self)
         self._adopt_watch_timer.setInterval(2000)
         self._adopt_watch_timer.timeout.connect(self._on_adopt_watch_tick)
@@ -18219,6 +18590,81 @@ class RoboDojoEvalLauncher(QObject):
         return found
 
     @staticmethod
+    def list_running_isaac_sims() -> List[dict]:
+        """发现系统中已在跑的 Isaac Sim / Kit 进程。"""
+        patterns = (
+            r"/kit/kit",
+            r"kit/kit ",
+            r"isaac-sim",
+            r"isaacsim\.",
+            r"IsaacSim",
+            r"omni\.isaac",
+            r"isaacsim\.replicator",
+        )
+        found: List[dict] = []
+        seen = set()  # type: ignore[var-annotated]
+        for pat in patterns:
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-af", pat],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=False,
+                )
+            except Exception:
+                continue
+            if result.returncode not in (0, 1):
+                continue
+            for line in (result.stdout or "").splitlines():
+                line = line.strip()
+                if not line or "pgrep" in line:
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) < 2:
+                    continue
+                try:
+                    pid = int(parts[0])
+                except ValueError:
+                    continue
+                if pid in seen or pid <= 1:
+                    continue
+                cmd = parts[1]
+                # 排除纯文本编辑 / 本探测自身
+                low = cmd.lower()
+                if "show_camera_topics" in low or "pgrep" in low:
+                    continue
+                if not any(
+                    k in low
+                    for k in (
+                        "kit/kit",
+                        "isaac-sim",
+                        "isaacsim",
+                        "omni.isaac",
+                        "isaac sim",
+                    )
+                ):
+                    continue
+                seen.add(pid)
+                found.append({"pid": pid, "cmd": cmd})
+        found.sort(key=lambda x: x["pid"])
+        return found
+
+    @classmethod
+    def isaac_sim_status(cls) -> dict:
+        """汇总 Isaac / eval_client / 持久化 session 运行状态。"""
+        clients = cls.list_running_eval_clients()
+        kits = cls.list_running_isaac_sims()
+        _, pid_path = persistent_slot_paths(cls.PERSIST_SLOT)
+        persist_pid = read_persistent_pid(pid_path)
+        return {
+            "clients": clients,
+            "kits": kits,
+            "persist_pid": persist_pid,
+            "running": bool(clients or kits or persist_pid > 1),
+        }
+
+    @staticmethod
     def _pid_alive(pid: int) -> bool:
         if pid <= 1:
             return False
@@ -18238,6 +18684,10 @@ class RoboDojoEvalLauncher(QObject):
         if self._process is not None:
             if self._process.state() in (QProcess.Starting, QProcess.Running):
                 return True
+        persist_pid = read_persistent_pid(self._persist_pid_path)
+        if persist_pid > 1 and persist_pid not in self._external_pids:
+            # 持久化 session 仍在，但本窗口尚未接管 → 不算「本窗口在跑」
+            pass
         if self._external_pids:
             alive = [p for p in self._external_pids if self._pid_alive(p)]
             self._external_pids = alive
@@ -18320,11 +18770,88 @@ class RoboDojoEvalLauncher(QObject):
         self.running_changed.emit(True)
         return chosen
 
+    def adopt_persisted_eval(
+        self,
+        task: str = "",
+        *,
+        bridge_dir: str = "",
+        **kwargs,
+    ) -> Optional[dict]:
+        """接管 EAI 退出后仍存活的持久化评测 session。"""
+        if self.is_running() and not self._adopted:
+            return None
+        persist_pid = read_persistent_pid(self._persist_pid_path)
+        if persist_pid <= 1:
+            return None
+        # 优先用 eval_client 拿到任务名；否则只挂持久化 session pid。
+        clients = self.list_running_eval_clients()
+        chosen = None
+        prefer = (task or "").strip()
+        if prefer:
+            for c in reversed(clients):
+                if c.get("task") == prefer:
+                    chosen = c
+                    break
+        if chosen is None and clients:
+            chosen = clients[-1]
+        if chosen is not None:
+            return self.adopt_running_eval(
+                task,
+                bridge_dir=bridge_dir,
+                prefer_task=str(chosen.get("task") or prefer),
+                **kwargs,
+            )
+        # 仅有持久化 shell / Isaac，无 eval_client 元数据时仍接管 session。
+        self._process = None
+        self._adopted = True
+        self._keep_alive = False
+        self._stopping = False
+        self._restart_pending = False
+        self._external_pids = [persist_pid]
+        try:
+            self._pgid = os.getpgid(persist_pid)
+        except OSError:
+            self._pgid = persist_pid
+        bridge_dir = os.path.abspath(
+            os.path.expanduser(
+                (bridge_dir or "").strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
+            )
+        )
+        self._last_start_kwargs = {
+            "task": prefer or task,
+            "bridge_dir": bridge_dir,
+            "policy_dir": kwargs.get("policy_dir", ""),
+            "ckpt": kwargs.get("ckpt", "demo"),
+            "action_type": kwargs.get("action_type", "ee"),
+            "policy_env": kwargs.get("policy_env", ""),
+            "eval_env": kwargs.get("eval_env", ""),
+            "robodojo_root": kwargs.get("robodojo_root", ""),
+            "display": kwargs.get("display", ""),
+            "use_gui": bool(kwargs.get("use_gui", True)),
+        }
+        kits = self.list_running_isaac_sims()
+        self.log_line.emit(
+            f"复用持久化仿真 session: pid={persist_pid}"
+            + (f" IsaacKit×{len(kits)}" if kits else "")
+        )
+        self.status_message.emit(
+            f"已复用持久化 Isaac/评测 session pid={persist_pid}"
+        )
+        if not self._adopt_watch_timer.isActive():
+            self._adopt_watch_timer.start()
+        self.running_changed.emit(True)
+        return {"pid": persist_pid, "task": prefer or task, "persisted": True}
+
     def _on_adopt_watch_tick(self) -> None:
         if not self._adopted:
             self._adopt_watch_timer.stop()
             return
         if self.is_running():
+            return
+        # 持久化 session 或 eval_client 可能刚退出；再扫一遍 Isaac。
+        if read_persistent_pid(self._persist_pid_path) > 1:
+            return
+        if self.list_running_eval_clients() or self.list_running_isaac_sims():
             return
         self._adopt_watch_timer.stop()
         self._adopted = False
@@ -18367,19 +18894,23 @@ class RoboDojoEvalLauncher(QObject):
                 return "switched"
             return "busy"
 
+        adopt_kwargs = dict(
+            bridge_dir=bridge_dir,
+            policy_dir=policy_dir,
+            ckpt=ckpt,
+            action_type=action_type,
+            policy_env=policy_env,
+            eval_env=eval_env,
+            robodojo_root=robodojo_root,
+            display=display,
+            use_gui=use_gui,
+        )
+
         if reuse_existing:
             adopted = self.adopt_running_eval(
                 task,
-                bridge_dir=bridge_dir,
                 prefer_task=task,
-                policy_dir=policy_dir,
-                ckpt=ckpt,
-                action_type=action_type,
-                policy_env=policy_env,
-                eval_env=eval_env,
-                robodojo_root=robodojo_root,
-                display=display,
-                use_gui=use_gui,
+                **adopt_kwargs,
             )
             if adopted is not None:
                 cur = str(adopted.get("task") or "").strip()
@@ -18389,6 +18920,55 @@ class RoboDojoEvalLauncher(QObject):
                     return "reused"
                 self.status_message.emit(f"已复用仿真（任务 {cur or task}）")
                 return "reused"
+
+            persisted = self.adopt_persisted_eval(task, **adopt_kwargs)
+            if persisted is not None:
+                cur = str(persisted.get("task") or "").strip()
+                if cur and cur != task:
+                    if self.request_switch_task(task, bridge_dir=bridge_dir):
+                        return "switched"
+                    return "reused"
+                self.status_message.emit(
+                    f"已复用持久化仿真（任务 {cur or task or '?'}）"
+                )
+                return "reused"
+
+            # Isaac Kit 已在跑但尚无/未识别到 eval_client：禁止再起一套。
+            status = self.isaac_sim_status()
+            if status.get("running"):
+                kits = status.get("kits") or []
+                clients = status.get("clients") or []
+                persist_pid = int(status.get("persist_pid") or 0)
+                detail_parts = []
+                if clients:
+                    detail_parts.append(
+                        "eval_client="
+                        + ",".join(
+                            f"{c['pid']}:{c.get('task') or '?'}" for c in clients
+                        )
+                    )
+                if kits:
+                    detail_parts.append(
+                        "IsaacKit=" + ",".join(str(k["pid"]) for k in kits[:6])
+                    )
+                if persist_pid > 1:
+                    detail_parts.append(f"persist={persist_pid}")
+                detail = "; ".join(detail_parts) or "unknown"
+                self.log_line.emit(
+                    f"[WARN] 检测到 Isaac/评测已在运行，拒绝重复启动: {detail}"
+                )
+                # 最后再试一次接管（竞态：扫描时进程刚起来）
+                adopted = self.adopt_running_eval(
+                    task, prefer_task=task, **adopt_kwargs
+                )
+                if adopted is None:
+                    adopted = self.adopt_persisted_eval(task, **adopt_kwargs)
+                if adopted is not None:
+                    return "reused"
+                self.status_message.emit(
+                    "Isaac Sim 已在运行，请先「停止评测」或等待接管，勿重复启动"
+                )
+                return "busy"
 
         return self._start_new_process(
             task,
@@ -18788,6 +19368,14 @@ class RoboDojoEvalLauncher(QObject):
                     status_msg = f"正在启动 RoboDojo headless 评测: {task}…"
 
         cmd = " && ".join(exports) + f" && cd {shlex.quote(root)} && {run_cmd}"
+        # 与策略服务一样：真实评测/Isaac 进独立 session；UI 只 tail 日志。
+        # 关闭 EAI 只杀 tail，Isaac 继续跑，下次启动可复用。
+        if self._keep_on_exit:
+            shell, pid_path = persistent_model_shell(cmd, self.PERSIST_SLOT)
+            self._persist_pid_path = pid_path
+            launch_cmd = shell
+        else:
+            launch_cmd = cmd
         self._stopping = False
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
@@ -18836,14 +19424,24 @@ class RoboDojoEvalLauncher(QObject):
         except OSError:
             pass
         proc.setProcessEnvironment(qenv)
-        proc.start("setsid", ["bash", "-lc", cmd])
+        # setsid：stop() 可杀进程组；persist 时外层只是 log tail。
+        proc.start("setsid", ["bash", "-lc", launch_cmd])
         self._process = proc
         self._pgid = None
         if proc.waitForStarted(5000):
-            try:
-                self._pgid = int(proc.processId())
-            except Exception:
-                self._pgid = None
+            # persist 模式下真 session pid 在 pid 文件；稍后再读。
+            if self._keep_on_exit:
+                for _ in range(20):
+                    persist_pid = read_persistent_pid(self._persist_pid_path)
+                    if persist_pid > 1:
+                        self._pgid = persist_pid
+                        break
+                    time.sleep(0.05)
+            if self._pgid is None:
+                try:
+                    self._pgid = int(proc.processId())
+                except Exception:
+                    self._pgid = None
         self.running_changed.emit(True)
         self.log_line.emit(log_cmd)
         if starvla_ckpt_note:
@@ -18869,7 +19467,8 @@ class RoboDojoEvalLauncher(QObject):
                 "  策略=无：仅启评测；Isaac 使用进程内零动作，不会连接 WebSocket 策略服务"
             )
         self.log_line.emit(
-            "  常驻模式：评测相关进程将保持运行，直到点击「停止评测」"
+            "  常驻模式：评测/Isaac 保持运行，直到点击「停止评测」；"
+            "关闭 EAI 界面不会停止 Isaac Sim"
         )
         self.status_message.emit(status_msg)
         return "started"
@@ -18969,6 +19568,9 @@ class RoboDojoEvalLauncher(QObject):
             pid = int(c["pid"])
             if pid not in self._external_pids:
                 self._external_pids.append(pid)
+        persist_pid = read_persistent_pid(self._persist_pid_path)
+        if persist_pid > 1 and persist_pid not in self._external_pids:
+            self._external_pids.append(persist_pid)
         if self._external_pids and self._pgid is None:
             try:
                 self._pgid = os.getpgid(self._external_pids[0])
@@ -18983,16 +19585,20 @@ class RoboDojoEvalLauncher(QObject):
 
         self._stopping = True
         n = len(clients)
+        kits = self.list_running_isaac_sims()
         self.status_message.emit(
-            f"正在停止全部仿真（发现 {n} 个 eval_client；可再点强制结束）…"
+            f"正在停止全部仿真（eval_client={n}, IsaacKit={len(kits)}；可再点强制结束）…"
         )
         self.log_line.emit(
-            f"--- 请求停止全部仿真（eval_client={n}，含本窗口进程）---"
+            f"--- 请求停止全部仿真（eval_client={n}, IsaacKit={len(kits)}）---"
         )
         for c in clients:
             self.log_line.emit(
                 f"  stop target pid={c['pid']} task={c.get('task') or '?'}"
             )
+        if persist_pid > 1:
+            self.log_line.emit(f"  stop persist session pid={persist_pid}")
+            stop_persistent_model(self._persist_pid_path)
         self.running_changed.emit(True)
         self._signal_process_group(signal.SIGTERM)
         killed = self._pkill_eval_leftovers(sig="-TERM")
@@ -19005,6 +19611,7 @@ class RoboDojoEvalLauncher(QObject):
         self._keep_alive = False
         self._restart_pending = False
         self._stopping = True
+        stop_persistent_model(self._persist_pid_path)
         self._signal_process_group(signal.SIGKILL)
         if self._process is not None and self._process.state() != QProcess.NotRunning:
             try:
@@ -19025,6 +19632,18 @@ class RoboDojoEvalLauncher(QObject):
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
             except Exception:
                 pass
+        for k in self.list_running_isaac_sims():
+            pid = int(k["pid"])
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except Exception:
+                pass
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except Exception:
+                pass
         self._process = None
         self._pgid = None
         self._external_pids = []
@@ -19032,13 +19651,25 @@ class RoboDojoEvalLauncher(QObject):
         if getattr(self, "_adopt_watch_timer", None) is not None:
             self._adopt_watch_timer.stop()
         self._stopping = False
-        left = self.list_running_eval_clients()
-        if left:
-            self.log_line.emit(
-                "[WARN] 强制停止后仍有残留: "
-                + ", ".join(f"{c['pid']}:{c.get('task') or '?'}" for c in left)
+        left_clients = self.list_running_eval_clients()
+        left_kits = self.list_running_isaac_sims()
+        if left_clients or left_kits:
+            bits = []
+            if left_clients:
+                bits.append(
+                    "eval="
+                    + ", ".join(
+                        f"{c['pid']}:{c.get('task') or '?'}" for c in left_clients
+                    )
+                )
+            if left_kits:
+                bits.append(
+                    "kit=" + ", ".join(str(k["pid"]) for k in left_kits[:6])
+                )
+            self.log_line.emit("[WARN] 强制停止后仍有残留: " + "; ".join(bits))
+            self.status_message.emit(
+                f"仍有仿真残留（client={len(left_clients)} kit={len(left_kits)}），请再点一次停止"
             )
-            self.status_message.emit(f"仍有 {len(left)} 个仿真残留，请再点一次停止")
             self.running_changed.emit(False)
             return
         self.log_line.emit(f"--- 全部仿真已停止（pkill hits≈{killed}）---")
@@ -19087,10 +19718,55 @@ class RoboDojoEvalLauncher(QObject):
                 self._process.terminate()
 
     def shutdown(self) -> None:
+        """EAI 退出：只断开本窗口对评测的管理，不停止 Isaac Sim。
+
+        显式「停止评测」仍走 stop()/_force_kill_all_sims()。
+        """
         self._keep_alive = False
         self._restart_pending = False
+        self._stopping = False
         if getattr(self, "_adopt_watch_timer", None) is not None:
             self._adopt_watch_timer.stop()
+        if getattr(self, "_switch_watch_timer", None) is not None:
+            self._switch_watch_timer.stop()
+        proc = self._process
+        self._process = None
+        if proc is not None:
+            for signal_name, slot in (
+                ("readyReadStandardOutput", self._on_process_output),
+                ("finished", self._on_process_finished),
+                ("errorOccurred", self._on_process_error),
+            ):
+                try:
+                    getattr(proc, signal_name).disconnect(slot)
+                except (TypeError, RuntimeError):
+                    pass
+            if proc.state() != QProcess.NotRunning:
+                # 仅结束日志 tail；persist session / Isaac 继续跑。
+                try:
+                    proc.terminate()
+                    proc.waitForFinished(400)
+                except Exception:
+                    pass
+            try:
+                proc.deleteLater()
+            except Exception:
+                pass
+        self._pgid = None
+        self._external_pids = []
+        self._adopted = False
+        if self._keep_on_exit:
+            persist_pid = read_persistent_pid(self._persist_pid_path)
+            kits = self.list_running_isaac_sims()
+            clients = self.list_running_eval_clients()
+            if persist_pid > 1 or kits or clients:
+                self.log_line.emit(
+                    "--- EAI 退出：保留 Isaac/评测 "
+                    f"(persist={persist_pid or '-'}, "
+                    f"eval_client={len(clients)}, IsaacKit={len(kits)}) ---"
+                )
+            return
+        # 非保活模式（兼容）：仍强制清理
         self._force_kill_all_sims()
 
     def _on_process_output(self) -> None:
@@ -19124,6 +19800,54 @@ class RoboDojoEvalLauncher(QObject):
             self.running_changed.emit(False)
             return
         if self._process is not None and self._process.state() != QProcess.NotRunning:
+            return
+        # 日志 tail 抖动时 persist/Isaac 可能仍在：先接管，禁止再起一套。
+        if self.isaac_sim_status().get("running"):
+            adopted = self.adopt_running_eval(
+                str(kwargs.get("task") or ""),
+                prefer_task=str(kwargs.get("task") or ""),
+                **{
+                    k: kwargs[k]
+                    for k in (
+                        "bridge_dir",
+                        "policy_dir",
+                        "ckpt",
+                        "action_type",
+                        "policy_env",
+                        "eval_env",
+                        "robodojo_root",
+                        "display",
+                        "use_gui",
+                    )
+                    if k in kwargs
+                },
+            )
+            if adopted is None:
+                adopted = self.adopt_persisted_eval(
+                    str(kwargs.get("task") or ""),
+                    **{
+                        k: kwargs[k]
+                        for k in (
+                            "bridge_dir",
+                            "policy_dir",
+                            "ckpt",
+                            "action_type",
+                            "policy_env",
+                            "eval_env",
+                            "robodojo_root",
+                            "display",
+                            "use_gui",
+                        )
+                        if k in kwargs
+                    },
+                )
+            if adopted is not None:
+                self.log_line.emit("--- 常驻：日志退出但 Isaac 仍在，已重新接管 ---")
+                return
+            self.log_line.emit(
+                "--- 常驻重启跳过：检测到 Isaac 仍在运行但无法接管，避免重复启动 ---"
+            )
+            self.running_changed.emit(False)
             return
         self.log_line.emit("--- 常驻模式：重新启动评测 ---")
         self.start(reuse_existing=False, **kwargs)
@@ -20480,8 +21204,24 @@ class RynnValueLauncher(QObject):
                 url, timeout_s=2.0
             )
             if ok_srv:
+                live = ""
+                model_info = info_srv.get("model_info") if isinstance(info_srv, dict) else None
+                if isinstance(model_info, dict):
+                    live = str(model_info.get("reward_model") or "")
+                health = info_srv.get("health") if isinstance(info_srv, dict) else None
+                if not live and isinstance(health, dict):
+                    live = str(health.get("reward_model") or "")
+                want = (model_path or checkpoint_path or "").strip()
+                same = (
+                    model_identity_same("", live, "", want) if (live and want) else True
+                )
+                if same is False:
+                    self.status_message.emit(
+                        f"RynnValue 已在运行其它模型（{live}）。请先停止再部署。"
+                    )
+                    return
                 self.log_line.emit(f"[adopt] {msg_srv}")
-                self.status_message.emit(f"RynnValue 已部署，跳过启动: {msg_srv}")
+                self.status_message.emit(f"同一模型已部署，跳过重复部署: {msg_srv}")
                 return
             if info_srv.get("listening"):
                 self.log_line.emit(f"[skip] {msg_srv}")
@@ -20589,7 +21329,17 @@ class RynnValueLauncher(QObject):
         proc.errorOccurred.connect(self._on_process_error)
         proc.setWorkingDirectory(root)
         proc.setProcessEnvironment(qenv)
-        proc.start("setsid", ["bash", script, *args])
+        persist_server = job_norm in ("reward_server", "server", "serve")
+        if persist_server:
+            inner = "exec bash " + " ".join(
+                shlex.quote(a) for a in [script, *args]
+            )
+            shell, pid_path = persistent_model_shell(inner, "rynnvalue_reward")
+            self._persist_pid_path = pid_path
+            proc.start("setsid", ["bash", "-lc", shell])
+        else:
+            self._persist_pid_path = ""
+            proc.start("setsid", ["bash", script, *args])
         self._process = proc
         self.running_changed.emit(True)
         if self._log_dir:
@@ -20601,6 +21351,8 @@ class RynnValueLauncher(QObject):
         self.status_message.emit(f"正在启动 RynnValue（{job_norm}）…")
 
     def stop(self) -> None:
+        if getattr(self, "_persist_pid_path", ""):
+            stop_persistent_model(self._persist_pid_path)
         if not self.is_running():
             self.status_message.emit("当前没有运行中的 RynnValue")
             return
@@ -20617,6 +21369,14 @@ class RynnValueLauncher(QObject):
             QTimer.singleShot(4000, self._force_kill)
 
     def shutdown(self) -> None:
+        # reward_server 在独立 session：界面退出只结束日志 tail。
+        if getattr(self, "_persist_pid_path", ""):
+            proc = self._process
+            self._process = None
+            if proc is not None and proc.state() != QProcess.NotRunning:
+                proc.terminate()
+                proc.waitForFinished(400)
+            return
         if self._process is not None and self._process.state() != QProcess.NotRunning:
             pid = int(self._process.processId())
             if pid > 0:
@@ -20987,6 +21747,14 @@ class MuJoCoViewerLauncher(QObject):
         # Bumped on each start/force_clear so delayed _force_kill cannot
         # SIGKILL a newly launched process after relaunch.
         self._run_generation: int = 0
+        # Policy / Pi / Psi servers stay up after the UI exits.
+        self._keep_on_exit = False
+        self._persist_slot = ""
+        self._persist_pid_path = ""
+
+    def enable_persist_on_exit(self, slot: str) -> None:
+        self._keep_on_exit = True
+        self._persist_slot = (slot or "model").strip() or "model"
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.state() in (
@@ -21123,6 +21891,14 @@ class MuJoCoViewerLauncher(QObject):
             self.status_message.emit("命令为空")
             return
         self._label = (label or argv[0] or "cmd").strip() or "cmd"
+        launch_argv = list(argv)
+        if self._keep_on_exit:
+            inner = " ".join(shlex.quote(a) for a in launch_argv)
+            shell, pid_path = persistent_model_shell(
+                inner, self._persist_slot or "model"
+            )
+            self._persist_pid_path = pid_path
+            launch_argv = ["bash", "-lc", shell]
         qenv = QProcessEnvironment.systemEnvironment()
         qenv.insert("PYTHONUNBUFFERED", "1")
         if env_extra:
@@ -21144,8 +21920,10 @@ class MuJoCoViewerLauncher(QObject):
         proc.errorOccurred.connect(self._on_process_error)
         proc.setWorkingDirectory(work)
         proc.setProcessEnvironment(qenv)
-        # setsid so stop() can kill the whole process group
-        proc.start("setsid", list(argv))
+        # setsid so stop() can kill the whole process group.
+        # Persisted models put the real server in an inner session; this
+        # process is only the log tail.
+        proc.start("setsid", launch_argv)
         self._process = proc
         self._last_exit_code = None
         self.running_changed.emit(True)
@@ -21154,8 +21932,14 @@ class MuJoCoViewerLauncher(QObject):
         self.status_message.emit(f"正在启动: {self._label}")
 
     def stop(self) -> None:
+        if self._keep_on_exit and self._persist_pid_path:
+            stop_persistent_model(self._persist_pid_path)
         if not self.is_running():
-            self.status_message.emit("当前没有运行中的 MuJoCo")
+            if self._keep_on_exit:
+                self.status_message.emit("已停止持久化模型进程")
+                self.running_changed.emit(False)
+            else:
+                self.status_message.emit("当前没有运行中的 MuJoCo")
             return
         self.status_message.emit("正在停止 MuJoCo…")
         if self._process is not None:
@@ -21175,6 +21959,14 @@ class MuJoCoViewerLauncher(QObject):
         self._run_generation += 1
         self._process = None
         self._disconnect_process(proc)
+        if self._keep_on_exit:
+            # 日志 tail 可以结束；模型 session 留给下次界面复用。
+            if proc is not None and proc.state() != QProcess.NotRunning:
+                proc.terminate()
+                proc.waitForFinished(400)
+            if proc is not None:
+                proc.deleteLater()
+            return
         if proc is not None and proc.state() != QProcess.NotRunning:
             pid = int(proc.processId())
             if pid > 0:
@@ -21209,6 +22001,8 @@ class MuJoCoViewerLauncher(QObject):
         Disconnects the old QProcess before clearing so a late finished(code=9)
         cannot wipe a newly started process reference.
         """
+        if self._keep_on_exit and self._persist_pid_path:
+            stop_persistent_model(self._persist_pid_path)
         proc = self._process
         self._run_generation += 1
         self._process = None
@@ -23606,6 +24400,7 @@ class CameraTopicWindow(QMainWindow):
         self._bagel_call_bridge.finished.connect(self._on_bagel_call_finished)
         self._update_bagel_api_ui()
         self._sync_bagel_gradio_embed()
+        QTimer.singleShot(700, self._adopt_persisted_bagel)
 
         # sub image / sub task 挂在全部 tab 最后，见下方 addTab
 
@@ -24145,6 +24940,13 @@ class CameraTopicWindow(QMainWindow):
         self.sim_status_label = QLabel("桥: 空闲")
         self.sim_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         sim_ctrl_row.addWidget(self.sim_status_label, 1)
+        self.sim_isaac_status_label = QLabel("Isaac Sim: 未检测")
+        self.sim_isaac_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.sim_isaac_status_label.setToolTip(
+            "实时探测本机 Isaac Kit / eval_client / 持久化评测 session。\n"
+            "关闭 EAI 不会停止 Isaac；再次打开可自动接管。"
+        )
+        sim_ctrl_row.addWidget(self.sim_isaac_status_label)
         self.sim_bridge_start_btn = QPushButton("启动相机桥")
         self.sim_bridge_start_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_bridge_start_btn.setToolTip("运行 run_isaac_cam_bridge.sh（无 Humble 时自动进 Docker）")
@@ -24295,13 +25097,14 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_start_btn = QPushButton("启动评测")
         self.sim_eval_start_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_eval_start_btn.setToolTip(
-            "启动前会检查是否已有 eval_client / Isaac 在跑：有则复用并按需热切换任务。\n"
+            "启动前会检查是否已有 eval_client / Isaac Kit / 持久化 session：\n"
+            "有则复用并按需热切换任务，不会重复拉起 Isaac。\n"
             "无运行进程时：按「仿真界面」选项新启动（EVAL_NUM=keep 常驻）。\n"
             "已由本窗口管理时：按钮为「切换任务」。\n"
             "未勾选「一体启动」且选了策略：须先「策略部署」匹配后再评测（只起 client）。\n"
             "勾选「一体启动」：评测内先起模型再起仿真（旧流程，利于避 OOM）。\n"
             "策略选「无」：只启评测客户端（零动作 / GUI 遥控）。\n"
-            "相关进程一直保留，直到点击「停止评测」。"
+            "关闭 EAI 不会停止 Isaac；相关进程一直保留，直到点击「停止评测」。"
         )
         self.sim_eval_start_btn.clicked.connect(
             lambda: self._start_sim_eval(viewer_only=False)
@@ -24317,12 +25120,23 @@ class CameraTopicWindow(QMainWindow):
             self._on_sim_viewer_only_clicked
         )
         sim_run_row.addWidget(self.sim_eval_viewer_only_btn)
+        self.sim_eval_pause_btn = QPushButton("暂停")
+        self.sim_eval_pause_btn.setFocusPolicy(Qt.NoFocus)
+        self.sim_eval_pause_btn.setEnabled(False)
+        self.sim_eval_pause_btn.setCheckable(True)
+        self.sim_eval_pause_btn.setToolTip(
+            "暂停 / 继续当前仿真任务（写入共享目录 sim_control.json）。\n"
+            "各后端在 step 循环中轮询；暂停时保留仿真状态，可随时继续。"
+        )
+        self.sim_eval_pause_btn.clicked.connect(self._on_sim_pause_clicked)
+        sim_run_row.addWidget(self.sim_eval_pause_btn)
         self.sim_eval_stop_run_btn = QPushButton("停止评测")
         self.sim_eval_stop_run_btn.setFocusPolicy(Qt.NoFocus)
         self.sim_eval_stop_run_btn.setObjectName("dangerAction")
         self.sim_eval_stop_run_btn.setEnabled(False)
         self.sim_eval_stop_run_btn.setToolTip(
-            "停止全部仿真（本窗口进程 + 系统中所有 eval_client / Isaac / robodojo）。\n"
+            "停止全部仿真（本窗口进程 + 持久化 session + 系统中所有 eval_client / Isaac）。\n"
+            "注意：仅关闭 EAI 窗口不会杀 Isaac；必须点此按钮才会真正停止。\n"
             "首次点击发 SIGTERM；约 2s 后自动 SIGKILL；仍残留时可再点一次强制清理。"
         )
         self.sim_eval_stop_run_btn.clicked.connect(self._on_sim_eval_stop_run_clicked)
@@ -24476,6 +25290,7 @@ class CameraTopicWindow(QMainWindow):
         self._sim_eval_launcher.log_line.connect(self._append_sim_log)
         self._sim_eval_launcher.running_changed.connect(self._update_sim_eval_run_ui)
         self._robodojo_policy_launcher = MuJoCoViewerLauncher(self)
+        self._robodojo_policy_launcher.enable_persist_on_exit("robodojo_policy")
         self._robodojo_policy_launcher.log_line.connect(self._append_sim_log)
         self._robodojo_policy_launcher.status_message.connect(
             lambda m: self._append_sim_log(f"[策略] {m}")
@@ -24490,6 +25305,9 @@ class CameraTopicWindow(QMainWindow):
         self._sim_frame_timer = QTimer(self)
         self._sim_frame_timer.setInterval(2000)
         self._sim_frame_timer.timeout.connect(self._refresh_sim_frame_status)
+        self._sim_frame_timer.start()  # 持续刷新共享帧年龄 + Isaac Sim 状态
+        # Adopt persisted Isaac/eval only after build_heavy_ui finishes (see end).
+        # Scheduling here races _boot_tick processEvents before arm-btn styles exist.
         self._sim_npy_last_mtime: Dict[str, float] = {}
         self._sim_npy_preview_timer = QTimer(self)
         self._sim_npy_preview_timer.setInterval(50)  # ~20 Hz 直读共享帧
@@ -24680,6 +25498,18 @@ class CameraTopicWindow(QMainWindow):
             "该任务最多评测的回合数。0 / 全部 = benchmark 里的全部回合。"
         )
         mj_task_row.addWidget(self.molmospaces_episodes_spin)
+        mj_task_row.addWidget(QLabel("视角"))
+        self.molmospaces_viewer_cam_combo = ImeSafeComboBox()
+        for label, cam_id in MOLMOSPACES_VIEWER_CAMS:
+            self.molmospaces_viewer_cam_combo.addItem(label, cam_id)
+        # Default: 正面第三视角（看清机器人与操作对象整体）
+        self.molmospaces_viewer_cam_combo.setCurrentIndex(0)
+        self.molmospaces_viewer_cam_combo.setToolTip(
+            "启动前选择 Viewer 相机：\n"
+            "· 正面第三视角：跟踪机身，看清机器人与操作对象整体（默认）\n"
+            "· 头部第一视角：head_camera_rgb，看清手臂与操作对象"
+        )
+        mj_task_row.addWidget(self.molmospaces_viewer_cam_combo)
         sp_page_l.addLayout(mj_task_row)
         self.molmospaces_pi_row = QWidget()
         pi_row = QHBoxLayout(self.molmospaces_pi_row)
@@ -25419,7 +26249,7 @@ class CameraTopicWindow(QMainWindow):
         _rv_row3 = QHBoxLayout()
         _rv_row3.setSpacing(6)
         _rv_row3.addWidget(QLabel("RynnValue 状态"))
-        self.sim_rynnvalue_status_label = QLabel("未检查（勾选 Live HUD 后自动探测）")
+        self.sim_rynnvalue_status_label = QLabel("检测中…")
         self.sim_rynnvalue_status_label.setFont(
             QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL)
         )
@@ -25437,6 +26267,8 @@ class CameraTopicWindow(QMainWindow):
         self._sim_rynnvalue_status_timer.timeout.connect(
             self._on_sim_rynnvalue_status_tick
         )
+        self._sim_rynnvalue_status_timer.start()
+        QTimer.singleShot(400, self._on_sim_rynnvalue_status_tick)
         self._update_sim_rynnvalue_hud_controls()
         # Panel is parented into 下方工作区 (not 仿真评测 tab).
         self.sim_rynnvalue_hud_panel.setVisible(True)
@@ -25466,6 +26298,16 @@ class CameraTopicWindow(QMainWindow):
             self._on_sim_viewer_only_clicked
         )
         mj_run_row.addWidget(self.mujoco_viewer_only_btn)
+        self.mujoco_pause_btn = QPushButton("暂停")
+        self.mujoco_pause_btn.setEnabled(False)
+        self.mujoco_pause_btn.setCheckable(True)
+        self.mujoco_pause_btn.setToolTip(
+            "暂停 / 继续当前仿真任务（写入共享目录 sim_control.json）。\n"
+            "MuJoCo EGL / MolmoSpaces / Arena / LIBERO / RoboTwin / 扩展评测等\n"
+            "在 step 循环中轮询；暂停时保留仿真状态。官方 MuJoCo viewer 亦可用 Space。"
+        )
+        self.mujoco_pause_btn.clicked.connect(self._on_sim_pause_clicked)
+        mj_run_row.addWidget(self.mujoco_pause_btn)
         self.mujoco_stop_btn = QPushButton("停止")
         self.mujoco_stop_btn.setObjectName("dangerAction")
         self.mujoco_stop_btn.setEnabled(False)
@@ -25527,6 +26369,7 @@ class CameraTopicWindow(QMainWindow):
         self._mujoco_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
         # Separate process for openpi serve_policy (survives eval stop).
         self._pi_policy_launcher = MuJoCoViewerLauncher(self)
+        self._pi_policy_launcher.enable_persist_on_exit("pi_serve")
         self._pi_policy_launcher.log_line.connect(self._append_mujoco_log)
         self._pi_policy_launcher.status_message.connect(self._on_mujoco_status)
         self._pi_policy_launcher.running_changed.connect(
@@ -25538,6 +26381,7 @@ class CameraTopicWindow(QMainWindow):
         self._pi_gpu_mem_cache: Tuple[float, Dict[str, str]] = (0.0, {})
         # Separate process for Psi Policy / Native6D / WAM servers.
         self._psi_remote_launcher = MuJoCoViewerLauncher(self)
+        self._psi_remote_launcher.enable_persist_on_exit("psi_remote")
         self._psi_remote_launcher.log_line.connect(self._append_mujoco_log)
         self._psi_remote_launcher.status_message.connect(self._on_mujoco_status)
         self._psi_remote_launcher.running_changed.connect(
@@ -26088,6 +26932,11 @@ class CameraTopicWindow(QMainWindow):
             lambda: self._on_arm_move_clicked("right")
         )
         arm_row1.addWidget(self.right_arm_move_btn)
+        # Init early: sim eval running_changed may fire via processEvents mid-build.
+        self._left_arm_move_btn_idle_style = ""
+        self._left_arm_move_btn_cancel_style = f"color: {UI_ACCENT_RED};"
+        self._right_arm_move_btn_idle_style = ""
+        self._right_arm_move_btn_cancel_style = f"color: {UI_ACCENT_RED};"
         arm_row1.addStretch(1)
         manual_layout.addLayout(arm_row1)
 
@@ -28866,6 +29715,8 @@ class CameraTopicWindow(QMainWindow):
         self._update_local_ai_deploy_btn()
         self._update_train_ui()
         self._update_cad_ui()
+        # After full UI is ready (arm-btn styles etc.): adopt leftover Isaac/eval.
+        QTimer.singleShot(900, self._adopt_persisted_robodojo_eval)
 
 
     def _get_psi_policy_dir(self) -> Optional[str]:
@@ -29178,6 +30029,30 @@ class CameraTopicWindow(QMainWindow):
         self._append_bagel_log(f"$ 下载模型 → {save_dir}")
         proc.setProcessEnvironment(bagel_isolated_process_env(py))
         proc.start("bash", ["-lc", cmd])
+
+    def _adopt_persisted_bagel(self) -> None:
+        """界面重新打开时，按端口上的真实服务刷新 Bagel 状态。"""
+        if not hasattr(self, "_bagel_launcher"):
+            return
+        host = BAGEL_SERVER_HOST_DEFAULT
+        if hasattr(self, "bagel_host_edit"):
+            host = self.bagel_host_edit.text().strip() or host
+        api_port = BAGEL_API_PORT_DEFAULT
+        if hasattr(self, "bagel_api_port_spin"):
+            api_port = int(self.bagel_api_port_spin.value())
+        gradio_port = BAGEL_SERVER_PORT_DEFAULT
+        if hasattr(self, "bagel_port_spin"):
+            gradio_port = int(self.bagel_port_spin.value())
+        mode = 1
+        if hasattr(self, "bagel_mode_combo"):
+            mode = int(self.bagel_mode_combo.currentData() or 1)
+        if getattr(self, "_bagel_api_launcher", None) is not None:
+            if self._bagel_api_launcher.try_adopt(server_name=host, server_port=api_port):
+                self._update_bagel_api_ui()
+        if self._bagel_launcher.try_adopt(
+            server_name=host, server_port=gradio_port, mode=mode
+        ):
+            self._update_bagel_run_ui()
 
     def _on_bagel_start_clicked(self) -> None:
         host = self.bagel_host_edit.text().strip() or BAGEL_SERVER_HOST_DEFAULT
@@ -30918,15 +31793,105 @@ class CameraTopicWindow(QMainWindow):
         if running:
             self.sim_status_label.setText("桥: 运行中")
             self.sim_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
-            if not self._sim_frame_timer.isActive():
-                self._sim_frame_timer.start()
         else:
             self.sim_status_label.setText("桥: 空闲")
             self.sim_status_label.setStyleSheet("")
-            self._sim_frame_timer.stop()
+        # 帧状态 + Isaac Sim 运行探测常开（不依赖相机桥）
+        if hasattr(self, "_sim_frame_timer") and not self._sim_frame_timer.isActive():
+            self._sim_frame_timer.start()
         self._refresh_sim_frame_status()
 
+    def _update_isaac_sim_status_ui(self) -> None:
+        """刷新顶部「Isaac Sim: …」运行状态。"""
+        if not hasattr(self, "sim_isaac_status_label"):
+            return
+        try:
+            status = RoboDojoEvalLauncher.isaac_sim_status()
+        except Exception:
+            self.sim_isaac_status_label.setText("Isaac Sim: 探测失败")
+            self.sim_isaac_status_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+            return
+        clients = status.get("clients") or []
+        kits = status.get("kits") or []
+        persist_pid = int(status.get("persist_pid") or 0)
+        managed = bool(
+            getattr(self, "_sim_eval_launcher", None)
+            and self._sim_eval_launcher.is_running()
+        )
+        adopted = bool(
+            getattr(self, "_sim_eval_launcher", None)
+            and getattr(self._sim_eval_launcher, "_adopted", False)
+        )
+        if not status.get("running") and not managed:
+            self.sim_isaac_status_label.setText("Isaac Sim: 未运行")
+            self.sim_isaac_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+            return
+        bits: List[str] = []
+        if kits:
+            bits.append(f"Kit×{len(kits)}")
+        if clients:
+            task = clients[-1].get("task") or "?"
+            bits.append(f"eval×{len(clients)}({task})")
+        if persist_pid > 1:
+            bits.append(f"persist={persist_pid}")
+        if managed:
+            bits.append("已接管" if adopted else "本窗口")
+        detail = " · ".join(bits) if bits else "运行中"
+        self.sim_isaac_status_label.setText(f"Isaac Sim: 运行中（{detail}）")
+        self.sim_isaac_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+
+    def _adopt_persisted_robodojo_eval(self) -> None:
+        """界面打开时接管上次退出留下的 Isaac / 评测。"""
+        if not getattr(self, "_sim_eval_launcher", None):
+            return
+        if self._sim_eval_launcher.is_running():
+            self._update_isaac_sim_status_ui()
+            return
+        status = RoboDojoEvalLauncher.isaac_sim_status()
+        if not status.get("running"):
+            self._update_isaac_sim_status_ui()
+            return
+        task = str(
+            self.sim_eval_task_combo.currentData()
+            or self.sim_eval_task_combo.currentText()
+            or ""
+        ).strip()
+        bridge_dir = os.path.abspath(
+            os.path.expanduser(
+                self.sim_bridge_dir_edit.text().strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT
+            )
+        )
+        adopted = self._sim_eval_launcher.adopt_running_eval(
+            task,
+            bridge_dir=bridge_dir,
+            prefer_task=task,
+            use_gui=True,
+        )
+        if adopted is None:
+            adopted = self._sim_eval_launcher.adopt_persisted_eval(
+                task,
+                bridge_dir=bridge_dir,
+                use_gui=True,
+            )
+        if adopted is not None:
+            cur = str(adopted.get("task") or task or "?").strip()
+            self._append_sim_log(
+                f"界面启动：已接管已有 Isaac/评测（task={cur}），未重新启动"
+            )
+            self._activate_sim_camera_preview(force=False)
+        else:
+            kits = status.get("kits") or []
+            clients = status.get("clients") or []
+            self._append_sim_log(
+                "[WARN] 检测到 Isaac/评测在跑但未能接管："
+                f"Kit×{len(kits)} eval×{len(clients)}；"
+                "启动评测时将拒绝重复拉起，可先「停止评测」再开。"
+            )
+        self._update_sim_eval_run_ui()
+        self._update_isaac_sim_status_ui()
+
     def _refresh_sim_frame_status(self) -> None:
+        self._update_isaac_sim_status_ui()
         bridge_dir = os.path.abspath(
             os.path.expanduser(self.sim_bridge_dir_edit.text().strip() or ISAAC_CAM_BRIDGE_DIR_DEFAULT)
         )
@@ -31109,7 +32074,14 @@ class CameraTopicWindow(QMainWindow):
         was_running = bool(getattr(self, "_sim_eval_was_running", False))
         stopping = bool(getattr(self._sim_eval_launcher, "_stopping", False))
         no_policy = not str(self.sim_eval_policy_combo.currentData() or "")
-        self.sim_eval_stop_run_btn.setEnabled(running)
+        # 「停止评测」在探测到系统里仍有 Isaac/eval 时也应可点（含外部残留）
+        try:
+            ext_running = bool(RoboDojoEvalLauncher.isaac_sim_status().get("running"))
+        except Exception:
+            ext_running = False
+        self.sim_eval_stop_run_btn.setEnabled(running or ext_running or stopping)
+        self._update_isaac_sim_status_ui()
+        self._update_sim_pause_ui()
         if hasattr(self, "sim_eval_viewer_only_btn"):
             self.sim_eval_viewer_only_btn.setEnabled(
                 (not running)
@@ -31858,9 +32830,20 @@ class CameraTopicWindow(QMainWindow):
             hasattr(self, "_robodojo_policy_launcher")
             and self._robodojo_policy_launcher.is_running()
         ):
-            self._append_sim_log(
-                f"[策略] 本窗口部署进程已在运行（{host}:{port}），跳过重复部署"
-            )
+            info_owned = inspect_robodojo_policy_listener(host, port)
+            if robodojo_policy_matches_listener(
+                info_owned, policy_dir=policy_dir, ckpt=ckpt, action_type=action_type
+            ) or not info_owned.get("listening"):
+                self._append_sim_log(
+                    f"[策略] 同一模型已在运行（{host}:{port}），跳过重复部署"
+                )
+            else:
+                pol = info_owned.get("policy_name") or "?"
+                ck = info_owned.get("ckpt_name") or "?"
+                self._append_sim_log(
+                    f"[策略] 已有其它策略在跑（{pol}/{ck}），"
+                    "与当前选择不一致。请先「部署停止」再部署。"
+                )
             self._update_sim_policy_deploy_ui()
             return
 
@@ -32068,6 +33051,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_sim_eval_stop_run_clicked(self) -> None:
         self._append_sim_log("--- 用户点击停止评测（停止全部仿真）---")
+        self._set_sim_paused(False, log=False)
         self._stop_isaac_rynnvalue_npy_hud()
         self._sim_eval_launcher.stop()
         if self._sim_eval_auto_bridge and self._sim_bridge_launcher.is_running():
@@ -32076,6 +33060,85 @@ class CameraTopicWindow(QMainWindow):
             self._sim_eval_auto_bridge = False
             self._update_sim_bridge_ui()
         self._update_sim_eval_run_ui()
+
+    def _sim_paused_state(self) -> bool:
+        if is_sim_paused is None:
+            return bool(getattr(self, "_sim_paused_ui", False))
+        try:
+            return bool(is_sim_paused(self._sim_bridge_dir()))
+        except Exception:
+            return bool(getattr(self, "_sim_paused_ui", False))
+
+    def _set_sim_paused(self, paused: bool, *, log: bool = True) -> bool:
+        """Write shared sim_control.json and sync both pause buttons."""
+        self._sim_paused_ui = bool(paused)
+        ok = True
+        if write_sim_control is not None:
+            try:
+                ok = bool(
+                    write_sim_control(
+                        root=self._sim_bridge_dir(),
+                        paused=bool(paused),
+                        merge=True,
+                    )
+                )
+            except Exception as exc:
+                ok = False
+                if log:
+                    self._append_sim_log(f"[暂停] 写入失败: {exc}")
+        elif clear_sim_control is not None and not paused:
+            try:
+                clear_sim_control(self._sim_bridge_dir())
+            except Exception:
+                pass
+        self._update_sim_pause_ui()
+        if log:
+            msg = "已暂停任务" if paused else "已继续任务"
+            try:
+                self._append_sim_log(f"[暂停] {msg}")
+            except Exception:
+                pass
+            try:
+                self._append_mujoco_log(f"[暂停] {msg}")
+            except Exception:
+                pass
+        return ok
+
+    def _on_sim_pause_clicked(self) -> None:
+        if not self._any_sim_process_running():
+            self._set_sim_paused(False, log=False)
+            return
+        # Prefer the clicked button's checked state; fall back to toggle.
+        sender = self.sender()
+        if sender is not None and hasattr(sender, "isChecked"):
+            want_paused = bool(sender.isChecked())
+        else:
+            want_paused = not self._sim_paused_state()
+        self._set_sim_paused(want_paused, log=True)
+
+    def _update_sim_pause_ui(self) -> None:
+        running = self._any_sim_process_running()
+        paused = self._sim_paused_state() if running else False
+        if not running:
+            self._sim_paused_ui = False
+        label = "继续" if paused else "暂停"
+        tip = (
+            "当前已暂停；点击继续运行任务。"
+            if paused
+            else "暂停当前仿真任务（保留状态，可继续）。"
+        )
+        for attr in ("sim_eval_pause_btn", "mujoco_pause_btn"):
+            btn = getattr(self, attr, None)
+            if btn is None:
+                continue
+            btn.blockSignals(True)
+            try:
+                btn.setEnabled(running)
+                btn.setChecked(paused and running)
+                btn.setText(label)
+                btn.setToolTip(tip)
+            finally:
+                btn.blockSignals(False)
 
     def _sim_eval_root_path(self) -> str:
         return os.path.abspath(
@@ -34355,6 +35418,14 @@ class CameraTopicWindow(QMainWindow):
         self._real_eval_active = False
         self._local_qwen_launcher.shutdown()
         self._remote_qwen_launcher.shutdown()
+        for launcher_name in (
+            "_robodojo_policy_launcher",
+            "_pi_policy_launcher",
+            "_psi_remote_launcher",
+        ):
+            launcher = getattr(self, launcher_name, None)
+            if launcher is not None:
+                launcher.shutdown()
         for panel in self.panels.values():
             if isinstance(panel, DepthPanel3D):
                 panel.stop_robot_timer()
@@ -36839,7 +37910,8 @@ class CameraTopicWindow(QMainWindow):
             "psi_molmospaces": (
                 "Psi-MolmoSpaces（init_molmospaces）：任务列表=psi_molmo_spaces/*.json；"
                 "「只开界面」与「启动」均按当前选中任务开场景；"
-                "Viewer=官方 MuJoCo GLFW · 机器人第一视角 (head_camera_rgb)；"
+                "启动前可选视角：正面第三视角（默认，机器人+对象整体）/"
+                "头部第一视角（手臂+对象）；Viewer=官方 MuJoCo GLFW；"
                 "默认策略 WAM Psi-R1 Remote；下方「部署启动」拉起 :9317 服务并显示状态。"
                 "与 Isaac 评测互斥；不接 /camera/* 预览。"
             ),
@@ -37072,6 +38144,7 @@ class CameraTopicWindow(QMainWindow):
             self.mujoco_viewer_only_btn.setEnabled(startable)
         if hasattr(self, "mujoco_stop_btn"):
             self.mujoco_stop_btn.setEnabled(running)
+        self._update_sim_pause_ui()
         if hasattr(self, "mujoco_install_btn"):
             self.mujoco_install_btn.setEnabled(
                 (not running) and backend == "mujoco"
@@ -37156,6 +38229,7 @@ class CameraTopicWindow(QMainWindow):
         self._update_sim_backend_mutex_ui()
 
     def _on_mujoco_unified_start_clicked(self) -> None:
+        self._set_sim_paused(False, log=False)
         backend = self._sim_backend_id()
         if self._is_spaces_sim_backend(backend):
             self._on_molmospaces_run_clicked()
@@ -37172,6 +38246,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_sim_viewer_only_clicked(self) -> None:
         """Start sim GUI only — no policy / model inference for any backend."""
+        self._set_sim_paused(False, log=False)
         backend = self._sim_backend_id()
         if backend == "isaac":
             self._start_sim_eval(viewer_only=True)
@@ -37943,7 +39018,10 @@ class CameraTopicWindow(QMainWindow):
         return True
 
     def _start_isaac_rynnvalue_npy_hud(self, bridge_dir: str) -> None:
-        """Poll Isaac cam_head.npy into Live HUD (GUI-side sidecar)."""
+        """Poll Isaac cam_head.npy into Live HUD (GUI-side sidecar).
+
+        OpenCV HighGUI is headless in ros-humble, so the popup is a Qt window.
+        """
         self._stop_isaac_rynnvalue_npy_hud()
         if not self._sim_rynnvalue_hud_enabled():
             return
@@ -37965,13 +39043,14 @@ class CameraTopicWindow(QMainWindow):
             os.makedirs(os.path.dirname(status), exist_ok=True)
         except Exception:
             pass
+        # Scoring only in-process; Qt owns the visible window (not OpenCV).
         hud = RynnValueLiveHud(
             server_url=str(settings["server_url"]),
             refresh_sec=float(settings["refresh_sec"]),
             num_frames=int(settings["num_frames"]),
             robot_description=prof.robot_description,
             camera_description=prof.camera_description,
-            show_window=bool(settings.get("show_window", True)),
+            show_window=False,
             status_path=status,
             flip_ud=False,
         )
@@ -37981,20 +39060,44 @@ class CameraTopicWindow(QMainWindow):
             os.path.expanduser(bridge_dir or ISAAC_CAM_BRIDGE_DIR_DEFAULT)
         )
         self._isaac_rynnvalue_last_mtime = 0.0
+        qt_hud = RynnValueQtHudWindow(self)
+        qt_hud.closed_by_user.connect(self._on_isaac_rynnvalue_qt_hud_closed)
+        qt_hud.show()
+        qt_hud.raise_()
+        qt_hud.activateWindow()
+        self._isaac_rynnvalue_qt_hud = qt_hud
         if not hasattr(self, "_isaac_rynnvalue_timer"):
             self._isaac_rynnvalue_timer = QTimer(self)
             self._isaac_rynnvalue_timer.setInterval(120)
             self._isaac_rynnvalue_timer.timeout.connect(self._poll_isaac_rynnvalue_npy)
         self._isaac_rynnvalue_timer.start()
         self._append_sim_log(
-            f"[rynnvalue] Isaac Live HUD window polling "
+            f"[rynnvalue] Isaac Live HUD Qt 窗口已弹出；轮询 "
             f"{self._isaac_rynnvalue_bridge_dir}/cam_head.npy"
+            "（ros-humble OpenCV 无 HighGUI，改用 Qt）"
         )
+
+    def _on_isaac_rynnvalue_qt_hud_closed(self) -> None:
+        self._append_sim_log("[rynnvalue] Live HUD 窗口已关闭；停止打分")
+        self._stop_isaac_rynnvalue_npy_hud()
 
     def _stop_isaac_rynnvalue_npy_hud(self) -> None:
         timer = getattr(self, "_isaac_rynnvalue_timer", None)
         if timer is not None and timer.isActive():
             timer.stop()
+        qt_hud = getattr(self, "_isaac_rynnvalue_qt_hud", None)
+        self._isaac_rynnvalue_qt_hud = None
+        if qt_hud is not None:
+            try:
+                qt_hud.closed_by_user.disconnect(
+                    self._on_isaac_rynnvalue_qt_hud_closed
+                )
+            except Exception:
+                pass
+            try:
+                qt_hud.close()
+            except Exception:
+                pass
         hud = getattr(self, "_isaac_rynnvalue_hud", None)
         if hud is not None:
             try:
@@ -38009,17 +39112,31 @@ class CameraTopicWindow(QMainWindow):
             return
         bridge = getattr(self, "_isaac_rynnvalue_bridge_dir", "") or ""
         npy = os.path.join(bridge, "cam_head.npy")
-        if not os.path.isfile(npy):
+        if os.path.isfile(npy):
+            try:
+                mtime = os.path.getmtime(npy)
+                if mtime > float(
+                    getattr(self, "_isaac_rynnvalue_last_mtime", 0.0) or 0.0
+                ):
+                    import numpy as _np
+
+                    arr = _np.load(npy)
+                    self._isaac_rynnvalue_last_mtime = mtime
+                    hud.push_frame(arr)
+            except Exception:
+                pass
+        qt_hud = getattr(self, "_isaac_rynnvalue_qt_hud", None)
+        if qt_hud is None or getattr(qt_hud, "_user_closed", False):
             return
         try:
-            mtime = os.path.getmtime(npy)
-            if mtime <= float(getattr(self, "_isaac_rynnvalue_last_mtime", 0.0) or 0.0):
-                return
-            import numpy as _np
-
-            arr = _np.load(npy)
-            self._isaac_rynnvalue_last_mtime = mtime
-            hud.push_frame(arr)
+            rgb = hud.last_overlay_rgb()
+            if rgb is not None:
+                qt_hud.set_overlay_rgb(rgb)
+            snap = hud.snapshot()
+            qt_hud.set_status_title(
+                snap.remaining_s if snap.remaining_s is not None else None,
+                error=str(snap.error or ""),
+            )
         except Exception:
             pass
 
@@ -38245,12 +39362,8 @@ class CameraTopicWindow(QMainWindow):
         if hasattr(self, "sim_rynnvalue_stop_btn"):
             self.sim_rynnvalue_stop_btn.setEnabled(True)
         timer = getattr(self, "_sim_rynnvalue_status_timer", None)
-        if timer is not None:
-            if enabled:
-                if not timer.isActive():
-                    timer.start()
-            else:
-                timer.stop()
+        if timer is not None and not timer.isActive():
+            timer.start()
 
     def _update_libero_rynnvalue_hud_controls(self) -> None:
         self._update_sim_rynnvalue_hud_controls()
@@ -38321,9 +39434,7 @@ class CameraTopicWindow(QMainWindow):
                 self._on_mujoco_status(msg)
         else:
             self._set_rynnvalue_workspace_hud_active(False)
-            self._set_sim_rynnvalue_status("未启用 Live HUD", level="muted")
-            if hasattr(self, "sim_rynnvalue_deploy_btn"):
-                self.sim_rynnvalue_deploy_btn.setText("部署 RynnValue")
+            self._probe_and_show_rynnvalue_reward_status(log=False)
             self._stop_isaac_rynnvalue_npy_hud()
 
     def _on_sim_rynnvalue_url_changed(self) -> None:
@@ -38331,8 +39442,7 @@ class CameraTopicWindow(QMainWindow):
             self._probe_and_show_rynnvalue_reward_status(log=False)
 
     def _on_sim_rynnvalue_status_tick(self) -> None:
-        if self._sim_rynnvalue_hud_enabled():
-            self._probe_and_show_rynnvalue_reward_status(log=False)
+        self._probe_and_show_rynnvalue_reward_status(log=False)
 
     def _on_sim_rynnvalue_probe_clicked(self) -> None:
         ok, msg = self._probe_and_show_rynnvalue_reward_status(log=True)
@@ -38509,7 +39619,21 @@ class CameraTopicWindow(QMainWindow):
         # Prefer an already-healthy deploy (UI-owned or external) — do not reload GPU.
         ok_ext, msg_ext, _info_ext = probe_rynnvalue_reward_server(url, timeout_s=2.5)
         if ok_ext:
-            self._append_mujoco_log(f"[rynnvalue] 已部署，跳过启动: {msg_ext}")
+            live = ""
+            model_info = _info_ext.get("model_info") if isinstance(_info_ext, dict) else None
+            if isinstance(model_info, dict):
+                live = str(model_info.get("reward_model") or "")
+            health = _info_ext.get("health") if isinstance(_info_ext, dict) else None
+            if not live and isinstance(health, dict):
+                live = str(health.get("reward_model") or "")
+            want = (self._rynnvalue_deploy_model_path() or self._rynnvalue_deploy_ckpt_path() or "").strip()
+            same = model_identity_same("", live, "", want) if (live and want) else True
+            if same is False:
+                msg_diff = f"已在运行其它模型（{live}）。请先「停止模型」再部署。"
+                self._append_mujoco_log(f"[rynnvalue] {msg_diff}")
+                self._set_sim_rynnvalue_status(f"● {msg_ext}", level="ok")
+                return False, msg_diff
+            self._append_mujoco_log(f"[rynnvalue] 同一模型已部署，跳过重复部署: {msg_ext}")
             self._set_sim_rynnvalue_status(f"● {msg_ext}", level="ok")
             self._update_sim_rynnvalue_hud_controls()
             return True, msg_ext
@@ -39418,6 +40542,35 @@ class CameraTopicWindow(QMainWindow):
                 return str(rid)
         return "droid"
 
+    def _molmospaces_viewer_cam_choice(self) -> Tuple[str, str, str]:
+        """Return ``(first_person, cam_name, human_label)`` from the 视角 combo.
+
+        Default is front third-person (robot + manipulation target overview).
+        ``head`` uses ``head_camera_rgb`` first-person (arms + target).
+        """
+        cam_id = "front"
+        if hasattr(self, "molmospaces_viewer_cam_combo"):
+            cam_id = str(self.molmospaces_viewer_cam_combo.currentData() or "front")
+        if cam_id == "head":
+            return (
+                "1",
+                "head_camera_rgb",
+                "头部第一视角 (head_camera_rgb)",
+            )
+        return ("0", "front", "正面第三视角 (front)")
+
+    def _molmospaces_viewer_cam_env(self) -> Dict[str, str]:
+        """Env vars for ``run_molmospaces_eval.py`` viewer camera framing."""
+        viewer_fp, viewer_cam, _label = self._molmospaces_viewer_cam_choice()
+        env: Dict[str, str] = {
+            "MOLMOSPACES_VIEWER_FIRST_PERSON": viewer_fp,
+            "MOLMOSPACES_VIEWER_CAM": viewer_cam,
+        }
+        if viewer_fp == "0":
+            env["MOLMOSPACES_VIEWER_DISTANCE"] = MOLMOSPACES_VIEWER_FRONT_DISTANCE
+            env["MOLMOSPACES_VIEWER_ELEVATION"] = MOLMOSPACES_VIEWER_FRONT_ELEVATION
+        return env
+
     def _on_molmospaces_root_browse(self) -> None:
         cur = self._resolve_molmospaces_root()
         selected = QFileDialog.getExistingDirectory(
@@ -40151,9 +41304,31 @@ class CameraTopicWindow(QMainWindow):
             )
             self._stop_psi_remote_for_relaunch(port, mode=mode)
         elif port_listening(host, port, timeout=0.3):
-            # Already up; cheap listen check only (handshake is optional via 验证).
+            blob = listener_cmdline(port)
+            ckpt_base = os.path.basename(ckpt.rstrip("/")) if ckpt else ""
+            same_ckpt = False
+            other_ckpt = False
+            if blob and ckpt:
+                norm_ckpt = _norm_model_token(ckpt)
+                same_ckpt = ckpt in blob or (norm_ckpt and norm_ckpt in blob) or (
+                    bool(ckpt_base) and ckpt_base in blob
+                )
+                other_ckpt = (not same_ckpt) and (
+                    ".pt" in blob or "checkpoint" in blob.lower()
+                )
             self._update_molmospaces_psi_deploy_ui()
-            return True, f"端口 :{port} 已在监听；可点「验证」确认握手"
+            if same_ckpt:
+                return (
+                    True,
+                    f"同一模型已在运行（:{port} {ckpt_base}），跳过重复部署",
+                )
+            if other_ckpt:
+                return (
+                    False,
+                    f":{port} 上的服务不是当前 checkpoint"
+                    f"（{ckpt_base or ckpt}）。请先「部署停止」再部署。",
+                )
+            return True, f"端口 :{port} 已在监听，跳过重复部署"
         elif (
             getattr(self, "_psi_remote_launcher", None)
             and self._psi_remote_launcher.is_running()
@@ -40639,8 +41814,9 @@ class CameraTopicWindow(QMainWindow):
         self._append_mujoco_log(f"[psi_molmospaces] task={task.get('label')}")
         self._append_mujoco_log(f"[psi_molmospaces] benchmark={bench}")
         self._append_mujoco_log(f"[psi_molmospaces] assets={r1_msg}")
+        _vp_fp, _vp_cam, vp_label = self._molmospaces_viewer_cam_choice()
         self._append_mujoco_log(
-            "[psi_molmospaces] viewer: 官方 MuJoCo GLFW · 机器人第一视角 (head_camera_rgb)"
+            f"[psi_molmospaces] viewer: 官方 MuJoCo GLFW · {vp_label}"
         )
         self._append_mujoco_log(
             "[psi_molmospaces] 结束后保留窗口，点「停止」或关闭窗口再退出"
@@ -40651,8 +41827,7 @@ class CameraTopicWindow(QMainWindow):
             "RYNNVALUE_HUD_BACKEND": "psi_molmospaces",
             "MOLMOSPACES_EVAL_VIEWER": "1",
             "MOLMOSPACES_VIEWER_ONLY": "1",
-            "MOLMOSPACES_VIEWER_FIRST_PERSON": "1",
-            "MOLMOSPACES_VIEWER_CAM": "head_camera_rgb",
+            **self._molmospaces_viewer_cam_env(),
             "MOLMOSPACES_FORCE_EGL": "0",
             "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
             "EAI_DIR": EAI_DIR,
@@ -40967,8 +42142,14 @@ class CameraTopicWindow(QMainWindow):
                 f"[{spaces_tag}] 结束后保留窗口，点「停止」或关闭窗口再退出"
             )
             if backend == "psi_molmospaces":
+                _vp_fp, _vp_cam, vp_label = self._molmospaces_viewer_cam_choice()
                 self._append_mujoco_log(
-                    f"[{spaces_tag}] viewer: 官方 MuJoCo GLFW · 机器人第一视角 (head_camera_rgb)"
+                    f"[{spaces_tag}] viewer: 官方 MuJoCo GLFW · {vp_label}"
+                )
+            else:
+                self._append_mujoco_log(
+                    f"[{spaces_tag}] viewer cam: "
+                    f"{self._molmospaces_viewer_cam_choice()[2]}"
                 )
             # GLFW path also needs RYNNVALUE_LIVE_HUD (viewer feed is hooked in
             # molmospaces_viewer_cam); previously viewer_only skipped HUD env.
@@ -40979,19 +42160,15 @@ class CameraTopicWindow(QMainWindow):
             )
             if hud_env and not self._ensure_live_hud_reward_or_abort(spaces_tag):
                 return
-            # Psi：官方 MuJoCo GLFW + 头部第一视角；其它 Spaces 默认仍可 FORCE_EGL。
+            # Psi：官方 MuJoCo GLFW；视角由上方「视角」下拉决定（默认正面第三视角）。
+            # 其它 Spaces 默认仍可 FORCE_EGL。
             force_egl = "0" if backend == "psi_molmospaces" else "1"
-            if backend == "psi_molmospaces":
-                viewer_fp, viewer_cam = "1", "head_camera_rgb"
-            else:
-                viewer_fp, viewer_cam = "0", "front"
             env_extra = {
                 "MUJOCO_GL": "glfw",
                 "MOLMOSPACES_ROOT": root,
                 "RYNNVALUE_HUD_BACKEND": spaces_tag,
                 "MOLMOSPACES_EVAL_VIEWER": "1",
-                "MOLMOSPACES_VIEWER_FIRST_PERSON": viewer_fp,
-                "MOLMOSPACES_VIEWER_CAM": viewer_cam,
+                **self._molmospaces_viewer_cam_env(),
                 "MOLMOSPACES_FORCE_EGL": force_egl,
                 # Keep last frame until GUI「停止」or window close.
                 "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
@@ -41164,9 +42341,8 @@ class CameraTopicWindow(QMainWindow):
         self._append_mujoco_log(
             "[molmospaces] viewer: VirtualGL→NVIDIA when available, else EGL+Tk"
         )
-        self._append_mujoco_log(
-            "[molmospaces] viewer cam: front third-person (机器人正面)"
-        )
+        _vp_fp, _vp_cam, vp_label = self._molmospaces_viewer_cam_choice()
+        self._append_mujoco_log(f"[molmospaces] viewer cam: {vp_label}")
         self._append_mujoco_log(
             "[molmospaces] 结束后保留窗口，点「停止」或关闭窗口再退出"
         )
@@ -41177,8 +42353,7 @@ class CameraTopicWindow(QMainWindow):
             "MUJOCO_GL": "glfw",
             "MOLMOSPACES_ROOT": root,
             "RYNNVALUE_HUD_BACKEND": spaces_tag,
-            "MOLMOSPACES_VIEWER_FIRST_PERSON": "0",
-            "MOLMOSPACES_VIEWER_CAM": "front",
+            **self._molmospaces_viewer_cam_env(),
             "MOLMOSPACES_FORCE_EGL": "1",
             "MOLMOSPACES_VIEWER_KEEP_OPEN": "1",
             "EAI_DIR": EAI_DIR,
@@ -41316,6 +42491,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_mujoco_stop_clicked(self) -> None:
         self._append_mujoco_log("--- 用户停止 MuJoCo ---")
+        self._set_sim_paused(False, log=False)
         self._mujoco_launcher.stop()
         self._update_mujoco_ui()
 
@@ -44484,6 +45660,13 @@ class CameraTopicWindow(QMainWindow):
             btn.setToolTip(self._disabled_move_btn_tooltip(arm_side))
 
     def _update_arm_move_btns_ui(self, force: bool = False) -> None:
+        # Guard: may be invoked from sim eval signals during build_heavy_ui.
+        if not hasattr(self, "left_arm_move_btn") or not hasattr(
+            self, "_left_arm_move_btn_idle_style"
+        ):
+            return
+        if not hasattr(self, "arm_move_speed_slider"):
+            return
         speed_busy = self.node.is_slow_motion_busy() or self._is_sim_arm_moving()
         self.arm_move_speed_slider.setEnabled(not speed_busy)
         self._update_one_arm_move_btn_ui("left", force=force)
@@ -46376,6 +47559,24 @@ def parse_only_tabs(tab_args: Optional[List[object]]) -> List[str]:
     return resolved
 
 
+def _combo_down_arrow_path() -> str:
+    """Light chevron for dark-theme QComboBox (Fusion default arrow is too dim)."""
+    path = os.path.join(EAI_DIR, ".cache", "ui", "combo_down_arrow.svg")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8" '
+            'viewBox="0 0 12 8">'
+            f'<path fill="{UI_TEXT_SECONDARY}" d="M1 1.2h10L6 7.2z"/>'
+            "</svg>\n"
+        )
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(svg)
+    except OSError:
+        pass
+    return path.replace("\\", "/")
+
+
 def apply_viewer_theme(app: QApplication) -> None:
     """统一深色主题：表面层级、焦点环、标签页强调色、滚动条。"""
     palette = QPalette()
@@ -46395,6 +47596,7 @@ def apply_viewer_theme(app: QApplication) -> None:
     palette.setColor(QPalette.Mid, QColor(UI_BORDER))
     palette.setColor(QPalette.Dark, QColor(UI_BG_INPUT))
     app.setPalette(palette)
+    combo_arrow = _combo_down_arrow_path()
     app.setStyleSheet(
         f"""
         QWidget {{
@@ -46491,9 +47693,34 @@ def apply_viewer_theme(app: QApplication) -> None:
         QPlainTextEdit:focus, QTextEdit:focus {{
             border: 1px solid {UI_ACCENT_BLUE_BRIGHT};
         }}
+        QComboBox {{
+            padding-right: 28px;
+        }}
         QComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 26px;
             border: none;
-            width: 22px;
+            border-left: 1px solid {UI_BORDER};
+            border-top-right-radius: {UI_RADIUS};
+            border-bottom-right-radius: {UI_RADIUS};
+            background-color: {UI_BG_ELEVATED};
+        }}
+        QComboBox::drop-down:hover {{
+            background-color: {UI_BG_HOVER};
+            border-left-color: {UI_BORDER_STRONG};
+        }}
+        QComboBox::drop-down:disabled {{
+            background-color: {UI_BG_WINDOW};
+            border-left-color: {UI_BORDER};
+        }}
+        QComboBox::down-arrow {{
+            image: url("{combo_arrow}");
+            width: 12px;
+            height: 8px;
+        }}
+        QComboBox::down-arrow:disabled {{
+            image: url("{combo_arrow}");
         }}
         QComboBox QAbstractItemView {{
             color: {UI_TEXT_PRIMARY};

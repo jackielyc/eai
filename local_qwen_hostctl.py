@@ -93,13 +93,39 @@ def _tail_log_errors(max_lines: int = 40) -> str:
     return ""
 
 
-def qwen_health_ok(timeout_s: float = 1.5) -> bool:
+def qwen_health_body(timeout_s: float = 1.5) -> Dict[str, Any]:
     try:
         with urlopen(f"http://127.0.0.1:{QWEN_PORT}/health", timeout=timeout_s) as resp:
             body = json.loads(resp.read().decode("utf-8"))
-            return bool(body.get("ok"))
+            return body if isinstance(body, dict) else {}
     except Exception:
-        return False
+        return {}
+
+
+def qwen_health_ok(timeout_s: float = 1.5) -> bool:
+    return bool(qwen_health_body(timeout_s=timeout_s).get("ok"))
+
+
+def _same_requested_model(normalized: Dict[str, str], body: Optional[Dict[str, Any]] = None) -> Optional[bool]:
+    """True if the live/starting service is the requested model."""
+    body = body if body is not None else qwen_health_body()
+    live_id = str((body or {}).get("model") or "").strip()
+    live_dir = str((body or {}).get("model_dir") or "").strip().rstrip("/")
+    if not live_id and not live_dir:
+        live_id = str((_LAST_OPTS or {}).get("model_id") or "").strip()
+        live_dir = str((_LAST_OPTS or {}).get("model_dir") or "").strip().rstrip("/")
+    want_id = str(normalized.get("model_id") or "").strip()
+    want_dir = str(normalized.get("model_dir") or "").strip().rstrip("/")
+    if live_dir and want_dir:
+        same_dir = live_dir == want_dir or os.path.basename(live_dir) == os.path.basename(want_dir)
+        if not same_dir:
+            return False
+        if live_id and want_id and live_id != want_id:
+            return False
+        return True
+    if live_id and want_id:
+        return live_id == want_id
+    return None
 
 
 def _refresh_proc_state() -> None:
@@ -174,10 +200,38 @@ def start_service(opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     normalized = _normalize_start_opts(opts)
     _refresh_proc_state()
     if qwen_health_ok():
-        return {"ok": True, "message": "服务已在运行", **status_payload()}
+        same = _same_requested_model(normalized)
+        if same is False:
+            live = qwen_health_body()
+            shown = live.get("model") or live.get("model_dir") or "未知模型"
+            return {
+                "ok": False,
+                "message": f"已在运行其它模型（{shown}）。若要换成 {normalized['model_label']}，请先停止再部署。",
+                **status_payload(),
+            }
+        return {
+            "ok": True,
+            "message": f"同一模型已在运行，跳过重复部署 ({normalized['model_label']})",
+            "already_running": True,
+            **status_payload(),
+        }
     with _LOCK:
         if _PROC is not None and _PROC.poll() is None:
-            return {"ok": True, "message": "正在启动中", **status_payload()}
+            same = _same_requested_model(normalized, body={})
+            if same is False:
+                return {
+                    "ok": False,
+                    "message": (
+                        f"其它模型正在启动。若要换成 {normalized['model_label']}，请先停止再部署。"
+                    ),
+                    **status_payload(),
+                }
+            return {
+                "ok": True,
+                "message": f"同一模型正在启动，跳过重复部署 ({normalized['model_label']})",
+                "already_running": True,
+                **status_payload(),
+            }
         if not os.path.isfile(RUN_SCRIPT):
             return {"ok": False, "message": f"未找到 {RUN_SCRIPT}"}
         model_dir = normalized["model_dir"]

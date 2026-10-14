@@ -29,11 +29,11 @@
     },
     "sam3_u_spin": {
       "kind": "spin",
-      "value": 64
+      "value": 573
     },
     "sam3_v_spin": {
       "kind": "spin",
-      "value": 80
+      "value": 236
     },
     "pose_backend_combo": {
       "kind": "combo",
@@ -97,9 +97,9 @@
     },
     "lingbot_depth_topic_combo": {
       "kind": "combo",
-      "index": 3,
-      "text": "/libero/preview",
-      "data": "/libero/preview"
+      "index": 4,
+      "text": "/rynnvalue/live_hud",
+      "data": "/rynnvalue/live_hud"
     },
     "lingbot_depth_model_edit": {
       "kind": "line",
@@ -193,9 +193,9 @@
     },
     "lingbot_video_topic_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "/camera/head_color",
-      "data": "/camera/head_color"
+      "index": 4,
+      "text": "/rynnvalue/live_hud",
+      "data": "/rynnvalue/live_hud"
     },
     "lingbot_video_model_edit": {
       "kind": "line",
@@ -263,9 +263,9 @@
     },
     "lingbot_world_topic_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "/camera/head_color",
-      "data": "/camera/head_color"
+      "index": 4,
+      "text": "/rynnvalue/live_hud",
+      "data": "/rynnvalue/live_hud"
     },
     "lingbot_world_ckpt_edit": {
       "kind": "line",
@@ -423,7 +423,7 @@
     },
     "sim_backend_isaac_radio": {
       "kind": "radio",
-      "checked": false
+      "checked": true
     },
     "sim_backend_mujoco_radio": {
       "kind": "radio",
@@ -435,7 +435,7 @@
     },
     "sim_backend_psi_spaces_radio": {
       "kind": "radio",
-      "checked": true
+      "checked": false
     },
     "sim_backend_arena_radio": {
       "kind": "radio",
@@ -469,10 +469,10 @@
     },
     "sim_eval_task_combo": {
       "kind": "combo",
-      "index": 1,
-      "text": "arrange_largest_number",
-      "data": "arrange_largest_number",
-      "edit": "arrange_largest_number"
+      "index": 0,
+      "text": "align_blocks",
+      "data": "align_blocks",
+      "edit": "align_blocks"
     },
     "sim_eval_policy_combo": {
       "kind": "combo",
@@ -558,8 +558,8 @@
     "molmospaces_task_combo": {
       "kind": "combo",
       "index": 0,
-      "text": "[Psi] pick up the apple (20 ep)",
-      "data": "{'extra': (), 'id': 'psi:benchmark', 'label': '[Psi] pick up the apple (20 ep)', 'path': '/share_data/projects/mahjong/share/personal/liyichao/psi-molmospaces/psi_molmo_spaces', 'ready': True}"
+      "text": "Close (Close-v1)",
+      "data": "{'extra': (), 'id': 'close_v1', 'label': 'Close (Close-v1)', 'path': '/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/molmospaces/assets/L3NoYXJlX2RhdGEvcHJvamVjdHMvbWFoam9uZy9zaGFyZS9wZXJzb25hbC9saXlpY2hhby9tb2xtb3NwYWNlcw/benchmarks/molmospaces-bench-v1/ithor/FrankaCloseDataGenConfig/FrankaCloseDataGenConfig_20260123_json_benchmark', 'ready': True}"
     },
     "molmospaces_policy_combo": {
       "kind": "combo",
@@ -570,6 +570,12 @@
     "molmospaces_episodes_spin": {
       "kind": "spin",
       "value": 1
+    },
+    "molmospaces_viewer_cam_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "正面第三视角",
+      "data": "front"
     },
     "molmospaces_pi_ckpt_edit": {
       "kind": "line",
@@ -1541,7 +1547,7 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "仿真评测",
+  "control_tab": "真机评测",
   "splitter_sizes": [
     256,
     1258,
@@ -1564,5 +1570,5 @@
     "/camera/right_wrist_depth": true
   },
   "topic_user_unchecked": [],
-  "workspace_collapsed": true
+  "workspace_collapsed": false
 }

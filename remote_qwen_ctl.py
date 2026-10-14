@@ -513,13 +513,55 @@ def sync_runtime() -> Dict[str, object]:
     return {"ok": True, "message": f"已同步到 {SSH_HOST}:{REMOTE_WORK}"}
 
 
+def remote_health_body(timeout_s: float = 2.0) -> Dict[str, object]:
+    script = (
+        f"curl -fsS --max-time {max(1, int(timeout_s))} "
+        f"http://127.0.0.1:{REMOTE_PORT}/health || true"
+    )
+    proc = ssh_bash(script, timeout_s=timeout_s + 12)
+    raw = (proc.stdout or "").strip()
+    try:
+        body = json.loads(raw)
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 def remote_health_ok(timeout_s: float = 2.0) -> bool:
+    body = remote_health_body(timeout_s=timeout_s)
+    if body:
+        return bool(body.get("ok") or body.get("loading") or body.get("model"))
     script = (
         f"curl -fsS --max-time {max(1, int(timeout_s))} "
         f"http://127.0.0.1:{REMOTE_PORT}/health"
     )
     proc = ssh_bash(script, timeout_s=timeout_s + 10)
     return proc.returncode == 0
+
+
+def _remote_same_model(
+    body: Dict[str, object],
+    *,
+    model_id: str,
+    model_dir: str,
+) -> Optional[bool]:
+    """True/False when both sides are known, else None."""
+    live_id = str(body.get("model") or "").strip()
+    live_dir = str(body.get("model_dir") or "").strip().rstrip("/")
+    want_id = (model_id or "").strip()
+    want_dir = (model_dir or "").strip().rstrip("/")
+    if live_dir and want_dir:
+        same_dir = live_dir == want_dir or os.path.basename(live_dir) == os.path.basename(
+            want_dir
+        )
+        if not same_dir:
+            return False
+        if live_id and want_id and live_id != want_id:
+            return False
+        return True
+    if live_id and want_id:
+        return live_id == want_id
+    return None
 
 
 def local_tunnel_health(timeout_s: float = 2.0) -> Tuple[bool, Dict[str, object]]:
@@ -726,13 +768,34 @@ def start_remote_service(
         return sync
 
     if remote_health_ok():
+        body = remote_health_body()
+        same = _remote_same_model(
+            body, model_id=str(mid or ""), model_dir=str(model_dir or "")
+        )
+        live_id = str(body.get("model") or "")
+        live_dir = str(body.get("model_dir") or "")
+        if same is False:
+            shown = live_id or live_dir or "未知模型"
+            return {
+                "ok": False,
+                "message": (
+                    f"远程已在运行其它模型（{shown} @ {SSH_HOST}）。"
+                    f"若要换成 {label}，请先停止再部署。"
+                ),
+                "model_key": key,
+                "model_id": live_id or model_id,
+                "model_label": label,
+                "already_running": True,
+                "same_model": False,
+            }
         return {
             "ok": True,
-            "message": f"远程服务已在运行 ({label} @ {SSH_HOST})",
+            "message": f"同一模型已在运行，跳过重复部署 ({label} @ {SSH_HOST})",
             "model_key": key,
-            "model_id": model_id,
+            "model_id": live_id or model_id,
             "model_label": label,
             "already_running": True,
+            "same_model": True,
         }
 
     script = f"""

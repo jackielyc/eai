@@ -20,7 +20,8 @@ from pathlib import Path
 
 def main() -> int:
     os.environ.setdefault("PYTHONUNBUFFERED", "1")
-    # Defaults; Psi GUI sets FIRST_PERSON=1 + head_camera_rgb.
+    # Defaults: front third-person. Psi GUI may override via 视角 combo
+    # (front | head_camera_rgb first-person).
     os.environ.setdefault("MOLMOSPACES_VIEWER_FIRST_PERSON", "0")
     os.environ.setdefault("MOLMOSPACES_VIEWER_CAM", "front")
     # Default FORCE_EGL=1 for legacy TurboVNC safety; GUI may set 0 for

@@ -3,6 +3,8 @@
 Reads ``gui_robot_cmd.json`` / writes ``sim_robot_state.json`` under
 ``ISAAC_CAM_BRIDGE_DIR`` (same protocol as RoboDojo ``NoopModelClient``).
 
+Also exposes pause helpers for ``sim_control.json`` (UI 暂停/继续).
+
 Pose format: ``[x, y, z, qw, qx, qy, qz]``. Gripper: ``0=open, 1=closed``.
 """
 
@@ -50,6 +52,55 @@ def ensure_bridge_dir(root: str = "") -> str:
     os.environ["ISAAC_CAM_BRIDGE_DIR"] = d
     os.environ.setdefault("EAI_DIR", _EAI_DIR)
     return d
+
+
+def is_sim_paused(root: str = "") -> bool:
+    """True when EAI GUI wrote ``sim_control.json`` with paused=true."""
+    bridge = _load_bridge()
+    if bridge is None:
+        return False
+    try:
+        return bool(bridge.is_sim_paused(root or ensure_bridge_dir()))
+    except Exception:
+        return False
+
+
+def wait_while_paused(
+    root: str = "",
+    *,
+    poll_s: float = 0.05,
+    stop_flag: Any = None,
+) -> bool:
+    """Block while the GUI pause flag is set. Returns False if stop_flag trips."""
+    bridge = _load_bridge()
+    if bridge is None:
+        return True
+    try:
+        return bool(
+            bridge.wait_while_paused(
+                root or ensure_bridge_dir(),
+                poll_s=poll_s,
+                stop_flag=stop_flag,
+            )
+        )
+    except Exception:
+        return True
+
+
+def set_sim_paused(paused: bool, root: str = "") -> bool:
+    bridge = _load_bridge()
+    if bridge is None:
+        return False
+    try:
+        return bool(
+            bridge.write_sim_control(
+                root=root or ensure_bridge_dir(),
+                paused=bool(paused),
+                merge=True,
+            )
+        )
+    except Exception:
+        return False
 
 
 def pose7_ok(val: Any) -> Optional[List[float]]:
@@ -332,6 +383,7 @@ __all__ = [
     "GuiTeleopSession",
     "ensure_bridge_dir",
     "grip01",
+    "is_sim_paused",
     "libero_action_from_cmd",
     "libero_objects_to_state",
     "libero_obs_to_state",
@@ -339,4 +391,6 @@ __all__ = [
     "pose7_ok",
     "robotwin_action_from_cmd",
     "robotwin_pose_to_pose7",
+    "set_sim_paused",
+    "wait_while_paused",
 ]

@@ -1,42 +1,69 @@
 #!/usr/bin/env bash
 # Ensure every model stack in tools/model_conda_envs.py has exactly one
-# miniconda3 env. Missing envs are created by cloning a related base env
-# (or a minimal python create when no clone source fits).
+# real miniconda3 env (no soft/hard links between env dirs).
+# Missing envs: full conda --clone --copy, or minimal python create.
 set -euo pipefail
 
 MINICONDA3="${EAI_MINICONDA3:-/share_data/projects/mahjong/share/personal/liyichao/miniconda3}"
-# shellcheck disable=SC1091
-source "${MINICONDA3}/etc/profile.d/conda.sh"
-conda activate base >/dev/null 2>&1 || true
+CONDA_BIN="${MINICONDA3}/bin/conda"
+if [[ ! -x "${CONDA_BIN}" ]]; then
+  echo "[error] conda not found: ${CONDA_BIN}" >&2
+  exit 1
+fi
 
 ENVS="${MINICONDA3}/envs"
 EAI_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Reject symlink env dirs; force a real independent install.
+reject_symlink_env() {
+  local name="$1" path="${ENVS}/${name}"
+  if [[ -L "${path}" ]]; then
+    echo "[fix] ${name} is a symlink -> $(readlink "${path}"); removing"
+    rm -f "${path}"
+  fi
+}
+
+env_ready() {
+  local name="$1" path="${ENVS}/${name}"
+  [[ ! -L "${path}" && -x "${path}/bin/python" ]]
+}
+
 ensure_clone() {
   local name="$1" base="$2"
-  if [[ -x "${ENVS}/${name}/bin/python" ]]; then
-    echo "[skip] ${name} already exists"
+  reject_symlink_env "${name}"
+  if env_ready "${name}"; then
+    echo "[skip] ${name} already exists (real env)"
     return 0
+  fi
+  if [[ -d "${ENVS}/${name}" ]]; then
+    echo "[clean] removing incomplete ${name}"
+    rm -rf "${ENVS}/${name}"
   fi
   if [[ ! -x "${ENVS}/${base}/bin/python" ]]; then
     echo "[error] clone source missing: ${base}" >&2
     return 1
   fi
-  echo "[create] ${name} ← clone ${base}"
-  conda create -y -p "${ENVS}/${name}" --clone "${ENVS}/${base}"
+  # --copy: do not hard-link packages from the source env
+  echo "[create] ${name} ← clone --copy ${base}"
+  "${CONDA_BIN}" create -y -p "${ENVS}/${name}" --clone "${ENVS}/${base}" --copy
 }
 
 ensure_py() {
   local name="$1" ver="$2"
-  if [[ -x "${ENVS}/${name}/bin/python" ]]; then
-    echo "[skip] ${name} already exists"
+  reject_symlink_env "${name}"
+  if env_ready "${name}"; then
+    echo "[skip] ${name} already exists (real env)"
     return 0
   fi
+  if [[ -d "${ENVS}/${name}" ]]; then
+    echo "[clean] removing incomplete ${name}"
+    rm -rf "${ENVS}/${name}"
+  fi
   echo "[create] ${name} python=${ver}"
-  conda create -y -p "${ENVS}/${name}" "python=${ver}"
+  "${CONDA_BIN}" create -y -p "${ENVS}/${name}" "python=${ver}" --copy
 }
 
-echo "=== ensure model conda envs under ${ENVS} ==="
+echo "=== ensure model conda envs under ${ENVS} (real copy, no links) ==="
 
 # Policy stacks that previously fell back onto RoboDojo / RLinf
 ensure_clone lingbot_va RoboDojo

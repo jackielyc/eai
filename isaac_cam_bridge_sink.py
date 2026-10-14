@@ -19,6 +19,9 @@
 遥控（策略=无）:
   {DIR}/gui_robot_cmd.json    UI → Isaac 目标位姿 / 夹爪
   {DIR}/sim_robot_state.json  Isaac → UI 当前 TCP / 夹爪
+
+任务暂停（所有仿真后端）:
+  {DIR}/sim_control.json      UI → paused: true|false；子进程在 step 前轮询
 """
 
 from __future__ import annotations
@@ -154,12 +157,14 @@ def write_cam_depth(cam_key: str, depth: object, *, every: Optional[int] = None)
 # ---------------------------------------------------------------------------
 # gui_robot_cmd.json   UI 写入的目标位姿/夹爪
 # sim_robot_state.json 仿真回写的当前 TCP / 夹爪
+# sim_control.json     UI 写入的暂停/继续（所有仿真后端共用）
 #
 # ee_pose: [x, y, z, qw, qx, qy, qz]（与 RoboDojo get_real_endpose 一致）
 # gripper: 0=开, 1=合
 
 GUI_ROBOT_CMD_NAME = "gui_robot_cmd.json"
 SIM_ROBOT_STATE_NAME = "sim_robot_state.json"
+SIM_CONTROL_NAME = "sim_control.json"
 
 
 def _atomic_json_write(path: str, data: Mapping[str, Any]) -> None:
@@ -366,3 +371,91 @@ def sim_state_is_fresh(state: Optional[Mapping[str, Any]], max_age_s: float = 2.
     except (TypeError, ValueError):
         return False
     return ts > 0 and (time.time() - ts) <= max_age_s
+
+
+# ---------------------------------------------------------------------------
+# GUI ↔ 仿真任务暂停 / 继续（所有后端在 step 前轮询）
+# ---------------------------------------------------------------------------
+
+
+def sim_control_path(root: Optional[str] = None) -> str:
+    d = (root or bridge_dir() or "").strip()
+    return os.path.join(d, SIM_CONTROL_NAME) if d else ""
+
+
+def read_sim_control(root: Optional[str] = None) -> Optional[dict]:
+    path = sim_control_path(root)
+    if not path:
+        return None
+    return _read_json(path)
+
+
+def write_sim_control(
+    *,
+    root: Optional[str] = None,
+    paused: Optional[bool] = None,
+    merge: bool = True,
+) -> bool:
+    """Write sim pause/control flags. merge=True keeps unspecified fields."""
+    d = (root or bridge_dir() or "").strip()
+    if not d:
+        return False
+    path = os.path.join(d, SIM_CONTROL_NAME)
+    prev = _read_json(path) if merge else None
+    if not isinstance(prev, dict):
+        prev = {}
+    out: dict = {"ts": time.time()}
+    if paused is not None:
+        out["paused"] = bool(paused)
+    elif merge and "paused" in prev:
+        out["paused"] = bool(prev.get("paused"))
+    else:
+        out["paused"] = False
+    try:
+        _atomic_json_write(path, out)
+    except Exception as exc:
+        _log_fail("sim_control", exc)
+        return False
+    return True
+
+
+def clear_sim_control(root: Optional[str] = None) -> None:
+    path = sim_control_path(root)
+    if not path:
+        return
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def is_sim_paused(root: Optional[str] = None) -> bool:
+    data = read_sim_control(root)
+    if not data:
+        return False
+    return bool(data.get("paused"))
+
+
+def wait_while_paused(
+    root: Optional[str] = None,
+    *,
+    poll_s: float = 0.05,
+    stop_flag: Optional[Any] = None,
+) -> bool:
+    """Block while ``sim_control.json`` says paused.
+
+    Returns False if ``stop_flag`` became truthy while waiting (caller should exit);
+    otherwise True (running / resumed).
+    """
+    while is_sim_paused(root):
+        if stop_flag is not None:
+            try:
+                if callable(stop_flag) and stop_flag():
+                    return False
+                if not callable(stop_flag) and stop_flag:
+                    return False
+            except Exception:
+                pass
+        time.sleep(max(0.01, float(poll_s)))
+    return True
