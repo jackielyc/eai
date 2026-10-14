@@ -347,6 +347,13 @@ def main() -> int:
             return
         if key == "space" or char == " ":
             state["paused"] = not state["paused"]
+            state["_pause_from_gui"] = False
+            try:
+                from sim_gui_teleop import set_sim_paused
+
+                set_sim_paused(bool(state["paused"]))
+            except Exception:
+                pass
         elif key == "r":
             mujoco.mj_resetData(model, data)
             data.ctrl[:] = 0
@@ -519,11 +526,27 @@ def main() -> int:
             # wxyz → mujoco quat wxyz
             data.mocap_quat[mocap_i] = pose[3:7]
 
+    def _sync_gui_pause() -> None:
+        """Honor EAI「暂停」button via sim_control.json (Space key still works)."""
+        try:
+            from sim_gui_teleop import is_sim_paused
+
+            gui_paused = bool(is_sim_paused())
+        except Exception:
+            return
+        # Prefer GUI flag when set; Space toggles local state and also writes back.
+        if gui_paused and not state["paused"]:
+            state["paused"] = True
+        elif (not gui_paused) and state["paused"] and state.get("_pause_from_gui"):
+            state["paused"] = False
+        state["_pause_from_gui"] = bool(gui_paused)
+
     def tick() -> None:
         if not state["alive"]:
             return
         t0 = time.perf_counter()
         try:
+            _sync_gui_pause()
             if not state["paused"]:
                 nsub = max(1, int(round(state["speed"])))
                 for _ in range(nsub):

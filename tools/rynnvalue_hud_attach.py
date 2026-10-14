@@ -257,8 +257,48 @@ def extract_obs_rgb(obs: Any) -> Optional[np.ndarray]:
     return None
 
 
+def install_arena_pause_hook() -> bool:
+    """Monkeypatch Arena ``rollout_policy`` so EAI「暂停」gates env.step."""
+    try:
+        import isaaclab_arena.evaluation.policy_runner as pr
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("arena policy_runner import failed (pause): %s", exc)
+        return False
+    if getattr(pr, "_eai_pause_hooked", False):
+        return True
+    orig = pr.rollout_policy
+
+    def _wrapped(env, policy, num_steps, num_episodes, language_instruction=None):
+        raw_step = env.step
+
+        def step_with_pause(actions):
+            try:
+                from sim_gui_teleop import wait_while_paused
+
+                wait_while_paused()
+            except Exception:
+                pass
+            return raw_step(actions)
+
+        env.step = step_with_pause  # type: ignore[method-assign]
+        try:
+            return orig(env, policy, num_steps, num_episodes, language_instruction)
+        finally:
+            env.step = raw_step  # type: ignore[method-assign]
+
+    pr.rollout_policy = _wrapped  # type: ignore[assignment]
+    pr._eai_pause_hooked = True  # type: ignore[attr-defined]
+    logger.info("Arena rollout_policy pause hook installed")
+    return True
+
+
 def install_arena_rollout_hook() -> bool:
     """Monkeypatch IsaacLab-Arena ``rollout_policy`` to publish frames."""
+    # Pause works even when Live HUD is off.
+    try:
+        install_arena_pause_hook()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("arena pause hook: %s", exc)
     if not enabled():
         return False
     try:
@@ -285,6 +325,12 @@ def install_arena_rollout_hook() -> bool:
         raw_step = env.step
 
         def step_with_hud(actions):
+            try:
+                from sim_gui_teleop import wait_while_paused
+
+                wait_while_paused()
+            except Exception:
+                pass
             out = raw_step(actions)
             try:
                 obs = out[0] if isinstance(out, tuple) else out

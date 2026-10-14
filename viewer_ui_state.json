@@ -423,7 +423,7 @@
     },
     "sim_backend_isaac_radio": {
       "kind": "radio",
-      "checked": true
+      "checked": false
     },
     "sim_backend_mujoco_radio": {
       "kind": "radio",
@@ -431,7 +431,7 @@
     },
     "sim_backend_spaces_radio": {
       "kind": "radio",
-      "checked": false
+      "checked": true
     },
     "sim_backend_psi_spaces_radio": {
       "kind": "radio",
@@ -469,10 +469,10 @@
     },
     "sim_eval_task_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "align_blocks",
-      "data": "align_blocks",
-      "edit": "align_blocks"
+      "index": 26,
+      "text": "pick_from_conveyor_by_image",
+      "data": "pick_from_conveyor_by_image",
+      "edit": "pick_from_conveyor_by_image"
     },
     "sim_eval_policy_combo": {
       "kind": "combo",
@@ -496,6 +496,10 @@
     },
     "sim_eval_bundled_check": {
       "kind": "check",
+      "checked": false
+    },
+    "sim_eval_pause_btn": {
+      "kind": "toggle",
       "checked": false
     },
     "sim_eval_root_edit": {
@@ -541,7 +545,7 @@
     },
     "molmospaces_root_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/psi-molmospaces"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/molmospaces"
     },
     "molmospaces_recipe_combo": {
       "kind": "combo",
@@ -557,15 +561,15 @@
     },
     "molmospaces_task_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "Close (Close-v1)",
-      "data": "{'extra': (), 'id': 'close_v1', 'label': 'Close (Close-v1)', 'path': '/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/molmospaces/assets/L3NoYXJlX2RhdGEvcHJvamVjdHMvbWFoam9uZy9zaGFyZS9wZXJzb25hbC9saXlpY2hhby9tb2xtb3NwYWNlcw/benchmarks/molmospaces-bench-v1/ithor/FrankaCloseDataGenConfig/FrankaCloseDataGenConfig_20260123_json_benchmark', 'ready': True}"
+      "index": 6,
+      "text": "Pick-Filament (Pick-v2-filament)",
+      "data": "{'extra': ('--use-filament',), 'id': 'pick_v2_filament', 'label': 'Pick-Filament (Pick-v2-filament)', 'path': '/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/molmospaces/assets/L3NoYXJlX2RhdGEvcHJvamVjdHMvbWFoam9uZy9zaGFyZS9wZXJzb25hbC9saXlpY2hhby9tb2xtb3NwYWNlcw/benchmarks/molmospaces-bench-v2/procthor-objaverse/FrankaPickHardBench/FrankaPickHardBench_20260206_json_benchmark', 'ready': True}"
     },
     "molmospaces_policy_combo": {
       "kind": "combo",
-      "index": 3,
-      "text": "WAM Psi-R1 Remote",
-      "data": "molmo_spaces.configs.wam_psi_r1_config:WamPsiR1RemotePickEvalConfig"
+      "index": 0,
+      "text": "Pi",
+      "data": "molmo_spaces.evaluation.configs.evaluation_configs:PiPolicyEvalConfig"
     },
     "molmospaces_episodes_spin": {
       "kind": "spin",
@@ -641,7 +645,13 @@
     },
     "libero_task_id_spin": {
       "kind": "spin",
-      "value": 3
+      "value": 5
+    },
+    "libero_task_combo": {
+      "kind": "combo",
+      "index": 5,
+      "text": "[5] push the plate to the front of the stove",
+      "data": 5
     },
     "libero_config_combo": {
       "kind": "combo",
@@ -693,9 +703,9 @@
     },
     "robotwin_task_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "adjust_bottle",
-      "data": "adjust_bottle"
+      "index": 2,
+      "text": "place_container_plate",
+      "data": "place_container_plate"
     },
     "robotwin_config_combo": {
       "kind": "combo",
@@ -770,6 +780,10 @@
     "sim_rynnvalue_frames_spin": {
       "kind": "spin",
       "value": 8
+    },
+    "mujoco_pause_btn": {
+      "kind": "toggle",
+      "checked": false
     },
     "real_robot_a2d_radio": {
       "kind": "radio",
@@ -1547,7 +1561,7 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "真机评测",
+  "control_tab": "仿真评测",
   "splitter_sizes": [
     256,
     1258,
@@ -1570,5 +1584,5 @@
     "/camera/right_wrist_depth": true
   },
   "topic_user_unchecked": [],
-  "workspace_collapsed": false
+  "workspace_collapsed": true
 }

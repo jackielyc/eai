@@ -61,6 +61,24 @@ def _run(argv: List[str], *, cwd: str = "", env: Optional[dict] = None) -> int:
     full_env = os.environ.copy()
     if env:
         full_env.update({k: str(v) for k, v in env.items() if v is not None})
+    # Best-effort: honor EAI「暂停」via gym/gymnasium Env.step patch.
+    full_env.setdefault("EAI_SIM_PAUSE", "1")
+    tools = str(_HERE)
+    prev_pp = full_env.get("PYTHONPATH") or ""
+    parts = [tools] + [p for p in prev_pp.split(os.pathsep) if p and p != tools]
+    full_env["PYTHONPATH"] = os.pathsep.join(parts)
+    # Prepend bootstrap import for python script launches.
+    py_name = os.path.basename(str(argv[0] if argv else ""))
+    if len(argv) >= 2 and py_name.startswith("python"):
+        script = argv[1]
+        if script.endswith(".py") and os.path.isfile(script):
+            boot = (
+                "import sys; import eai_sim_pause_bootstrap; "
+                f"sys.argv=[{script!r}]+sys.argv[1:]; "
+                f"import runpy; runpy.run_path({script!r}, run_name='__main__')"
+            )
+            argv = [argv[0], "-c", boot, *argv[2:]]
+            _log("pause bootstrap injected for gym/gymnasium Env.step")
     try:
         return int(
             subprocess.call(argv, cwd=cwd or None, env=full_env)

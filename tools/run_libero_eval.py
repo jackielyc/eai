@@ -671,7 +671,11 @@ def _main_viewer_only(args: argparse.Namespace) -> int:
             return env.set_init_state(initial_states[0])
 
         try:
+            from sim_gui_teleop import wait_while_paused
+
             while not stop["flag"] and not _libero_gui_dismissed():
+                if not wait_while_paused(stop_flag=lambda: stop["flag"]):
+                    break
                 pose7, grip = libero_obs_to_state(obs)
                 try:
                     objs = libero_objects_to_state(env)
@@ -823,7 +827,12 @@ def main(args: argparse.Namespace) -> int:
                 if live_hud is not None:
                     live_hud.reset_episode(hud_bridge.instruction(task_description))
 
+                from sim_gui_teleop import wait_while_paused
+
                 for t in range(max_steps + args.num_steps_wait):
+                    if not wait_while_paused(stop_flag=lambda: gui_closed):
+                        gui_closed = True
+                        break
                     if t < args.num_steps_wait:
                         obs, reward, done, info = env.step(dummy)
                         if args.render_gui and not _render_gui_frame(env):

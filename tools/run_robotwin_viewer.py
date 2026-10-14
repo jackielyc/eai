@@ -173,7 +173,11 @@ def main() -> int:
     prev_int = signal.signal(signal.SIGINT, _on_signal)
     prev_term = signal.signal(signal.SIGTERM, _on_signal)
     try:
+        from sim_gui_teleop import wait_while_paused  # noqa: E402
+
         while not stop["flag"]:
+            if not wait_while_paused(stop_flag=lambda: stop["flag"]):
+                break
             try:
                 left = task.get_arm_pose("left")
                 right = task.get_arm_pose("right")

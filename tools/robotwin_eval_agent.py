@@ -69,11 +69,23 @@ class HudEnvWorker(EnvWorker):
             print(f"[robotwin] RynnValue obs push skipped: {exc}", flush=True)
 
     def env_evaluate_step(self, raw_actions, stage_id):
+        try:
+            from sim_gui_teleop import wait_while_paused
+
+            wait_while_paused()
+        except Exception:
+            pass
         env_output, env_info = super().env_evaluate_step(raw_actions, stage_id)
         self._push_rynnvalue_obs(getattr(env_output, "obs", None))
         return env_output, env_info
 
     def env_interact_step(self, raw_actions, stage_id):
+        try:
+            from sim_gui_teleop import wait_while_paused
+
+            wait_while_paused()
+        except Exception:
+            pass
         env_output, env_info = super().env_interact_step(raw_actions, stage_id)
         self._push_rynnvalue_obs(getattr(env_output, "obs", None))
         return env_output, env_info

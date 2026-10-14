@@ -52,12 +52,14 @@ def main() -> int:
     os.environ.setdefault("EAI_DIR", str(here.parent))
 
     try:
-        from rynnvalue_hud_attach import install_arena_rollout_hook
+        from rynnvalue_hud_attach import install_arena_pause_hook, install_arena_rollout_hook
 
+        if install_arena_pause_hook():
+            print("[arena] EAI pause hook enabled (sim_control.json)", flush=True)
         if install_arena_rollout_hook():
             print("[arena] RynnValue Live HUD hook enabled", flush=True)
     except Exception as exc:  # noqa: BLE001
-        print(f"[arena] Live HUD hook skipped: {exc}", flush=True)
+        print(f"[arena] HUD/pause hook skipped: {exc}", flush=True)
 
     # policy_runner uses sys.argv; drop our wrapper flags.
     sys.argv = [str(runner), *rest]

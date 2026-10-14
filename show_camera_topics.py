@@ -19,6 +19,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
 仿真评测（策略=无 / 只开界面）时，「手臂/手」页通过共享目录 gui_robot_cmd.json
 遥控各仿真后端（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / Arena / LIBERO / RoboTwin / 扩展评测）双臂与夹爪。
+仿真运行中可用「暂停 / 继续」按钮（写入 sim_control.json）暂停任务 step；各后端在循环中轮询。
 「手臂/手」页可输入文本指挥手臂相对移动和手部开合，例如「左臂向前5cm；右手张开」。
 「手臂/手」页也可选择人类演示视频，经 MediaPipe 分析后让机器人复现手部开合与手腕相对运动。
 """
@@ -161,6 +162,7 @@ from PyQt5.QtGui import (
     QCloseEvent,
     QDesktopServices,
     QFont,
+    QIcon,
     QImage,
     QMouseEvent,
     QPixmap,
@@ -421,8 +423,27 @@ class ImeSafeComboBox(QComboBox):
         lw = self._ensure_list()
         lw.clear()
         cur = self.currentIndex()
+        has_thumb = getattr(self, "_eval_task_thumbs", None) is not None
+        if has_thumb:
+            lw.setIconSize(QSize(120, 68))
+            lw.setSpacing(3)
+            lw.setTextElideMode(Qt.ElideRight)
+        else:
+            lw.setIconSize(QSize())
+            lw.setSpacing(0)
         for i in range(self.count()):
-            item = QListWidgetItem(self.itemText(i))
+            text = self.itemText(i)
+            pix = combo_task_thumb(self, i) if has_thumb else None
+            if pix is not None:
+                item = QListWidgetItem(QIcon(pix), text)
+                item.setSizeHint(QSize(0, 76))
+            else:
+                icon = self.itemIcon(i)
+                item = (
+                    QListWidgetItem(icon, text)
+                    if not icon.isNull()
+                    else QListWidgetItem(text)
+                )
             tip = self.itemData(i, Qt.ToolTipRole)
             if tip:
                 item.setToolTip(str(tip))
@@ -443,8 +464,14 @@ class ImeSafeComboBox(QComboBox):
         if row_h <= 0:
             row_h = 24
         visible = min(rows, max(self.maxVisibleItems(), 8))
-        lw.setFixedWidth(max(self.width(), 120))
-        lw.setFixedHeight(min(280, row_h * visible + 4))
+        if has_thumb:
+            row_h = max(row_h, 76)
+        popup_w = max(self.width(), 440 if has_thumb else 120)
+        parent_for_w = lw.parentWidget()
+        if parent_for_w is not None:
+            popup_w = min(popup_w, max(self.width(), parent_for_w.width() - 12))
+        lw.setFixedWidth(popup_w)
+        lw.setFixedHeight(min(500 if has_thumb else 280, row_h * visible + 4))
         # 相对主窗口定位（同一 X 窗口内）
         parent = lw.parentWidget()
         gp = self.mapToGlobal(QPoint(0, self.height()))
@@ -595,6 +622,14 @@ class FilterableImeSafeComboBox(ImeSafeComboBox):
         self._filter_source_indices = []
         cur = self.currentIndex()
         select_row = -1
+        has_thumb = getattr(self, "_eval_task_thumbs", None) is not None
+        if has_thumb:
+            lw.setIconSize(QSize(120, 68))
+            lw.setSpacing(3)
+            lw.setTextElideMode(Qt.ElideRight)
+        else:
+            lw.setIconSize(QSize())
+            lw.setSpacing(0)
         for i in range(self.count()):
             text = self.itemText(i)
             tip = self.itemData(i, Qt.ToolTipRole)
@@ -608,7 +643,12 @@ class FilterableImeSafeComboBox(ImeSafeComboBox):
             hay = " ".join([text, str(tip or ""), *path_bits])
             if not _combo_fuzzy_match(query, hay):
                 continue
-            item = QListWidgetItem(text)
+            pix = combo_task_thumb(self, i) if has_thumb else None
+            if pix is not None:
+                item = QListWidgetItem(QIcon(pix), text)
+                item.setSizeHint(QSize(0, 76))
+            else:
+                item = QListWidgetItem(text)
             if tip:
                 item.setToolTip(str(tip))
             item.setData(Qt.UserRole, i)
@@ -648,8 +688,11 @@ class FilterableImeSafeComboBox(ImeSafeComboBox):
         if row_h <= 0:
             row_h = 24
         visible = min(rows, max(self.maxVisibleItems(), 10))
-        list_h = min(320, row_h * visible + 4)
-        panel.setFixedWidth(max(self.width(), 280))
+        has_thumb = lw.iconSize().width() >= 48
+        if has_thumb:
+            row_h = max(row_h, 76)
+        list_h = min(500 if has_thumb else 320, row_h * visible + 4)
+        panel.setFixedWidth(max(self.width(), 440 if has_thumb else 280))
         panel.setFixedHeight(list_h + filt.sizeHint().height() + 16)
         parent = panel.parentWidget()
         gp = self.mapToGlobal(QPoint(0, self.height()))
@@ -1003,6 +1046,28 @@ EAI_DIR = os.path.dirname(os.path.abspath(__file__))
 _EAI_TOOLS_DIR = os.path.join(EAI_DIR, "tools")
 if _EAI_TOOLS_DIR not in sys.path:
     sys.path.insert(0, _EAI_TOOLS_DIR)
+if EAI_DIR not in sys.path:
+    sys.path.insert(0, EAI_DIR)
+try:
+    from eval_task_thumbs import (  # noqa: E402
+        bind_eval_task_thumb,
+        combo_task_thumb,
+        make_eval_task_preview,
+        stamp_eval_task_combo,
+    )
+except ImportError:  # pragma: no cover
+    def combo_task_thumb(_combo, _index):  # type: ignore[misc]
+        return None
+
+    def stamp_eval_task_combo(_combo) -> None:  # type: ignore[misc]
+        return None
+
+    def bind_eval_task_thumb(_combo, _preview) -> None:  # type: ignore[misc]
+        return None
+
+    def make_eval_task_preview(_parent=None):  # type: ignore[misc]
+        wrap = QWidget()
+        return wrap, QLabel(), QLabel()
 try:
     from sim_eval_leaderboard import (  # noqa: E402
         board_for_backend as load_sim_eval_board,
@@ -2229,6 +2294,10 @@ def list_psi_molmospaces_local_tasks(repo_root: str = "") -> List[dict]:
     return tasks
 
 
+_MOLMOSPACES_TASK_CACHE: Dict[Tuple[str, bool], Tuple[float, List[dict]]] = {}
+_MOLMOSPACES_TASK_TTL_S = 45.0
+
+
 def list_molmospaces_eval_tasks(
     repo_root: str = "", *, psi_only: bool = False
 ) -> List[dict]:
@@ -2237,8 +2306,16 @@ def list_molmospaces_eval_tasks(
     When ``psi_only=True`` (Psi-MolmoSpaces backend), return only
     ``psi_molmo_spaces`` benches — matching the init_molmospaces workflow.
     """
+    root_key = os.path.abspath(os.path.expanduser(repo_root or ""))
+    cache_key = (root_key, bool(psi_only))
+    now = time.time()
+    hit = _MOLMOSPACES_TASK_CACHE.get(cache_key)
+    if hit is not None and (now - hit[0]) < _MOLMOSPACES_TASK_TTL_S:
+        return hit[1]
+
     psi_tasks = list_psi_molmospaces_local_tasks(repo_root)
     if psi_only:
+        _MOLMOSPACES_TASK_CACHE[cache_key] = (now, psi_tasks)
         return psi_tasks
 
     tasks: List[dict] = []
@@ -2261,10 +2338,17 @@ def list_molmospaces_eval_tasks(
         if not os.path.isdir(bench_root):
             continue
         for dirpath, dirnames, filenames in os.walk(bench_root):
-            dirnames[:] = [d for d in dirnames if d not in {".git", "__pycache__"}]
+            # Skip episode trees (house_*) and VCS junk — they dominate walk time.
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if d not in {".git", "__pycache__"} and not d.startswith("house_")
+            ]
             if "benchmark.json" not in filenames:
                 continue
             full = os.path.abspath(dirpath)
+            # Found a bench leaf; do not descend into its scene payloads.
+            dirnames.clear()
             if full in known_paths:
                 continue
             known_paths.add(full)
@@ -2280,6 +2364,7 @@ def list_molmospaces_eval_tasks(
             )
     if psi_tasks:
         tasks = psi_tasks + tasks
+    _MOLMOSPACES_TASK_CACHE[cache_key] = (now, tasks)
     return tasks
 
 
@@ -24767,6 +24852,7 @@ class CameraTopicWindow(QMainWindow):
         idx_simpler = self.sim_extended_combo.findData("simpler")
         if idx_simpler >= 0:
             self.sim_extended_combo.setCurrentIndex(idx_simpler)
+        stamp_eval_task_combo(self.sim_extended_combo)
         self.sim_extended_combo.currentIndexChanged.connect(
             self._on_sim_extended_combo_changed
         )
@@ -25001,7 +25087,10 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_task_combo = ImeSafeComboBox()
         self.sim_eval_task_combo.setMinimumWidth(180)
         self.sim_eval_task_combo.setEditable(True)
-        self.sim_eval_task_combo.setToolTip("选择或输入 RoboDojo 任务名（如 build_tower）")
+        self.sim_eval_task_combo.setToolTip(
+            "选择或输入 RoboDojo 任务名（如 build_tower）。"
+            "下拉项带场景缩略图，悬停可看任务在做什么。"
+        )
         for task_name in list_robodojo_tasks():
             self.sim_eval_task_combo.addItem(task_name, task_name)
         if self.sim_eval_task_combo.count() == 0:
@@ -25142,6 +25231,14 @@ class CameraTopicWindow(QMainWindow):
         self.sim_eval_stop_run_btn.clicked.connect(self._on_sim_eval_stop_run_clicked)
         sim_run_row.addWidget(self.sim_eval_stop_run_btn)
         isaac_lower_l.addLayout(sim_run_row)
+        (
+            self.sim_eval_task_preview,
+            self.sim_eval_task_thumb,
+            _sim_task_cap,
+        ) = make_eval_task_preview()
+        stamp_eval_task_combo(self.sim_eval_task_combo)
+        bind_eval_task_thumb(self.sim_eval_task_combo, self.sim_eval_task_thumb)
+        isaac_lower_l.addWidget(self.sim_eval_task_preview)
 
         sim_policy_deploy_row = QHBoxLayout()
         sim_policy_deploy_row.setSpacing(6)
@@ -25461,6 +25558,7 @@ class CameraTopicWindow(QMainWindow):
         self.molmospaces_task_combo = ImeSafeComboBox()
         self.molmospaces_task_combo.setToolTip(
             "每次只评测当前选中的一个任务。"
+            "下拉项带场景缩略图，悬停可看这个任务在做什么。"
             "未下载的项在启动时会提示，不会同时跑多个任务。"
         )
         mj_task_row.addWidget(self.molmospaces_task_combo, 1)
@@ -25511,6 +25609,13 @@ class CameraTopicWindow(QMainWindow):
         )
         mj_task_row.addWidget(self.molmospaces_viewer_cam_combo)
         sp_page_l.addLayout(mj_task_row)
+        (
+            self.molmospaces_task_preview,
+            self.molmospaces_task_thumb,
+            _ms_task_cap,
+        ) = make_eval_task_preview()
+        bind_eval_task_thumb(self.molmospaces_task_combo, self.molmospaces_task_thumb)
+        sp_page_l.addWidget(self.molmospaces_task_preview)
         self.molmospaces_pi_row = QWidget()
         pi_row = QHBoxLayout(self.molmospaces_pi_row)
         pi_row.setContentsMargins(0, 0, 0, 0)
@@ -25678,7 +25783,9 @@ class CameraTopicWindow(QMainWindow):
         arena_task_row.setSpacing(6)
         arena_task_row.addWidget(QLabel("任务"))
         self.arena_task_combo = ImeSafeComboBox()
-        self.arena_task_combo.setToolTip("每次只启动当前选中的一个 environment")
+        self.arena_task_combo.setToolTip(
+            "每次只启动当前选中的一个 environment。下拉项带场景缩略图。"
+        )
         arena_task_row.addWidget(self.arena_task_combo, 1)
         self.arena_task_refresh_btn = QPushButton("刷新")
         self.arena_task_refresh_btn.setFocusPolicy(Qt.NoFocus)
@@ -25718,6 +25825,13 @@ class CameraTopicWindow(QMainWindow):
         self.arena_gpu_spin.setFixedWidth(52)
         arena_task_row.addWidget(self.arena_gpu_spin)
         arena_page_l.addLayout(arena_task_row)
+        (
+            self.arena_task_preview,
+            self.arena_task_thumb,
+            _arena_task_cap,
+        ) = make_eval_task_preview()
+        bind_eval_task_thumb(self.arena_task_combo, self.arena_task_thumb)
+        arena_page_l.addWidget(self.arena_task_preview)
         self.arena_policy_file_row = QWidget()
         arena_file_row = QHBoxLayout(self.arena_policy_file_row)
         arena_file_row.setContentsMargins(0, 0, 0, 0)
@@ -25796,6 +25910,16 @@ class CameraTopicWindow(QMainWindow):
         )
         self.libero_task_id_spin.valueChanged.connect(self._on_libero_suite_changed)
         libero_task_row.addWidget(self.libero_task_id_spin)
+        libero_task_row.addWidget(QLabel("任务"))
+        self.libero_task_combo = ImeSafeComboBox()
+        self.libero_task_combo.setMinimumWidth(280)
+        self.libero_task_combo.setToolTip(
+            "套件中的具体任务。下拉项带场景缩略图，悬停可看在做什么。"
+        )
+        self.libero_task_combo.currentIndexChanged.connect(
+            self._on_libero_task_combo_changed
+        )
+        libero_task_row.addWidget(self.libero_task_combo)
         libero_task_row.addWidget(QLabel("配置"))
         self.libero_config_combo = ImeSafeComboBox()
         for label, cfg_id in LIBERO_POLICY_CONFIGS:
@@ -25819,6 +25943,12 @@ class CameraTopicWindow(QMainWindow):
         self.libero_mode_combo.currentIndexChanged.connect(self._on_libero_mode_changed)
         libero_task_row.addWidget(self.libero_mode_combo)
         libero_page_l.addLayout(libero_task_row)
+        (
+            self.libero_task_preview,
+            self.libero_task_thumb,
+            _libero_task_cap,
+        ) = make_eval_task_preview()
+        libero_page_l.addWidget(self.libero_task_preview)
 
         libero_ckpt_row = QHBoxLayout()
         libero_ckpt_row.setSpacing(6)
@@ -25975,8 +26105,10 @@ class CameraTopicWindow(QMainWindow):
         for label, task_id in ROBOTWIN_TASKS:
             self.robotwin_task_combo.addItem(label, task_id)
         self.robotwin_task_combo.setToolTip(
-            "RLinf 已提供 Hydra env YAML 的 RoboTwin 任务"
+            "RLinf 已提供 Hydra env YAML 的 RoboTwin 任务。"
+            "下拉项带场景缩略图，悬停可看在做什么。"
         )
+        stamp_eval_task_combo(self.robotwin_task_combo)
         robotwin_task_row.addWidget(self.robotwin_task_combo)
         robotwin_task_row.addWidget(QLabel("配置"))
         self.robotwin_config_combo = ImeSafeComboBox()
@@ -25994,6 +26126,13 @@ class CameraTopicWindow(QMainWindow):
         robotwin_task_row.addWidget(self.robotwin_gpu_spin)
         robotwin_task_row.addStretch(1)
         robotwin_page_l.addLayout(robotwin_task_row)
+        (
+            self.robotwin_task_preview,
+            self.robotwin_task_thumb,
+            _rt_task_cap,
+        ) = make_eval_task_preview()
+        bind_eval_task_thumb(self.robotwin_task_combo, self.robotwin_task_thumb)
+        robotwin_page_l.addWidget(self.robotwin_task_preview)
 
         robotwin_ckpt_row = QHBoxLayout()
         robotwin_ckpt_row.setSpacing(6)
@@ -26119,6 +26258,10 @@ class CameraTopicWindow(QMainWindow):
         ext_param_row.addWidget(QLabel("任务"))
         self.ext_bench_task_edit = QLineEdit("")
         self.ext_bench_task_edit.setPlaceholderText("可选 task / suite 名")
+        self.ext_bench_task_edit.setToolTip(
+            "填写后，下方缩略图会按任务名显示对应场景。"
+        )
+        self.ext_bench_task_edit.textChanged.connect(self._refresh_ext_task_thumb)
         self.ext_bench_task_edit.setMinimumWidth(140)
         ext_param_row.addWidget(self.ext_bench_task_edit)
         ext_param_row.addWidget(QLabel("episodes"))
@@ -26132,6 +26275,12 @@ class CameraTopicWindow(QMainWindow):
         ext_param_row.addWidget(self.ext_bench_viewer_check)
         ext_param_row.addStretch(1)
         ext_page_l.addLayout(ext_param_row)
+        (
+            self.ext_task_preview,
+            self.ext_task_thumb,
+            _ext_task_cap,
+        ) = make_eval_task_preview()
+        ext_page_l.addWidget(self.ext_task_preview)
 
         ext_btn_row = QHBoxLayout()
         ext_btn_row.setSpacing(6)
@@ -32437,6 +32586,7 @@ class CameraTopicWindow(QMainWindow):
         if self._sim_backend_id() != "isaac":
             self._append_sim_log("请先将仿真后端切换为「Isaac / RoboDojo」")
             return
+        self._set_sim_paused(False, log=False)
         task = str(
             self.sim_eval_task_combo.currentData()
             or self.sim_eval_task_combo.currentText()
@@ -33105,7 +33255,13 @@ class CameraTopicWindow(QMainWindow):
         return ok
 
     def _on_sim_pause_clicked(self) -> None:
-        if not self._any_sim_process_running():
+        try:
+            ext_isaac = bool(
+                RoboDojoEvalLauncher.isaac_sim_status().get("running")
+            )
+        except Exception:
+            ext_isaac = False
+        if not self._any_sim_process_running() and not ext_isaac:
             self._set_sim_paused(False, log=False)
             return
         # Prefer the clicked button's checked state; fall back to toggle.
@@ -33118,8 +33274,16 @@ class CameraTopicWindow(QMainWindow):
 
     def _update_sim_pause_ui(self) -> None:
         running = self._any_sim_process_running()
-        paused = self._sim_paused_state() if running else False
-        if not running:
+        # Isaac may be an externally attached session (stop btn still enabled).
+        try:
+            ext_isaac = bool(
+                RoboDojoEvalLauncher.isaac_sim_status().get("running")
+            )
+        except Exception:
+            ext_isaac = False
+        can_pause = bool(running or ext_isaac)
+        paused = self._sim_paused_state() if can_pause else False
+        if not can_pause:
             self._sim_paused_ui = False
         label = "继续" if paused else "暂停"
         tip = (
@@ -33133,8 +33297,8 @@ class CameraTopicWindow(QMainWindow):
                 continue
             btn.blockSignals(True)
             try:
-                btn.setEnabled(running)
-                btn.setChecked(paused and running)
+                btn.setEnabled(can_pause)
+                btn.setChecked(paused and can_pause)
                 btn.setText(label)
                 btn.setToolTip(tip)
             finally:
@@ -37866,6 +38030,19 @@ class CameraTopicWindow(QMainWindow):
         self._ext_bench_form_key = key
         if hasattr(self, "ext_bench_status_label"):
             self.ext_bench_status_label.setText(f"空闲 · {label}")
+        self._refresh_ext_task_thumb()
+
+    def _refresh_ext_task_thumb(self, *_args) -> None:
+        thumb = getattr(self, "ext_task_thumb", None)
+        if thumb is None:
+            return
+        suite = ""
+        if hasattr(self, "sim_extended_combo"):
+            suite = str(self.sim_extended_combo.currentText() or "").strip()
+        task = ""
+        if hasattr(self, "ext_bench_task_edit"):
+            task = self.ext_bench_task_edit.text().strip()
+        thumb.show_text(f"{suite} {task}".strip())
 
     def _on_sim_backend_changed(self, *_args) -> None:
         backend = self._sim_backend_id()
@@ -38638,6 +38815,9 @@ class CameraTopicWindow(QMainWindow):
             if idx >= 0:
                 self.arena_task_combo.setCurrentIndex(idx)
         self.arena_task_combo.blockSignals(False)
+        stamp_eval_task_combo(self.arena_task_combo)
+        if hasattr(self, "arena_task_thumb"):
+            self.arena_task_thumb.show_combo_current(self.arena_task_combo)
         self._append_mujoco_log(f"[arena] 已列出 {len(names)} 个评测任务")
 
     def _on_arena_policy_changed(self, *_args) -> None:
@@ -38859,6 +39039,43 @@ class CameraTopicWindow(QMainWindow):
             if 0 <= idx < len(tasks):
                 tip = f"当前: [{idx}] {tasks[idx][2]}\n\n" + tip
         spin.setToolTip(tip)
+        combo = getattr(self, "libero_task_combo", None)
+        if combo is not None:
+            combo.blockSignals(True)
+            combo.clear()
+            if tasks:
+                for i, _name, lang in tasks:
+                    combo.addItem(f"[{i}] {lang}", i)
+            else:
+                cur = int(spin.value()) if spin is not None else 0
+                combo.addItem(f"{suite} 任务 {cur}", cur)
+            stamp_eval_task_combo(combo)
+            if spin is not None:
+                found = combo.findData(int(spin.value()))
+                if found >= 0:
+                    combo.setCurrentIndex(found)
+            combo.blockSignals(False)
+            if hasattr(self, "libero_task_thumb"):
+                self.libero_task_thumb.show_combo_current(combo)
+
+    def _on_libero_task_combo_changed(self, *_args) -> None:
+        combo = getattr(self, "libero_task_combo", None)
+        spin = getattr(self, "libero_task_id_spin", None)
+        if combo is None:
+            return
+        data = combo.currentData()
+        if spin is not None and data is not None:
+            try:
+                idx = int(data)
+            except (TypeError, ValueError):
+                idx = -1
+            if idx >= 0 and spin.value() != idx:
+                spin.blockSignals(True)
+                spin.setValue(idx)
+                spin.blockSignals(False)
+                spin.setToolTip(combo.itemText(combo.currentIndex()))
+        if hasattr(self, "libero_task_thumb"):
+            self.libero_task_thumb.show_combo_current(combo)
 
     def _libero_task_id_value(self) -> int:
         if hasattr(self, "libero_task_id_spin"):
@@ -40608,6 +40825,9 @@ class CameraTopicWindow(QMainWindow):
                     self.molmospaces_task_combo.setCurrentIndex(i)
                     break
         self.molmospaces_task_combo.blockSignals(False)
+        stamp_eval_task_combo(self.molmospaces_task_combo)
+        if hasattr(self, "molmospaces_task_thumb"):
+            self.molmospaces_task_thumb.show_combo_current(self.molmospaces_task_combo)
         tag = "psi_molmospaces" if psi_only else "molmospaces"
         self._append_mujoco_log(
             f"[{tag}] 已列出 {len(tasks)} 个评测任务（本地数据就绪 {ready_n}）"

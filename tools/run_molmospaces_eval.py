@@ -68,6 +68,24 @@ def main() -> int:
 
     import molmo_spaces.evaluation.eval_main as eval_main
 
+    # Gate Task physics steps on EAI「暂停」(sim_control.json).
+    try:
+        from molmo_spaces.tasks.task import Task
+        from sim_gui_teleop import wait_while_paused
+
+        if not getattr(Task, "_eai_pause_patched", False):
+            _orig_apply = Task._apply_action
+
+            def _apply_with_pause(self, action):  # type: ignore[no-untyped-def]
+                wait_while_paused()
+                return _orig_apply(self, action)
+
+            Task._apply_action = _apply_with_pause  # type: ignore[method-assign]
+            Task._eai_pause_patched = True  # type: ignore[attr-defined]
+            print("[molmospaces-eval] EAI pause hook on Task._apply_action", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[molmospaces-eval] pause hook skipped: {exc}", flush=True)
+
     orig_create = eval_main.create_eval_config
 
     def _create_with_viewer(*args, **kwargs):
