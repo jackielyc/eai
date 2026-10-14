@@ -24,9 +24,9 @@ EAI_DIR = Path(__file__).resolve().parent.parent
 OPENPI_ROOT_DEFAULT = Path(
     "/share_data/projects/mahjong/share/personal/liyichao/psi-lab/openpi"
 )
+# Exactly one miniconda3 env for OpenPI (see tools/model_conda_envs.py).
 OPENPI_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/openpi/bin/python",
-    "/home/psibot/miniconda3/envs/openpi/bin/python",
 )
 OPENPI_DATA_HOME_DEFAULT = str(EAI_DIR / ".cache" / "openpi")
 # MolmoSpaces eval default: joint-position π0.5-DROID.

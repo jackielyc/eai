@@ -387,7 +387,7 @@
     },
     "train_policy_dir_edit": {
       "kind": "line",
-      "text": ""
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/psi-policy"
     },
     "train_config_combo": {
       "kind": "combo",
@@ -469,10 +469,10 @@
     },
     "sim_eval_task_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "align_blocks",
-      "data": "align_blocks",
-      "edit": "align_blocks"
+      "index": 1,
+      "text": "arrange_largest_number",
+      "data": "arrange_largest_number",
+      "edit": "arrange_largest_number"
     },
     "sim_eval_policy_combo": {
       "kind": "combo",
@@ -496,7 +496,7 @@
     },
     "sim_eval_bundled_check": {
       "kind": "check",
-      "checked": true
+      "checked": false
     },
     "sim_eval_root_edit": {
       "kind": "line",
@@ -563,9 +563,9 @@
     },
     "molmospaces_policy_combo": {
       "kind": "combo",
-      "index": 2,
-      "text": "Psi R1 Pick Planner",
-      "data": "molmo_spaces.evaluation.configs.evaluation_configs:PsiR1PickPlannerEvalConfig"
+      "index": 3,
+      "text": "WAM Psi-R1 Remote",
+      "data": "molmo_spaces.configs.wam_psi_r1_config:WamPsiR1RemotePickEvalConfig"
     },
     "molmospaces_episodes_spin": {
       "kind": "spin",
@@ -574,6 +574,14 @@
     "molmospaces_pi_ckpt_edit": {
       "kind": "line",
       "text": "/share_data/projects/mahjong/share/personal/liyichao/models/pi05_libero"
+    },
+    "molmospaces_psi_ckpt_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/models/psi-molospaces-maobo-step=00022000-train_loss=0.018139.pt"
+    },
+    "molmospaces_psi_gpu_spin": {
+      "kind": "spin",
+      "value": 0
     },
     "arena_root_edit": {
       "kind": "line",
@@ -1556,5 +1564,5 @@
     "/camera/right_wrist_depth": true
   },
   "topic_user_unchecked": [],
-  "workspace_collapsed": false
+  "workspace_collapsed": true
 }

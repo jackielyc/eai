@@ -839,7 +839,10 @@ SAM3_SEGMENT_BACKENDS = (
 SAM3_WORKER_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "sam3_segment_worker.py"
 )
-SAM3_PYTHON_DEFAULT = os.environ.get("SAM3_PYTHON", "python3")
+SAM3_PYTHON_DEFAULT = os.environ.get(
+    "SAM3_PYTHON",
+    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/sam3/bin/python",
+)
 
 
 def resolve_sam3_model_path() -> str:
@@ -1478,10 +1481,8 @@ HUMANOGO_ROOT_DEFAULT = (
 HUMANOGO_WEBSITE_URL = "https://humanego-ai.github.io/"
 HUMANOGO_GALLERY_URL = "https://leo-tx-humanego-gallery.static.hf.space/"
 HUMANOGO_PYTHON_CANDIDATES: Tuple[str, ...] = (
+    # Exactly one miniconda3 env for HumanEgo (see tools/model_conda_envs.py).
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/humanego/bin/python",
-    "/home/psibot/miniconda3/envs/humanego/bin/python",
-    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python",
-    "/home/psibot/miniconda3/envs/eai/bin/python",
 )
 
 
@@ -2282,9 +2283,107 @@ def list_molmospaces_eval_tasks(
     return tasks
 
 
-def is_psi_policy_id(policy_id: str) -> bool:
-    """True for PsiPolicyEvalConfig (needs psi-policy-server websocket, not openpi)."""
-    return "PsiPolicyEvalConfig" in (policy_id or "")
+try:
+    from psi_remote_policy_runtime import (  # noqa: E402
+        PSI_NATIVE6D_EVAL_ID,
+        PSI_NATIVE6D_PORT_DEFAULT,
+        PSI_POLICY_EVAL_ID,
+        PSI_POLICY_PORT_DEFAULT as PSI_REMOTE_POLICY_PORT_DEFAULT,
+        WAM_PSI_R1_EVAL_ID,
+        WAM_PSI_R1_PORT_DEFAULT,
+        build_psi_remote_server_argv,
+        default_port_for_mode as psi_remote_default_port,
+        is_psi_native6d_policy_id,
+        is_psi_policy_id,
+        is_wam_psi_r1_policy_id,
+        needs_psi_remote_deploy,
+        probe_psi_remote_server,
+        psi_remote_mode_for_policy,
+        resolve_checkpoint_path as resolve_psi_remote_checkpoint,
+        resolve_default_wam_finetune_checkpoint,
+        resolve_psi_policy_python as resolve_psi_remote_python,
+        resolve_psi_policy_root as resolve_psi_remote_policy_root,
+        resolve_wan22_dir,
+        wam82_server_needs_restart,
+    )
+except ImportError:  # pragma: no cover
+    PSI_NATIVE6D_EVAL_ID = (
+        "molmo_spaces.evaluation.configs.psi_native6d_eval_config:"
+        "PsiNative6DPolicyEvalConfig"
+    )
+    PSI_POLICY_EVAL_ID = (
+        "molmo_spaces.evaluation.configs.evaluation_configs:PsiPolicyEvalConfig"
+    )
+    WAM_PSI_R1_EVAL_ID = (
+        "molmo_spaces.configs.wam_psi_r1_config:WamPsiR1RemotePickEvalConfig"
+    )
+    PSI_REMOTE_POLICY_PORT_DEFAULT = 8080
+    PSI_NATIVE6D_PORT_DEFAULT = 8081
+    WAM_PSI_R1_PORT_DEFAULT = 9317
+
+    def is_psi_policy_id(policy_id: str) -> bool:  # type: ignore[misc]
+        return "PsiPolicyEvalConfig" in (policy_id or "")
+
+    def is_psi_native6d_policy_id(policy_id: str) -> bool:  # type: ignore[misc]
+        return "PsiNative6DPolicyEvalConfig" in (policy_id or "")
+
+    def is_wam_psi_r1_policy_id(policy_id: str) -> bool:  # type: ignore[misc]
+        return "WamPsiR1RemotePickEvalConfig" in (policy_id or "")
+
+    def needs_psi_remote_deploy(policy_id: str) -> bool:  # type: ignore[misc]
+        return (
+            is_psi_policy_id(policy_id)
+            or is_psi_native6d_policy_id(policy_id)
+            or is_wam_psi_r1_policy_id(policy_id)
+        )
+
+    def psi_remote_mode_for_policy(policy_id: str) -> str:  # type: ignore[misc]
+        if is_wam_psi_r1_policy_id(policy_id):
+            return "wam82"
+        if is_psi_native6d_policy_id(policy_id):
+            return "native6d"
+        if is_psi_policy_id(policy_id):
+            return "psi_policy"
+        return ""
+
+    def psi_remote_default_port(mode: str) -> int:  # type: ignore[misc]
+        if mode == "wam82":
+            return WAM_PSI_R1_PORT_DEFAULT
+        if mode == "native6d":
+            return PSI_NATIVE6D_PORT_DEFAULT
+        return PSI_REMOTE_POLICY_PORT_DEFAULT
+
+    def build_psi_remote_server_argv(**_kwargs):  # type: ignore[misc]
+        raise RuntimeError("psi_remote_policy_runtime 未找到")
+
+    def probe_psi_remote_server(*_a, **_k):  # type: ignore[misc]
+        return False, "psi_remote_policy_runtime 未找到"
+
+    def resolve_psi_remote_checkpoint(path: str) -> str:  # type: ignore[misc]
+        return os.path.abspath(os.path.expanduser(path or ""))
+
+    def resolve_default_wam_finetune_checkpoint(user: str = "") -> str:  # type: ignore[misc]
+        return (
+            user
+            or os.environ.get("PSI_REMOTE_CKPT", "").strip()
+            or (
+                "/share_data_prj/maobo/wam_train_eval/train_runs/"
+                "pick_apple_tomato_856_native6d_quantile_songzhe_repro_wam_finetune_4gpu/"
+                "checkpoints/policy/topk/step=00016000-train_loss=0.349923.pt"
+            )
+        )
+
+    def resolve_psi_remote_python(repo_dir: str = "") -> str:  # type: ignore[misc]
+        return "python3"
+
+    def resolve_psi_remote_policy_root(user: str = "") -> str:  # type: ignore[misc]
+        return ""
+
+    def resolve_wan22_dir(user: str = "") -> str:  # type: ignore[misc]
+        return ""
+
+    def wam82_server_needs_restart(port: int) -> bool:  # type: ignore[misc]
+        return False
 
 
 def list_isaaclab_arena_environments(root: str) -> List[str]:
@@ -2585,7 +2684,6 @@ ROBOMETER_ROOT_DEFAULT = (
 )
 ROBOMETER_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/robometer-policy/bin/python",
-    "/home/psibot/miniconda3/envs/robometer-policy/bin/python",
 )
 ROBOMETER_RUN_SCRIPT = os.path.join(EAI_DIR, "run_robometer_policy.sh")
 ROBOMETER_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "robometer_policy")
@@ -2603,7 +2701,6 @@ RYNNVALUE_ROOT_DEFAULT = (
 )
 RYNNVALUE_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/rynnvalue/bin/python",
-    "/home/psibot/miniconda3/envs/rynnvalue/bin/python",
 )
 RYNNVALUE_RUN_SCRIPT = os.path.join(EAI_DIR, "run_rynnvalue.sh")
 RYNNVALUE_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "rynnvalue")
@@ -2774,7 +2871,15 @@ MOLMOSPACES_EVAL_POLICIES: Tuple[Tuple[str, str], ...] = (
     ),
     (
         "Psi Policy",
-        "molmo_spaces.evaluation.configs.evaluation_configs:PsiPolicyEvalConfig",
+        PSI_POLICY_EVAL_ID,
+    ),
+    (
+        "Psi Policy Native6D",
+        PSI_NATIVE6D_EVAL_ID,
+    ),
+    (
+        "WAM Psi-R1 Remote",
+        WAM_PSI_R1_EVAL_ID,
     ),
     (
         "Psi R1 Pick Planner",
@@ -2797,11 +2902,11 @@ MOLMOSPACES_EVAL_POLICIES: Tuple[Tuple[str, str], ...] = (
         "molmo_spaces.evaluation.configs.evaluation_configs:TeleopPolicyEvalConfig",
     ),
 )
+PSI_REMOTE_CKPT_DEFAULT = resolve_default_wam_finetune_checkpoint()
 MOLMOSPACES_EVAL_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "molmospaces_eval")
 PSI_MOLMOSPACES_EVAL_OUTPUT_DIR = os.path.join(EAI_DIR, ".cache", "psi_molmospaces_eval")
-PSI_MOLMOSPACES_DEFAULT_POLICY = (
-    "molmo_spaces.evaluation.configs.evaluation_configs:PsiR1PickPlannerEvalConfig"
-)
+# Default to WAM remote so the Psi/WAM deploy row is visible on Psi-MolmoSpaces.
+PSI_MOLMOSPACES_DEFAULT_POLICY = WAM_PSI_R1_EVAL_ID
 # PsiPolicyConfig.remote_config defaults to localhost:8080 (server CLI default is 8000 —
 # start serve_policy with --port 8080 to match).
 PSI_POLICY_SERVER_PORT_DEFAULT = int(
@@ -2823,7 +2928,6 @@ ISAACLAB_ARENA_ROOT_DEFAULT = (
 )
 ISAACLAB_ARENA_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/IsaacLab-Arena/bin/python",
-    "/home/psibot/miniconda3/envs/IsaacLab-Arena/bin/python",
 )
 ISAACLAB_ARENA_POLICIES: Tuple[Tuple[str, str], ...] = (
     ("zero_action（零动作）", "zero_action"),
@@ -2838,16 +2942,9 @@ ROBOTWIN_CKPT_DEFAULT = resolve_robotwin_checkpoint().path
 ROBOTWIN_CONFIG_DEFAULT = "pi05_aloha_robotwin"
 ROBOTWIN_TASK_DEFAULT = "adjust_bottle"
 MOLMOSPACES_RESOURCES_MIN = "0.0.3a2"
+# MuJoCo viewer uses the molmospaces env (see tools/model_conda_envs.py).
 MUJOCO_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/molmospaces/bin/python",
-    "/home/psibot/miniconda3/envs/molmospaces/bin/python",
-    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/IsaacLab-Arena/bin/python",
-    "/home/psibot/miniconda3/envs/IsaacLab-Arena/bin/python",
-    "/home/psibot/miniconda3/envs/mujoco/bin/python",
-    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/mujoco/bin/python",
-    "/home/psibot/miniconda3/envs/eai/bin/python",
-    "/home/psibot/miniconda3/bin/python",
-    "/usr/bin/python3",
 )
 MUJOCO_MODEL_PRESETS: Tuple[str, ...] = (
     PSI_R1_MODEL_XML,
@@ -2897,6 +2994,7 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "Astra",
     "PhysicalRSI",
     "编程冲SOTA",
+    "主机资源",
     "HumanEgo",
     "数据集",
     "sub task",
@@ -3046,6 +3144,14 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "code_sota": "编程冲SOTA",
     "编程冲sota": "编程冲SOTA",
     "编程冲SOTA": "编程冲SOTA",
+    "system": "主机资源",
+    "sysmon": "主机资源",
+    "host": "主机资源",
+    "gpu": "主机资源",
+    "cpu": "主机资源",
+    "monitor": "主机资源",
+    "system_monitor": "主机资源",
+    "主机资源": "主机资源",
     "gpt-6": "Astra",
     "gpt6": "Astra",
     "robodojo": "Astra",
@@ -3119,13 +3225,9 @@ ROBODOJO_POLICY_HOST_DEFAULT = (
 RISE_ROOT_DEFAULT = os.path.join(
     ROBODOJO_ROOT_DEFAULT, "XPolicyLab", "policy", "RISE", "RISE"
 )
+# Exactly one miniconda3 env for RISE (see tools/model_conda_envs.py).
 RISE_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/rise/bin/python",
-    "/home/psibot/miniconda3/envs/rise/bin/python",
-    "/home/psibot/miniconda3/envs/RISE/bin/python",
-    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python",
-    "/home/psibot/miniconda3/envs/RLinf/bin/python",
-    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RoboDojo/bin/python",
 )
 # 本机可用的 OpenPI/RISE 风格 ckpt（目录内需有 model.safetensors；优先带 assets/）
 RISE_POLICY_CKPT_CANDIDATES: Tuple[str, ...] = (
@@ -20881,12 +20983,40 @@ class MuJoCoViewerLauncher(QObject):
         super().__init__(parent)
         self._process: Optional[QProcess] = None
         self._label = ""
+        self._last_exit_code: Optional[int] = None
+        # Bumped on each start/force_clear so delayed _force_kill cannot
+        # SIGKILL a newly launched process after relaunch.
+        self._run_generation: int = 0
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.state() in (
             QProcess.Starting,
             QProcess.Running,
         )
+
+    def _disconnect_process(self, proc: Optional[QProcess]) -> None:
+        if proc is None:
+            return
+        for signal_name, slot in (
+            ("readyReadStandardOutput", self._on_process_output),
+            ("finished", self._on_process_finished),
+            ("errorOccurred", self._on_process_error),
+        ):
+            try:
+                getattr(proc, signal_name).disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+
+    def _is_active_process(self, proc: object) -> bool:
+        return proc is not None and proc is self._process
+
+    @property
+    def last_exit_code(self) -> Optional[int]:
+        return self._last_exit_code
+
+    @property
+    def label(self) -> str:
+        return self._label or ""
 
     def start(
         self,
@@ -20956,6 +21086,7 @@ class MuJoCoViewerLauncher(QObject):
                 "[warn] DISPLAY 为空，图形窗口可能无法弹出（本机桌面/X11 转发）"
             )
 
+        self._run_generation += 1
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_process_output)
@@ -21005,6 +21136,7 @@ class MuJoCoViewerLauncher(QObject):
             self.log_line.emit(
                 "[warn] DISPLAY 为空，图形窗口可能无法弹出（本机桌面/X11 转发）"
             )
+        self._run_generation += 1
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_process_output)
@@ -21015,6 +21147,7 @@ class MuJoCoViewerLauncher(QObject):
         # setsid so stop() can kill the whole process group
         proc.start("setsid", list(argv))
         self._process = proc
+        self._last_exit_code = None
         self.running_changed.emit(True)
         shown = " ".join(shlex.quote(a) for a in argv)
         self.log_line.emit(f"$ (cd {shlex.quote(work)} && {shown})")
@@ -21026,6 +21159,7 @@ class MuJoCoViewerLauncher(QObject):
             return
         self.status_message.emit("正在停止 MuJoCo…")
         if self._process is not None:
+            gen = self._run_generation
             pid = int(self._process.processId())
             if pid > 0:
                 try:
@@ -21034,33 +21168,77 @@ class MuJoCoViewerLauncher(QObject):
                     self._process.terminate()
             else:
                 self._process.terminate()
-            QTimer.singleShot(3000, self._force_kill)
+            QTimer.singleShot(3000, lambda g=gen: self._force_kill(expected_gen=g))
 
     def shutdown(self) -> None:
-        if self._process is not None and self._process.state() != QProcess.NotRunning:
-            pid = int(self._process.processId())
+        proc = self._process
+        self._run_generation += 1
+        self._process = None
+        self._disconnect_process(proc)
+        if proc is not None and proc.state() != QProcess.NotRunning:
+            pid = int(proc.processId())
             if pid > 0:
                 try:
                     os.killpg(pid, signal.SIGTERM)
                 except (ProcessLookupError, PermissionError, OSError):
-                    self._process.terminate()
+                    proc.terminate()
             else:
-                self._process.terminate()
-            self._process.waitForFinished(1500)
-        if self._process is not None and self._process.state() != QProcess.NotRunning:
-            pid = int(self._process.processId())
+                proc.terminate()
+            proc.waitForFinished(1500)
+        if proc is not None and proc.state() != QProcess.NotRunning:
+            pid = int(proc.processId())
             if pid > 0:
                 try:
                     os.killpg(pid, signal.SIGKILL)
                 except (ProcessLookupError, PermissionError, OSError):
-                    self._process.kill()
+                    proc.kill()
             else:
-                self._process.kill()
-            self._process.waitForFinished(800)
-        self._process = None
+                proc.kill()
+            proc.waitForFinished(800)
+        if proc is not None:
+            proc.deleteLater()
         self.running_changed.emit(False)
 
-    def _force_kill(self) -> None:
+    def force_clear(self) -> None:
+        """Hard-kill process group and drop launcher state so relaunch can proceed.
+
+        Used by Psi/WAM redeploy when a previous QProcess is stuck or still
+        marked Running after SIGTERM. Unlike stop(), this does not wait on a
+        timer — it SIGKILLs immediately and clears ``_process``.
+
+        Disconnects the old QProcess before clearing so a late finished(code=9)
+        cannot wipe a newly started process reference.
+        """
+        proc = self._process
+        self._run_generation += 1
+        self._process = None
+        self._disconnect_process(proc)
+        if proc is not None and proc.state() != QProcess.NotRunning:
+            pid = int(proc.processId())
+            if pid > 0:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            try:
+                proc.waitForFinished(500)
+            except Exception:
+                pass
+        if proc is not None:
+            proc.deleteLater()
+        self.running_changed.emit(False)
+
+    def _force_kill(self, expected_gen: Optional[int] = None) -> None:
+        if expected_gen is not None and expected_gen != self._run_generation:
+            return
         if self._process is None or self._process.state() == QProcess.NotRunning:
             return
         pid = int(self._process.processId())
@@ -21073,8 +21251,10 @@ class MuJoCoViewerLauncher(QObject):
         self._process.kill()
 
     def _on_process_output(self) -> None:
-        if self._process is None:
+        proc = self.sender()
+        if not self._is_active_process(proc):
             return
+        assert self._process is not None
         data = bytes(self._process.readAllStandardOutput()).decode(
             "utf-8", errors="replace"
         )
@@ -21084,6 +21264,11 @@ class MuJoCoViewerLauncher(QObject):
                 self.log_line.emit(text)
 
     def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        proc = self.sender()
+        # Stale QProcess (killed during relaunch) must not clear the new one.
+        if not self._is_active_process(proc):
+            return
+        self._last_exit_code = int(exit_code)
         self.running_changed.emit(False)
         label = self._label or "MuJoCo"
         if exit_code == 0:
@@ -21095,10 +21280,14 @@ class MuJoCoViewerLauncher(QObject):
         self._process = None
 
     def _on_process_error(self, error: QProcess.ProcessError) -> None:
+        if not self._is_active_process(self.sender()):
+            return
         if error == QProcess.FailedToStart:
+            self._last_exit_code = -1
             self.log_line.emit("[ERROR] 无法启动 MuJoCo 进程")
             self.status_message.emit("无法启动 MuJoCo")
             self.running_changed.emit(False)
+            self._process = None
 
 
 class LingbotMapLauncher(QObject):
@@ -21805,7 +21994,7 @@ class CameraTopicWindow(QMainWindow):
         self.replay_start_btn = QPushButton("开始")
         self.replay_start_btn.setToolTip(
             "启动 rrd_replay 并开始回放。\n"
-            "会自动启动手/臂服务栈（若未运行）、切 control_mode=0 并使能手/臂。"
+            "先决条件：已选 .rrd + 手/臂服务栈运行中 + control_mode=0 + 手/臂已使能。"
         )
         self.replay_start_btn.clicked.connect(self._on_replay_start_clicked)
         self.replay_stop_btn = QPushButton("停止")
@@ -21905,16 +22094,14 @@ class CameraTopicWindow(QMainWindow):
         sam3_invoke_row.addWidget(QLabel("v"))
         sam3_invoke_row.addWidget(self.sam3_v_spin)
         self.stereo_invoke_btn = QPushButton("调用分割")
-        self.stereo_invoke_btn.setToolTip(
-            "对当前提示点执行立体分割 + 6D 位姿（跟随上方分割/位姿后端设置）。\n"
-            "点击图像仅选点，不会自动分割。"
-        )
+        self.stereo_invoke_btn.setEnabled(False)
+        self.stereo_invoke_btn.setToolTip("请先点击彩色/深度图像选择提示点")
         self.stereo_invoke_btn.clicked.connect(self._on_stereo_invoke_clicked)
         sam3_invoke_row.addWidget(self.stereo_invoke_btn)
         self.sam3_invoke_btn = QPushButton("调用 SAM3")
+        self.sam3_invoke_btn.setEnabled(False)
         self.sam3_invoke_btn.setToolTip(
-            "对当前彩色图像调用 SAM3 分割，并在下方显示结果；"
-            "成功时会在图像上叠加 mask"
+            "需有彩色图像；点提示模式下还需先点击图像选点"
         )
         self.sam3_invoke_btn.clicked.connect(self._on_sam3_invoke_clicked)
         sam3_invoke_row.addWidget(self.sam3_invoke_btn)
@@ -24476,9 +24663,9 @@ class CameraTopicWindow(QMainWindow):
         if idx_pi >= 0:
             self.molmospaces_policy_combo.setCurrentIndex(idx_pi)
         self.molmospaces_policy_combo.setToolTip(
-            "默认 Pi：使用下方本地模型路径部署 openpi serve_policy（:8080）。"
-            "Dummy 不需要外部策略服务。"
-            "Teleop 需要对应遥控服务已启动。"
+            "Pi：下方部署 openpi serve_policy（:8080）。\n"
+            "Psi Policy / Native6D / WAM：下方「Psi/WAM模型」行部署对应服务。\n"
+            "Psi R1 Pick Planner / Dummy 无需外部策略服务。"
         )
         self.molmospaces_policy_combo.currentIndexChanged.connect(
             self._on_molmospaces_policy_changed
@@ -24543,12 +24730,94 @@ class CameraTopicWindow(QMainWindow):
         )
         pi_row.addWidget(self.molmospaces_pi_probe_btn)
         sp_page_l.addWidget(self.molmospaces_pi_row)
+        self.molmospaces_pi_status_label = QLabel("Pi: ○ 未部署")
+        self.molmospaces_pi_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.molmospaces_pi_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.molmospaces_pi_status_label.setWordWrap(True)
+        self.molmospaces_pi_status_label.setToolTip(
+            f"openpi serve_policy 部署状态（默认 ws://{PI_SERVER_HOST_DEFAULT}:"
+            f"{MOLMOSPACES_PI_PORT_DEFAULT}）"
+        )
+        sp_page_l.addWidget(self.molmospaces_pi_status_label)
+
+        self.molmospaces_psi_row = QWidget()
+        psi_row = QHBoxLayout(self.molmospaces_psi_row)
+        psi_row.setContentsMargins(0, 0, 0, 0)
+        psi_row.setSpacing(6)
+        self.molmospaces_psi_ckpt_label = QLabel("Psi/WAM模型")
+        psi_row.addWidget(self.molmospaces_psi_ckpt_label)
+        self.molmospaces_psi_ckpt_edit = QLineEdit(PSI_REMOTE_CKPT_DEFAULT)
+        self.molmospaces_psi_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.molmospaces_psi_ckpt_edit.setPlaceholderText(
+            "默认: psi-molospaces-maobo-step=00022000-train_loss=0.018139.pt"
+        )
+        _ckpt_exists = bool(
+            PSI_REMOTE_CKPT_DEFAULT and os.path.isfile(PSI_REMOTE_CKPT_DEFAULT)
+        )
+        self.molmospaces_psi_ckpt_edit.setToolTip(
+            "Psi Policy / Native6D：serve_policy_psi_policy*.py 的 --policy.dir\n"
+            "WAM Psi-R1 Remote：serve_wam82_policy 的 --checkpoint\n"
+            f"默认 WAM ckpt: {PSI_REMOTE_CKPT_DEFAULT or '<未设置>'}\n"
+            f"本地是否存在: {'是' if _ckpt_exists else '否'}\n"
+            f"默认端口 Psi={PSI_REMOTE_POLICY_PORT_DEFAULT} / "
+            f"Native6D={PSI_NATIVE6D_PORT_DEFAULT} / WAM={WAM_PSI_R1_PORT_DEFAULT}"
+        )
+        psi_row.addWidget(self.molmospaces_psi_ckpt_edit, 1)
+        self.molmospaces_psi_ckpt_browse_btn = QPushButton("…")
+        self.molmospaces_psi_ckpt_browse_btn.setFixedWidth(28)
+        self.molmospaces_psi_ckpt_browse_btn.setFocusPolicy(Qt.NoFocus)
+        self.molmospaces_psi_ckpt_browse_btn.clicked.connect(
+            self._on_molmospaces_psi_ckpt_browse
+        )
+        psi_row.addWidget(self.molmospaces_psi_ckpt_browse_btn)
+        psi_row.addWidget(QLabel("GPU"))
+        self.molmospaces_psi_gpu_spin = QSpinBox()
+        self.molmospaces_psi_gpu_spin.setRange(0, 15)
+        self.molmospaces_psi_gpu_spin.setValue(int(os.environ.get("EVAL_GPU_ID") or 0))
+        self.molmospaces_psi_gpu_spin.setToolTip("CUDA_VISIBLE_DEVICES（单卡）")
+        psi_row.addWidget(self.molmospaces_psi_gpu_spin)
+        self.molmospaces_psi_start_btn = QPushButton("部署启动")
+        self.molmospaces_psi_start_btn.setFocusPolicy(Qt.NoFocus)
+        self.molmospaces_psi_start_btn.setToolTip(
+            "按当前策略启动 Psi Policy / Native6D / WAM 服务"
+        )
+        self.molmospaces_psi_start_btn.clicked.connect(
+            self._on_molmospaces_psi_start_clicked
+        )
+        psi_row.addWidget(self.molmospaces_psi_start_btn)
+        self.molmospaces_psi_stop_btn = QPushButton("部署停止")
+        self.molmospaces_psi_stop_btn.setFocusPolicy(Qt.NoFocus)
+        self.molmospaces_psi_stop_btn.setToolTip("停止本窗口拉起的 Psi/WAM 策略服务")
+        self.molmospaces_psi_stop_btn.clicked.connect(
+            self._on_molmospaces_psi_stop_clicked
+        )
+        psi_row.addWidget(self.molmospaces_psi_stop_btn)
+        self.molmospaces_psi_probe_btn = QPushButton("验证")
+        self.molmospaces_psi_probe_btn.setFocusPolicy(Qt.NoFocus)
+        self.molmospaces_psi_probe_btn.setToolTip("探测当前策略对应端口是否可握手")
+        self.molmospaces_psi_probe_btn.clicked.connect(
+            self._on_molmospaces_psi_probe_clicked
+        )
+        psi_row.addWidget(self.molmospaces_psi_probe_btn)
+        sp_page_l.addWidget(self.molmospaces_psi_row)
+        self.molmospaces_psi_status_label = QLabel("Psi/WAM: ○ 未部署")
+        self.molmospaces_psi_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.molmospaces_psi_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.molmospaces_psi_status_label.setWordWrap(True)
+        self.molmospaces_psi_status_label.setToolTip(
+            "Psi Policy / Native6D / WAM 服务部署状态：未部署 / 部署中 / 已就绪；"
+            "含 mode、端口与 checkpoint 文件名。"
+        )
+        sp_page_l.addWidget(self.molmospaces_psi_status_label)
+
         self._on_molmospaces_policy_changed()
         self._update_molmospaces_pi_deploy_ui()
+        self._update_molmospaces_psi_deploy_ui()
         sp_hint = QLabel(
             "使用 molmospaces conda 环境；与 Isaac 评测 / MuJoCo viewer 互斥。"
             "动作选「评测所选任务」时，只启动任务下拉框里当前这一项。"
-            "选 Pi 时用「部署启动/停止」管理策略服务；评测前会确认可调用。"
+            "选 Pi / Psi Policy / Native6D / WAM 时用「部署启动/停止」管理策略服务；"
+            "评测前会确认可调用。"
         )
         sp_hint.setWordWrap(True)
         sp_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
@@ -25267,6 +25536,18 @@ class CameraTopicWindow(QMainWindow):
         self._pi_policy_ready_timer.setInterval(1500)
         self._pi_policy_ready_timer.timeout.connect(self._update_molmospaces_pi_deploy_ui)
         self._pi_gpu_mem_cache: Tuple[float, Dict[str, str]] = (0.0, {})
+        # Separate process for Psi Policy / Native6D / WAM servers.
+        self._psi_remote_launcher = MuJoCoViewerLauncher(self)
+        self._psi_remote_launcher.log_line.connect(self._append_mujoco_log)
+        self._psi_remote_launcher.status_message.connect(self._on_mujoco_status)
+        self._psi_remote_launcher.running_changed.connect(
+            self._update_molmospaces_psi_deploy_ui
+        )
+        self._psi_remote_ready_timer = QTimer(self)
+        self._psi_remote_ready_timer.setInterval(1500)
+        self._psi_remote_ready_timer.timeout.connect(
+            self._update_molmospaces_psi_deploy_ui
+        )
         self._sim_eval_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
         self._sim_bridge_launcher.running_changed.connect(self._update_sim_backend_mutex_ui)
         self._refresh_mujoco_models(
@@ -25282,6 +25563,9 @@ class CameraTopicWindow(QMainWindow):
         if hasattr(self, "_pi_policy_ready_timer"):
             self._pi_policy_ready_timer.start()
             self._update_molmospaces_pi_deploy_ui()
+        if hasattr(self, "_psi_remote_ready_timer"):
+            self._psi_remote_ready_timer.start()
+            self._update_molmospaces_psi_deploy_ui()
 
         # 稍后 addTab：仿真评测 / 真机评测 放在末尾
 
@@ -25340,7 +25624,10 @@ class CameraTopicWindow(QMainWindow):
         real_ctrl_row.addWidget(self.real_eval_stack_btn)
         self.real_eval_start_btn = QPushButton("开始评测")
         self.real_eval_start_btn.setFocusPolicy(Qt.NoFocus)
-        self.real_eval_start_btn.setToolTip("检查真机就绪条件并进入评测记录（策略闭环可后续接入）")
+        self.real_eval_start_btn.setToolTip(
+            "进入真机评测记录。\n"
+            "先决条件：已有 /camera/*_color、手臂与手部已使能（R1 还需栈脚本就绪）。"
+        )
         self.real_eval_start_btn.clicked.connect(self._on_real_eval_start_clicked)
         real_ctrl_row.addWidget(self.real_eval_start_btn)
         self.real_eval_stop_btn = QPushButton("停止")
@@ -26339,7 +26626,7 @@ class CameraTopicWindow(QMainWindow):
         self.ctx_sync_start_btn.setFocusPolicy(Qt.NoFocus)
         self.ctx_sync_start_btn.setToolTip(
             "同时播放视频并启动 RRD 回放，使机器人按轨迹跟做。\n"
-            "会自动切 control_mode=0 并使能手/臂（与「回放」页相同）。"
+            "先决条件：已选视频+.rrd + 手/臂服务栈运行中 + control_mode=0 + 手/臂已使能。"
         )
         self.ctx_sync_start_btn.clicked.connect(self._on_ctx_sync_start_clicked)
         ctx_ctrl.addWidget(self.ctx_sync_start_btn)
@@ -27984,6 +28271,11 @@ class CameraTopicWindow(QMainWindow):
         self.prog_sota_tab = ProgSotaTab()
         control_tabs.addTab(self.prog_sota_tab, "编程冲SOTA")
 
+        from system_monitor.tab import SystemMonitorTab
+
+        self.system_monitor_tab = SystemMonitorTab()
+        control_tabs.addTab(self.system_monitor_tab, "主机资源")
+
         humanego_tab = QWidget()
         humanego_tab.setObjectName("humanegoTab")
         humanego_outer = QVBoxLayout(humanego_tab)
@@ -28556,6 +28848,7 @@ class CameraTopicWindow(QMainWindow):
         self._ui_timer = QTimer(self)
         self._ui_timer.timeout.connect(self._update_waiting_hint)
         self._ui_timer.timeout.connect(self._update_robot_enable_status_ui)
+        self._ui_timer.timeout.connect(self._update_prereq_gated_buttons)
         self._ui_timer.start(2000)
         self._sam3_health_timer = QTimer(self)
         self._sam3_health_timer.timeout.connect(self._refresh_sam3_status)
@@ -28569,6 +28862,7 @@ class CameraTopicWindow(QMainWindow):
         robot, base = self._stack_launcher.get_cached_status()
         self._update_robot_stack_ui(robot, base)
         self._update_replay_ui()
+        self._update_prereq_gated_buttons()
         self._update_local_ai_deploy_btn()
         self._update_train_ui()
         self._update_cad_ui()
@@ -32164,6 +32458,31 @@ class CameraTopicWindow(QMainWindow):
         else:
             self.status_bar.showMessage(f"{label} robot-service 启动失败", 5000)
 
+    def _real_eval_start_blockers(self) -> List[str]:
+        """真机「开始评测」不可点时的原因列表。"""
+        backend = self._real_robot_backend_id()
+        warnings: List[str] = []
+        try:
+            names = list(dict(self.node.get_topic_names_and_types()))
+            cams = sum(
+                1 for t in names if t.startswith("/camera") and t.endswith("_color")
+            )
+            if cams <= 0:
+                warnings.append(
+                    "未发现 /camera/*_color topic（确认相机/栈是否在同一 ROS_DOMAIN）"
+                )
+        except Exception as exc:
+            warnings.append(f"topic 查询失败: {exc}")
+        if not self.node.is_arm_enabled():
+            warnings.append("手臂未使能")
+        if not self.node.is_hand_enabled():
+            warnings.append("手部未使能")
+        if backend == REAL_ROBOT_BACKEND_R1 and not self._real_robot_backend_has_stack_scripts(
+            backend
+        ):
+            warnings.append(real_robot_stack_ready_hint(backend))
+        return warnings
+
     def _refresh_real_eval_status(self) -> None:
         backend = self._real_robot_backend_id()
         label = real_robot_backend_label(backend)
@@ -32186,39 +32505,44 @@ class CameraTopicWindow(QMainWindow):
             hand,
             mode,
         ]
+        blockers = self._real_eval_start_blockers()
         if self._real_eval_active:
             parts.append("评测中")
             self.real_eval_status_label.setText(f"状态: 评测中（{label}）")
             self.real_eval_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            self.real_eval_start_btn.setEnabled(False)
         else:
-            self.real_eval_status_label.setText(f"状态: 未开始（{label}）")
-            self.real_eval_status_label.setStyleSheet("")
+            ready = not blockers
+            self.real_eval_status_label.setText(
+                f"状态: {'就绪' if ready else '未就绪'}（{label}）"
+            )
+            self.real_eval_status_label.setStyleSheet(
+                f"color: {UI_ACCENT_GREEN};" if ready else ""
+            )
+            self.real_eval_start_btn.setEnabled(ready)
+            if ready:
+                self.real_eval_start_btn.setToolTip(
+                    "进入真机评测记录。\n"
+                    "先决条件已满足：相机 / 手臂使能 / 手部使能。"
+                )
+            else:
+                self.real_eval_start_btn.setToolTip(
+                    "不可开始评测:\n" + "\n".join(f"• {w}" for w in blockers)
+                )
         self.real_eval_ready_label.setText("  |  ".join(parts))
 
     def _on_real_eval_start_clicked(self) -> None:
         backend = self._real_robot_backend_id()
         label = real_robot_backend_label(backend)
-        warnings: List[str] = []
-        try:
-            names = list(dict(self.node.get_topic_names_and_types()))
-            cams = sum(1 for t in names if t.startswith("/camera") and t.endswith("_color"))
-            if cams <= 0:
-                warnings.append("未发现 /camera/*_color topic（确认相机/栈是否在同一 ROS_DOMAIN）")
-        except Exception as exc:
-            warnings.append(f"topic 查询失败: {exc}")
-        if not self.node.is_arm_enabled():
-            warnings.append("手臂未使能")
-        if not self.node.is_hand_enabled():
-            warnings.append("手部未使能")
-        if backend == REAL_ROBOT_BACKEND_R1 and not self._real_robot_backend_has_stack_scripts(backend):
-            warnings.append(real_robot_stack_ready_hint(backend))
-        task = self.real_eval_task_edit.text().strip()
+        warnings = self._real_eval_start_blockers()
         if warnings:
             for w in warnings:
                 self._append_real_eval_log(f"[就绪检查] {w}")
             self.status_bar.showMessage("真机评测：存在未就绪项，请查看日志", 5000)
-        else:
-            self._append_real_eval_log("[就绪检查] OK")
+            self._refresh_real_eval_status()
+            return
+        task = self.real_eval_task_edit.text().strip()
+        self._append_real_eval_log("[就绪检查] OK")
         self._real_eval_active = True
         self.real_eval_start_btn.setEnabled(False)
         self.real_eval_stop_btn.setEnabled(True)
@@ -32238,7 +32562,6 @@ class CameraTopicWindow(QMainWindow):
         backend = self._real_robot_backend_id()
         label = real_robot_backend_label(backend)
         self._real_eval_active = False
-        self.real_eval_start_btn.setEnabled(True)
         self.real_eval_stop_btn.setEnabled(False)
         self.real_eval_task_edit.setEnabled(True)
         self.real_robot_a2d_radio.setEnabled(True)
@@ -34639,11 +34962,34 @@ class CameraTopicWindow(QMainWindow):
         has_rrd = bool((self._ctx_rrd_path or "").strip()) and os.path.isfile(
             self._ctx_rrd_path or ""
         )
+        robot_blockers = self.node.get_replay_prerequisite_warnings()
+        can_sync = (
+            (not node_running)
+            and has_video
+            and has_rrd
+            and not robot_blockers
+        )
         self.ctx_select_video_btn.setEnabled(not node_running)
         self.ctx_select_rrd_btn.setEnabled(not node_running)
         self.ctx_rerun_btn.setEnabled(has_rrd)
         self.ctx_loop_spin.setEnabled(not node_running)
-        self.ctx_sync_start_btn.setEnabled(not node_running and has_video and has_rrd)
+        self.ctx_sync_start_btn.setEnabled(can_sync)
+        if can_sync:
+            self.ctx_sync_start_btn.setToolTip(
+                "同步播放演示视频与 RRD 回放（先决条件已满足）。"
+            )
+        else:
+            reasons: List[str] = []
+            if node_running:
+                reasons.append("回放节点已在运行")
+            if not has_video:
+                reasons.append("请先选择演示视频")
+            if not has_rrd:
+                reasons.append("请先选择配对 .rrd")
+            reasons.extend(robot_blockers)
+            self.ctx_sync_start_btn.setToolTip(
+                "不可同步开始:\n" + "\n".join(f"• {r}" for r in reasons)
+            )
         self.ctx_stop_btn.setEnabled(
             node_running
             or (
@@ -34656,8 +35002,10 @@ class CameraTopicWindow(QMainWindow):
             completed, total = self._replay_launcher.get_loop_progress()
             loop_hint = f" [{min(completed + 1, total)}/{total}]" if total > 1 else ""
             self.ctx_status_label.setText(f"状态: 同步中 · {label}{loop_hint}")
-        elif has_video and has_rrd:
+        elif has_video and has_rrd and not robot_blockers:
             self.ctx_status_label.setText("状态: 已就绪（可同步开始）")
+        elif has_video and has_rrd:
+            self.ctx_status_label.setText("状态: 文件已选（机器人先决条件未满足）")
         elif has_video:
             self.ctx_status_label.setText("状态: 已选视频（需配对 RRD）")
         elif has_rrd:
@@ -34692,9 +35040,25 @@ class CameraTopicWindow(QMainWindow):
         self._update_replay_rrd_path_display(path)
 
         has_path = bool((self._selected_rrd_path or "").strip())
+        robot_blockers = self.node.get_replay_prerequisite_warnings()
+        can_start = (not node_running) and has_path and not robot_blockers
         self.replay_count_spin.setEnabled(not node_running)
         self.replay_select_btn.setEnabled(not node_running)
-        self.replay_start_btn.setEnabled(not node_running and has_path)
+        self.replay_start_btn.setEnabled(can_start)
+        if can_start:
+            self.replay_start_btn.setToolTip(
+                "启动 rrd_replay 并开始回放（先决条件已满足）。"
+            )
+        else:
+            reasons: List[str] = []
+            if node_running:
+                reasons.append("回放节点已在运行")
+            if not has_path:
+                reasons.append("请先选择 .rrd 文件")
+            reasons.extend(robot_blockers)
+            self.replay_start_btn.setToolTip(
+                "不可开始回放:\n" + "\n".join(f"• {r}" for r in reasons)
+            )
         self.replay_stop_btn.setEnabled(node_running)
         self._update_ctx_ui()
 
@@ -36476,8 +36840,7 @@ class CameraTopicWindow(QMainWindow):
                 "Psi-MolmoSpaces（init_molmospaces）：任务列表=psi_molmo_spaces/*.json；"
                 "「只开界面」与「启动」均按当前选中任务开场景；"
                 "Viewer=官方 MuJoCo GLFW · 机器人第一视角 (head_camera_rgb)；"
-                "默认策略 Psi R1 Pick Planner（无需策略服务）；"
-                "选 Psi Policy 前请先启动 psi-policy-server --port 8080。"
+                "默认策略 WAM Psi-R1 Remote；下方「部署启动」拉起 :9317 服务并显示状态。"
                 "与 Isaac 评测互斥；不接 /camera/* 预览。"
             ),
             "arena": (
@@ -38996,11 +39359,15 @@ class CameraTopicWindow(QMainWindow):
                 if idx >= 0:
                     self.molmospaces_robot_combo.setCurrentIndex(idx)
             if hasattr(self, "molmospaces_policy_combo"):
-                idx = self.molmospaces_policy_combo.findData(
-                    PSI_MOLMOSPACES_DEFAULT_POLICY
-                )
-                if idx >= 0:
-                    self.molmospaces_policy_combo.setCurrentIndex(idx)
+                cur_pol = str(self.molmospaces_policy_combo.currentData() or "")
+                # Keep an already-selected Psi/WAM remote policy; only fill default
+                # when the current choice does not need a deployable server.
+                if not needs_psi_remote_deploy(cur_pol):
+                    idx = self.molmospaces_policy_combo.findData(
+                        PSI_MOLMOSPACES_DEFAULT_POLICY
+                    )
+                    if idx >= 0:
+                        self.molmospaces_policy_combo.setCurrentIndex(idx)
             if hasattr(self, "molmospaces_root_edit"):
                 self.molmospaces_root_edit.setToolTip(
                     "Psi-MolmoSpaces 仓库路径（默认 "
@@ -39220,14 +39587,48 @@ class CameraTopicWindow(QMainWindow):
         policy = ""
         if hasattr(self, "molmospaces_policy_combo"):
             policy = str(self.molmospaces_policy_combo.currentData() or "")
-        show = (
+        backend = ""
+        if hasattr(self, "_sim_backend_id"):
+            try:
+                backend = str(self._sim_backend_id() or "")
+            except Exception:
+                backend = ""
+        show_pi = (
             is_pi_policy_id(policy)
             and (not is_lingbot_va_policy(policy))
             and (not is_vpp2_policy(policy))
         )
+        # On Psi-MolmoSpaces always keep the deploy row/status visible so switching
+        # to Pick Planner / Dummy does not make the controls disappear.
+        show_psi = needs_psi_remote_deploy(policy) or backend == "psi_molmospaces"
         if hasattr(self, "molmospaces_pi_row"):
-            self.molmospaces_pi_row.setVisible(show)
+            self.molmospaces_pi_row.setVisible(show_pi)
+        if hasattr(self, "molmospaces_pi_status_label"):
+            self.molmospaces_pi_status_label.setVisible(show_pi)
+        if hasattr(self, "molmospaces_psi_row"):
+            self.molmospaces_psi_row.setVisible(show_psi)
+        if hasattr(self, "molmospaces_psi_status_label"):
+            self.molmospaces_psi_status_label.setVisible(show_psi)
+        if show_psi and hasattr(self, "molmospaces_psi_ckpt_label"):
+            mode = psi_remote_mode_for_policy(policy)
+            labels = {
+                "wam82": "WAM模型",
+                "native6d": "Native6D模型",
+                "psi_policy": "Psi模型",
+            }
+            self.molmospaces_psi_ckpt_label.setText(labels.get(mode, "Psi/WAM模型"))
+            # Auto-fill the Songzhe WAM-finetune default when switching to WAM,
+            # or when the current path is empty / clearly a wrong LLM artifact.
+            if mode == "wam82" and hasattr(self, "molmospaces_psi_ckpt_edit"):
+                cur = self.molmospaces_psi_ckpt_edit.text().strip()
+                cur_l = cur.replace("\\", "/").lower()
+                need_default = (not cur) or cur.endswith("scheduler.pt") or (
+                    "qwen" in cur_l and "wam" not in cur_l
+                )
+                if need_default and PSI_REMOTE_CKPT_DEFAULT:
+                    self.molmospaces_psi_ckpt_edit.setText(PSI_REMOTE_CKPT_DEFAULT)
         self._update_molmospaces_pi_deploy_ui()
+        self._update_molmospaces_psi_deploy_ui()
 
     def _launch_vpp2_backend(
         self,
@@ -39397,17 +39798,37 @@ class CameraTopicWindow(QMainWindow):
         self._pi_gpu_mem_cache = (now, out)
         return out
 
+    def _deploy_status_color(self, level: str) -> str:
+        return {
+            "ok": UI_ACCENT_GREEN,
+            "warn": UI_ACCENT_ORANGE,
+            "err": UI_ACCENT_RED,
+            "muted": UI_TEXT_MUTED,
+        }.get(level, UI_TEXT_MUTED)
+
     def _set_libero_pi_status(self, text: str, *, level: str = "muted") -> None:
         if not hasattr(self, "libero_pi_status_label"):
             return
-        color = {
-            "ok": "#3dd68c",
-            "warn": "#e6a23c",
-            "err": "#f56c6c",
-            "muted": UI_TEXT_MUTED,
-        }.get(level, UI_TEXT_MUTED)
         self.libero_pi_status_label.setText(text)
-        self.libero_pi_status_label.setStyleSheet(f"color: {color};")
+        self.libero_pi_status_label.setStyleSheet(
+            f"color: {self._deploy_status_color(level)};"
+        )
+
+    def _set_molmospaces_pi_status(self, text: str, *, level: str = "muted") -> None:
+        if not hasattr(self, "molmospaces_pi_status_label"):
+            return
+        self.molmospaces_pi_status_label.setText(text)
+        self.molmospaces_pi_status_label.setStyleSheet(
+            f"color: {self._deploy_status_color(level)};"
+        )
+
+    def _set_molmospaces_psi_status(self, text: str, *, level: str = "muted") -> None:
+        if not hasattr(self, "molmospaces_psi_status_label"):
+            return
+        self.molmospaces_psi_status_label.setText(text)
+        self.molmospaces_psi_status_label.setStyleSheet(
+            f"color: {self._deploy_status_color(level)};"
+        )
 
     def _update_molmospaces_pi_deploy_ui(self, *_args) -> None:
         running = bool(
@@ -39462,13 +39883,19 @@ class CameraTopicWindow(QMainWindow):
             bits.append(f"{gpu_mib}MiB")
         extra = (" " + " ".join(bits)) if bits else ""
         if running and not listening:
+            status = f"Pi: ◐ 部署中（加载权重）… ws://{host}:{port}{extra}"
             self._set_libero_pi_status(f"◐ 部署中（加载权重）…{extra}", level="warn")
+            self._set_molmospaces_pi_status(status, level="warn")
         elif listening:
+            owned = "本窗口托管" if running else "可复用"
+            status = f"Pi: ● 已就绪 ws://{host}:{port}{extra} — {owned}"
             self._set_libero_pi_status(
                 f"● 运行中 ws://{host}:{port}{extra}", level="ok"
             )
+            self._set_molmospaces_pi_status(status, level="ok")
         else:
             self._set_libero_pi_status("○ 未部署", level="muted")
+            self._set_molmospaces_pi_status("Pi: ○ 未部署", level="muted")
 
 
     def _on_molmospaces_pi_ckpt_browse(self) -> None:
@@ -39517,6 +39944,423 @@ class CameraTopicWindow(QMainWindow):
         self._append_mujoco_log(f"[pi] {msg}")
         self._update_molmospaces_pi_deploy_ui()
         self._on_mujoco_status(msg)
+
+    def _molmospaces_selected_policy_id(self) -> str:
+        if hasattr(self, "molmospaces_policy_combo"):
+            return str(self.molmospaces_policy_combo.currentData() or "")
+        return ""
+
+    def _molmospaces_psi_mode(self) -> str:
+        return psi_remote_mode_for_policy(self._molmospaces_selected_policy_id())
+
+    def _molmospaces_psi_port(self) -> int:
+        return int(psi_remote_default_port(self._molmospaces_psi_mode() or "psi_policy"))
+
+    def _molmospaces_psi_ckpt_text(self) -> str:
+        if hasattr(self, "molmospaces_psi_ckpt_edit"):
+            return self.molmospaces_psi_ckpt_edit.text().strip()
+        return PSI_REMOTE_CKPT_DEFAULT
+
+    def _update_molmospaces_psi_deploy_ui(self, *_args) -> None:
+        if not hasattr(self, "molmospaces_psi_start_btn"):
+            return
+        mode = self._molmospaces_psi_mode()
+        mode_label = {
+            "wam82": "WAM",
+            "native6d": "Native6D",
+            "psi_policy": "PsiPolicy",
+        }.get(mode or "", mode or "")
+        host = "localhost"
+        port = self._molmospaces_psi_port()
+        ckpt = self._molmospaces_psi_ckpt_text()
+        ckpt_name = os.path.basename(ckpt) if ckpt else ""
+        gpu = ""
+        if hasattr(self, "molmospaces_psi_gpu_spin"):
+            gpu = f" gpu={int(self.molmospaces_psi_gpu_spin.value())}"
+        running = bool(
+            getattr(self, "_psi_remote_launcher", None)
+            and self._psi_remote_launcher.is_running()
+        )
+        listening = port_listening(host, port) if mode else False
+        if running and listening:
+            self.molmospaces_psi_start_btn.setText("已就绪")
+            self.molmospaces_psi_start_btn.setEnabled(False)
+        elif running:
+            self.molmospaces_psi_start_btn.setText("部署中…")
+            self.molmospaces_psi_start_btn.setEnabled(False)
+        else:
+            self.molmospaces_psi_start_btn.setText("部署启动")
+            self.molmospaces_psi_start_btn.setEnabled(bool(mode))
+        if hasattr(self, "molmospaces_psi_stop_btn"):
+            self.molmospaces_psi_stop_btn.setEnabled(running or listening)
+        if hasattr(self, "molmospaces_psi_probe_btn"):
+            self.molmospaces_psi_probe_btn.setEnabled(bool(mode))
+
+        detail_bits = []
+        if mode_label:
+            detail_bits.append(mode_label)
+        detail_bits.append(f":{port}")
+        if ckpt_name:
+            detail_bits.append(ckpt_name)
+        if gpu:
+            detail_bits.append(gpu.strip())
+        detail = " · ".join(detail_bits)
+        if not mode:
+            self._set_molmospaces_psi_status(
+                "Psi/WAM: ○ 当前策略无需部署", level="muted"
+            )
+        elif running and listening:
+            self._psi_remote_last_error = ""
+            self._set_molmospaces_psi_status(
+                f"Psi/WAM: ● 已就绪 ws://{host}:{port} — {detail}",
+                level="ok",
+            )
+            if hasattr(self, "_psi_remote_ready_timer") and self._psi_remote_ready_timer.isActive():
+                self._psi_remote_ready_timer.stop()
+        elif running:
+            self._set_molmospaces_psi_status(
+                f"Psi/WAM: ◐ 部署中（加载权重）… {detail}",
+                level="warn",
+            )
+        elif listening:
+            self._set_molmospaces_psi_status(
+                f"Psi/WAM: ● 端口已监听（可复用） ws://{host}:{port} — {detail}",
+                level="ok",
+            )
+        else:
+            launcher = getattr(self, "_psi_remote_launcher", None)
+            exit_code = getattr(launcher, "last_exit_code", None) if launcher else None
+            last_err = str(getattr(self, "_psi_remote_last_error", "") or "").strip()
+            user_stopped = bool(getattr(self, "_psi_remote_user_stopped", False))
+            if last_err:
+                self._set_molmospaces_psi_status(
+                    f"Psi/WAM: ✕ 部署失败 — {last_err}",
+                    level="err",
+                )
+            elif (not user_stopped) and exit_code not in (None, 0):
+                self._set_molmospaces_psi_status(
+                    f"Psi/WAM: ✕ 进程退出 code={exit_code} — {detail}",
+                    level="err",
+                )
+            else:
+                self._set_molmospaces_psi_status(
+                    f"Psi/WAM: ○ 未部署 — {detail}",
+                    level="muted",
+                )
+
+    def _on_molmospaces_psi_ckpt_browse(self) -> None:
+        cur = self._molmospaces_psi_ckpt_text()
+        start = cur if os.path.isdir(cur) else os.path.dirname(cur) if cur else ""
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            "选择 Psi / WAM checkpoint (.pt)",
+            start,
+            "PyTorch checkpoint (*.pt);;All files (*)",
+        )
+        if selected and hasattr(self, "molmospaces_psi_ckpt_edit"):
+            self.molmospaces_psi_ckpt_edit.setText(selected)
+
+    def _on_molmospaces_psi_probe_clicked(self) -> None:
+        mode = self._molmospaces_psi_mode()
+        if not mode:
+            self._on_mujoco_status("当前策略不需要 Psi/WAM 部署")
+            return
+        host, port = "localhost", self._molmospaces_psi_port()
+        # Fast path: avoid long subprocess probe that freezes the GUI.
+        if not port_listening(host, port, timeout=0.3):
+            self._append_mujoco_log(
+                f"[psi-remote/{mode}] 验证: ws://{host}:{port} 未监听"
+            )
+            self._on_mujoco_status(f"Psi/WAM 未就绪: :{port} 未监听")
+            self._update_molmospaces_psi_deploy_ui()
+            return
+        py = resolve_psi_remote_python(resolve_psi_remote_policy_root())
+        ok, msg = probe_psi_remote_server(mode, host, port, python_bin=py, timeout_s=3.0)
+        self._append_mujoco_log(f"[psi-remote/{mode}] 验证: {msg}")
+        self._on_mujoco_status(msg if ok else f"Psi/WAM 不可用: {msg}")
+        self._update_molmospaces_psi_deploy_ui()
+
+    def _warn_if_unlikely_wam_checkpoint(self, ckpt: str, mode: str) -> str:
+        """Return a warning string for checkpoints that are almost certainly wrong."""
+        if mode != "wam82":
+            return ""
+        name = os.path.basename(ckpt or "").lower()
+        path_l = (ckpt or "").replace("\\", "/").lower()
+        bad_names = ("scheduler.pt", "optimizer.pt", "rng_state.pt", "trainer.pt")
+        if name in bad_names or "/checkpoint-" in path_l and name == "scheduler.pt":
+            return (
+                f"当前文件 {os.path.basename(ckpt)} 不像 WAM policy 权重；"
+                "请选择 step=*.pt（例如 step=00016000-train_loss=0.349923.pt）"
+            )
+        if "qwen" in path_l and "wam" not in path_l and "native6d" not in path_l:
+            return (
+                "路径像是 Qwen/LLM 训练目录，不是 WAM finetune checkpoint；"
+                "请改选 pick_apple_tomato_*_wam_finetune 下的 step=*.pt"
+            )
+        return ""
+
+    def _stop_psi_remote_for_relaunch(self, port: int, *, mode: str) -> None:
+        """Stop UI-managed and stray listeners on ``port``, then wait until free."""
+        if getattr(self, "_psi_remote_launcher", None) is not None:
+            self._append_mujoco_log(f"[psi-remote/{mode}] 强制清理 UI 托管进程…")
+            self._psi_remote_launcher.force_clear()
+        stop_pi_server_on_port(port, log=self._append_mujoco_log)
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            QApplication.processEvents()
+            launcher_busy = bool(
+                getattr(self, "_psi_remote_launcher", None)
+                and self._psi_remote_launcher.is_running()
+            )
+            if (not launcher_busy) and (not port_listening("localhost", port, timeout=0.15)):
+                break
+            time.sleep(0.2)
+        # Last resort: clear launcher state even if QProcess is stuck reporting Running.
+        if getattr(self, "_psi_remote_launcher", None) is not None:
+            if self._psi_remote_launcher.is_running():
+                self._psi_remote_launcher.force_clear()
+        self._update_molmospaces_psi_deploy_ui()
+
+    def _start_psi_remote_server_async(
+        self, *, prefer_ckpt: str = "", force_restart: bool = False
+    ) -> Tuple[bool, str]:
+        """Launch Psi/WAM server without blocking the Qt event loop."""
+        mode = self._molmospaces_psi_mode()
+        if not mode:
+            return False, "当前策略不是 Psi Policy / Native6D / WAM"
+        host = "localhost"
+        port = self._molmospaces_psi_port()
+        ckpt_raw = (prefer_ckpt or "").strip() or self._molmospaces_psi_ckpt_text()
+        ckpt = resolve_psi_remote_checkpoint(ckpt_raw)
+        if hasattr(self, "molmospaces_psi_ckpt_edit") and ckpt:
+            self.molmospaces_psi_ckpt_edit.setText(ckpt)
+        if not ckpt or not os.path.isfile(ckpt):
+            return False, f"请先选择有效 checkpoint（当前: {ckpt_raw or '<空>'}）"
+        warn = self._warn_if_unlikely_wam_checkpoint(ckpt, mode)
+        if warn:
+            return False, warn
+        need_clean = force_restart or (
+            mode == "wam82"
+            and port_listening(host, port, timeout=0.3)
+            and wam82_server_needs_restart(port)
+        )
+        if need_clean:
+            self._append_mujoco_log(
+                f"[psi-remote/{mode}] 停止旧服务并用干净环境重启"
+                "（env -u LD_PRELOAD）…"
+            )
+            self._stop_psi_remote_for_relaunch(port, mode=mode)
+        elif port_listening(host, port, timeout=0.3):
+            # Already up; cheap listen check only (handshake is optional via 验证).
+            self._update_molmospaces_psi_deploy_ui()
+            return True, f"端口 :{port} 已在监听；可点「验证」确认握手"
+        elif (
+            getattr(self, "_psi_remote_launcher", None)
+            and self._psi_remote_launcher.is_running()
+        ):
+            self._update_molmospaces_psi_deploy_ui()
+            return True, f"服务已在启动中（:{port}），请等待按钮变为「已就绪」"
+        molmo_root = self._resolve_molmospaces_root()
+        policy_root = resolve_psi_remote_policy_root()
+        gpu = "0"
+        if hasattr(self, "molmospaces_psi_gpu_spin"):
+            gpu = str(int(self.molmospaces_psi_gpu_spin.value()))
+        if mode != "wam82" and not policy_root:
+            return False, "未找到 psi-policy 仓库（设置 PSI_POLICY_ROOT / PSI_POLICY_DIR）"
+        if mode == "wam82" and not resolve_wan22_dir():
+            self._append_mujoco_log(
+                "[psi-remote/wam82] 警告: 未找到 Wan2.2-TI2V-5B，"
+                "请设置 WAN22_TI2V_5B_CHECKPOINT_DIR"
+            )
+        try:
+            argv, cwd, env_extra, label = build_psi_remote_server_argv(
+                mode=mode,
+                checkpoint=ckpt,
+                molmospaces_root=molmo_root,
+                psi_policy_root=policy_root,
+                host="0.0.0.0",
+                port=port,
+                gpu_id=gpu,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"无法组装服务命令: {exc}"
+        self._append_mujoco_log(
+            f"[psi-remote/{mode}] checkpoint={ckpt} port={port} gpu={gpu}"
+        )
+        self._append_mujoco_log(f"[psi-remote/{mode}] 后台启动 {label} @ :{port}")
+        if env_extra.get("WAN22_TI2V_5B_CHECKPOINT_DIR"):
+            self._append_mujoco_log(
+                f"[psi-remote/{mode}] WAN={env_extra['WAN22_TI2V_5B_CHECKPOINT_DIR']}"
+            )
+        if env_extra.get("WAM_PROMPT_EMBEDDING_DIR"):
+            self._append_mujoco_log(
+                f"[psi-remote/{mode}] prompt_emb={env_extra['WAM_PROMPT_EMBEDDING_DIR']}"
+            )
+        self._append_mujoco_log(
+            f"[psi-remote/{mode}] WAM/Psi 加载可能需数分钟，界面不应卡住；"
+            "请等按钮变为「已就绪」后再评测"
+        )
+        self._psi_remote_launcher.start_cwd_command(
+            cwd=cwd,
+            argv=argv,
+            label=label,
+            env_extra=env_extra,
+        )
+        if hasattr(self, "_psi_remote_ready_timer"):
+            self._psi_remote_ready_timer.start()
+        self._update_molmospaces_psi_deploy_ui()
+        return True, f"已开始部署（:{port}），加载中请稍候"
+
+    def _on_molmospaces_psi_start_clicked(self) -> None:
+        try:
+            self._append_mujoco_log("[psi-remote] 正在部署启动…")
+            self._psi_remote_last_error = ""
+            self._psi_remote_user_stopped = False
+            port = self._molmospaces_psi_port()
+            mode = self._molmospaces_psi_mode()
+            listening = port_listening("localhost", port, timeout=0.2)
+            launcher_busy = bool(
+                getattr(self, "_psi_remote_launcher", None)
+                and self._psi_remote_launcher.is_running()
+            )
+            # Only force-clean a *stale listening* WAM. Do not kill a healthy
+            # in-flight load just because :port is not up yet.
+            force = bool(
+                mode == "wam82"
+                and listening
+                and wam82_server_needs_restart(port)
+            )
+            if mode == "wam82" and (not listening) and launcher_busy:
+                self._append_mujoco_log(
+                    f"[psi-remote/{mode}] 服务仍在加载（:{port} 未监听），不重复拉起"
+                )
+                self._update_molmospaces_psi_deploy_ui()
+                self._on_mujoco_status(f"WAM 加载中（:{port}），请等待「已就绪」")
+                return
+            ok, msg = self._start_psi_remote_server_async(force_restart=force)
+        except Exception as exc:  # noqa: BLE001
+            msg = f"{type(exc).__name__}: {exc}"
+            self._psi_remote_last_error = msg
+            self._append_mujoco_log(f"[psi-remote] 部署异常: {msg}")
+            self._on_mujoco_status(f"Psi/WAM 部署失败: {msg}")
+            self._update_molmospaces_psi_deploy_ui()
+            return
+        if ok:
+            self._psi_remote_last_error = ""
+        else:
+            self._psi_remote_last_error = msg
+            self._append_mujoco_log(f"[psi-remote] {msg}")
+        self._update_molmospaces_psi_deploy_ui()
+        self._on_mujoco_status(msg if ok else f"Psi/WAM 部署失败: {msg}")
+
+    def _on_molmospaces_psi_stop_clicked(self) -> None:
+        mode = self._molmospaces_psi_mode() or "psi_policy"
+        port = self._molmospaces_psi_port()
+        self._psi_remote_last_error = ""
+        self._psi_remote_user_stopped = True
+        if hasattr(self, "_psi_remote_launcher") and self._psi_remote_launcher.is_running():
+            self._append_mujoco_log(f"[psi-remote/{mode}] 正在停止 UI 启动的服务…")
+            self._psi_remote_launcher.stop()
+        msg = stop_pi_server_on_port(port, log=self._append_mujoco_log)
+        self._append_mujoco_log(f"[psi-remote/{mode}] {msg}")
+        self._update_molmospaces_psi_deploy_ui()
+        self._on_mujoco_status(msg)
+
+    def _ensure_psi_remote_policy_ready(
+        self,
+        *,
+        start_if_needed: bool = True,
+        wait_s: float = 30.0,
+        prefer_ckpt: str = "",
+    ) -> Tuple[bool, str]:
+        """Check Psi/WAM readiness; optionally kick off async deploy (no long UI freeze)."""
+        mode = self._molmospaces_psi_mode()
+        if not mode:
+            return False, "当前策略不是 Psi Policy / Native6D / WAM"
+        host = "localhost"
+        port = self._molmospaces_psi_port()
+        ckpt_raw = (prefer_ckpt or "").strip() or self._molmospaces_psi_ckpt_text()
+        ckpt = resolve_psi_remote_checkpoint(ckpt_raw)
+        warn = self._warn_if_unlikely_wam_checkpoint(ckpt, mode)
+        if warn:
+            return False, warn
+        py = resolve_psi_remote_python(resolve_psi_remote_policy_root())
+        force_restart = bool(
+            mode == "wam82"
+            and port_listening(host, port, timeout=0.3)
+            and wam82_server_needs_restart(port)
+        )
+        if force_restart:
+            self._append_mujoco_log(
+                f"[psi-remote/{mode}] 预检发现旧/污染的 WAM 服务，强制重启"
+                "（env -u LD_PRELOAD，避免 cudnnGetVersion 崩溃）…"
+            )
+            if not start_if_needed:
+                self._stop_psi_remote_for_relaunch(port, mode=mode)
+                return False, f"Psi/WAM 需重启: ws://{host}:{port}"
+            ok, msg = self._start_psi_remote_server_async(
+                prefer_ckpt=ckpt, force_restart=True
+            )
+            if not ok:
+                return False, msg
+            return (
+                False,
+                f"已强制重启部署（:{port}）。"
+                "请等按钮变为「已就绪」后再点启动评测（WAM 加载常需数分钟）。",
+            )
+        if port_listening(host, port, timeout=0.3):
+            ok, msg = probe_psi_remote_server(
+                mode, host, port, python_bin=py, timeout_s=2.5
+            )
+            if ok:
+                return True, msg
+            running = bool(
+                getattr(self, "_psi_remote_launcher", None)
+                and self._psi_remote_launcher.is_running()
+            )
+            if running:
+                return (
+                    False,
+                    f"服务仍在加载（:{port} 已监听但握手未完成）。"
+                    "请等「已就绪」后再点启动评测。",
+                )
+            return False, msg
+        running = bool(
+            getattr(self, "_psi_remote_launcher", None)
+            and self._psi_remote_launcher.is_running()
+        )
+        if running:
+            return (
+                False,
+                f"服务部署中（:{port}）。请等按钮变为「已就绪」后再评测。",
+            )
+        if not start_if_needed:
+            return False, f"Psi/WAM 未就绪: ws://{host}:{port}"
+        ok, msg = self._start_psi_remote_server_async(prefer_ckpt=ckpt)
+        if not ok:
+            return False, msg
+        # Brief non-blocking-ish wait: keep processEvents, but never hang for minutes.
+        deadline = time.time() + min(20.0, max(5.0, float(wait_s)))
+        last = msg
+        while time.time() < deadline:
+            QApplication.processEvents()
+            self._update_molmospaces_psi_deploy_ui()
+            if port_listening(host, port, timeout=0.2):
+                ok, last = probe_psi_remote_server(
+                    mode, host, port, python_bin=py, timeout_s=2.0
+                )
+                if ok:
+                    return True, last
+            if not self._psi_remote_launcher.is_running() and not port_listening(
+                host, port, timeout=0.2
+            ):
+                return False, "Psi/WAM 服务进程已退出，请查看上方日志"
+            time.sleep(0.5)
+        return (
+            False,
+            f"已开始部署但尚未就绪（:{port}）。"
+            "WAM 加载常需数分钟：请等「已就绪」后再点启动评测。",
+        )
 
     def _warmup_pi_before_rynnvalue_hud(self) -> Tuple[bool, str]:
         """Init Pi JAX/cuBLAS before RynnValue occupies the same GPU."""
@@ -39981,7 +40825,7 @@ class CameraTopicWindow(QMainWindow):
                 needs_remote = (
                     is_lingbot_va_policy(policy)
                     or is_vpp2_policy(policy)
-                    or is_psi_policy_id(policy)
+                    or needs_psi_remote_deploy(policy)
                     or is_pi_policy_id(policy)
                 )
                 franka_only = (
@@ -40020,31 +40864,28 @@ class CameraTopicWindow(QMainWindow):
                 )
                 return
             pi_ckpt = ""
-            if (not viewer_only) and is_psi_policy_id(policy):
-                # PsiPolicy connects to psi-policy-server (openpi-compatible WS).
-                # Do NOT start openpi serve_policy here.
+            psi_remote_ckpt = ""
+            psi_remote_mode = ""
+            if (not viewer_only) and needs_psi_remote_deploy(policy):
+                # Psi Policy / Native6D / WAM: deploy via GUI row (not openpi Pi).
                 self.mujoco_log_edit.clear()
-                host = "localhost"
-                port = PSI_POLICY_SERVER_PORT_DEFAULT
+                psi_remote_mode = psi_remote_mode_for_policy(policy)
                 self._append_mujoco_log(
-                    f"[psi-policy] 选用 Psi Policy：探测 ws://{host}:{port} …"
+                    f"[psi-remote/{psi_remote_mode}] 选用远程策略：确认服务可调用…"
                 )
-                ok, msg = probe_pi_server(host, port, timeout_s=4.0)
+                ok, msg = self._ensure_psi_remote_policy_ready(
+                    start_if_needed=True, wait_s=900.0
+                )
                 if not ok:
-                    serve = os.path.join(root, PSI_POLICY_SERVER_SCRIPT)
-                    self._append_mujoco_log(f"[psi-policy] 预检失败: {msg}")
-                    self._append_mujoco_log(
-                        "[psi-policy] 请先在另一终端启动（端口须与 "
-                        f"PsiPolicyConfig.remote_config 一致，默认 {port}）:\n"
-                        f"  cd {shlex.quote(os.path.join(root, 'psi-policy-server'))}\n"
-                        f"  python scripts/serve_policy.py --port {port} "
-                        "policy:checkpoint --policy.config=<cfg> "
-                        "--policy.dir=<ckpt_or_dir>\n"
-                        f"  # 或: {shlex.quote(serve)} --port {port}"
-                    )
-                    self._on_mujoco_status(f"Psi Policy 服务未就绪: {msg}")
+                    self._append_mujoco_log(f"[psi-remote/{psi_remote_mode}] 预检失败: {msg}")
+                    self._on_mujoco_status(f"Psi/WAM 未就绪: {msg}")
                     return
-                self._append_mujoco_log(f"[psi-policy] 预检通过: {msg}")
+                psi_remote_ckpt = resolve_psi_remote_checkpoint(
+                    self._molmospaces_psi_ckpt_text()
+                )
+                self._append_mujoco_log(
+                    f"[psi-remote/{psi_remote_mode}] 预检通过: {msg}"
+                )
             elif (not viewer_only) and is_pi_policy_id(policy):
                 self.mujoco_log_edit.clear()
                 self._append_mujoco_log("[pi] 选用 Pi：先确认模型/服务可调用…")
@@ -40085,6 +40926,8 @@ class CameraTopicWindow(QMainWindow):
             ]
             if pi_ckpt:
                 argv.extend(["--checkpoint_path", pi_ckpt])
+            elif psi_remote_ckpt:
+                argv.extend(["--checkpoint_path", psi_remote_ckpt])
             max_eps = 1
             if hasattr(self, "molmospaces_episodes_spin"):
                 max_eps = int(self.molmospaces_episodes_spin.value())
@@ -40106,13 +40949,17 @@ class CameraTopicWindow(QMainWindow):
                 if viewer_only
                 else f"{spaces_tag} eval {task.get('id')}"
             )
-            if not is_pi_policy_id(policy):
+            if not is_pi_policy_id(policy) and not needs_psi_remote_deploy(policy):
                 self.mujoco_log_edit.clear()
             self._append_mujoco_log(f"[{spaces_tag}] task={task.get('label')}")
             self._append_mujoco_log(f"[{spaces_tag}] benchmark={bench}")
             self._append_mujoco_log(f"[{spaces_tag}] policy={policy}")
             if pi_ckpt:
                 self._append_mujoco_log(f"[{spaces_tag}] checkpoint={pi_ckpt}")
+            if psi_remote_ckpt:
+                self._append_mujoco_log(
+                    f"[{spaces_tag}] psi/wam checkpoint={psi_remote_ckpt}"
+                )
             self._append_mujoco_log(
                 f"[{spaces_tag}] max_episodes={'全部' if max_eps <= 0 else max_eps}"
             )
@@ -40156,6 +41003,17 @@ class CameraTopicWindow(QMainWindow):
                 "PYTHONNOUSERSITE": "1",
                 **molmospaces_cache_env(),
             }
+            if psi_remote_mode:
+                port = self._molmospaces_psi_port()
+                env_extra["PSI_POLICY_SERVER_HOST"] = "127.0.0.1"
+                env_extra["PSI_POLICY_SERVER_PORT"] = str(port)
+                if psi_remote_mode == "wam82":
+                    env_extra["WAM_POLICY_SERVER_HOST"] = "127.0.0.1"
+                    env_extra["WAM_POLICY_SERVER_PORT"] = str(port)
+                    env_extra["WAM_PSI_R1_ACTION_CHUNK_SIZE"] = "16"
+                    env_extra["MLSPACES_JSON_EVAL_SCENE_VARIANT"] = os.environ.get(
+                        "MLSPACES_JSON_EVAL_SCENE_VARIANT", "base"
+                    )
             if viewer_only:
                 env_extra["MOLMOSPACES_VIEWER_ONLY"] = "1"
             tools = os.path.join(EAI_DIR, "tools")
@@ -42125,6 +42983,7 @@ class CameraTopicWindow(QMainWindow):
             h, w = panel._latest_image.shape[:2]
             self.sam3_u_spin.setMaximum(max(u, w - 1))
             self.sam3_v_spin.setMaximum(max(v, h - 1))
+        self._update_segment_invoke_btns_ui()
         if hasattr(self, "lingbot_depth_topic_combo"):
             source = str(self.lingbot_depth_source_combo.currentData() or "camera")
             if source == "camera":
@@ -42319,8 +43178,8 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_sam3_call_finished(self, result: object) -> None:
         self._sam3_call_busy = False
-        self.sam3_invoke_btn.setEnabled(True)
         self.sam3_invoke_btn.setText("调用 SAM3")
+        self._update_segment_invoke_btns_ui()
         if not isinstance(result, Sam3CallResult):
             return
 
@@ -42608,6 +43467,7 @@ class CameraTopicWindow(QMainWindow):
             sam3_model=resolve_sam3_model_path(),
         )
         self._refresh_sam3_status()
+        self._update_segment_invoke_btns_ui()
 
     def _refresh_sam3_status(self) -> None:
         cfg = get_segment_settings()
@@ -42693,6 +43553,7 @@ class CameraTopicWindow(QMainWindow):
     def _on_stack_status_changed(self, robot: str, base: str) -> None:
         self._update_robot_stack_ui(robot, base)
         self._update_robot_enable_status_ui()
+        self._update_prereq_gated_buttons()
 
     def _update_robot_stack_ui(
         self,
@@ -43092,6 +43953,7 @@ class CameraTopicWindow(QMainWindow):
         msg = self.node.request_model_control_mode()
         self.status_bar.showMessage(msg)
         self._update_enable_status_ui()
+        self._update_prereq_gated_buttons()
 
     def _on_hand_enable_clicked(self) -> None:
         enable = not self.node.is_hand_enabled()
@@ -43100,14 +43962,17 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_arm_enable_ui_changed(self, enabled: bool) -> None:
         self._update_enable_status_ui()
+        self._update_prereq_gated_buttons()
         if enabled:
             self._try_finish_pending_arm_move()
 
     def _on_hand_enable_ui_changed(self, _enabled: bool) -> None:
         self._update_enable_status_ui()
+        self._update_prereq_gated_buttons()
 
     def _on_control_mode_ui_changed(self, _mode: int) -> None:
         self._update_enable_status_ui()
+        self._update_prereq_gated_buttons()
 
     @staticmethod
     def _style_enable_label(label: QLabel, received: bool, enabled: bool) -> None:
@@ -43117,6 +43982,169 @@ class CameraTopicWindow(QMainWindow):
             label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
         else:
             label.setStyleSheet(f"color: {UI_ACCENT_RED};")
+
+    def _stack_ready_for_enable_services(self) -> bool:
+        """手/臂使能与 mode 切换所需：手/臂服务栈已运行。"""
+        if self._sim_teleop_active():
+            return False
+        try:
+            _, base = self._stack_launcher.get_cached_status()
+        except Exception:
+            base = ""
+        return base == "运行中" or _is_stack_services_running()
+
+    def _has_segment_seed(self) -> bool:
+        topic = getattr(self, "_last_sam3_topic", "") or ""
+        panel = self.panels.get(topic) if topic else None
+        if isinstance(panel, CameraPanel) and panel._pending_seed_uv is not None:
+            return True
+        if isinstance(panel, DepthPanel3D) and panel._pending_seed_full_uv is not None:
+            return True
+        for p in self.panels.values():
+            if isinstance(p, CameraPanel) and p._pending_seed_uv is not None:
+                return True
+            if isinstance(p, DepthPanel3D) and p._pending_seed_full_uv is not None:
+                return True
+        return False
+
+    def _set_btn_prereq_enabled(
+        self,
+        btn: QPushButton,
+        enabled: bool,
+        *,
+        ok_tip: str,
+        blockers: Sequence[str],
+    ) -> None:
+        btn.setEnabled(bool(enabled))
+        if enabled:
+            btn.setToolTip(ok_tip)
+        else:
+            reasons = list(blockers) or ["先决条件未满足"]
+            btn.setToolTip("不可用:\n" + "\n".join(f"• {r}" for r in reasons))
+
+    def _update_enable_control_btns_ui(self) -> None:
+        """按服务栈就绪状态控制「启用手臂/手」「切 mode=0」「手部应用」。"""
+        sim = self._sim_teleop_active()
+        stack_ok = self._stack_ready_for_enable_services()
+        arm_on = self.node.is_arm_enabled()
+        hand_on = self.node.is_hand_enabled()
+        can_arm = sim or stack_ok or arm_on
+        can_hand = sim or stack_ok or hand_on
+        can_mode = (not sim) and stack_ok
+        can_apply = sim or hand_on
+        stack_hint = "请先点「启动机器人栈」并等待 stack: 运行中"
+        arm_tip = (
+            "仿真遥控中无需真机使能"
+            if sim
+            else "等同踏板 F2 开启/关闭手臂控制"
+        )
+        hand_tip = (
+            "仿真遥控中使用夹爪滑块即可"
+            if sim
+            else "等同踏板 F1 开启/关闭手部控制"
+        )
+        mode_tip = (
+            f"发布 {CONTROL_MODE_TOPIC}={MODEL_CONTROL_MODE}"
+            "（模型控制，手臂移动/回放需要）"
+        )
+        apply_tip = "将主游标（当前激活状态 A 或 B）的角度立即发送"
+        for btn in (
+            getattr(self, "arm_enable_btn", None),
+            getattr(self, "robot_arm_enable_btn", None),
+        ):
+            if btn is not None:
+                self._set_btn_prereq_enabled(
+                    btn,
+                    can_arm,
+                    ok_tip=arm_tip,
+                    blockers=["仿真遥控中" if sim else stack_hint],
+                )
+        for btn in (
+            getattr(self, "hand_enable_btn", None),
+            getattr(self, "robot_hand_enable_btn", None),
+        ):
+            if btn is not None:
+                self._set_btn_prereq_enabled(
+                    btn,
+                    can_hand,
+                    ok_tip=hand_tip,
+                    blockers=["仿真遥控中" if sim else stack_hint],
+                )
+        for btn in (
+            getattr(self, "mode0_btn", None),
+            getattr(self, "robot_mode0_btn", None),
+        ):
+            if btn is not None:
+                self._set_btn_prereq_enabled(
+                    btn,
+                    can_mode,
+                    ok_tip=mode_tip,
+                    blockers=[
+                        "仿真遥控中无需切 mode" if sim else stack_hint
+                    ],
+                )
+        for btn in (
+            getattr(self, "left_hand_apply_btn", None),
+            getattr(self, "right_hand_apply_btn", None),
+        ):
+            if btn is not None:
+                self._set_btn_prereq_enabled(
+                    btn,
+                    can_apply,
+                    ok_tip=apply_tip,
+                    blockers=["请先「启用手」或进入仿真遥控"],
+                )
+
+    def _update_segment_invoke_btns_ui(self) -> None:
+        """「调用分割 / SAM3」按选点与彩色图就绪控制可点性。"""
+        if hasattr(self, "stereo_invoke_btn"):
+            has_seed = self._has_segment_seed()
+            self._set_btn_prereq_enabled(
+                self.stereo_invoke_btn,
+                has_seed,
+                ok_tip=(
+                    "对当前提示点执行立体分割 + 6D 位姿（跟随上方分割/位姿后端设置）。\n"
+                    "点击图像仅选点，不会自动分割。"
+                ),
+                blockers=["请先点击彩色/深度图像选择提示点"],
+            )
+        if hasattr(self, "sam3_invoke_btn"):
+            if getattr(self, "_sam3_call_busy", False):
+                self.sam3_invoke_btn.setEnabled(False)
+                self.sam3_invoke_btn.setToolTip("SAM3 调用中…")
+            else:
+                has_color = self._pick_sam3_color_source() is not None
+                backend = (
+                    self.segment_backend_combo.currentData()
+                    if hasattr(self, "segment_backend_combo")
+                    else None
+                )
+                need_seed = backend != SAM3_BACKEND_TEXT
+                has_seed = self._has_segment_seed()
+                can = has_color and (has_seed or not need_seed)
+                blockers: List[str] = []
+                if not has_color:
+                    blockers.append("无可用彩色图像（请勾选 color topic 并等待图像）")
+                if need_seed and not has_seed:
+                    blockers.append("请先点击图像选择提示点")
+                self._set_btn_prereq_enabled(
+                    self.sam3_invoke_btn,
+                    can,
+                    ok_tip=(
+                        "对当前彩色图像调用 SAM3 分割，并在下方显示结果；"
+                        "成功时会在图像上叠加 mask"
+                    ),
+                    blockers=blockers,
+                )
+
+    def _update_prereq_gated_buttons(self, *_args) -> None:
+        """统一刷新依赖先决条件的按钮可点状态。"""
+        self._update_enable_control_btns_ui()
+        self._update_segment_invoke_btns_ui()
+        if hasattr(self, "replay_start_btn"):
+            self._update_replay_ui()
+        if hasattr(self, "real_eval_start_btn"):
+            self._refresh_real_eval_status()
 
     def _update_robot_enable_status_ui(self) -> None:
         arm_received = self.node._arm_enable_received_at > 0
@@ -43174,6 +44202,7 @@ class CameraTopicWindow(QMainWindow):
             if hasattr(self, "robot_control_mode_label"):
                 self.robot_control_mode_label.setText("mode: sim-gui")
                 self.robot_control_mode_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            self._update_enable_control_btns_ui()
             return
         self._update_arm_enable_ui()
         self._update_hand_enable_ui()
@@ -43186,6 +44215,7 @@ class CameraTopicWindow(QMainWindow):
             self.control_mode_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
         else:
             self.control_mode_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
+        self._update_enable_control_btns_ui()
 
     def _try_finish_pending_arm_move(self) -> None:
         if self._pending_arm_move_goal is None or not self.node.is_arm_enabled():
@@ -43231,8 +44261,9 @@ class CameraTopicWindow(QMainWindow):
     def _can_start_arm_move(self, arm_side: str = "left") -> bool:
         if self._is_sim_arm_moving() or self.node.is_slow_motion_busy():
             return True
-        if self.move_target_segment_radio.isChecked():
-            return self._resolve_move_goal(arm_side) is not None
+        # 分割位姿 / 相对偏移均需能解析出目标（零偏移时相对模式不可点）
+        if self._resolve_move_goal(arm_side) is None:
+            return False
         if self._sim_teleop_active():
             left_ok = self._sim_tcp_pose("left") is not None
             right_ok = self._sim_tcp_pose("right") is not None

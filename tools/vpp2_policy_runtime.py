@@ -30,12 +30,20 @@ ROBODOJO_ROOT_DEFAULT = _LIY / "RoboDojo"
 VPP2_POLICY_REL = "XPolicyLab/policy/VPP2"
 VPP2_WEIGHTS_DEFAULT = _LIY / "models" / "VPP2"
 
-VPP2_ENV_CANDIDATES: Tuple[str, ...] = (
-    str(_LIY / "RoboDojo_cache" / "envs" / "vpp2"),
-    str(_LIY / "miniconda3" / "envs" / "vpp2"),
-    "/home/psibot/miniconda3/envs/vpp2",
-    str(_LIY / "RoboDojo_cache" / "envs" / "RoboDojo"),
-)
+# Exactly one miniconda3 env for this stack (see tools/model_conda_envs.py).
+VPP2_ENV_DEFAULT = str(_LIY / "miniconda3" / "envs" / "vpp2")
+try:
+    import sys as _sys
+
+    _tools_dir = str(Path(__file__).resolve().parent)
+    if _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+    from model_conda_envs import env_dir as _model_env_dir
+
+    VPP2_ENV_DEFAULT = _model_env_dir("vpp2")
+except Exception:  # noqa: BLE001
+    pass
+VPP2_ENV_CANDIDATES: Tuple[str, ...] = (VPP2_ENV_DEFAULT,)
 
 # Backend → support level
 #   robodojo_adapter: XPolicyLab VPP2 deploy
@@ -259,13 +267,18 @@ def resolve_vpp2_conda_env(prefer: str = "") -> str:
     for cand in (
         (prefer or "").strip(),
         os.environ.get("VPP2_CONDA_ENV", ""),
-        os.environ.get("ROBODOJO_POLICY_ENV", ""),
-        *VPP2_ENV_CANDIDATES,
+        VPP2_ENV_DEFAULT,
     ):
         c = (cand or "").strip()
-        if c and os.path.isdir(c):
-            return c
-    return VPP2_ENV_CANDIDATES[0]
+        if not c:
+            continue
+        path = c if (os.path.sep in c or c.startswith("~")) else str(
+            _LIY / "miniconda3" / "envs" / c
+        )
+        path = os.path.abspath(os.path.expanduser(path))
+        if os.path.isdir(path):
+            return path
+    return VPP2_ENV_DEFAULT
 
 
 def resolve_paths(

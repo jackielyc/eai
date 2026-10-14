@@ -114,6 +114,12 @@ def main() -> int:
 
             cfg.policy_config = DummyPolicyConfig()
             cfg.end_on_success = False
+            # Placo IK ~+11s on Psi R1 init; unused with DummyPolicy.
+            try:
+                if getattr(cfg, "robot_config", None) is not None:
+                    cfg.robot_config.use_psi_r1_placo_ik = False
+            except Exception:
+                pass
             # Keep the window up until GUI stop / viewer close.
             try:
                 horizon = int(getattr(cfg, "task_horizon", 0) or 0)
@@ -122,7 +128,7 @@ def main() -> int:
             if horizon < 100000:
                 cfg.task_horizon = 100000
             print(
-                "[molmospaces-eval] viewer_only=1: DummyPolicy, keep robot/scene, "
+                "[molmospaces-eval] viewer_only=1: DummyPolicy, no Placo IK, "
                 f"task_horizon={cfg.task_horizon}",
                 flush=True,
             )

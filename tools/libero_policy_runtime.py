@@ -28,12 +28,9 @@ LIBERO_SRC_DEFAULT = OPENPI_ROOT_DEFAULT / "third_party" / "libero"
 LIBERO_CONFIG_DIR_DEFAULT = EAI_DIR / ".cache" / "libero"
 LIBERO_EVAL_OUTPUT_DIR = EAI_DIR / ".cache" / "libero_eval"
 
+# Exactly one miniconda3 env for LIBERO client (see tools/model_conda_envs.py).
 LIBERO_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/libero/bin/python",
-    "/home/psibot/miniconda3/envs/libero/bin/python",
-    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/openpi/bin/python",
-    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python",
-    "/home/psibot/miniconda3/envs/openpi/bin/python",
 )
 
 LIBERO_TASK_SUITES: Tuple[Tuple[str, str], ...] = (

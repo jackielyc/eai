@@ -26,11 +26,9 @@ ROBOTWIN_ROOT_DEFAULT = Path(
 )
 ROBOTWIN_EVAL_OUTPUT_DIR = EAI_DIR / ".cache" / "robotwin_eval"
 
+# Exactly one miniconda3 env for RoboTwin eval client (see tools/model_conda_envs.py).
 ROBOTWIN_PYTHON_CANDIDATES: Tuple[str, ...] = (
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/RLinf/bin/python",
-    "/home/psibot/miniconda3/envs/RLinf/bin/python",
-    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/openpi/bin/python",
-    "/home/psibot/miniconda3/envs/openpi/bin/python",
 )
 
 # (label, task_name) — tasks with ready Hydra env YAMLs under examples/embodiment/config/env/

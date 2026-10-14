@@ -32,12 +32,20 @@ ROBODOJO_ROOT_DEFAULT = _LIY / "RoboDojo"
 LINGBOT_VA_POLICY_REL = "XPolicyLab/policy/LingBot_VA"
 LINGBOT_VA_ROOT_DEFAULT = ROBODOJO_ROOT_DEFAULT / LINGBOT_VA_POLICY_REL
 
-LINGBOT_VA_ENV_CANDIDATES: Tuple[str, ...] = (
-    str(_LIY / "RoboDojo_cache" / "envs" / "lingbot_va"),
-    str(_LIY / "miniconda3" / "envs" / "lingbot_va"),
-    "/home/psibot/miniconda3/envs/lingbot_va",
-    str(_LIY / "RoboDojo_cache" / "envs" / "RoboDojo"),
-)
+# Exactly one miniconda3 env for this stack (see tools/model_conda_envs.py).
+LINGBOT_VA_ENV_DEFAULT = str(_LIY / "miniconda3" / "envs" / "lingbot_va")
+try:
+    import sys as _sys
+
+    _tools_dir = str(Path(__file__).resolve().parent)
+    if _tools_dir not in _sys.path:
+        _sys.path.insert(0, _tools_dir)
+    from model_conda_envs import env_dir as _model_env_dir
+
+    LINGBOT_VA_ENV_DEFAULT = _model_env_dir("lingbot_va")
+except Exception:  # noqa: BLE001
+    pass
+LINGBOT_VA_ENV_CANDIDATES: Tuple[str, ...] = (LINGBOT_VA_ENV_DEFAULT,)
 
 LINGBOT_VA_BASE_MODEL_CANDIDATES: Tuple[str, ...] = (
     str(_LIY / "RoboDojo_cache" / "models" / "lingbot-va-base"),
@@ -216,13 +224,19 @@ def resolve_lingbot_va_conda_env(prefer: str = "") -> str:
     for cand in (
         (prefer or "").strip(),
         os.environ.get("LINGBOT_VA_CONDA_ENV", ""),
-        os.environ.get("ROBODOJO_POLICY_ENV", ""),
-        *LINGBOT_VA_ENV_CANDIDATES,
+        LINGBOT_VA_ENV_DEFAULT,
     ):
         c = (cand or "").strip()
-        if c and os.path.isdir(c):
-            return c
-    return LINGBOT_VA_ENV_CANDIDATES[0]
+        if not c:
+            continue
+        # allow env name or absolute path
+        path = c if (os.path.sep in c or c.startswith("~")) else str(
+            _LIY / "miniconda3" / "envs" / c
+        )
+        path = os.path.abspath(os.path.expanduser(path))
+        if os.path.isdir(path):
+            return path
+    return LINGBOT_VA_ENV_DEFAULT
 
 
 def resolve_base_model(prefer: str = "") -> str:
