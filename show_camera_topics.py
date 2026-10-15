@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D / R1） / 本地摄像头（本机 MJPEG 推流 + SSH 反向隧道 + 预览） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D / R1 / Franka） / 本地摄像头（本机 MJPEG 推流 + SSH 反向隧道 + 预览） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -21,7 +21,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
 遥控各仿真后端（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / Arena / LIBERO / RoboTwin / 扩展评测）双臂与夹爪。
 仿真运行中可用「暂停 / 继续」按钮（写入 sim_control.json）暂停任务 step；各后端在循环中轮询。
 「手臂/手」页可输入文本指挥手臂相对移动和手部开合，例如「左臂向前5cm；右手张开」。
-「手臂/手」页也可选择人类演示视频，经 MediaPipe 分析后让机器人复现手部开合与手腕相对运动。
+「手臂/手」页也可选择人类演示视频，经 MediaPipe 分析后把轨迹写成文本指挥并填入输入框，并可让机器人复现手部开合与手腕相对运动。
 """
 
 from __future__ import annotations
@@ -3094,6 +3094,21 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "sub task",
     "sub image",
 )
+# 仿真评测页后端选择条默认顺序：(key, 显示名, 隐藏 radio 属性名)
+# key 用于持久化；radio 仍保留以兼容 viewer_ui_state / 既有 isChecked 逻辑
+SIM_BACKEND_SELECTOR_SPECS: Tuple[Tuple[str, str, str], ...] = (
+    ("isaac", "Isaac / RoboDojo", "sim_backend_isaac_radio"),
+    ("mujoco", "MuJoCo", "sim_backend_mujoco_radio"),
+    ("molmospaces", "MolmoSpaces", "sim_backend_spaces_radio"),
+    ("psi_molmospaces", "Psi-MolmoSpaces", "sim_backend_psi_spaces_radio"),
+    ("arena", "IsaacLab-Arena", "sim_backend_arena_radio"),
+    ("libero", "LIBERO", "sim_backend_libero_radio"),
+    ("robotwin", "RoboTwin", "sim_backend_robotwin_radio"),
+    ("extended", "扩展评测", "sim_backend_extended_radio"),
+)
+SIM_BACKEND_ORDER_KEYS: Tuple[str, ...] = tuple(
+    k for k, _label, _attr in SIM_BACKEND_SELECTOR_SPECS
+)
 # 启动 --tab 可用的别名 → 正式标题
 CONTROL_TAB_ALIASES: Dict[str, str] = {
     "brain": "大脑",
@@ -3260,6 +3275,111 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "data": "数据集",
     "数据集": "数据集",
 }
+# 悬停 tip 优先展示的短别名（未列出则从 CONTROL_TAB_ALIASES 自动挑）
+CONTROL_TAB_PREFERRED_ALIAS: Dict[str, str] = {
+    "大脑": "brain",
+    "回放": "replay",
+    "分割": "segment",
+    "视觉基础模型": "vision",
+    "空间感知模型": "depth",
+    "3D重建模型": "map",
+    "视频生成模型": "video",
+    "世界模型": "world",
+    "CAD": "cad",
+    "训练": "train",
+    "手臂/手": "arm",
+    "手骨架遥控": "skeleton",
+    "仿真评测": "sim",
+    "真机评测": "real",
+    "本地摄像头": "webcam",
+    "Reward评测": "reward",
+    "Reward训练": "reward_train",
+    "仿真强化学习训练": "dojo_rl",
+    "RoboMeter": "robometer",
+    "RynnValue": "rynn",
+    "RoboICL": "roboicl",
+    "ICL": "icl",
+    "Astra": "astra",
+    "PhysicalRSI": "rsi",
+    "编程冲SOTA": "sota",
+    "主机资源": "system",
+    "HumanEgo": "humanego",
+    "数据集": "dataset",
+    "sub task": "test",
+    "sub image": "bagel",
+}
+
+
+def _shell_tab_token(token: str) -> str:
+    """CLI 里对 --tab 参数加引号（含空格/中文时）。"""
+    t = (token or "").strip()
+    if not t:
+        return '""'
+    if re.fullmatch(r"[A-Za-z0-9_./+-]+", t):
+        return t
+    return shlex.quote(t)
+
+
+def control_tab_cli_aliases(title: str) -> List[str]:
+    """某 tab 可用于 --tab 的别名列表（首选短英文在前）。"""
+    title = (title or "").strip()
+    if not title:
+        return []
+    seen = set()
+    ordered: List[str] = []
+
+    def _push(name: str) -> None:
+        n = (name or "").strip()
+        if not n or n in seen:
+            return
+        seen.add(n)
+        ordered.append(n)
+
+    pref = CONTROL_TAB_PREFERRED_ALIAS.get(title, "")
+    if pref:
+        _push(pref)
+    ascii_rest: List[str] = []
+    other_rest: List[str] = []
+    for alias, dest in CONTROL_TAB_ALIASES.items():
+        if dest != title or alias == title:
+            continue
+        if alias.isascii() and " " not in alias:
+            ascii_rest.append(alias)
+        else:
+            other_rest.append(alias)
+    ascii_rest.sort(key=lambda s: (len(s), s.lower()))
+    for alias in ascii_rest:
+        _push(alias)
+    for alias in other_rest:
+        _push(alias)
+    _push(title)
+    return ordered
+
+
+def format_control_tab_launch_tooltip(title: str) -> str:
+    """鼠标悬停 tab 时展示的启动提示。"""
+    title = (title or "").strip()
+    if not title or title == "…":
+        return "正在构建控制区…"
+    aliases = control_tab_cli_aliases(title)
+    primary = aliases[0] if aliases else title
+    tok = _shell_tab_token(primary)
+    alias_line = " / ".join(aliases[:6]) if aliases else title
+    return (
+        f"「{title}」\n"
+        "\n"
+        "启动时只显示本页:\n"
+        f"  bash run_local.sh --tab {tok}\n"
+        f"  bash run_in_docker.sh --tab {tok}\n"
+        f"  python3 show_camera_topics.py --tab {tok}\n"
+        "\n"
+        f"别名: {alias_line}\n"
+        f"环境变量: EAI_ONLY_TAB={primary}\n"
+        "\n"
+        "可拖动标签调整顺序（写入 eai/control_tabs_order.json）"
+    )
+
+
 CAD_MESHES_DIR = os.path.join(EAI_DIR, "meshes")
 TEST_IMAGES_DIR = os.path.join(EAI_DIR, "images")
 ISAAC_CAM_BRIDGE_SCRIPT = os.path.join(EAI_DIR, "run_isaac_cam_bridge.sh")
@@ -3745,10 +3865,25 @@ LEGACY_BASE_SERVICES_LAUNCH = "base_services.launch.py"
 # 真机评测机器人后端（与仿真后端独立）
 REAL_ROBOT_BACKEND_A2D = "a2d"
 REAL_ROBOT_BACKEND_R1 = "r1"
+REAL_ROBOT_BACKEND_FRANKA = "franka"
 REAL_ROBOT_BACKEND_LABELS = {
     REAL_ROBOT_BACKEND_A2D: "A2D",
     REAL_ROBOT_BACKEND_R1: "R1",
+    REAL_ROBOT_BACKEND_FRANKA: "Franka",
 }
+# 非 A2D：独立 scripts/workspace，走 detached 拉起
+REAL_ROBOT_EXTERNAL_STACK_BACKENDS = frozenset(
+    {REAL_ROBOT_BACKEND_R1, REAL_ROBOT_BACKEND_FRANKA}
+)
+# 真机评测页后端选择条：(key, 显示名, 隐藏 radio 属性名)
+REAL_ROBOT_SELECTOR_SPECS: Tuple[Tuple[str, str, str], ...] = (
+    (REAL_ROBOT_BACKEND_A2D, "A2D", "real_robot_a2d_radio"),
+    (REAL_ROBOT_BACKEND_R1, "R1", "real_robot_r1_radio"),
+    (REAL_ROBOT_BACKEND_FRANKA, "Franka", "real_robot_franka_radio"),
+)
+REAL_ROBOT_ORDER_KEYS: Tuple[str, ...] = tuple(
+    k for k, _label, _attr in REAL_ROBOT_SELECTOR_SPECS
+)
 ROBOT_FK_JOINTS_TOPIC = "/fk/joint_states"
 ROBOT_LEFT_HAND_TOPIC = "/ry_hand/left/joint_states"
 ROBOT_RIGHT_HAND_TOPIC = "/ry_hand/right/joint_states"
@@ -5436,6 +5571,8 @@ EAI_DATASETS_DIR = os.path.join(EAI_DIR, "datasets")
 EAI_IMAGES_DIR = os.path.join(EAI_DIR, "images")
 CHAT_USER_SETTINGS_PATH = os.path.join(EAI_DIR, "chat_user_settings.json")
 CONTROL_TABS_ORDER_PATH = os.path.join(EAI_DIR, "control_tabs_order.json")
+SIM_BACKENDS_ORDER_PATH = os.path.join(EAI_DIR, "sim_backends_order.json")
+REAL_ROBOT_BACKENDS_ORDER_PATH = os.path.join(EAI_DIR, "real_robot_backends_order.json")
 TEST_QWEN_LAST_CONFIG_PATH = os.path.join(EAI_DIR, "test_qwen_last_config.json")
 VIEWER_UI_STATE_PATH = os.path.join(EAI_DIR, "viewer_ui_state.json")
 # 只读日志/结果类文本框不参与恢复（避免把运行日志写回界面）
@@ -9295,6 +9432,147 @@ def preferred_control_tabs_order(available: Sequence[str]) -> List[str]:
     for title in avail:
         if title not in ordered:
             ordered.append(title)
+    return ordered
+
+
+def load_sim_backends_order() -> List[str]:
+    """加载仿真评测后端选择条自定义顺序；无效则返回空列表。"""
+    known = set(SIM_BACKEND_ORDER_KEYS)
+    try:
+        with open(SIM_BACKENDS_ORDER_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            raw = data
+        elif isinstance(data, dict):
+            raw = data.get("order") or []
+        else:
+            raw = []
+        out: List[str] = []
+        seen = set()
+        for item in raw:
+            key = str(item or "").strip()
+            if not key or key in seen or key not in known:
+                continue
+            seen.add(key)
+            out.append(key)
+        return out
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+def save_sim_backends_order(keys: Sequence[str]) -> str:
+    known = set(SIM_BACKEND_ORDER_KEYS)
+    cleaned: List[str] = []
+    seen = set()
+    for item in keys:
+        key = str(item or "").strip()
+        if not key or key in seen or key not in known:
+            continue
+        seen.add(key)
+        cleaned.append(key)
+    for key in SIM_BACKEND_ORDER_KEYS:
+        if key not in seen:
+            cleaned.append(key)
+            seen.add(key)
+    os.makedirs(os.path.dirname(SIM_BACKENDS_ORDER_PATH), exist_ok=True)
+    with open(SIM_BACKENDS_ORDER_PATH, "w", encoding="utf-8") as f:
+        json.dump({"order": cleaned}, f, ensure_ascii=False, indent=2)
+    return SIM_BACKENDS_ORDER_PATH
+
+
+def preferred_sim_backends_order(available: Sequence[str] | None = None) -> List[str]:
+    """按「已保存顺序 → 默认 SIM_BACKEND_ORDER_KEYS」排列。"""
+    avail = [
+        str(k)
+        for k in (available if available is not None else SIM_BACKEND_ORDER_KEYS)
+        if str(k).strip()
+    ]
+    avail_set = set(avail)
+    saved = load_sim_backends_order()
+    ordered: List[str] = []
+    for key in saved:
+        if key in avail_set and key not in ordered:
+            ordered.append(key)
+    for key in SIM_BACKEND_ORDER_KEYS:
+        if key in avail_set and key not in ordered:
+            ordered.append(key)
+    for key in avail:
+        if key not in ordered:
+            ordered.append(key)
+    return ordered
+
+
+def load_real_robot_backends_order() -> List[str]:
+    """加载真机评测后端选择条自定义顺序；无效则返回空列表。"""
+    known = set(REAL_ROBOT_ORDER_KEYS)
+    try:
+        with open(REAL_ROBOT_BACKENDS_ORDER_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            raw = data
+        elif isinstance(data, dict):
+            raw = data.get("order") or []
+        else:
+            raw = []
+        out: List[str] = []
+        seen = set()
+        for item in raw:
+            key = normalize_real_robot_backend(str(item or ""))
+            if not key or key in seen or key not in known:
+                continue
+            seen.add(key)
+            out.append(key)
+        return out
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+def save_real_robot_backends_order(keys: Sequence[str]) -> str:
+    known = set(REAL_ROBOT_ORDER_KEYS)
+    cleaned: List[str] = []
+    seen = set()
+    for item in keys:
+        key = normalize_real_robot_backend(str(item or ""))
+        if not key or key in seen or key not in known:
+            continue
+        seen.add(key)
+        cleaned.append(key)
+    for key in REAL_ROBOT_ORDER_KEYS:
+        if key not in seen:
+            cleaned.append(key)
+            seen.add(key)
+    os.makedirs(os.path.dirname(REAL_ROBOT_BACKENDS_ORDER_PATH), exist_ok=True)
+    with open(REAL_ROBOT_BACKENDS_ORDER_PATH, "w", encoding="utf-8") as f:
+        json.dump({"order": cleaned}, f, ensure_ascii=False, indent=2)
+    return REAL_ROBOT_BACKENDS_ORDER_PATH
+
+
+def preferred_real_robot_backends_order(
+    available: Sequence[str] | None = None,
+) -> List[str]:
+    """按「已保存顺序 → 默认 REAL_ROBOT_ORDER_KEYS」排列。"""
+    avail = [
+        normalize_real_robot_backend(str(k))
+        for k in (available if available is not None else REAL_ROBOT_ORDER_KEYS)
+        if str(k).strip()
+    ]
+    avail = [k for k in avail if k in REAL_ROBOT_ORDER_KEYS]
+    avail_set = set(avail)
+    saved = load_real_robot_backends_order()
+    ordered: List[str] = []
+    for key in saved:
+        if key in avail_set and key not in ordered:
+            ordered.append(key)
+    for key in REAL_ROBOT_ORDER_KEYS:
+        if key in avail_set and key not in ordered:
+            ordered.append(key)
+    for key in avail:
+        if key not in ordered:
+            ordered.append(key)
     return ordered
 
 
@@ -15172,9 +15450,11 @@ def resolve_a2d_workspace_dir() -> str:
 
 
 def normalize_real_robot_backend(backend: str) -> str:
-    key = (backend or "").strip().lower()
-    if key in ("r1", "psi_r1", "psi-r1", "ruiyan_r1"):
+    key = (backend or "").strip().lower().replace("-", "_")
+    if key in ("r1", "psi_r1", "ruiyan_r1"):
         return REAL_ROBOT_BACKEND_R1
+    if key in ("franka", "franka_panda", "panda", "frankapanda", "libfranka"):
+        return REAL_ROBOT_BACKEND_FRANKA
     return REAL_ROBOT_BACKEND_A2D
 
 
@@ -15183,20 +15463,45 @@ def real_robot_backend_label(backend: str) -> str:
     return REAL_ROBOT_BACKEND_LABELS.get(key, key.upper())
 
 
-def resolve_r1_scripts_pack_dir() -> Optional[str]:
-    """R1 真机 scripts_pack；可通过 R1_SCRIPTS_DIR 覆盖。"""
-    env_dir = os.environ.get("R1_SCRIPTS_DIR", "").strip()
+def _resolve_tele_scripts_pack_dir(
+    *,
+    env_scripts: str,
+    workspace_names: Sequence[str],
+    opt_roots: Sequence[str],
+) -> Optional[str]:
+    """通用：按 ENV / 工作区名 /opt 路径解析 scripts_pack。"""
+    env_dir = os.environ.get(env_scripts, "").strip()
     if env_dir and os.path.isdir(env_dir):
         return os.path.abspath(env_dir)
     here = os.path.dirname(os.path.abspath(__file__))
     psibot_home = os.environ.get("PSIBOT_HOME", "/home/psibot").strip() or "/home/psibot"
-    candidates = [
-        os.path.join(psibot_home, "workspace_liyichao/r1-tele/install/scripts_pack/share/scripts_pack/scripts"),
-        os.path.join(psibot_home, "workspace_liyichao/install/scripts_pack/share/scripts_pack/scripts"),
-        os.path.abspath(os.path.join(here, "..", "install", "scripts_pack", "share", "scripts_pack", "scripts")),
-        os.path.expanduser("~/workspace_liyichao/r1-tele/install/scripts_pack/share/scripts_pack/scripts"),
-        "/opt/psi/rt/r1-tele/install/scripts_pack/share/scripts_pack/scripts",
-    ]
+    candidates: List[str] = []
+    for ws_name in workspace_names:
+        candidates.append(
+            os.path.join(
+                psibot_home,
+                f"workspace_liyichao/{ws_name}/install/scripts_pack/share/scripts_pack/scripts",
+            )
+        )
+        candidates.append(
+            os.path.expanduser(
+                f"~/workspace_liyichao/{ws_name}/install/scripts_pack/share/scripts_pack/scripts"
+            )
+        )
+    candidates.append(
+        os.path.join(
+            psibot_home, "workspace_liyichao/install/scripts_pack/share/scripts_pack/scripts"
+        )
+    )
+    candidates.append(
+        os.path.abspath(
+            os.path.join(here, "..", "install", "scripts_pack", "share", "scripts_pack", "scripts")
+        )
+    )
+    for root in opt_roots:
+        candidates.append(
+            os.path.join(root, "install/scripts_pack/share/scripts_pack/scripts")
+        )
     stack_script = STACK_SERVICES_SCRIPT
     resolved_candidates: List[str] = []
     for path in candidates:
@@ -15206,44 +15511,101 @@ def resolve_r1_scripts_pack_dir() -> Optional[str]:
         resolved_candidates.append(resolved)
         if os.path.isfile(os.path.join(resolved, stack_script)):
             return resolved
+        if os.path.isfile(os.path.join(resolved, ROBOT_SERVICE_SCRIPT)):
+            return resolved
     for resolved in resolved_candidates:
         if os.path.isdir(resolved):
             return resolved
     return None
 
 
-def resolve_r1_workspace_dir() -> str:
-    """R1 真机工作区；优先 r1-tele install。"""
-    env_ws = os.environ.get("R1_WORKSPACE_DIR", "").strip()
+def _resolve_tele_workspace_dir(
+    *,
+    env_workspace: str,
+    workspace_names: Sequence[str],
+    opt_roots: Sequence[str],
+    default_root: str,
+) -> str:
+    env_ws = os.environ.get(env_workspace, "").strip()
     if env_ws and os.path.isfile(os.path.join(env_ws, "install/setup.bash")):
         return os.path.abspath(env_ws)
-    for candidate in (
-        "/opt/psi/rt/r1-tele",
-        os.path.expanduser("~/workspace_liyichao/r1-tele"),
-        os.path.join(
-            os.environ.get("PSIBOT_HOME", "/home/psibot").strip() or "/home/psibot",
-            "workspace_liyichao/r1-tele",
-        ),
-    ):
+    psibot_home = os.environ.get("PSIBOT_HOME", "/home/psibot").strip() or "/home/psibot"
+    candidates: List[str] = list(opt_roots)
+    for ws_name in workspace_names:
+        candidates.append(os.path.expanduser(f"~/workspace_liyichao/{ws_name}"))
+        candidates.append(os.path.join(psibot_home, f"workspace_liyichao/{ws_name}"))
+    for candidate in candidates:
         if os.path.isfile(os.path.join(candidate, "install/setup.bash")):
             return candidate
-    return "/opt/psi/rt/r1-tele"
+    return default_root
+
+
+def resolve_r1_scripts_pack_dir() -> Optional[str]:
+    """R1 真机 scripts_pack；可通过 R1_SCRIPTS_DIR 覆盖。"""
+    return _resolve_tele_scripts_pack_dir(
+        env_scripts="R1_SCRIPTS_DIR",
+        workspace_names=("r1-tele",),
+        opt_roots=("/opt/psi/rt/r1-tele",),
+    )
+
+
+def resolve_r1_workspace_dir() -> str:
+    """R1 真机工作区；优先 r1-tele install。"""
+    return _resolve_tele_workspace_dir(
+        env_workspace="R1_WORKSPACE_DIR",
+        workspace_names=("r1-tele",),
+        opt_roots=("/opt/psi/rt/r1-tele",),
+        default_root="/opt/psi/rt/r1-tele",
+    )
+
+
+def resolve_franka_scripts_pack_dir() -> Optional[str]:
+    """Franka 真机 scripts_pack；可通过 FRANKA_SCRIPTS_DIR 覆盖。"""
+    return _resolve_tele_scripts_pack_dir(
+        env_scripts="FRANKA_SCRIPTS_DIR",
+        workspace_names=("franka-tele", "franka_tele", "panda-tele"),
+        opt_roots=(
+            "/opt/psi/rt/franka-tele",
+            "/opt/psi/rt/franka_tele",
+            "/opt/psi/rt/panda-tele",
+        ),
+    )
+
+
+def resolve_franka_workspace_dir() -> str:
+    """Franka 真机工作区；优先 franka-tele install。"""
+    return _resolve_tele_workspace_dir(
+        env_workspace="FRANKA_WORKSPACE_DIR",
+        workspace_names=("franka-tele", "franka_tele", "panda-tele"),
+        opt_roots=(
+            "/opt/psi/rt/franka-tele",
+            "/opt/psi/rt/franka_tele",
+            "/opt/psi/rt/panda-tele",
+        ),
+        default_root="/opt/psi/rt/franka-tele",
+    )
 
 
 def resolve_real_robot_scripts_dir(backend: str = REAL_ROBOT_BACKEND_A2D) -> Optional[str]:
-    if normalize_real_robot_backend(backend) == REAL_ROBOT_BACKEND_R1:
+    key = normalize_real_robot_backend(backend)
+    if key == REAL_ROBOT_BACKEND_R1:
         return resolve_r1_scripts_pack_dir()
+    if key == REAL_ROBOT_BACKEND_FRANKA:
+        return resolve_franka_scripts_pack_dir()
     return resolve_scripts_pack_dir()
 
 
 def resolve_real_robot_workspace_dir(backend: str = REAL_ROBOT_BACKEND_A2D) -> str:
-    if normalize_real_robot_backend(backend) == REAL_ROBOT_BACKEND_R1:
+    key = normalize_real_robot_backend(backend)
+    if key == REAL_ROBOT_BACKEND_R1:
         return resolve_r1_workspace_dir()
+    if key == REAL_ROBOT_BACKEND_FRANKA:
+        return resolve_franka_workspace_dir()
     return resolve_a2d_workspace_dir()
 
 
 def build_real_robot_ros_shell_prefix(backend: str = REAL_ROBOT_BACKEND_A2D) -> str:
-    """按真机后端拼 source + DDS 环境（A2D / R1 工作区不同）。"""
+    """按真机后端拼 source + DDS 环境（A2D / R1 / Franka 工作区不同）。"""
     key = normalize_real_robot_backend(backend)
     parts = ["set -e", "source /opt/ros/humble/setup.bash"]
     if key == REAL_ROBOT_BACKEND_R1:
@@ -15253,6 +15615,17 @@ def build_real_robot_ros_shell_prefix(backend: str = REAL_ROBOT_BACKEND_A2D) -> 
             os.path.expanduser("~/workspace_liyichao/install/setup.bash"),
         )
         scripts_env = "R1_SCRIPTS_DIR"
+    elif key == REAL_ROBOT_BACKEND_FRANKA:
+        setups = (
+            "/opt/psi/rt/franka-tele/install/setup.bash",
+            "/opt/psi/rt/franka_tele/install/setup.bash",
+            "/opt/psi/rt/panda-tele/install/setup.bash",
+            os.path.expanduser("~/workspace_liyichao/franka-tele/install/setup.bash"),
+            os.path.expanduser("~/workspace_liyichao/franka_tele/install/setup.bash"),
+            os.path.expanduser("~/workspace_liyichao/panda-tele/install/setup.bash"),
+            os.path.expanduser("~/workspace_liyichao/install/setup.bash"),
+        )
+        scripts_env = "FRANKA_SCRIPTS_DIR"
     else:
         setups = (
             "/opt/psi/rt/a2d-tele/install/setup.bash",
@@ -15280,7 +15653,10 @@ def real_robot_stack_ready_hint(backend: str) -> str:
     scripts = resolve_real_robot_scripts_dir(key)
     if scripts and os.path.isfile(os.path.join(scripts, ROBOT_SERVICE_SCRIPT)):
         return f"{label} 栈脚本: {scripts}"
-    env_name = "R1_SCRIPTS_DIR" if key == REAL_ROBOT_BACKEND_R1 else "A2D_SCRIPTS_DIR"
+    env_name = {
+        REAL_ROBOT_BACKEND_R1: "R1_SCRIPTS_DIR",
+        REAL_ROBOT_BACKEND_FRANKA: "FRANKA_SCRIPTS_DIR",
+    }.get(key, "A2D_SCRIPTS_DIR")
     if scripts:
         return f"{label} 已找到 scripts 目录但缺少 {ROBOT_SERVICE_SCRIPT}（{scripts}）"
     return f"{label} 未找到栈脚本，请设置 {env_name}"
@@ -22739,9 +23115,7 @@ class CameraTopicWindow(QMainWindow):
         control_tabs.setMovable(True)
         control_tabs.setUsesScrollButtons(True)
         control_tabs.tabBar().setElideMode(Qt.ElideRight)
-        control_tabs.tabBar().setToolTip(
-            "可拖动标签调整顺序；下次启动会按此顺序打开（写入 eai/control_tabs_order.json）"
-        )
+        # 各 tab 悬停 tip 见 _refresh_control_tab_tooltips（含 --tab 启动命令）
 
         self._ui_prefix = prefix
         self._llm_config = llm_config
@@ -24794,8 +25168,23 @@ class CameraTopicWindow(QMainWindow):
         self.sim_hint_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         sim_form_l.addWidget(self.sim_hint_label)
 
-        sim_backend_row = _FlowLayout(spacing=10)
+        # 可拖动的后端选择条（顺序写入 eai/sim_backends_order.json，重启恢复）
+        # 隐藏 radio 仍保留，供 viewer_ui_state / 既有 isChecked 逻辑使用
+        sim_backend_row = QHBoxLayout()
+        sim_backend_row.setSpacing(8)
         sim_backend_row.addWidget(QLabel("仿真后端"))
+        self.sim_backend_tab_bar = QTabBar()
+        self.sim_backend_tab_bar.setObjectName("simBackendTabs")
+        self.sim_backend_tab_bar.setMovable(True)
+        self.sim_backend_tab_bar.setExpanding(False)
+        self.sim_backend_tab_bar.setDocumentMode(True)
+        self.sim_backend_tab_bar.setUsesScrollButtons(True)
+        self.sim_backend_tab_bar.setDrawBase(False)
+        self.sim_backend_tab_bar.setElideMode(Qt.ElideRight)
+        self.sim_backend_tab_bar.setToolTip(
+            "可拖动调整仿真后端顺序；下次启动会按此顺序打开"
+            "（写入 eai/sim_backends_order.json）"
+        )
         self.sim_backend_isaac_radio = QRadioButton("Isaac / RoboDojo")
         self.sim_backend_mujoco_radio = QRadioButton("MuJoCo")
         self.sim_backend_spaces_radio = QRadioButton("MolmoSpaces")
@@ -24814,22 +25203,36 @@ class CameraTopicWindow(QMainWindow):
         self._sim_backend_group.addButton(self.sim_backend_libero_radio, 4)
         self._sim_backend_group.addButton(self.sim_backend_robotwin_radio, 5)
         self._sim_backend_group.addButton(self.sim_backend_extended_radio, 6)
-        self.sim_backend_isaac_radio.toggled.connect(self._on_sim_backend_changed)
-        self.sim_backend_mujoco_radio.toggled.connect(self._on_sim_backend_changed)
-        self.sim_backend_spaces_radio.toggled.connect(self._on_sim_backend_changed)
-        self.sim_backend_psi_spaces_radio.toggled.connect(self._on_sim_backend_changed)
-        self.sim_backend_arena_radio.toggled.connect(self._on_sim_backend_changed)
-        self.sim_backend_libero_radio.toggled.connect(self._on_sim_backend_changed)
-        self.sim_backend_robotwin_radio.toggled.connect(self._on_sim_backend_changed)
-        self.sim_backend_extended_radio.toggled.connect(self._on_sim_backend_changed)
-        sim_backend_row.addWidget(self.sim_backend_isaac_radio)
-        sim_backend_row.addWidget(self.sim_backend_mujoco_radio)
-        sim_backend_row.addWidget(self.sim_backend_spaces_radio)
-        sim_backend_row.addWidget(self.sim_backend_psi_spaces_radio)
-        sim_backend_row.addWidget(self.sim_backend_arena_radio)
-        sim_backend_row.addWidget(self.sim_backend_libero_radio)
-        sim_backend_row.addWidget(self.sim_backend_robotwin_radio)
-        sim_backend_row.addWidget(self.sim_backend_extended_radio)
+        self._sim_backend_radio_by_key = {
+            key: getattr(self, attr)
+            for key, _label, attr in SIM_BACKEND_SELECTOR_SPECS
+        }
+        self._sim_backend_tabs_guard = False
+        self._sim_backend_tabs_order_guard = False
+        for radio in self._sim_backend_radio_by_key.values():
+            radio.setVisible(False)
+            radio.toggled.connect(self._on_sim_backend_changed)
+        self.sim_backend_tab_bar.currentChanged.connect(self._on_sim_backend_tab_changed)
+        self.sim_backend_tab_bar.tabMoved.connect(self._on_sim_backend_tab_moved)
+        # 填充 tabs 时挡住 currentChanged，避免把默认选中的 Isaac 冲掉
+        self._sim_backend_tabs_guard = True
+        self._sim_backend_tabs_order_guard = True
+        try:
+            spec_by_key = {
+                k: (label, attr) for k, label, attr in SIM_BACKEND_SELECTOR_SPECS
+            }
+            for key in preferred_sim_backends_order():
+                pair = spec_by_key.get(key)
+                if pair is None:
+                    continue
+                label, _attr = pair
+                idx = self.sim_backend_tab_bar.addTab(label)
+                self.sim_backend_tab_bar.setTabData(idx, key)
+        finally:
+            self._sim_backend_tabs_guard = False
+            self._sim_backend_tabs_order_guard = False
+        self._sync_sim_backend_tab_from_radios()
+        sim_backend_row.addWidget(self.sim_backend_tab_bar, 1)
         sim_header_l.addLayout(sim_backend_row)
 
         ext_backend_row = QHBoxLayout()
@@ -26572,10 +26975,26 @@ class CameraTopicWindow(QMainWindow):
         self.real_eval_hint_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         real_outer.addWidget(self.real_eval_hint_label)
 
-        real_backend_row = _FlowLayout(spacing=10)
+        # 可拖动的真机后端选择条（顺序写入 eai/real_robot_backends_order.json）
+        # 隐藏 radio 仍保留，供 viewer_ui_state / 既有 isChecked 逻辑使用
+        real_backend_row = QHBoxLayout()
+        real_backend_row.setSpacing(8)
         real_backend_row.addWidget(QLabel("机器人后端"))
+        self.real_robot_backend_tab_bar = QTabBar()
+        self.real_robot_backend_tab_bar.setObjectName("realRobotBackendTabs")
+        self.real_robot_backend_tab_bar.setMovable(True)
+        self.real_robot_backend_tab_bar.setExpanding(False)
+        self.real_robot_backend_tab_bar.setDocumentMode(True)
+        self.real_robot_backend_tab_bar.setUsesScrollButtons(True)
+        self.real_robot_backend_tab_bar.setDrawBase(False)
+        self.real_robot_backend_tab_bar.setElideMode(Qt.ElideRight)
+        self.real_robot_backend_tab_bar.setToolTip(
+            "可拖动调整真机后端顺序；下次启动会按此顺序打开"
+            "（写入 eai/real_robot_backends_order.json）"
+        )
         self.real_robot_a2d_radio = QRadioButton("A2D")
         self.real_robot_r1_radio = QRadioButton("R1")
+        self.real_robot_franka_radio = QRadioButton("Franka")
         self.real_robot_a2d_radio.setChecked(True)
         self.real_robot_a2d_radio.setToolTip(
             "A2D 真机：a2d-tele / A2D_SCRIPTS_DIR，现场 /camera/*_color + HAL 臂手栈。"
@@ -26584,13 +27003,55 @@ class CameraTopicWindow(QMainWindow):
             "R1 真机：r1-tele / R1_SCRIPTS_DIR（可设 R1_WORKSPACE_DIR）。"
             " 与 A2D 工作区独立；栈脚本就绪后可直接启动。"
         )
+        self.real_robot_franka_radio.setToolTip(
+            "Franka 真机：franka-tele / FRANKA_SCRIPTS_DIR（可设 FRANKA_WORKSPACE_DIR）。"
+            " 与 A2D/R1 工作区独立；栈脚本就绪后可直接启动。"
+        )
         self._real_robot_backend_group = QButtonGroup(self)
         self._real_robot_backend_group.addButton(self.real_robot_a2d_radio, 0)
         self._real_robot_backend_group.addButton(self.real_robot_r1_radio, 1)
-        self.real_robot_a2d_radio.toggled.connect(self._on_real_robot_backend_changed)
-        self.real_robot_r1_radio.toggled.connect(self._on_real_robot_backend_changed)
-        real_backend_row.addWidget(self.real_robot_a2d_radio)
-        real_backend_row.addWidget(self.real_robot_r1_radio)
+        self._real_robot_backend_group.addButton(self.real_robot_franka_radio, 2)
+        self._real_robot_radio_by_key = {
+            key: getattr(self, attr)
+            for key, _label, attr in REAL_ROBOT_SELECTOR_SPECS
+        }
+        self._real_robot_tabs_guard = False
+        self._real_robot_tabs_order_guard = False
+        for radio in self._real_robot_radio_by_key.values():
+            radio.setVisible(False)
+            radio.toggled.connect(self._on_real_robot_backend_changed)
+        self.real_robot_backend_tab_bar.currentChanged.connect(
+            self._on_real_robot_backend_tab_changed
+        )
+        self.real_robot_backend_tab_bar.tabMoved.connect(
+            self._on_real_robot_backend_tab_moved
+        )
+        self._real_robot_tabs_guard = True
+        self._real_robot_tabs_order_guard = True
+        try:
+            tip_by_key = {
+                REAL_ROBOT_BACKEND_A2D: self.real_robot_a2d_radio.toolTip(),
+                REAL_ROBOT_BACKEND_R1: self.real_robot_r1_radio.toolTip(),
+                REAL_ROBOT_BACKEND_FRANKA: self.real_robot_franka_radio.toolTip(),
+            }
+            spec_by_key = {
+                k: (label, attr) for k, label, attr in REAL_ROBOT_SELECTOR_SPECS
+            }
+            for key in preferred_real_robot_backends_order():
+                pair = spec_by_key.get(key)
+                if pair is None:
+                    continue
+                label, _attr = pair
+                idx = self.real_robot_backend_tab_bar.addTab(label)
+                self.real_robot_backend_tab_bar.setTabData(idx, key)
+                tip = tip_by_key.get(key, "")
+                if tip:
+                    self.real_robot_backend_tab_bar.setTabToolTip(idx, tip)
+        finally:
+            self._real_robot_tabs_guard = False
+            self._real_robot_tabs_order_guard = False
+        self._sync_real_robot_backend_tab_from_radios()
+        real_backend_row.addWidget(self.real_robot_backend_tab_bar, 1)
         real_outer.addLayout(real_backend_row)
 
         real_task_row = QHBoxLayout()
@@ -26619,7 +27080,8 @@ class CameraTopicWindow(QMainWindow):
         self.real_eval_start_btn.setFocusPolicy(Qt.NoFocus)
         self.real_eval_start_btn.setToolTip(
             "进入真机评测记录。\n"
-            "先决条件：已有 /camera/*_color、手臂与手部已使能（R1 还需栈脚本就绪）。"
+            "先决条件：已有 /camera/*_color、手臂与手部已使能"
+            "（R1 / Franka 还需栈脚本就绪）。"
         )
         self.real_eval_start_btn.clicked.connect(self._on_real_eval_start_clicked)
         real_ctrl_row.addWidget(self.real_eval_start_btn)
@@ -27223,7 +27685,8 @@ class CameraTopicWindow(QMainWindow):
         self.human_demo_analyze_btn = QPushButton("分析")
         self.human_demo_analyze_btn.setFocusPolicy(Qt.NoFocus)
         self.human_demo_analyze_btn.setToolTip(
-            "用 MediaPipe Hands 离线分析视频，提取双手关节与手腕轨迹"
+            "用 MediaPipe Hands 离线分析视频，提取双手关节与手腕轨迹；\n"
+            "完成后把轨迹压缩成文本指挥填入上方输入框"
         )
         self.human_demo_analyze_btn.clicked.connect(self._on_human_demo_analyze_clicked)
         demo_ctrl_row.addWidget(self.human_demo_analyze_btn)
@@ -29809,10 +30272,17 @@ class CameraTopicWindow(QMainWindow):
         self.status_bar.showMessage("就绪")
         self._apply_only_tabs(self._only_tabs)
         self._restore_control_tabs_order()
+        self._refresh_control_tab_tooltips()
+        self._restore_sim_backends_order()
+        self._restore_real_robot_backends_order()
         self._restore_viewer_ui_state()
         # After restore: fix Pi_05 + LingBot-only ckpt (or clear incompatible leftovers).
         self._sanitize_sim_eval_policy_ckpt_pair()
+        self._sync_sim_backend_tab_from_radios()
+        self._sync_real_robot_backend_tab_from_radios()
         self._control_tabs_order_guard = False
+        self._sim_backend_tabs_order_guard = False
+        self._real_robot_tabs_order_guard = False
         self.control_tabs.tabBar().tabMoved.connect(self._on_control_tab_moved)
         self.chat_panel.status_message.connect(self.status_bar.showMessage)
         self._init_qwen_deploy_controller()
@@ -33573,9 +34043,126 @@ class CameraTopicWindow(QMainWindow):
         scrollbar.setValue(scrollbar.maximum())
 
     def _real_robot_backend_id(self) -> str:
-        if getattr(self, "real_robot_r1_radio", None) is not None and self.real_robot_r1_radio.isChecked():
+        by_key = getattr(self, "_real_robot_radio_by_key", None) or {}
+        for key, radio in by_key.items():
+            if radio is not None and radio.isChecked():
+                return normalize_real_robot_backend(str(key))
+        if (
+            getattr(self, "real_robot_franka_radio", None) is not None
+            and self.real_robot_franka_radio.isChecked()
+        ):
+            return REAL_ROBOT_BACKEND_FRANKA
+        if (
+            getattr(self, "real_robot_r1_radio", None) is not None
+            and self.real_robot_r1_radio.isChecked()
+        ):
             return REAL_ROBOT_BACKEND_R1
         return REAL_ROBOT_BACKEND_A2D
+
+    def _real_robot_backend_radios(self) -> List[QRadioButton]:
+        by_key = getattr(self, "_real_robot_radio_by_key", None) or {}
+        if by_key:
+            return [r for r in by_key.values() if r is not None]
+        radios: List[QRadioButton] = []
+        for attr in (
+            "real_robot_a2d_radio",
+            "real_robot_r1_radio",
+            "real_robot_franka_radio",
+        ):
+            w = getattr(self, attr, None)
+            if w is not None:
+                radios.append(w)
+        return radios
+
+    def _set_real_robot_backend_switch_enabled(self, enabled: bool) -> None:
+        for radio in self._real_robot_backend_radios():
+            radio.setEnabled(enabled)
+        bar = getattr(self, "real_robot_backend_tab_bar", None)
+        if bar is not None:
+            bar.setEnabled(enabled)
+
+    def _real_robot_backend_selector_keys(self) -> List[str]:
+        bar = getattr(self, "real_robot_backend_tab_bar", None)
+        if bar is None:
+            return []
+        out: List[str] = []
+        for i in range(bar.count()):
+            key = normalize_real_robot_backend(str(bar.tabData(i) or ""))
+            if key:
+                out.append(key)
+        return out
+
+    def _restore_real_robot_backends_order(self) -> None:
+        """按 eai/real_robot_backends_order.json 恢复真机后端选择条顺序。"""
+        bar = getattr(self, "real_robot_backend_tab_bar", None)
+        if bar is None or bar.count() <= 1:
+            return
+        desired = preferred_real_robot_backends_order(
+            self._real_robot_backend_selector_keys()
+        )
+        if not desired or desired == self._real_robot_backend_selector_keys():
+            return
+        self._real_robot_tabs_order_guard = True
+        try:
+            for target_idx, key in enumerate(desired):
+                cur = -1
+                for i in range(bar.count()):
+                    if normalize_real_robot_backend(str(bar.tabData(i) or "")) == key:
+                        cur = i
+                        break
+                if cur >= 0 and cur != target_idx:
+                    bar.moveTab(cur, target_idx)
+        finally:
+            self._real_robot_tabs_order_guard = False
+
+    def _sync_real_robot_backend_tab_from_radios(self) -> None:
+        """把隐藏 radio 的选中态同步到真机后端 TabBar。"""
+        bar = getattr(self, "real_robot_backend_tab_bar", None)
+        if bar is None or bar.count() <= 0:
+            return
+        key = self._real_robot_backend_id()
+        target = -1
+        for i in range(bar.count()):
+            if normalize_real_robot_backend(str(bar.tabData(i) or "")) == key:
+                target = i
+                break
+        if target < 0 or target == bar.currentIndex():
+            return
+        self._real_robot_tabs_guard = True
+        try:
+            bar.setCurrentIndex(target)
+        finally:
+            self._real_robot_tabs_guard = False
+
+    def _on_real_robot_backend_tab_changed(self, index: int) -> None:
+        if getattr(self, "_real_robot_tabs_guard", False):
+            return
+        bar = getattr(self, "real_robot_backend_tab_bar", None)
+        if bar is None or index < 0:
+            return
+        key = normalize_real_robot_backend(str(bar.tabData(index) or ""))
+        radio = (getattr(self, "_real_robot_radio_by_key", None) or {}).get(key)
+        if radio is None:
+            return
+        if radio.isChecked():
+            return
+        radio.setChecked(True)
+
+    def _on_real_robot_backend_tab_moved(self, _from: int, _to: int) -> None:
+        if getattr(self, "_real_robot_tabs_order_guard", False):
+            return
+        keys = self._real_robot_backend_selector_keys()
+        if not keys:
+            return
+        try:
+            path = save_real_robot_backends_order(keys)
+            status_bar = getattr(self, "status_bar", None)
+            if status_bar is not None:
+                status_bar.showMessage(f"已保存真机后端顺序 → {path}", 3000)
+        except Exception as exc:
+            status_bar = getattr(self, "status_bar", None)
+            if status_bar is not None:
+                status_bar.showMessage(f"保存真机后端顺序失败: {exc}", 4000)
 
     def _real_robot_backend_has_stack_scripts(self, backend: str = "") -> bool:
         key = normalize_real_robot_backend(backend or self._real_robot_backend_id())
@@ -33585,6 +34172,9 @@ class CameraTopicWindow(QMainWindow):
     def _on_real_robot_backend_changed(self, *_args) -> None:
         if not hasattr(self, "real_eval_hint_label"):
             return
+        # 同步 TabBar 高亮（viewer_ui_state 恢复 radio 时也会走到这里）
+        if not getattr(self, "_real_robot_tabs_guard", False):
+            self._sync_real_robot_backend_tab_from_radios()
         backend = self._real_robot_backend_id()
         label = real_robot_backend_label(backend)
         if backend == REAL_ROBOT_BACKEND_R1:
@@ -33596,6 +34186,16 @@ class CameraTopicWindow(QMainWindow):
             self.real_eval_stack_btn.setToolTip(
                 "启动 R1 robot stack（R1_SCRIPTS_DIR / r1-tele）"
             )
+        elif backend == REAL_ROBOT_BACKEND_FRANKA:
+            self.real_eval_hint_label.setText(
+                "Franka 真机评测：使用 franka-tele / FRANKA_SCRIPTS_DIR"
+                "（可选 FRANKA_WORKSPACE_DIR）。"
+                " 现场 ROS 相机（/camera/*_color），无需 Isaac 桥；"
+                "请确认栈已启动、手臂/夹爪已使能，并在「测试」页部署推理服务。"
+            )
+            self.real_eval_stack_btn.setToolTip(
+                "启动 Franka robot stack（FRANKA_SCRIPTS_DIR / franka-tele）"
+            )
         else:
             self.real_eval_hint_label.setText(
                 "A2D 真机评测：使用 a2d-tele / A2D_SCRIPTS_DIR。"
@@ -33606,11 +34206,9 @@ class CameraTopicWindow(QMainWindow):
                 "启动 A2D robot stack（与「回放」页相同：A2D_SCRIPTS_DIR / a2d-tele）"
             )
         # 评测进行中禁止切换后端
-        can_switch = not self._real_eval_active
-        self.real_robot_a2d_radio.setEnabled(can_switch)
-        self.real_robot_r1_radio.setEnabled(can_switch)
+        self._set_real_robot_backend_switch_enabled(not self._real_eval_active)
         has_scripts = self._real_robot_backend_has_stack_scripts(backend)
-        if backend == REAL_ROBOT_BACKEND_R1 and not has_scripts:
+        if backend in REAL_ROBOT_EXTERNAL_STACK_BACKENDS and not has_scripts:
             self.real_eval_stack_btn.setEnabled(True)  # 仍可点，点击后给出配置提示
             self.real_eval_stack_btn.setText(f"启动{label}栈")
         elif not self._real_eval_active:
@@ -33624,25 +34222,33 @@ class CameraTopicWindow(QMainWindow):
             self._append_real_eval_log(f"[栈] 后端={label}，走 A2D RobotStackLauncher")
             self._on_robot_stack_clicked()
             return
-        # R1：若已配置同源脚本布局则直接拉起；否则给出配置提示
+        # R1 / Franka：若已配置同源脚本布局则直接拉起；否则给出配置提示
         scripts = resolve_real_robot_scripts_dir(backend)
         robot_script = (
             os.path.join(scripts, ROBOT_SERVICE_SCRIPT) if scripts else ""
         )
         if not scripts or not os.path.isfile(robot_script):
             hint = real_robot_stack_ready_hint(backend)
+            env_name = (
+                "FRANKA_SCRIPTS_DIR"
+                if backend == REAL_ROBOT_BACKEND_FRANKA
+                else "R1_SCRIPTS_DIR"
+            )
+            ws_hint = (
+                "/opt/psi/rt/franka-tele（可选 FRANKA_WORKSPACE_DIR）"
+                if backend == REAL_ROBOT_BACKEND_FRANKA
+                else "/opt/psi/rt/r1-tele（可选 R1_WORKSPACE_DIR）"
+            )
             msg = (
-                f"R1 真机栈未配置：{hint}\n\n"
-                "请设置环境变量 R1_SCRIPTS_DIR 指向含 "
+                f"{label} 真机栈未配置：{hint}\n\n"
+                f"请设置环境变量 {env_name} 指向含 "
                 f"{ROBOT_SERVICE_SCRIPT} 的 scripts 目录，"
-                "或安装 /opt/psi/rt/r1-tele（可选 R1_WORKSPACE_DIR）。"
+                f"或安装 {ws_hint}。"
             )
             self._append_real_eval_log(f"[栈] {hint}")
-            self.status_bar.showMessage("R1 真机栈未配置", 6000)
-            QMessageBox.information(self, "R1 机器人栈", msg)
+            self.status_bar.showMessage(f"{label} 真机栈未配置", 6000)
+            QMessageBox.information(self, f"{label} 机器人栈", msg)
             return
-        # 与 A2D 相同脚本约定时，复用现有 launcher（shell prefix 仍偏 A2D；
-        # 若 R1 与 A2D 脚本同构，可先用当前 launcher；正式分离后再切 build_real_robot_ros_shell_prefix）
         self._append_real_eval_log(
             f"[栈] 后端={label} scripts={scripts}；尝试启动（与 A2D 同构脚本）"
         )
@@ -33704,8 +34310,9 @@ class CameraTopicWindow(QMainWindow):
             warnings.append("手臂未使能")
         if not self.node.is_hand_enabled():
             warnings.append("手部未使能")
-        if backend == REAL_ROBOT_BACKEND_R1 and not self._real_robot_backend_has_stack_scripts(
-            backend
+        if (
+            backend in REAL_ROBOT_EXTERNAL_STACK_BACKENDS
+            and not self._real_robot_backend_has_stack_scripts(backend)
         ):
             warnings.append(real_robot_stack_ready_hint(backend))
         return warnings
@@ -33774,8 +34381,7 @@ class CameraTopicWindow(QMainWindow):
         self.real_eval_start_btn.setEnabled(False)
         self.real_eval_stop_btn.setEnabled(True)
         self.real_eval_task_edit.setEnabled(False)
-        self.real_robot_a2d_radio.setEnabled(False)
-        self.real_robot_r1_radio.setEnabled(False)
+        self._set_real_robot_backend_switch_enabled(False)
         if not self._real_eval_timer.isActive():
             self._real_eval_timer.start()
         msg = f"开始真机评测[{label}]" + (f"：{task}" if task else "")
@@ -33791,8 +34397,7 @@ class CameraTopicWindow(QMainWindow):
         self._real_eval_active = False
         self.real_eval_stop_btn.setEnabled(False)
         self.real_eval_task_edit.setEnabled(True)
-        self.real_robot_a2d_radio.setEnabled(True)
-        self.real_robot_r1_radio.setEnabled(True)
+        self._set_real_robot_backend_switch_enabled(True)
         self._real_eval_timer.stop()
         self._append_real_eval_log(f"--- 真机评测已停止[{label}] ---")
         self.status_bar.showMessage(f"真机评测已停止（{label}）", 3000)
@@ -35932,6 +36537,7 @@ class CameraTopicWindow(QMainWindow):
             return
         tabs.setCurrentIndex(0)
         titles = [tabs.tabText(i) for i in range(tabs.count())]
+        self._refresh_control_tab_tooltips()
         if tabs.count() == 1:
             tabs.tabBar().setVisible(False)
             self.setWindowTitle(f"Camera Topic Viewer — {titles[0]}")
@@ -35949,6 +36555,15 @@ class CameraTopicWindow(QMainWindow):
         if tabs is None:
             return []
         return [tabs.tabText(i) for i in range(tabs.count())]
+
+    def _refresh_control_tab_tooltips(self) -> None:
+        """为每个控制区 tab 设置悬停提示：可用 --tab 如何启动。"""
+        tabs = getattr(self, "control_tabs", None)
+        if tabs is None:
+            return
+        for i in range(tabs.count()):
+            title = tabs.tabText(i)
+            tabs.setTabToolTip(i, format_control_tab_launch_tooltip(title))
 
     def _restore_control_tabs_order(self) -> None:
         """按 eai/control_tabs_order.json 恢复当前可见 tab 顺序。"""
@@ -36186,6 +36801,96 @@ class CameraTopicWindow(QMainWindow):
             status_bar = getattr(self, "status_bar", None)
             if status_bar is not None:
                 status_bar.showMessage(f"保存 tab 顺序失败: {exc}", 4000)
+
+    def _sim_backend_selector_keys(self) -> List[str]:
+        bar = getattr(self, "sim_backend_tab_bar", None)
+        if bar is None:
+            return []
+        out: List[str] = []
+        for i in range(bar.count()):
+            key = str(bar.tabData(i) or "").strip()
+            if key:
+                out.append(key)
+        return out
+
+    def _sim_backend_selector_key(self) -> str:
+        """当前选中的后端选择条 key（扩展套件统一为 extended）。"""
+        by_key = getattr(self, "_sim_backend_radio_by_key", None) or {}
+        for key, radio in by_key.items():
+            if radio is not None and radio.isChecked():
+                return str(key)
+        return "isaac"
+
+    def _restore_sim_backends_order(self) -> None:
+        """按 eai/sim_backends_order.json 恢复仿真后端选择条顺序。"""
+        bar = getattr(self, "sim_backend_tab_bar", None)
+        if bar is None or bar.count() <= 1:
+            return
+        desired = preferred_sim_backends_order(self._sim_backend_selector_keys())
+        if not desired or desired == self._sim_backend_selector_keys():
+            return
+        self._sim_backend_tabs_order_guard = True
+        try:
+            for target_idx, key in enumerate(desired):
+                cur = -1
+                for i in range(bar.count()):
+                    if str(bar.tabData(i) or "") == key:
+                        cur = i
+                        break
+                if cur >= 0 and cur != target_idx:
+                    bar.moveTab(cur, target_idx)
+        finally:
+            self._sim_backend_tabs_order_guard = False
+
+    def _sync_sim_backend_tab_from_radios(self) -> None:
+        """把隐藏 radio 的选中态同步到后端选择 TabBar。"""
+        bar = getattr(self, "sim_backend_tab_bar", None)
+        if bar is None or bar.count() <= 0:
+            return
+        key = self._sim_backend_selector_key()
+        target = -1
+        for i in range(bar.count()):
+            if str(bar.tabData(i) or "") == key:
+                target = i
+                break
+        if target < 0 or target == bar.currentIndex():
+            return
+        self._sim_backend_tabs_guard = True
+        try:
+            bar.setCurrentIndex(target)
+        finally:
+            self._sim_backend_tabs_guard = False
+
+    def _on_sim_backend_tab_changed(self, index: int) -> None:
+        if getattr(self, "_sim_backend_tabs_guard", False):
+            return
+        bar = getattr(self, "sim_backend_tab_bar", None)
+        if bar is None or index < 0:
+            return
+        key = str(bar.tabData(index) or "").strip()
+        radio = (getattr(self, "_sim_backend_radio_by_key", None) or {}).get(key)
+        if radio is None:
+            return
+        if radio.isChecked():
+            # 顺序拖动后 currentChanged 可能仍指向同一 radio，无需重复触发
+            return
+        radio.setChecked(True)
+
+    def _on_sim_backend_tab_moved(self, _from: int, _to: int) -> None:
+        if getattr(self, "_sim_backend_tabs_order_guard", False):
+            return
+        keys = self._sim_backend_selector_keys()
+        if not keys:
+            return
+        try:
+            path = save_sim_backends_order(keys)
+            status_bar = getattr(self, "status_bar", None)
+            if status_bar is not None:
+                status_bar.showMessage(f"已保存仿真后端顺序 → {path}", 3000)
+        except Exception as exc:
+            status_bar = getattr(self, "status_bar", None)
+            if status_bar is not None:
+                status_bar.showMessage(f"保存仿真后端顺序失败: {exc}", 4000)
 
     def _update_ctx_ui(self, *_args) -> None:
         if not hasattr(self, "ctx_sync_start_btn"):
@@ -38045,6 +38750,12 @@ class CameraTopicWindow(QMainWindow):
         thumb.show_text(f"{suite} {task}".strip())
 
     def _on_sim_backend_changed(self, *_args) -> None:
+        # radio.toggled(False) 是切换瞬间的中间态，等 True 再处理
+        if len(_args) == 1 and _args[0] is False:
+            return
+        # radio 可能被程序 setChecked；保持顶部可拖动选择条与之同步
+        if getattr(self, "sim_backend_tab_bar", None) is not None:
+            self._sync_sim_backend_tab_from_radios()
         backend = self._sim_backend_id()
         extended = self._is_extended_sim_backend(backend)
         if hasattr(self, "sim_extended_combo"):
@@ -38214,7 +38925,9 @@ class CameraTopicWindow(QMainWindow):
                 and self._sim_bridge_launcher.is_running()
             )
         )
+        busy = bool(mj_running or isaac_running)
         for wname in (
+            "sim_backend_tab_bar",
             "sim_backend_isaac_radio",
             "sim_backend_mujoco_radio",
             "sim_backend_spaces_radio",
@@ -38231,15 +38944,14 @@ class CameraTopicWindow(QMainWindow):
                 # and nothing is running.
                 if wname == "sim_extended_combo":
                     w.setEnabled(
-                        (not mj_running)
-                        and (not isaac_running)
+                        (not busy)
                         and bool(
                             getattr(self, "sim_backend_extended_radio", None)
                             and self.sim_backend_extended_radio.isChecked()
                         )
                     )
                 else:
-                    w.setEnabled(not mj_running and not isaac_running)
+                    w.setEnabled(not busy)
 
         backend = self._sim_backend_id()
         mj_startable = (
@@ -44975,7 +45687,7 @@ class CameraTopicWindow(QMainWindow):
             self.robot_stack_btn.setText("服务栈启动中…")
         else:
             self.robot_stack_btn.setText("启动机器人栈")
-        # 真机评测页：A2D 后端同步栈按钮状态；R1 用独立脚本路径时保持可点
+        # 真机评测页：A2D 同步栈按钮；R1 / Franka 独立脚本路径时保持可点
         if hasattr(self, "real_eval_stack_btn"):
             backend = self._real_robot_backend_id()
             label = real_robot_backend_label(backend)
@@ -46402,6 +47114,7 @@ class CameraTopicWindow(QMainWindow):
                     self.human_demo_status_label.setText(
                         f"演示: 已加载缓存 · {traj.summary()}"
                     )
+                    self._fill_arm_text_from_human_demo(traj)
                     self._show_human_demo_preview_frame(0)
                     self.status_bar.showMessage(f"已加载演示缓存: {cache}", 4000)
                     return
@@ -46411,6 +47124,37 @@ class CameraTopicWindow(QMainWindow):
             f"演示: 已选 {os.path.basename(resolved)}（待分析）"
         )
         self.status_bar.showMessage(f"已选择演示视频: {resolved}", 4000)
+
+    def _fill_arm_text_from_human_demo(self, traj: object) -> bool:
+        """把演示轨迹写成文本指挥，填入上方输入框。成功返回 True。"""
+        edit = getattr(self, "arm_text_cmd_edit", None)
+        if edit is None or traj is None:
+            return False
+        try:
+            from human_demo_imitate import trajectory_to_arm_text
+
+            mirror_w = getattr(self, "human_demo_mirror_check", None)
+            left_w = getattr(self, "human_demo_ctrl_left_check", None)
+            right_w = getattr(self, "human_demo_ctrl_right_check", None)
+            arm_w = getattr(self, "human_demo_move_arm_check", None)
+            scale_w = getattr(self, "human_demo_scale_spin", None)
+            text = trajectory_to_arm_text(
+                traj,  # type: ignore[arg-type]
+                mirror=bool(mirror_w.isChecked()) if mirror_w is not None else True,
+                ctrl_left=bool(left_w.isChecked()) if left_w is not None else True,
+                ctrl_right=bool(right_w.isChecked()) if right_w is not None else True,
+                move_arm=bool(arm_w.isChecked()) if arm_w is not None else True,
+                scale_m=float(scale_w.value()) if scale_w is not None else 0.30,
+            )
+        except Exception as exc:
+            self.status_bar.showMessage(f"轨迹转文本指挥失败: {exc}", 5000)
+            return False
+        text = (text or "").strip()
+        if not text:
+            return False
+        edit.setText(text)
+        edit.setCursorPosition(0)
+        return True
 
     def _on_human_demo_analyze_clicked(self) -> None:
         if self._human_demo_analyzing:
@@ -46487,8 +47231,14 @@ class CameraTopicWindow(QMainWindow):
         summary = traj.summary() if hasattr(traj, "summary") else ""
         self.human_demo_status_label.setText(f"演示: 就绪 · {summary}")
         self.human_demo_status_label.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+        filled = self._fill_arm_text_from_human_demo(traj)
         self._show_human_demo_preview_frame(0)
-        self.status_bar.showMessage(f"演示分析完成，缓存: {detail}", 5000)
+        if filled:
+            self.status_bar.showMessage(
+                f"演示分析完成，已填入文本指挥；缓存: {detail}", 5000
+            )
+        else:
+            self.status_bar.showMessage(f"演示分析完成，缓存: {detail}", 5000)
 
     def _human_demo_preview_fit_bgr(self, bgr: "np.ndarray") -> "np.ndarray":
         """将预览帧缩放到预览区宽高内（保持比例，尽量铺满）。"""

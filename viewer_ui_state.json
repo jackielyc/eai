@@ -97,7 +97,7 @@
     },
     "lingbot_depth_topic_combo": {
       "kind": "combo",
-      "index": 4,
+      "index": 1,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -193,7 +193,7 @@
     },
     "lingbot_video_topic_combo": {
       "kind": "combo",
-      "index": 4,
+      "index": 1,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -263,7 +263,7 @@
     },
     "lingbot_world_topic_combo": {
       "kind": "combo",
-      "index": 4,
+      "index": 1,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -431,7 +431,7 @@
     },
     "sim_backend_spaces_radio": {
       "kind": "radio",
-      "checked": true
+      "checked": false
     },
     "sim_backend_psi_spaces_radio": {
       "kind": "radio",
@@ -443,7 +443,7 @@
     },
     "sim_backend_libero_radio": {
       "kind": "radio",
-      "checked": false
+      "checked": true
     },
     "sim_backend_robotwin_radio": {
       "kind": "radio",
@@ -639,19 +639,19 @@
     },
     "libero_suite_combo": {
       "kind": "combo",
-      "index": 2,
-      "text": "libero_goal",
-      "data": "libero_goal"
+      "index": 4,
+      "text": "libero_90",
+      "data": "libero_90"
     },
     "libero_task_id_spin": {
       "kind": "spin",
-      "value": 5
+      "value": 9
     },
     "libero_task_combo": {
       "kind": "combo",
-      "index": 5,
-      "text": "[5] push the plate to the front of the stove",
-      "data": 5
+      "index": 0,
+      "text": "[0] pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "data": 0
     },
     "libero_config_combo": {
       "kind": "combo",
@@ -827,7 +827,7 @@
     },
     "arm_text_cmd_edit": {
       "kind": "line",
-      "text": "左臂向前5cm；左手合并"
+      "text": "右手合到42%；右手张开；左手合到30%；右手半握；右手张开；右手半握；右手合到25%"
     },
     "left_hand_slider_a": {
       "kind": "slider",
@@ -1013,7 +1013,7 @@
     },
     "reward_topic_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 2,
       "text": "/camera/head_color",
       "data": "/camera/head_color"
     },
@@ -1561,7 +1561,7 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "仿真评测",
+  "control_tab": "真机评测",
   "splitter_sizes": [
     256,
     1258,
@@ -1569,7 +1569,7 @@
   ],
   "geometry": [
     0,
-    56,
+    51,
     1920,
     1029
   ],
@@ -1584,5 +1584,5 @@
     "/camera/right_wrist_depth": true
   },
   "topic_user_unchecked": [],
-  "workspace_collapsed": true
+  "workspace_collapsed": false
 }

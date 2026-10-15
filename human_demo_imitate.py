@@ -179,6 +179,185 @@ def first_wrist_world_origins(
     return out
 
 
+def _fmt_offset_cm(meters: float) -> str:
+    cm = abs(float(meters)) * 100.0
+    if cm < 0.5:
+        return ""
+    if abs(cm - round(cm)) < 0.15:
+        return f"{int(round(cm))}cm"
+    return f"{cm:.1f}cm"
+
+
+def _format_arm_clause(side: str, dx: float, dy: float, dz: float) -> str:
+    """相对位移 →「左臂向前5cm，向上2cm」。"""
+    arm = "左臂" if side == "left" else "右臂"
+    parts: List[str] = []
+    for val, pos, neg in (
+        (dx, "向前", "向后"),
+        (dy, "向左", "向右"),
+        (dz, "向上", "向下"),
+    ):
+        label = _fmt_offset_cm(val)
+        if not label:
+            continue
+        parts.append(f"{pos if val > 0 else neg}{label}")
+    if not parts:
+        return ""
+    return arm + "，".join(parts) if len(parts) > 1 else arm + parts[0]
+
+
+def _format_hand_clause(side: str, grip01: float) -> str:
+    hand = "左手" if side == "left" else "右手"
+    g = max(0.0, min(1.0, float(grip01)))
+    if g <= 0.25:
+        return f"{hand}张开"
+    if g >= 0.75:
+        return f"{hand}闭合"
+    if abs(g - 0.5) <= 0.08:
+        return f"{hand}半握"
+    return f"{hand}合到{int(round(g * 100))}%"
+
+
+def _split_arm_deltas(
+    dx: float, dy: float, dz: float, *, max_m: float = 0.5
+) -> List[Tuple[float, float, float]]:
+    """把超过单条文本指挥上限的位移拆成多段。"""
+    lim = float(max(0.01, max_m))
+    mag = max(abs(dx), abs(dy), abs(dz))
+    if mag <= lim + 1e-9:
+        return [(dx, dy, dz)] if mag > 1e-6 else []
+    n = int(max(1, round(mag / lim + 1e-9)))
+    return [(dx / n, dy / n, dz / n) for _ in range(n)]
+
+
+def trajectory_to_arm_text(
+    traj: DemoTrajectory,
+    *,
+    mirror: bool = True,
+    ctrl_left: bool = True,
+    ctrl_right: bool = True,
+    move_arm: bool = True,
+    scale_m: float = DEFAULT_ARM_SCALE_M,
+    min_step_m: float = 0.02,
+    grip_delta: float = 0.22,
+    max_clauses: int = 48,
+) -> str:
+    """把演示轨迹压缩成可填入「文本指挥」的中文指令（分号分隔）。
+
+    手腕按相对首帧位移分段输出；手部开合在明显变化时输出张开/闭合/合到N%。
+    """
+    if traj is None or not traj.frames:
+        return ""
+    origins = first_wrist_origins(traj)
+    world_origins = first_wrist_world_origins(traj)
+    if not origins:
+        return ""
+
+    last_abs: Dict[str, Tuple[float, float, float]] = {}
+    last_grip: Dict[str, float] = {}
+    clauses: List[str] = []
+
+    def _emit(clause: str) -> bool:
+        if not clause:
+            return True
+        if len(clauses) >= max_clauses:
+            return False
+        clauses.append(clause)
+        return True
+
+    for fr in traj.frames:
+        if len(clauses) >= max_clauses:
+            break
+        for hand in fr.hands:
+            person_key = (
+                "Left" if hand.handedness.lower().startswith("l") else "Right"
+            )
+            robot_side = map_person_hand_to_robot_side(hand.handedness, mirror)
+            if robot_side == "left" and not ctrl_left:
+                continue
+            if robot_side == "right" and not ctrl_right:
+                continue
+
+            grip = float(sum(hand.joints)) / max(1, len(hand.joints))
+            prev_g = last_grip.get(robot_side)
+            # 首帧与明显开合变化都写入，便于直接点「执行」
+            if prev_g is None or abs(grip - prev_g) >= grip_delta:
+                if not _emit(_format_hand_clause(robot_side, grip)):
+                    break
+                last_grip[robot_side] = grip
+
+            if not move_arm:
+                continue
+            origin = origins.get(person_key)
+            if origin is None:
+                continue
+            abs_xyz = wrist_delta_to_base_world(
+                hand.wrist_xyz,
+                origin,
+                wrist_world_now=hand.wrist_world,
+                wrist_world0=world_origins.get(person_key),
+                scale_m=scale_m,
+                mirror=mirror,
+            )
+            prev = last_abs.get(robot_side)
+            if prev is None:
+                last_abs[robot_side] = abs_xyz
+                continue
+            ddx = abs_xyz[0] - prev[0]
+            ddy = abs_xyz[1] - prev[1]
+            ddz = abs_xyz[2] - prev[2]
+            if max(abs(ddx), abs(ddy), abs(ddz)) < min_step_m:
+                continue
+            for sx, sy, sz in _split_arm_deltas(ddx, ddy, ddz):
+                if not _emit(_format_arm_clause(robot_side, sx, sy, sz)):
+                    break
+            last_abs[robot_side] = abs_xyz
+
+    # 收尾：补上相对首帧的净位移残余（避免最后一小段被阈值吃掉）
+    if move_arm and len(clauses) < max_clauses:
+        for person_key, origin in origins.items():
+            # 找该手最后一帧
+            last_hand: Optional[DemoHandSample] = None
+            for fr in reversed(traj.frames):
+                for hand in fr.hands:
+                    key = (
+                        "Left"
+                        if hand.handedness.lower().startswith("l")
+                        else "Right"
+                    )
+                    if key == person_key:
+                        last_hand = hand
+                        break
+                if last_hand is not None:
+                    break
+            if last_hand is None:
+                continue
+            robot_side = map_person_hand_to_robot_side(last_hand.handedness, mirror)
+            if robot_side == "left" and not ctrl_left:
+                continue
+            if robot_side == "right" and not ctrl_right:
+                continue
+            abs_xyz = wrist_delta_to_base_world(
+                last_hand.wrist_xyz,
+                origin,
+                wrist_world_now=last_hand.wrist_world,
+                wrist_world0=world_origins.get(person_key),
+                scale_m=scale_m,
+                mirror=mirror,
+            )
+            prev = last_abs.get(robot_side, (0.0, 0.0, 0.0))
+            ddx = abs_xyz[0] - prev[0]
+            ddy = abs_xyz[1] - prev[1]
+            ddz = abs_xyz[2] - prev[2]
+            if max(abs(ddx), abs(ddy), abs(ddz)) < 0.01:
+                continue
+            for sx, sy, sz in _split_arm_deltas(ddx, ddy, ddz):
+                if not _emit(_format_arm_clause(robot_side, sx, sy, sz)):
+                    break
+
+    return "；".join(clauses)
+
+
 def analyze_demo_video(
     video_path: str,
     *,
@@ -486,6 +665,7 @@ __all__ = [
     "read_video_frame",
     "save_trajectory",
     "trajectory_cache_version",
+    "trajectory_to_arm_text",
     "wrist_delta_to_base",
     "wrist_delta_to_base_world",
 ]
