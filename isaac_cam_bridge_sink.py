@@ -15,6 +15,9 @@
 帧文件:
   {DIR}/{cam_key}.npy         HxWx3 uint8 RGB
   {DIR}/{cam_key}_depth.npy   HxW uint16 毫米深度（与真机 /camera/*_depth 一致）
+  {DIR}/{cam_key}_extrinsic.npy  4x4 float64，相机→base/env 相对系（与 TCP 同系）
+      约定：列为相机轴；默认已是 OpenCV/ROS optical（X右 Y下 Z前）。
+      若来自 USD 相机 xform，写出前需做 OpenGL→optical 转换。
 
 遥控（策略=无）:
   {DIR}/gui_robot_cmd.json    UI → Isaac 目标位姿 / 夹爪
@@ -35,7 +38,19 @@ import numpy as np
 
 _counters: Dict[str, int] = {}
 _depth_counters: Dict[str, int] = {}
+_extrinsic_counters: Dict[str, int] = {}
 _last_log_s = 0.0
+
+# USD/OpenGL 相机（X右 Y上 -Z前）→ ROS/OpenCV optical（X右 Y下 +Z前）
+_R_USD_FROM_OPTICAL = np.diag([1.0, -1.0, -1.0]).astype(np.float64)
+
+
+def usd_cam_to_optical_extrinsic(T_base_usd: np.ndarray) -> np.ndarray:
+    """把 camera-to-base（USD 轴）转为 optical-to-base。"""
+    T = np.asarray(T_base_usd, dtype=np.float64).reshape(4, 4).copy()
+    T_usd_from_opt = np.eye(4, dtype=np.float64)
+    T_usd_from_opt[:3, :3] = _R_USD_FROM_OPTICAL
+    return T @ T_usd_from_opt
 
 
 def bridge_dir() -> str:
@@ -124,6 +139,87 @@ def _depth_to_u16_mm(depth: object) -> Optional[np.ndarray]:
     bad = ~np.isfinite(depth_f) | (depth_f <= 0)
     depth_u16[bad] = 0
     return np.ascontiguousarray(depth_u16)
+
+
+def write_cam_extrinsic(
+    cam_key: str,
+    T_cam2base: object,
+    *,
+    every: Optional[int] = None,
+    already_optical: bool = True,
+) -> bool:
+    """写出 4x4 相机→base 外参（与仿真 TCP 同一相对系）。
+
+    ``already_optical=False`` 时按 USD/OpenGL 相机轴做转换后再写。
+    """
+    root = bridge_dir()
+    if not root:
+        return False
+    key = str(cam_key or "").strip()
+    if not key:
+        return False
+    try:
+        T = np.asarray(T_cam2base, dtype=np.float64).reshape(4, 4)
+    except Exception:
+        return False
+    if not np.isfinite(T).all():
+        return False
+    if not already_optical:
+        T = usd_cam_to_optical_extrinsic(T)
+
+    every_n = _bridge_every(every)
+    n = _extrinsic_counters.get(key, 0) + 1
+    _extrinsic_counters[key] = n
+    if (n - 1) % every_n != 0:
+        return False
+
+    try:
+        _atomic_npy_write(
+            os.path.join(root, f"{key}_extrinsic.npy"),
+            np.ascontiguousarray(T, dtype=np.float64),
+        )
+    except Exception as exc:
+        _log_fail(f"{key}_extrinsic", exc)
+        return False
+    return True
+
+
+def read_cam_extrinsic(
+    cam_key: str, *, root: Optional[str] = None, max_age_s: float = 3.0
+) -> Optional[np.ndarray]:
+    """读新鲜的相机→base 外参；过期或不存在返回 None。"""
+    d = (root or bridge_dir() or "").strip()
+    key = str(cam_key or "").strip()
+    if not d or not key:
+        return None
+    path = os.path.join(d, f"{key}_extrinsic.npy")
+    stamp_path = path + ".stamp"
+    try:
+        with open(stamp_path, "r", encoding="utf-8") as f:
+            ts = float(f.read().strip())
+        if max_age_s > 0 and (time.time() - ts) > float(max_age_s):
+            return None
+        with open(path, "rb") as f:
+            T = np.load(f)
+        T = np.asarray(T, dtype=np.float64).reshape(4, 4)
+    except Exception:
+        return None
+    if not np.isfinite(T).all():
+        return None
+    return T
+
+
+def sim_extrinsics_active(*, root: Optional[str] = None, max_age_s: float = 3.0) -> bool:
+    """Isaac 外参是否在刷（用于暂停 A2D 真机 TF，避免污染仿真 6D）。"""
+    d = (root or bridge_dir() or "").strip()
+    if not d:
+        d = os.environ.get("ISAAC_CAM_BRIDGE_DIR", "").strip()
+    if not d:
+        return False
+    for key in ("cam_head", "cam_high", "head_camera"):
+        if read_cam_extrinsic(key, root=d, max_age_s=max_age_s) is not None:
+            return True
+    return False
 
 
 def write_cam_depth(cam_key: str, depth: object, *, every: Optional[int] = None) -> bool:
@@ -304,23 +400,38 @@ def write_sim_robot_state(
     left_gripper: Any = None,
     right_gripper: Any = None,
     objects: Any = None,
+    merge: bool = True,
 ) -> bool:
     d = (root or bridge_dir() or "").strip()
     if not d:
         return False
+    prev = _read_json(os.path.join(d, SIM_ROBOT_STATE_NAME)) if merge else None
+    if not isinstance(prev, dict):
+        prev = {}
     out: dict = {"ts": time.time()}
     lp = _as_pose7(left_ee_pose)
     rp = _as_pose7(right_ee_pose)
     lg = _as_gripper(left_gripper)
     rg = _as_gripper(right_gripper)
+    # merge：未传的字段保留上一帧，避免 TCP 写与 objects 写互相覆盖
     if lp is not None:
         out["left_ee_pose"] = lp
+    elif "left_ee_pose" in prev:
+        out["left_ee_pose"] = prev["left_ee_pose"]
     if rp is not None:
         out["right_ee_pose"] = rp
+    elif "right_ee_pose" in prev:
+        out["right_ee_pose"] = prev["right_ee_pose"]
     if lg is not None:
         out["left_gripper"] = lg
+    elif "left_gripper" in prev:
+        out["left_gripper"] = prev["left_gripper"]
     if rg is not None:
         out["right_gripper"] = rg
+    elif "right_gripper" in prev:
+        out["right_gripper"] = prev["right_gripper"]
+    if objects is None and isinstance(prev.get("objects"), dict):
+        objects = prev["objects"]
     if isinstance(objects, dict) and objects:
         # 只保留可 JSON 序列化的简单位姿字段
         clean: dict = {}

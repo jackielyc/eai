@@ -43,6 +43,7 @@ MODEL_CONDA_ENVS: Dict[str, str] = {
     "robometer": "robometer-policy",
     # Sim / eval clients
     "robodojo": "RoboDojo",
+    "embodiedevo": "embodiedevo",
     "rlinf": "RLinf",
     "libero": "libero",
     "molmospaces": "molmospaces",
@@ -65,6 +66,7 @@ MODEL_CONDA_ENV_OVERRIDES: Dict[str, str] = {
     "humanego": "HUMANECO_CONDA_ENV",
     "psi_policy": "PSI_POLICY_CONDA_ENV",
     "rynnvalue": "RYNNVALUE_CONDA_ENV",
+    "embodiedevo": "EMBODIEDEVO_CONDA_ENV",
 }
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -158,6 +159,21 @@ def set_instruction(instruction: str) -> None:
         _hud.reset_episode(_instruction)
 
 
+def _write_cam_bridge_head(rgb: np.ndarray) -> None:
+    """Also dump cam_head.npy so eai /camera/* + 多视角 6D can refresh."""
+    if not os.environ.get("ISAAC_CAM_BRIDGE_DIR", "").strip():
+        return
+    try:
+        eai_s = str(Path(__file__).resolve().parent.parent)
+        if eai_s not in sys.path:
+            sys.path.insert(0, eai_s)
+        from isaac_cam_bridge_sink import write_cam_frame
+
+        write_cam_frame("cam_head", rgb, every=1)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def push_rgb(
     frame: Any,
     *,
@@ -190,6 +206,8 @@ def push_rgb(
                 _bus_writer.push(rgb, step=step_i, instruction=_instruction)
             elif _hud is not None:
                 _hud.push_frame(rgb, step=step_i)
+        # Shared npy bridge (best-effort; works even if HUD socket is down).
+        _write_cam_bridge_head(rgb)
     except Exception as exc:  # noqa: BLE001
         logger.debug("rynnvalue push skipped: %s", exc)
 

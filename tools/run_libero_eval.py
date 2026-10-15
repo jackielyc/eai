@@ -147,8 +147,59 @@ def _libero_preview_path() -> pathlib.Path:
     return eai / ".cache" / "rynnvalue_live" / "libero_preview.jpg"
 
 
-def _write_libero_preview_rgb(rgb: Any, *, min_interval_s: float = 0.1) -> None:
-    """Atomically write agentview RGB for the eai GUI preview poller."""
+def _libero_wrist_rgb(obs: Any) -> Any:
+    """Unflipped eye-in-hand RGB for eai cam bridge (None if missing)."""
+    if not isinstance(obs, dict):
+        return None
+    raw = obs.get("robot0_eye_in_hand_image")
+    if raw is None:
+        return None
+    try:
+        import numpy as np
+
+        arr = np.asarray(raw)
+        if arr.ndim != 3 or arr.shape[-1] < 3:
+            return None
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        return arr[..., :3]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _write_libero_cam_bridge(
+    head_rgb: Any, wrist_rgb: Any = None, *, every: int = 1
+) -> None:
+    """Write LIBERO agentview (+ eye-in-hand) into shared ISAAC_CAM_BRIDGE_DIR.
+
+    Feeds eai ``/camera/head_color`` / ``/camera/right_wrist_color`` via the same
+    npy poller used by Isaac, so 多视角 6D can refresh while LIBERO runs.
+    """
+    try:
+        eai = pathlib.Path(
+            os.environ.get("EAI_DIR") or pathlib.Path(__file__).resolve().parent.parent
+        )
+        if str(eai) not in sys.path:
+            sys.path.insert(0, str(eai))
+        from isaac_cam_bridge_sink import write_cam_frame
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        write_cam_frame("cam_head", head_rgb, every=every)
+        if wrist_rgb is not None:
+            # LIBERO single-arm eye-in-hand ≈ GUI 「右腕」
+            write_cam_frame("cam_right_wrist", wrist_rgb, every=every)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _write_libero_preview_rgb(
+    rgb: Any,
+    *,
+    wrist_rgb: Any = None,
+    min_interval_s: float = 0.1,
+) -> None:
+    """Atomically write agentview RGB for the eai GUI preview poller (+ cam bridge)."""
     import time as _time
 
     now = _time.time()
@@ -177,6 +228,18 @@ def _write_libero_preview_rgb(rgb: Any, *, min_interval_s: float = 0.1) -> None:
         tmp.replace(path)
         _PREVIEW_WRITE_STATE["last_at"] = now
         _PREVIEW_WRITE_STATE["path"] = str(path)
+        # Shared npy bridge for /camera/* + 多视角 6D (ISAAC_CAM_BRIDGE_DIR).
+        wrist_arr = None
+        if wrist_rgb is not None:
+            try:
+                w = np.asarray(wrist_rgb)
+                if w.ndim == 3 and w.shape[-1] >= 3:
+                    if w.dtype != np.uint8:
+                        w = np.clip(w, 0, 255).astype(np.uint8)
+                    wrist_arr = w[..., :3]
+            except Exception:  # noqa: BLE001
+                wrist_arr = None
+        _write_libero_cam_bridge(arr[..., :3], wrist_arr)
         if not _PREVIEW_WRITE_STATE["logged_ok"]:
             logging.info("libero preview → %s (%sx%s)", path, arr.shape[1], arr.shape[0])
             _PREVIEW_WRITE_STATE["logged_ok"] = 1
@@ -641,7 +704,9 @@ def _main_viewer_only(args: argparse.Namespace) -> int:
         obs = env.set_init_state(initial_states[0])
         try:
             _write_libero_preview_rgb(
-                hud_bridge.extract_rgb(obs, apply_flip=False), min_interval_s=0.0
+                hud_bridge.extract_rgb(obs, apply_flip=False),
+                wrist_rgb=_libero_wrist_rgb(obs),
+                min_interval_s=0.0,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -700,7 +765,8 @@ def _main_viewer_only(args: argparse.Namespace) -> int:
                     obs = _viewer_reset()
                 try:
                     _write_libero_preview_rgb(
-                        hud_bridge.extract_rgb(obs, apply_flip=False)
+                        hud_bridge.extract_rgb(obs, apply_flip=False),
+                        wrist_rgb=_libero_wrist_rgb(obs),
                     )
                 except Exception:  # noqa: BLE001
                     pass
@@ -841,7 +907,8 @@ def main(args: argparse.Namespace) -> int:
                         # Feed eai 图像预览 during settle steps too.
                         try:
                             _write_libero_preview_rgb(
-                                hud_bridge.extract_rgb(obs, apply_flip=False)
+                                hud_bridge.extract_rgb(obs, apply_flip=False),
+                                wrist_rgb=_libero_wrist_rgb(obs),
                             )
                         except Exception:  # noqa: BLE001
                             pass
@@ -869,7 +936,9 @@ def main(args: argparse.Namespace) -> int:
                     replay_images.append(img_in)
                     # Unflipped agentview → eai workspace preview (always).
                     hud_img = hud_bridge.extract_rgb(obs, apply_flip=False)
-                    _write_libero_preview_rgb(hud_img)
+                    _write_libero_preview_rgb(
+                        hud_img, wrist_rgb=_libero_wrist_rgb(obs)
+                    )
                     if live_hud is not None:
                         # Unflipped: score + display match sim viewer.
                         live_hud.push_frame(

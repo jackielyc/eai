@@ -29,11 +29,11 @@
     },
     "sam3_u_spin": {
       "kind": "spin",
-      "value": 573
+      "value": 133
     },
     "sam3_v_spin": {
       "kind": "spin",
-      "value": 236
+      "value": 96
     },
     "pose_backend_combo": {
       "kind": "combo",
@@ -97,7 +97,7 @@
     },
     "lingbot_depth_topic_combo": {
       "kind": "combo",
-      "index": 1,
+      "index": 3,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -193,7 +193,7 @@
     },
     "lingbot_video_topic_combo": {
       "kind": "combo",
-      "index": 1,
+      "index": 3,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -263,7 +263,7 @@
     },
     "lingbot_world_topic_combo": {
       "kind": "combo",
-      "index": 1,
+      "index": 3,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -423,7 +423,7 @@
     },
     "sim_backend_isaac_radio": {
       "kind": "radio",
-      "checked": false
+      "checked": true
     },
     "sim_backend_mujoco_radio": {
       "kind": "radio",
@@ -443,7 +443,7 @@
     },
     "sim_backend_libero_radio": {
       "kind": "radio",
-      "checked": true
+      "checked": false
     },
     "sim_backend_robotwin_radio": {
       "kind": "radio",
@@ -469,16 +469,16 @@
     },
     "sim_eval_task_combo": {
       "kind": "combo",
-      "index": 26,
-      "text": "pick_from_conveyor_by_image",
-      "data": "pick_from_conveyor_by_image",
-      "edit": "pick_from_conveyor_by_image"
+      "index": 1,
+      "text": "arrange_largest_number",
+      "data": "arrange_largest_number",
+      "edit": "arrange_largest_number"
     },
     "sim_eval_policy_combo": {
       "kind": "combo",
-      "index": 36,
-      "text": "starVLA",
-      "data": "XPolicyLab/policy/starVLA"
+      "index": 0,
+      "text": "无",
+      "data": ""
     },
     "sim_eval_ckpt_edit": {
       "kind": "line",
@@ -645,13 +645,13 @@
     },
     "libero_task_id_spin": {
       "kind": "spin",
-      "value": 9
+      "value": 1
     },
     "libero_task_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "[0] pick up the black bowl between the plate and the ramekin and place it on the plate",
-      "data": 0
+      "index": 1,
+      "text": "[1] pick up the black bowl next to the ramekin and place it on the plate",
+      "data": 1
     },
     "libero_config_combo": {
       "kind": "combo",
@@ -791,6 +791,10 @@
     },
     "real_robot_r1_radio": {
       "kind": "radio",
+      "checked": false
+    },
+    "real_robot_franka_radio": {
+      "kind": "radio",
       "checked": true
     },
     "real_eval_task_edit": {
@@ -827,7 +831,7 @@
     },
     "arm_text_cmd_edit": {
       "kind": "line",
-      "text": "右手合到42%；右手张开；左手合到30%；右手半握；右手张开；右手半握；右手合到25%"
+      "text": "右臂移到 x=0.1259 y=-0.1563 z=0.7961"
     },
     "left_hand_slider_a": {
       "kind": "slider",
@@ -859,7 +863,7 @@
     },
     "offset_x_spin": {
       "kind": "dspin",
-      "value": 0.05
+      "value": 0.0
     },
     "offset_y_spin": {
       "kind": "dspin",
@@ -868,6 +872,14 @@
     "offset_z_spin": {
       "kind": "dspin",
       "value": 0.0
+    },
+    "arm_panel_human_demo_radio": {
+      "kind": "radio",
+      "checked": false
+    },
+    "arm_panel_mv6d_radio": {
+      "kind": "radio",
+      "checked": true
     },
     "human_demo_path_edit": {
       "kind": "line",
@@ -892,6 +904,68 @@
     "human_demo_scale_spin": {
       "kind": "dspin",
       "value": 0.3
+    },
+    "mv6d_enable_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "mv6d_lingbot_depth_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "mv6d_fill_cmd_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "mv6d_wrist_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "左腕",
+      "data": "/camera/left_wrist_color"
+    },
+    "mv6d_interval_spin": {
+      "kind": "dspin",
+      "value": 0.5
+    },
+    "mv6d_overlay_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "mv6d_head_u_spin": {
+      "kind": "spin",
+      "value": 444
+    },
+    "mv6d_head_v_spin": {
+      "kind": "spin",
+      "value": 280
+    },
+    "mv6d_gt_enable_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "mv6d_gt_x_spin": {
+      "kind": "dspin",
+      "value": 0.1283
+    },
+    "mv6d_gt_y_spin": {
+      "kind": "dspin",
+      "value": -0.0582
+    },
+    "mv6d_gt_z_spin": {
+      "kind": "dspin",
+      "value": 0.7675
+    },
+    "mv6d_gt_roll_spin": {
+      "kind": "dspin",
+      "value": 0.0
+    },
+    "mv6d_gt_pitch_spin": {
+      "kind": "dspin",
+      "value": 0.0
+    },
+    "mv6d_gt_yaw_spin": {
+      "kind": "dspin",
+      "value": 0.0
     },
     "skeleton_cam_combo": {
       "kind": "combo",
@@ -1013,7 +1087,7 @@
     },
     "reward_topic_combo": {
       "kind": "combo",
-      "index": 2,
+      "index": 0,
       "text": "/camera/head_color",
       "data": "/camera/head_color"
     },
@@ -1520,6 +1594,66 @@
       "kind": "plain",
       "text": "def act(o, g, m, skills, tools):\n    tiles = skills.perceive(o)\n    if tiles:\n        skills.pick_and_place(tiles[0], \"row\")\n    return m\n"
     },
+    "tab:EmbodiedEvo.repo_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/EmbodiedEvo"
+    },
+    "tab:EmbodiedEvo.python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/embodiedevo/bin/python"
+    },
+    "tab:EmbodiedEvo.mode_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "run（Playground+Test）",
+      "data": "run"
+    },
+    "tab:EmbodiedEvo.recipe_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "tab:EmbodiedEvo.task_combo": {
+      "kind": "combo",
+      "index": 36,
+      "text": "stack bowls",
+      "data": "stack_bowls"
+    },
+    "tab:EmbodiedEvo.gpu_edit": {
+      "kind": "line",
+      "text": "0"
+    },
+    "tab:EmbodiedEvo.scenes_spin": {
+      "kind": "spin",
+      "value": 5
+    },
+    "tab:EmbodiedEvo.pg_budget_spin": {
+      "kind": "spin",
+      "value": 100
+    },
+    "tab:EmbodiedEvo.test_budget_spin": {
+      "kind": "spin",
+      "value": 100
+    },
+    "tab:EmbodiedEvo.model_edit": {
+      "kind": "line",
+      "text": "gpt-6-astra"
+    },
+    "tab:EmbodiedEvo.reason_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "xhigh",
+      "data": "xhigh"
+    },
+    "tab:EmbodiedEvo.run_dir_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/EmbodiedEvo/runs/202610151957_stack_bowls"
+    },
+    "tab:EmbodiedEvo.history_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "(历史 run…)",
+      "data": ""
+    },
     "tab:编程冲SOTA.backend_combo": {
       "kind": "combo",
       "index": 0,
@@ -1561,7 +1695,7 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "真机评测",
+  "control_tab": "手臂/手",
   "splitter_sizes": [
     256,
     1258,
@@ -1569,7 +1703,7 @@
   ],
   "geometry": [
     0,
-    51,
+    56,
     1920,
     1029
   ],
@@ -1584,5 +1718,5 @@
     "/camera/right_wrist_depth": true
   },
   "topic_user_unchecked": [],
-  "workspace_collapsed": false
+  "workspace_collapsed": true
 }

@@ -35,19 +35,33 @@ DEFAULT_DIR = os.path.join(
 DEFAULT_HZ = 30.0
 
 # cam_key → (color_topic, depth_topic, frame_id)
+# 注意：勿用真机 A2D 的 camera_frame（会被 a2d_head_camera_tf 盖掉，6D Z≈1.8）。
+# Isaac 专用 frame，由本桥根据 *_extrinsic.npy 发布 base_link→frame TF。
 CAMERA_MAP: Dict[str, Tuple[str, str, str]] = {
-    "cam_head": ("/camera/head_color", "/camera/head_depth", "camera_frame"),
-    "cam_high": ("/camera/head_color", "/camera/head_depth", "camera_frame"),
-    "head_camera": ("/camera/head_color", "/camera/head_depth", "camera_frame"),
+    "cam_head": (
+        "/camera/head_color",
+        "/camera/head_depth",
+        "isaac_head_camera_frame",
+    ),
+    "cam_high": (
+        "/camera/head_color",
+        "/camera/head_depth",
+        "isaac_head_camera_frame",
+    ),
+    "head_camera": (
+        "/camera/head_color",
+        "/camera/head_depth",
+        "isaac_head_camera_frame",
+    ),
     "cam_left_wrist": (
         "/camera/left_wrist_color",
         "/camera/left_wrist_depth",
-        "left_wrist_camera_frame",
+        "isaac_left_wrist_camera_frame",
     ),
     "cam_right_wrist": (
         "/camera/right_wrist_color",
         "/camera/right_wrist_depth",
-        "right_wrist_camera_frame",
+        "isaac_right_wrist_camera_frame",
     ),
 }
 
@@ -96,6 +110,53 @@ def _read_stamp(path: str) -> str:
             return str(os.path.getmtime(path))
         except Exception:
             return ""
+
+
+def _load_extrinsic(path: str) -> Optional[np.ndarray]:
+    try:
+        with open(path, "rb") as f:
+            arr = np.load(f)
+        T = np.asarray(arr, dtype=np.float64).reshape(4, 4)
+    except Exception:
+        return None
+    if not np.isfinite(T).all():
+        return None
+    return T
+
+
+def _matrix_to_quat_xyzw(R: np.ndarray) -> Tuple[float, float, float, float]:
+    m = np.asarray(R, dtype=np.float64).reshape(3, 3)
+    trace = float(m[0, 0] + m[1, 1] + m[2, 2])
+    if trace > 0.0:
+        s = 0.5 / np.sqrt(trace + 1.0)
+        qw = 0.25 / s
+        qx = (m[2, 1] - m[1, 2]) * s
+        qy = (m[0, 2] - m[2, 0]) * s
+        qz = (m[1, 0] - m[0, 1]) * s
+    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2])
+        qw = (m[2, 1] - m[1, 2]) / s
+        qx = 0.25 * s
+        qy = (m[0, 1] + m[1, 0]) / s
+        qz = (m[0, 2] + m[2, 0]) / s
+    elif m[1, 1] > m[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2])
+        qw = (m[0, 2] - m[2, 0]) / s
+        qx = (m[0, 1] + m[1, 0]) / s
+        qy = 0.25 * s
+        qz = (m[1, 2] + m[2, 1]) / s
+    else:
+        s = 2.0 * np.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1])
+        qw = (m[1, 0] - m[0, 1]) / s
+        qx = (m[0, 2] + m[2, 0]) / s
+        qy = (m[1, 2] + m[2, 1]) / s
+        qz = 0.25 * s
+    q = np.array([qx, qy, qz, qw], dtype=np.float64)
+    n = float(np.linalg.norm(q))
+    if n < 1e-12:
+        return (0.0, 0.0, 0.0, 1.0)
+    q /= n
+    return (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
 
 
 def _numpy_to_imgmsg(
@@ -155,9 +216,11 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     import rclpy
+    from geometry_msgs.msg import TransformStamped
     from rclpy.node import Node
     from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import Image
+    from tf2_ros import TransformBroadcaster
 
     class IsaacCamBridge(Node):
         def __init__(self) -> None:
@@ -166,6 +229,8 @@ def main(argv=None) -> int:
             self._last_color_stamp: Dict[str, str] = {}
             self._last_depth_stamp: Dict[str, str] = {}
             self._pubs: Dict[str, object] = {}
+            self._tf_broadcaster = TransformBroadcaster(self)
+            self._tf_logged = False
             self._qos = QoSProfile(
                 reliability=(
                     ReliabilityPolicy.BEST_EFFORT
@@ -188,7 +253,7 @@ def main(argv=None) -> int:
             period = 1.0 / max(1.0, float(args.hz))
             self.create_timer(period, self._on_timer)
             self.get_logger().info(
-                f"watching {self._dir} → color+depth "
+                f"watching {self._dir} → color+depth+TF "
                 f"{sorted(self._pubs.keys())} (numpy Image encode, no cv_bridge)"
             )
 
@@ -281,11 +346,49 @@ def main(argv=None) -> int:
             self._ensure_pub(depth_topic).publish(msg)
             self._last_depth_stamp[cam_key] = stamp_val
 
+        def _publish_extrinsic_tf(self, cam_key: str, frame_id: str) -> bool:
+            """把仿真写出的 cam→base 外参发成 base_link→frame_id TF。"""
+            path = os.path.join(self._dir, f"{cam_key}_extrinsic.npy")
+            if not os.path.isfile(path):
+                return False
+            # 允许 stamp 稍旧：评测掉帧时仍保持 TF 连续
+            stamp_val = _read_stamp(path)
+            try:
+                age = time.time() - float(stamp_val)
+            except (TypeError, ValueError):
+                age = 0.0
+            if age > 5.0:
+                return False
+            T = _load_extrinsic(path)
+            if T is None:
+                return False
+            msg = TransformStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = "base_link"
+            msg.child_frame_id = frame_id
+            msg.transform.translation.x = float(T[0, 3])
+            msg.transform.translation.y = float(T[1, 3])
+            msg.transform.translation.z = float(T[2, 3])
+            qx, qy, qz, qw = _matrix_to_quat_xyzw(T[:3, :3])
+            msg.transform.rotation.x = qx
+            msg.transform.rotation.y = qy
+            msg.transform.rotation.z = qz
+            msg.transform.rotation.w = qw
+            self._tf_broadcaster.sendTransform(msg)
+            if not self._tf_logged:
+                self._tf_logged = True
+                self.get_logger().info(
+                    f"publishing sim TF base_link→{frame_id} from {cam_key}_extrinsic.npy "
+                    f"xyz=({T[0, 3]:.3f},{T[1, 3]:.3f},{T[2, 3]:.3f})"
+                )
+            return True
+
         def _on_timer(self) -> None:
             if not os.path.isdir(self._dir):
                 return
             published_color = set()
             published_depth = set()
+            published_tf_frames = set()
             for cam_key in self._cam_keys():
                 color_topic, depth_topic, frame_id = self._resolve_mapping(cam_key)
                 if color_topic not in published_color:
@@ -294,6 +397,9 @@ def main(argv=None) -> int:
                 if depth_topic not in published_depth:
                     self._publish_depth(cam_key, depth_topic, frame_id)
                     published_depth.add(depth_topic)
+                if frame_id and frame_id not in published_tf_frames:
+                    if self._publish_extrinsic_tf(cam_key, frame_id):
+                        published_tf_frames.add(frame_id)
 
     rclpy.init(args=None)
     node = IsaacCamBridge()

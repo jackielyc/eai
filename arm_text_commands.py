@@ -15,15 +15,20 @@ from typing import Dict, List, Optional, Tuple
 ARM_TEXT_DEFAULT_STEP_M = 0.05
 ARM_TEXT_MAX_OFFSET_M = 0.5
 
-ARM_TEXT_CMD_PLACEHOLDER = "例：左臂向前5cm；右手张开"
+ARM_TEXT_CMD_PLACEHOLDER = "例：左臂向前5cm；右臂移到 x=0.4 y=-0.1 z=0.35；右手张开"
 ARM_TEXT_CMD_HELP = (
-    "输入文字指挥手臂相对移动和手的开合，回车或点「执行」。\n"
+    "输入文字指挥手臂相对/绝对移动和手的开合，回车或点「执行」。\n"
     "多条用分号或换行分隔，按书写顺序执行（手臂移动完成后才执行下一条）。\n"
     "\n"
-    "手臂（base_link，不写距离默认 5cm，最大 0.5m）：\n"
+    "手臂相对（base_link，不写距离默认 5cm，最大 0.5m）：\n"
     "  左臂向前5cm\n"
     "  右臂向上2厘米，向左1cm\n"
     "  双臂抬起\n"
+    "\n"
+    "手臂绝对目标（base_link，米；仿真下匹配点=两指结合中点，执行时自动换算成 EE；"
+    "可带 qx qy qz qw，省略则保持当前姿态）：\n"
+    "  左臂移到 x=0.412 y=-0.103 z=0.355\n"
+    "  右臂移到 0.40, -0.10, 0.35\n"
     "\n"
     "手（0=张，1=合）：\n"
     "  左手张开；右手闭合；双手半握\n"
@@ -197,9 +202,50 @@ class ArmHandTextAction:
     dx: float = 0.0
     dy: float = 0.0
     dz: float = 0.0
+    # 绝对目标（base_link 米）；非空时优先于 dx/dy/dz
+    abs_xyz: Optional[Tuple[float, float, float]] = None
+    # 可选姿态；None 表示执行时保持当前 TCP 姿态
+    abs_quat_xyzw: Optional[Tuple[float, float, float, float]] = None
     position: Optional[float] = None
     joints: Dict[str, float] = field(default_factory=dict)
     label: str = ""
+
+
+_ABS_POSE_RE = re.compile(
+    r"(?:移到|移动到|去往|前往|目标(?:位姿|位置)?|goto|move\s*to)\s*"
+    r"(?:"
+    r"x\s*[=:：]?\s*([+-]?\d+(?:\.\d+)?)\s*(?:m|米)?\s*[,，\s]+"
+    r"y\s*[=:：]?\s*([+-]?\d+(?:\.\d+)?)\s*(?:m|米)?\s*[,，\s]+"
+    r"z\s*[=:：]?\s*([+-]?\d+(?:\.\d+)?)\s*(?:m|米)?"
+    r"|"
+    r"[\(（]?\s*([+-]?\d+(?:\.\d+)?)\s*(?:m|米)?\s*[,，\s]+"
+    r"([+-]?\d+(?:\.\d+)?)\s*(?:m|米)?\s*[,，\s]+"
+    r"([+-]?\d+(?:\.\d+)?)\s*(?:m|米)?\s*[\)）]?"
+    r")"
+    # 可选姿态（z 后可能已无空白，故 \s* + 显式 qx）
+    r"(?:"
+    r"\s*qx\s*[=:：]?\s*([+-]?\d+(?:\.\d+)?)\s+"
+    r"qy\s*[=:：]?\s*([+-]?\d+(?:\.\d+)?)\s+"
+    r"qz\s*[=:：]?\s*([+-]?\d+(?:\.\d+)?)\s+"
+    r"qw\s*[=:：]?\s*([+-]?\d+(?:\.\d+)?)"
+    r")?",
+    re.IGNORECASE,
+)
+
+
+def format_arm_abs_pose_text(
+    side: str,
+    xyz: Tuple[float, float, float],
+    quat_xyzw: Optional[Tuple[float, float, float, float]] = None,
+) -> str:
+    """生成可被 parse_arm_hand_text 识别的绝对目标指令。"""
+    name = {"left": "左臂", "right": "右臂", "both": "双臂"}.get(side, "左臂")
+    x, y, z = [float(v) for v in xyz]
+    text = f"{name}移到 x={x:.4f} y={y:.4f} z={z:.4f}"
+    if quat_xyzw is not None and len(quat_xyzw) >= 4:
+        qx, qy, qz, qw = [float(v) for v in quat_xyzw[:4]]
+        text += f" qx={qx:.4f} qy={qy:.4f} qz={qz:.4f} qw={qw:.4f}"
+    return text
 
 
 def canonical_hand_joint(name: str) -> Optional[str]:
@@ -279,6 +325,23 @@ def _strip_polite(clause: str) -> str:
     return clause
 
 
+def _parse_abs_xyz(
+    clause: str,
+) -> Optional[Tuple[Tuple[float, float, float], Optional[Tuple[float, float, float, float]]]]:
+    match = _ABS_POSE_RE.search(clause)
+    if not match:
+        return None
+    g = match.groups()
+    if g[0] is not None:
+        x, y, z = float(g[0]), float(g[1]), float(g[2])
+    else:
+        x, y, z = float(g[3]), float(g[4]), float(g[5])
+    quat = None
+    if g[6] is not None:
+        quat = (float(g[6]), float(g[7]), float(g[8]), float(g[9]))
+    return (x, y, z), quat
+
+
 def _parse_clause(
     clause: str,
     inherit: Optional[Tuple[str, str]] = None,
@@ -291,10 +354,13 @@ def _parse_clause(
         return [ArmHandTextAction(kind="stop", side="both", label="停止")], ""
 
     side, prefer = _detect_subject(clause)
-    deltas = _extract_deltas(clause)
+    abs_parsed = _parse_abs_xyz(clause)
+    abs_xyz = abs_parsed[0] if abs_parsed is not None else None
+    abs_quat = abs_parsed[1] if abs_parsed is not None else None
+    deltas = None if abs_xyz is not None else _extract_deltas(clause)
     fingers = _extract_fingers(clause)
-    hand_pos = _parse_hand_position(clause)
-    has_arm = deltas is not None
+    hand_pos = _parse_hand_position(clause) if abs_xyz is None else None
+    has_arm = deltas is not None or abs_xyz is not None
     has_hand = hand_pos is not None or bool(fingers)
 
     if side is None and not has_arm and not has_hand:
@@ -319,15 +385,21 @@ def _parse_clause(
         prefer = "arm"
     elif prefer == "arm" and has_hand and not has_arm:
         prefer = "hand"
+    # 绝对移到一律按手臂处理（避免「到」被手部解析吃掉）
+    if abs_xyz is not None:
+        prefer = "arm"
 
     arm_action: Optional[ArmHandTextAction] = None
     hand_action: Optional[ArmHandTextAction] = None
     if has_arm and (prefer == "arm" or has_hand):
-        dx, dy, dz, clamped = deltas or (0.0, 0.0, 0.0, False)
-        if abs(dx) + abs(dy) + abs(dz) < 1e-6:
-            return [], f"{raw}（偏移为零）"
-        arm_action = _make_arm_action(side, dx, dy, dz, clamped)
-    if has_hand and (prefer == "hand" or has_arm):
+        if abs_xyz is not None:
+            arm_action = _make_abs_arm_action(side, abs_xyz, abs_quat)
+        else:
+            dx, dy, dz, clamped = deltas or (0.0, 0.0, 0.0, False)
+            if abs(dx) + abs(dy) + abs(dz) < 1e-6:
+                return [], f"{raw}（偏移为零）"
+            arm_action = _make_arm_action(side, dx, dy, dz, clamped)
+    if has_hand and (prefer == "hand" or has_arm) and abs_xyz is None:
         if fingers and hand_pos is None:
             return [], f"{raw}（请说明张开、闭合或开合量）"
         pos = 0.0 if hand_pos is None else hand_pos
@@ -535,6 +607,24 @@ def _make_arm_action(
     )
 
 
+def _make_abs_arm_action(
+    side: str,
+    xyz: Tuple[float, float, float],
+    quat_xyzw: Optional[Tuple[float, float, float, float]] = None,
+) -> ArmHandTextAction:
+    x, y, z = [float(v) for v in xyz]
+    label = f"{_side_name(side, 'arm')} → ({x:.4f}, {y:.4f}, {z:.4f}) m"
+    if quat_xyzw is not None:
+        label += " +quat"
+    return ArmHandTextAction(
+        kind="arm",
+        side=side,
+        abs_xyz=(x, y, z),
+        abs_quat_xyzw=quat_xyzw,
+        label=label,
+    )
+
+
 def _expand_both_arms(action: ArmHandTextAction) -> List[ArmHandTextAction]:
     if action.side != "both":
         return [action]
@@ -547,6 +637,8 @@ def _expand_both_arms(action: ArmHandTextAction) -> List[ArmHandTextAction]:
                 dx=action.dx,
                 dy=action.dy,
                 dz=action.dz,
+                abs_xyz=action.abs_xyz,
+                abs_quat_xyzw=action.abs_quat_xyzw,
                 label=action.label.replace("双臂", _side_name(side, "arm"), 1),
             )
         )

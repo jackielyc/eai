@@ -392,7 +392,42 @@ class HeadCameraTfPublisher:
         msg.transform.rotation.w = qw
         return msg
 
+    def _sim_extrinsics_active(self) -> bool:
+        """Isaac/RoboDojo 正在刷仿真外参时，勿再发 A2D 真机 TF（否则 6D Z 会飞到 ~1.8m）。"""
+        try:
+            bridge = os.environ.get("ISAAC_CAM_BRIDGE_DIR", "").strip()
+            if not bridge:
+                return False
+            sink_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "isaac_cam_bridge_sink.py"
+            )
+            if not os.path.isfile(sink_path):
+                return False
+            import importlib.util
+
+            spec = importlib.util.spec_from_file_location(
+                "isaac_cam_bridge_sink_tfcheck", sink_path
+            )
+            if spec is None or spec.loader is None:
+                return False
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return bool(mod.sim_extrinsics_active(root=bridge, max_age_s=3.0))
+        except Exception:
+            return False
+
     def _on_timer(self) -> None:
+        if self._sim_extrinsics_active():
+            if not getattr(self, "_logged_sim_suppress", False):
+                self._logged_sim_suppress = True
+                self.node.get_logger().info(
+                    "camera TF: Isaac 外参活跃 → 暂停 A2D base_link→camera_frame "
+                    "（由 isaac_cam_ros_bridge 发布仿真 TF）"
+                )
+            return
+        if getattr(self, "_logged_sim_suppress", False):
+            self._logged_sim_suppress = False
+            self.node.get_logger().info("camera TF: 恢复 A2D base_link→camera_frame")
         with self._lock:
             T = self.fk.base_to_camera_matrix()
             have_waist = self._have_waist

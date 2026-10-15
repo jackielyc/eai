@@ -41,6 +41,41 @@ def _find_rgb(example_dir: Path) -> Path | None:
     return None
 
 
+def _synthesize_sparse_depth_png(
+    out_path: Path,
+    *,
+    height: int,
+    width: int,
+    sparse_z_m: float,
+    seed_uv: tuple[int, int] | None = None,
+    depth_scale: float = 1000.0,
+) -> Path:
+    """无传感器 depth 时造稀疏先验（毫米 uint16 PNG），供 MDM 补全。"""
+    import cv2
+
+    z = max(0.05, float(sparse_z_m))
+    mm = int(round(z * float(depth_scale)))
+    mm = max(1, min(65535, mm))
+    depth_u16 = np.zeros((height, width), dtype=np.uint16)
+    # 中心 + 种子 + 稀疏网格，避免全零导致 encoder 无有效深度 token
+    pts = [(width // 2, height // 2)]
+    if seed_uv is not None:
+        pts.append((int(seed_uv[0]), int(seed_uv[1])))
+    step_u = max(8, width // 8)
+    step_v = max(8, height // 8)
+    for v in range(step_v // 2, height, step_v):
+        for u in range(step_u // 2, width, step_u):
+            pts.append((u, v))
+    for u, v in pts:
+        uu = max(0, min(width - 1, int(u)))
+        vv = max(0, min(height - 1, int(v)))
+        depth_u16[vv, uu] = mm
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(out_path), depth_u16):
+        raise RuntimeError(f"无法写出稀疏 depth: {out_path}")
+    return out_path
+
+
 def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     if args.example is not None and str(args.example).strip() != "":
         example_dir = LINGBOT_DEPTH_ROOT / "examples" / str(args.example).strip()
@@ -58,25 +93,60 @@ def _resolve_inputs(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         return rgb, depth, intrinsics
 
     rgb = Path(os.path.abspath(os.path.expanduser(args.rgb or "")))
-    depth = Path(os.path.abspath(os.path.expanduser(args.depth or "")))
+    depth_raw = (args.depth or "").strip()
+    depth: Path | None = (
+        Path(os.path.abspath(os.path.expanduser(depth_raw))) if depth_raw else None
+    )
     intrinsics = Path(os.path.abspath(os.path.expanduser(args.intrinsics or "")))
     missing = []
     if not rgb.is_file():
         missing.append(f"rgb={rgb}")
-    if not depth.is_file():
-        missing.append(f"depth={depth}")
     if not intrinsics.is_file():
         missing.append(f"intrinsics={intrinsics}")
     if missing:
         raise FileNotFoundError("输入文件不存在: " + ", ".join(missing))
-    return rgb, depth, intrinsics
+
+    if depth is not None and depth.is_file():
+        return rgb, depth, intrinsics
+
+    # 允许无 depth：用稀疏平面先验（LIBERO 等 RGB-only 场景）
+    if not bool(getattr(args, "allow_empty_depth", False)):
+        raise FileNotFoundError(
+            f"depth 不存在: {depth or '(未提供)'}；"
+            "若要从 RGB 稀疏先验补深度请加 --allow-empty-depth"
+        )
+    import cv2
+
+    img = cv2.imread(str(rgb), cv2.IMREAD_COLOR)
+    if img is None:
+        raise FileNotFoundError(f"无法读取 rgb: {rgb}")
+    h, w = img.shape[:2]
+    seed = None
+    if getattr(args, "seed_u", None) is not None and getattr(args, "seed_v", None) is not None:
+        seed = (int(args.seed_u), int(args.seed_v))
+    out_dir = Path(os.path.abspath(os.path.expanduser(args.out)))
+    synth = out_dir / "raw_depth_sparse.png"
+    _synthesize_sparse_depth_png(
+        synth,
+        height=h,
+        width=w,
+        sparse_z_m=float(getattr(args, "sparse_z", 0.45) or 0.45),
+        seed_uv=seed,
+        depth_scale=float(args.depth_scale),
+    )
+    print(
+        f"[lingbot_depth] 无传感器 depth → 稀疏先验 {synth} "
+        f"z={float(getattr(args, 'sparse_z', 0.45) or 0.45):.3f}m",
+        flush=True,
+    )
+    return rgb, synth, intrinsics
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="LingBot-Depth worker")
     parser.add_argument("--example", default="", help="examples/<id> under lingbot-depth")
     parser.add_argument("--rgb", default="", help="RGB image path")
-    parser.add_argument("--depth", default="", help="raw depth PNG (16-bit mm)")
+    parser.add_argument("--depth", default="", help="raw depth PNG (16-bit mm)；可空")
     parser.add_argument("--intrinsics", default="", help="3x3 intrinsics txt/json")
     parser.add_argument(
         "--model",
@@ -88,6 +158,19 @@ def main() -> int:
     parser.add_argument("--no-mask", action="store_true")
     parser.add_argument("--cache-dir", default="")
     parser.add_argument("--depth-scale", type=float, default=1000.0)
+    parser.add_argument(
+        "--allow-empty-depth",
+        action="store_true",
+        help="无 depth 文件时用 --sparse-z 造稀疏先验再补全",
+    )
+    parser.add_argument(
+        "--sparse-z",
+        type=float,
+        default=0.45,
+        help="allow-empty-depth 时稀疏先验深度（米）",
+    )
+    parser.add_argument("--seed-u", type=int, default=None)
+    parser.add_argument("--seed-v", type=int, default=None)
     args = parser.parse_args()
 
     try:
