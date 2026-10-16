@@ -3898,13 +3898,22 @@ MOVE_TF_LOOKUP_TIMEOUT_S = 1.0
 IK_TARGET_FRAME = "base_link"
 # mink_fk 将 frame_id 标为 map，但与 ik_node /tele/fk 使用同一 fkSolve，数值即 base_link 系
 MINK_FK_FRAME_ALIASES = frozenset({"map", "world"})
-# ARX X5：ee_link=link6；两指 joint7/8 原点在 link6 系 x≈0.08657、±y，结合中点≈(0.08657,0,0)
-# 文本指挥绝对目标以该中点匹配物体，执行时再换算为 link6/EE 指令。
+# ARX X5：ee_link=link6；两指关节原点在 link6 +X≈0.08657（开合沿 ±Y），结合中点用此值。
+# 勿用 gripper_bias=0.145：那是另一套 TCP 约定，会把中点再沿接近方向拉长 ~58mm，误差变大。
 SIM_FINGER_MID_OFFSET_IN_EE_M: Tuple[float, float, float] = (0.08657, 0.0, 0.0)
+# 指令插值写完后，再等仿真 EE 跟踪到位（否则 UI「完成」时夹爪中点仍偏很远）
+SIM_ARM_SETTLE_TOL_M = 0.020
+SIM_ARM_SETTLE_MAX_S = 8.0
 # 融合点过少时 PCA 中心漂～数 cm、姿态不可用 → 标不可靠并优先仿真 GT
 MV6D_MIN_FUSED_POINTS = 80
-# 桌面抓取：手指中点对准物体中心略偏上（半高的一小部分），避免插进桌面
-MV6D_GRASP_Z_LIFT_FRAC = 0.35
+# 桌面抓取：手指中点对准物体几何中心（0=重合；勿再抬高，否则视觉 residual 变大）
+MV6D_GRASP_Z_LIFT_FRAC = 0.0
+# 估计→最近仿真物体的匹配半径（用于回填真值中心，使夹爪中点能对准物体）
+MV6D_FILL_GT_MAX_DIST_M = 0.28
+# 腕深度无效像素占比过高时跳过该腕（右腕常见空洞会污染共享 6D）
+MV6D_WRIST_DEPTH_INVALID_MAX_RATIO = 0.10
+# 仿真绝对移动：先水平对准再下压，避免斜插导致 IK 卡在桌面上方
+SIM_ARM_APPROACH_MIN_DZ_M = 0.03
 
 ROBOT_ARM_TOPIC = "/hal/arm_joint_state"
 ROBOT_SERVICE_SCRIPT = "start_ros_service.sh"
@@ -47333,18 +47342,43 @@ class CameraTopicWindow(QMainWindow):
                 f"已写入仿真{side_name}绝对目标（当前无 TCP 回读，跳过插值）→ {goal.label}"
             )
         start_xyz, start_quat = start
+        # 明显下压时先水平对准（同 XY、保持当前高度），再落到终值，IK 成功率更高
+        final_xyz = (
+            float(goal_xyz[0]),
+            float(goal_xyz[1]),
+            float(goal_xyz[2]),
+        )
+        dz = float(start_xyz[2]) - float(final_xyz[2])
+        approach_xyz = None
+        if dz >= float(SIM_ARM_APPROACH_MIN_DZ_M):
+            approach_xyz = (
+                float(final_xyz[0]),
+                float(final_xyz[1]),
+                float(start_xyz[2]),
+            )
+            active_xyz = approach_xyz
+        else:
+            active_xyz = final_xyz
         dist = math.sqrt(
-            sum((float(goal_xyz[i]) - float(start_xyz[i])) ** 2 for i in range(3))
+            sum((float(active_xyz[i]) - float(start_xyz[i])) ** 2 for i in range(3))
         )
         duration = self._sim_move_duration_s(dist)
         hold_side = "right" if arm_side == "left" else "left"
         hold = self._sim_tcp_pose(hold_side)
+        # 目标夹爪中点（按指令姿态从终值 EE 反推）；settle 闭环按此伺服，不依赖姿态是否跟得上
+        target_mid = None
+        if self._sim_uses_finger_mid_match():
+            target_mid = self._finger_mid_xyz_from_ee(final_xyz, goal_quat)
         self._sim_arm_move = {
             "arm_side": arm_side,
             "start_xyz": start_xyz,
             "start_quat": start_quat,
-            "goal_xyz": goal_xyz,
+            "goal_xyz": active_xyz,
             "goal_quat": goal_quat,
+            "final_xyz": final_xyz,
+            "final_quat": goal_quat,
+            "target_mid_xyz": target_mid,
+            "approach_pending": approach_xyz is not None,
             "hold_side": hold_side,
             "hold_pose": hold,
             "t0": time.time(),
@@ -47356,7 +47390,8 @@ class CameraTopicWindow(QMainWindow):
         if not self._sim_arm_move_timer.isActive():
             self._sim_arm_move_timer.start()
         side_name = arm_side_label(arm_side)
-        return f"仿真{side_name}移动中… ({duration:.1f}s) → {goal.label}"
+        phase = "先水平对准" if approach_xyz is not None else "直达"
+        return f"仿真{side_name}移动中… ({phase} {duration:.1f}s) → {goal.label}"
 
     def _on_sim_arm_move_tick(self) -> None:
         move = self._sim_arm_move
@@ -47400,10 +47435,17 @@ class CameraTopicWindow(QMainWindow):
                 kwargs[out_key] = pose7_wxyz_from_xyz_xyzw(xyz, quat)
             self._write_sim_gui_cmd(**kwargs)
             if done:
+                settled, settle_note = self._sim_arm_move_try_settle(move)
+                if not settled:
+                    self.status_bar.showMessage(
+                        f"仿真双臂指令已写完，等待 IK 到位… {settle_note}", 2000
+                    )
+                    self._update_arm_move_btns_ui()
+                    return
                 self._sim_arm_move = None
                 self._sim_arm_move_timer.stop()
                 label = str(move.get("label") or "双臂归位")
-                done_msg = f"仿真双臂移动完成 → {label}"
+                done_msg = f"仿真双臂移动完成 → {label}{settle_note}"
                 if not self._text_cmd_pumping:
                     extra = self._pump_text_cmd_queue()
                     if extra:
@@ -47437,11 +47479,49 @@ class CameraTopicWindow(QMainWindow):
                 kwargs["left_ee_pose"] = hold7
         self._write_sim_gui_cmd(**kwargs)
         if done:
+            settled, settle_note = self._sim_arm_move_try_settle(move)
+            if not settled:
+                self.status_bar.showMessage(
+                    f"仿真指令已写完，等待 IK 到位… {settle_note}", 2000
+                )
+                self._update_arm_move_btns_ui()
+                return
+            # 水平对准完成后，再启动下压段
+            if move.get("approach_pending") and move.get("final_xyz") is not None:
+                cur = self._sim_tcp_pose(str(move["arm_side"]))
+                start_xyz = cur[0] if cur is not None else move["goal_xyz"]
+                start_quat = cur[1] if cur is not None else move["goal_quat"]
+                final_xyz = move["final_xyz"]
+                final_quat = move.get("final_quat") or move["goal_quat"]
+                dist2 = math.sqrt(
+                    sum(
+                        (float(final_xyz[i]) - float(start_xyz[i])) ** 2
+                        for i in range(3)
+                    )
+                )
+                move["start_xyz"] = start_xyz
+                move["start_quat"] = start_quat
+                move["goal_xyz"] = final_xyz
+                move["goal_quat"] = final_quat
+                move["approach_pending"] = False
+                move.pop("settle_t0", None)
+                move["t0"] = time.time()
+                move["duration"] = self._sim_move_duration_s(dist2)
+                self.status_bar.showMessage(
+                    f"仿真已水平对准，开始下压… ({move['duration']:.1f}s) {settle_note}",
+                    3000,
+                )
+                self._update_arm_move_btns_ui()
+                return
             side_name = arm_side_label(str(move["arm_side"]))
             label = str(move.get("label") or "")
             self._sim_arm_move = None
             self._sim_arm_move_timer.stop()
-            done_msg = f"仿真{side_name}移动完成" + (f" → {label}" if label else "")
+            done_msg = (
+                f"仿真{side_name}移动完成"
+                + (f" → {label}" if label else "")
+                + settle_note
+            )
             if not self._text_cmd_pumping:
                 extra = self._pump_text_cmd_queue()
                 if extra:
@@ -47450,6 +47530,120 @@ class CameraTopicWindow(QMainWindow):
             self._update_arm_move_btns_ui()
             return
         self._update_arm_move_btns_ui()
+
+    def _sim_arm_move_try_settle(self, move: dict) -> Tuple[bool, str]:
+        """插值结束后持有/修正目标，直到 EE（或夹爪中点）到位或超时。
+
+        仿真下姿态常跟不住：对「手指中点匹配」用世界系闭环
+        ``EE ← EE + (target_mid - cur_mid)``，保持当前实际姿态，把中点拉到目标。
+        """
+        now = time.time()
+        if "settle_t0" not in move:
+            move["settle_t0"] = now
+            # 把插值时钟钉在终点，后续 tick 继续走 done 分支
+            move["t0"] = now - float(move.get("duration") or 1.0)
+
+        use_mid = (
+            move.get("mode") != "dual"
+            and not move.get("approach_pending")
+            and self._sim_uses_finger_mid_match()
+            and move.get("target_mid_xyz") is not None
+        )
+
+        # 闭环：按实际中点残差改写 EE 目标（保留当前可达成姿态）
+        if use_mid:
+            side = str(move.get("arm_side") or "left")
+            cur = self._sim_tcp_pose(side)
+            if cur is not None:
+                target_mid = move["target_mid_xyz"]
+                cur_mid = self._finger_mid_xyz_from_ee(cur[0], cur[1])
+                merr = math.sqrt(
+                    sum(
+                        (float(cur_mid[i]) - float(target_mid[i])) ** 2
+                        for i in range(3)
+                    )
+                )
+                if merr > float(SIM_ARM_SETTLE_TOL_M):
+                    # 限幅单步修正，避免一次跳太远触发碰撞
+                    max_step = 0.06
+                    corr = [
+                        float(target_mid[i]) - float(cur_mid[i]) for i in range(3)
+                    ]
+                    corr_n = math.sqrt(sum(c * c for c in corr)) or 1.0
+                    scale = min(1.0, max_step / corr_n)
+                    new_ee = (
+                        float(cur[0][0]) + corr[0] * scale,
+                        float(cur[0][1]) + corr[1] * scale,
+                        float(cur[0][2]) + corr[2] * scale,
+                    )
+                    move["goal_xyz"] = new_ee
+                    move["goal_quat"] = (
+                        float(cur[1][0]),
+                        float(cur[1][1]),
+                        float(cur[1][2]),
+                        float(cur[1][3]),
+                    )
+
+        # 续写终值，防止 Noop 丢目标
+        kwargs: dict = {"enabled": True}
+        goals: List[Tuple[str, Tuple[float, float, float], Tuple[float, float, float, float]]] = []
+        if move.get("mode") == "dual":
+            for side, gxyz, gquat in (
+                ("left", "left_goal_xyz", "left_goal_quat"),
+                ("right", "right_goal_xyz", "right_goal_quat"),
+            ):
+                if gxyz not in move or gquat not in move:
+                    continue
+                pose7 = pose7_wxyz_from_xyz_xyzw(move[gxyz], move[gquat])
+                kwargs[f"{side}_ee_pose"] = pose7
+                goals.append((side, move[gxyz], move[gquat]))
+        else:
+            side = str(move.get("arm_side") or "left")
+            pose7 = pose7_wxyz_from_xyz_xyzw(move["goal_xyz"], move["goal_quat"])
+            kwargs["left_ee_pose" if side == "left" else "right_ee_pose"] = pose7
+            goals.append((side, move["goal_xyz"], move["goal_quat"]))
+            hold = move.get("hold_pose")
+            if hold is not None:
+                h_side = str(move.get("hold_side") or ("right" if side == "left" else "left"))
+                hold7 = pose7_wxyz_from_xyz_xyzw(hold[0], hold[1])
+                kwargs["left_ee_pose" if h_side == "left" else "right_ee_pose"] = hold7
+        self._write_sim_gui_cmd(**kwargs)
+
+        max_err = 0.0
+        mid_err = 0.0
+        parts: List[str] = []
+        for side, gxyz, gquat in goals:
+            cur = self._sim_tcp_pose(side)
+            if cur is None:
+                parts.append(f"{arm_side_label(side)}无回读")
+                max_err = max(max_err, 1.0)
+                continue
+            err = math.sqrt(
+                sum((float(cur[0][i]) - float(gxyz[i])) ** 2 for i in range(3))
+            )
+            max_err = max(max_err, err)
+            cur_mid = self._finger_mid_xyz_from_ee(cur[0], cur[1])
+            if move.get("target_mid_xyz") is not None and not move.get(
+                "approach_pending"
+            ):
+                goal_mid = move["target_mid_xyz"]
+            else:
+                goal_mid = self._finger_mid_xyz_from_ee(gxyz, gquat)
+            merr = math.sqrt(
+                sum((float(cur_mid[i]) - float(goal_mid[i])) ** 2 for i in range(3))
+            )
+            mid_err = max(mid_err, merr)
+            parts.append(
+                f"{arm_side_label(side)} EEΔ={err * 1000:.0f}mm 中点Δ={merr * 1000:.0f}mm"
+            )
+        note = "；".join(parts)
+        # 手指中点模式以中点残差为准；否则看 EE
+        done_err = mid_err if use_mid else max_err
+        if done_err <= float(SIM_ARM_SETTLE_TOL_M):
+            return True, f"（到位 {note}）"
+        if now - float(move["settle_t0"]) >= float(SIM_ARM_SETTLE_MAX_S):
+            return True, f"（超时未完全到位 {note}；请检查 IK/碰撞）"
+        return False, note
 
     def _on_left_hand_sliders_changed(self, _value: int = 0) -> None:
         self.left_hand_label_a.setText(format_hand_angle_label(self.left_hand_slider_a.value()))
@@ -49189,19 +49383,50 @@ class CameraTopicWindow(QMainWindow):
 
         # 种子处深度无效 → 视为看不见（遮挡/飞出工作区）
         try:
+            depth_m = depth_to_meters_array(wrist_depth)
             z_seed = float(
-                depth_to_meters_array(wrist_depth)[
+                depth_m[
                     max(0, min(dh - 1, int(wv))),
                     max(0, min(dw - 1, int(wu))),
                 ]
             )
         except Exception:
+            depth_m = None
             z_seed = 0.0
         if not np.isfinite(z_seed) or z_seed < 0.05 or z_seed > 3.5:
             notes.append(
                 f"{label}：种子({wu},{wv})深度无效 z={z_seed:.3f}，不参考该腕图像"
             )
             return None, notes
+
+        # 种子邻域 + 全图抽样：无效深度过高则跳过（避免右腕空洞把融合中心带偏）
+        if depth_m is not None:
+            rad = 40
+            u0 = max(0, int(wu) - rad)
+            u1 = min(dw, int(wu) + rad + 1)
+            v0 = max(0, int(wv) - rad)
+            v1 = min(dh, int(wv) + rad + 1)
+            patch = depth_m[v0:v1, u0:u1]
+            if patch.size > 0:
+                valid_p = (patch > 0.05) & (patch < 3.5) & np.isfinite(patch)
+                inv_p = 1.0 - float(np.count_nonzero(valid_p)) / float(patch.size)
+                if inv_p > float(MV6D_WRIST_DEPTH_INVALID_MAX_RATIO):
+                    notes.append(
+                        f"{label}：种子邻域无效深度 {inv_p * 100:.0f}% "
+                        f"> {MV6D_WRIST_DEPTH_INVALID_MAX_RATIO * 100:.0f}%，不参考"
+                    )
+                    return None, notes
+            # 全图稀疏抽样
+            step = max(1, min(dh, dw) // 64)
+            sample = depth_m[::step, ::step]
+            if sample.size > 0:
+                valid_s = (sample > 0.05) & (sample < 3.5) & np.isfinite(sample)
+                inv_s = 1.0 - float(np.count_nonzero(valid_s)) / float(sample.size)
+                if inv_s > float(MV6D_WRIST_DEPTH_INVALID_MAX_RATIO) * 1.5:
+                    notes.append(
+                        f"{label}：全图无效深度≈{inv_s * 100:.0f}%，不参考该腕图像"
+                    )
+                    return None, notes
 
         notes.append(f"{label}：可见，种子({wu},{wv})")
         wrist_result = self._estimate_view_6d(
@@ -49980,6 +50205,39 @@ class CameraTopicWindow(QMainWindow):
             return self._sim_resolve_arm_side(prefer)
         return prefer
 
+    def _mv6d_cmd_arm_side_for_target(
+        self, xyz: Optional[Tuple[float, float, float]]
+    ) -> str:
+        """回填选臂：优先离目标更近的那只（避免目标在左侧却驱右臂，误差显得更大）。"""
+        prefer = self._mv6d_cmd_arm_side()
+        if xyz is None:
+            return prefer
+        use_mid = self._sim_uses_finger_mid_match()
+        best_side = prefer
+        best_d = 1e9
+        prefer_d = 1e9
+        hx, hy, hz = float(xyz[0]), float(xyz[1]), float(xyz[2])
+        for side in ("left", "right"):
+            tcp = self._tcp_for_relative_goal(side)
+            if tcp is None:
+                continue
+            if use_mid:
+                px, py, pz = self._finger_mid_xyz_from_ee(tcp[0], tcp[1])
+            else:
+                px, py, pz = tcp[0]
+            d = math.sqrt((px - hx) ** 2 + (py - hy) ** 2 + (pz - hz) ** 2)
+            if side == prefer:
+                prefer_d = d
+            if d < best_d:
+                best_d = d
+                best_side = side
+        # 偏好侧已足够近，或两侧差不多 → 跟 combo；否则改用更近的一侧
+        if best_side != prefer and prefer_d < best_d + 0.12:
+            return prefer
+        if best_side != prefer and best_d + 0.08 < prefer_d:
+            return best_side
+        return prefer
+
     def _mv6d_sim_extrinsic_matrix(
         self,
         color_topic: str = "",
@@ -50395,7 +50653,7 @@ class CameraTopicWindow(QMainWindow):
             pass
 
     def _fill_arm_text_from_mv6d(self, snap: MultiView6DPoseSnapshot) -> bool:
-        """回填绝对目标到文本指挥：只用 6D 估计值（不用仿真 GT 替换）。"""
+        """回填绝对目标：优先最近仿真物体中心（夹爪中点应对准物体中点），否则用 6D 估计。"""
         edit = getattr(self, "arm_text_cmd_edit", None)
         if edit is None:
             return False
@@ -50408,18 +50666,31 @@ class CameraTopicWindow(QMainWindow):
                 pass
             return False
         unreliable, why = self._mv6d_estimate_looks_unreliable(xyz_est, snap)
-        xyz_base = xyz_est
-        note = f"{note}; 回填=6D估计"
-        if unreliable:
-            note = f"{note}; 警告:{why}"
+        xyz_gt, _quat_gt, gt_note = self._mv6d_refine_with_sim_gt(
+            xyz_est,
+            max_dist_m=float(MV6D_FILL_GT_MAX_DIST_M),
+            snap=snap,
+        )
+        if gt_note and xyz_gt is not None:
+            xyz_base = (
+                float(xyz_gt[0]),
+                float(xyz_gt[1]),
+                float(xyz_gt[2]),
+            )
+            note = f"{note}; 回填=仿真物体中心({gt_note})"
             try:
                 self.mv6d_result_edit.append(
-                    f"\n[回填] 仅用 6D 估计（{why}）→ "
-                    f"({xyz_est[0]:.4f},{xyz_est[1]:.4f},{xyz_est[2]:.4f})"
+                    f"\n[回填] 6D→仿真物体中心 {gt_note} → "
+                    f"({xyz_base[0]:.4f},{xyz_base[1]:.4f},{xyz_base[2]:.4f})"
+                    f"（估计曾为 {xyz_est[0]:.4f},{xyz_est[1]:.4f},{xyz_est[2]:.4f}）"
                 )
             except Exception:
                 pass
         else:
+            xyz_base = xyz_est
+            note = f"{note}; 回填=6D估计"
+            if unreliable:
+                note = f"{note}; 警告:{why}"
             try:
                 self.mv6d_result_edit.append(
                     f"\n[回填] 6D 估计 → "
@@ -50427,8 +50698,11 @@ class CameraTopicWindow(QMainWindow):
                 )
             except Exception:
                 pass
-        # 与当前匹配点比：仿真用手指结合中点，真机用 TCP
-        side = self._mv6d_cmd_arm_side()
+        # 选离目标更近的臂回填（右腕 combo + 物体在左侧时，右臂误差会显得大很多）
+        side = self._mv6d_cmd_arm_side_for_target(xyz_base)
+        prefer = self._mv6d_cmd_arm_side()
+        if side != prefer:
+            note = f"{note}; 改用{arm_side_label(side)}(距目标更近，原偏好{arm_side_label(prefer)})"
         tcp = self._tcp_for_relative_goal(side)
         use_finger_mid = self._sim_uses_finger_mid_match()
         if use_finger_mid:
@@ -50448,7 +50722,7 @@ class CameraTopicWindow(QMainWindow):
             if dist > 0.85:
                 msg = (
                     f"回填拒绝：目标距当前{arm_side_label(side)}{cur_label} "
-                    f"约 {dist:.2f} m（估计 {xyz_base[0]:.3f},{xyz_base[1]:.3f},"
+                    f"约 {dist:.2f} m（目标 {xyz_base[0]:.3f},{xyz_base[1]:.3f},"
                     f"{xyz_base[2]:.3f}；{cur_label} {cx:.3f},{cy:.3f},{cz:.3f}）。"
                     f"多为仿真仍在用 A2D 真机 TF；请确认 Isaac 外参已写出并重新估计。"
                     f"（{note}）"

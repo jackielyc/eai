@@ -43,6 +43,14 @@ from embodied_evo.catalog import (
     read_task_toml,
     resolve_python,
 )
+from embodied_evo.local_models import (
+    LocalModel,
+    deploy_model,
+    fetch_status,
+    list_local_models,
+    stop_model,
+    sync_codex_local_model,
+)
 from embodied_evo.monitor import RunSnapshot, list_runs, snapshot_run
 from embodied_evo.runner import EmbodiedEvoRunner, RunRequest, suggest_run_dir
 
@@ -50,6 +58,7 @@ _TEXT = "#ececec"
 _MUTED = "#b0b0b0"
 _GREEN = "#50fa7b"
 _RED = "#ff8888"
+_YELLOW = "#e6c07b"
 _BG = "#1e1f22"
 _BG_LOG = "#1a1b1e"
 _BORDER = "#3d4048"
@@ -84,15 +93,18 @@ class EmbodiedEvoTab(QWidget):
         self._poll = QTimer(self)
         self._poll.setInterval(2000)
         self._poll.timeout.connect(self._refresh_snapshot)
+        self._model_status_timer = QTimer(self)
+        self._model_status_timer.setInterval(2500)
+        self._model_status_timer.timeout.connect(self._refresh_model_status)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 6, 8, 6)
         root.setSpacing(6)
 
         hint = QLabel(
-            "EmbodiedEvo：完整实验需要 RoboDojo + 模型 API Key。"
-            "无 Key 时选模式「smoke（无 API）」即可验证仿真器与 session IPC；"
-            "完整 run/explore/test 才需要 Codex 凭证。默认本机跑 agent，不用 Docker 镜像。"
+            "EmbodiedEvo：无 API 时选「smoke」；勾选「显示仿真窗口」会弹出 Isaac 视窗，"
+            "本页右侧同步刷新相机观测图。完整 run/explore/test 仍需 Codex 凭证；"
+            "默认本机跑 agent，不用 Docker 镜像。"
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {_MUTED};")
@@ -148,6 +160,13 @@ class EmbodiedEvoTab(QWidget):
         self.recipe_check = QCheckBox("使用 public recipe")
         self.recipe_check.setChecked(True)
         mode_row.addWidget(self.recipe_check)
+        self.gui_check = QCheckBox("显示仿真窗口")
+        self.gui_check.setChecked(True)
+        self.gui_check.setToolTip(
+            "打开 Isaac Sim 视窗（EMBODIEDEVO_ROBODOJO_HEADLESS=0）；"
+            "关闭则为 headless。页面「观测图」区仍会刷新相机图。"
+        )
+        mode_row.addWidget(self.gui_check)
         form.addRow("模式", mode_row)
 
         self.task_combo = QComboBox()
@@ -180,15 +199,44 @@ class EmbodiedEvoTab(QWidget):
         form.addRow("预算", param_row)
 
         model_row = QHBoxLayout()
-        self.model_edit = QLineEdit("gpt-6-astra")
-        self.model_edit.setFont(QFont(_MONO, 9))
-        model_row.addWidget(self.model_edit, 1)
+        self.model_combo = QComboBox()
+        self.model_combo.setMinimumWidth(220)
+        self.model_combo.setFont(QFont(_MONO, 9))
+        self.model_combo.setToolTip(
+            "从本机 models/Qwen 等目录选择可用权重；"
+            "部署后走 http://127.0.0.1:8100/v1（Responses）"
+        )
+        model_row.addWidget(self.model_combo, 2)
+        self.refresh_models_btn = QPushButton("刷新")
+        self.refresh_models_btn.setToolTip("重新扫描可用模型目录")
+        self.refresh_models_btn.clicked.connect(self._reload_models)
+        model_row.addWidget(self.refresh_models_btn)
         model_row.addWidget(QLabel("reasoning"))
         self.reason_combo = QComboBox()
         for effort in ("xhigh", "high", "medium", "low", "minimal"):
             self.reason_combo.addItem(effort, effort)
+        # 本地 Qwen 更稳妥用 high
+        idx = self.reason_combo.findData("high")
+        if idx >= 0:
+            self.reason_combo.setCurrentIndex(idx)
         model_row.addWidget(self.reason_combo)
         form.addRow("模型", model_row)
+
+        model_ctl = QHBoxLayout()
+        self.model_status_label = QLabel("模型状态: 检测中…")
+        self.model_status_label.setFont(QFont(_MONO, 9))
+        self.model_status_label.setStyleSheet(f"color: {_MUTED};")
+        model_ctl.addWidget(self.model_status_label, 1)
+        self.deploy_model_btn = QPushButton("部署")
+        self.deploy_model_btn.setToolTip("启动所选本地模型推理服务")
+        self.deploy_model_btn.clicked.connect(self._deploy_selected_model)
+        model_ctl.addWidget(self.deploy_model_btn)
+        self.stop_model_btn = QPushButton("停止模型")
+        self.stop_model_btn.setObjectName("dangerAction")
+        self.stop_model_btn.setToolTip("停止 :8100 上的本地 Qwen 服务")
+        self.stop_model_btn.clicked.connect(self._stop_selected_model)
+        model_ctl.addWidget(self.stop_model_btn)
+        form.addRow("服务", model_ctl)
 
         run_row = QHBoxLayout()
         self.run_dir_edit = QLineEdit()
@@ -377,12 +425,15 @@ class EmbodiedEvoTab(QWidget):
         root.addWidget(split, 1)
 
         self._load_defaults_from_toml()
+        self._reload_models()
         self._reload_tasks()
         self._suggest_run_dir()
         self._on_mode_changed()
         self._reload_history()
         self._set_idle(True)
+        self._model_status_timer.start()
         QTimer.singleShot(200, self._probe)
+        QTimer.singleShot(300, self._refresh_model_status)
 
     # ----- helpers -----
     def _repo(self) -> Path:
@@ -394,13 +445,35 @@ class EmbodiedEvoTab(QWidget):
         playground = data.get("playground") if isinstance(data.get("playground"), dict) else {}
         test = data.get("test") if isinstance(data.get("test"), dict) else {}
         sim = data.get("simulator") if isinstance(data.get("simulator"), dict) else {}
+        # 若已配置本地 Codex（Qwen），不要被 task.toml 的 gpt-6-astra 覆盖
+        local_codex = Path.home() / ".config" / "embodiedevo" / "codex" / "config.toml"
+        preferred_model = os.environ.get("EMBODIEDEVO_MODEL", "").strip() or "qwen3.5-4b"
+        use_local_qwen = False
+        if local_codex.is_file():
+            try:
+                txt = local_codex.read_text(encoding="utf-8", errors="replace")
+                use_local_qwen = "127.0.0.1:8100" in txt
+                if use_local_qwen:
+                    for line in txt.splitlines():
+                        s = line.strip()
+                        if s.startswith("model ="):
+                            preferred_model = s.split("=", 1)[1].strip().strip('"')
+                            break
+            except OSError:
+                use_local_qwen = False
+        self._preferred_model = preferred_model
         if isinstance(agent, dict):
-            if agent.get("model"):
-                self.model_edit.setText(str(agent["model"]))
-            effort = str(agent.get("reasoning_effort") or "")
-            idx = self.reason_combo.findData(effort)
-            if idx >= 0:
-                self.reason_combo.setCurrentIndex(idx)
+            if use_local_qwen:
+                idx = self.reason_combo.findData("high")
+                if idx >= 0:
+                    self.reason_combo.setCurrentIndex(idx)
+            else:
+                if agent.get("model"):
+                    self._preferred_model = str(agent["model"])
+                effort = str(agent.get("reasoning_effort") or "")
+                idx = self.reason_combo.findData(effort)
+                if idx >= 0:
+                    self.reason_combo.setCurrentIndex(idx)
         if isinstance(playground, dict) and playground.get("budget") is not None:
             self.pg_budget_spin.setValue(int(playground["budget"]))
         if isinstance(test, dict):
@@ -441,14 +514,129 @@ class EmbodiedEvoTab(QWidget):
     def _on_mode_changed(self) -> None:
         smoke = self.mode_combo.currentData() == "smoke"
         # smoke 不用模型 / recipe；其它模式保持可编辑
-        self.model_edit.setEnabled(not smoke)
+        self.model_combo.setEnabled(not smoke)
+        self.refresh_models_btn.setEnabled(not smoke)
         self.reason_combo.setEnabled(not smoke)
+        self.deploy_model_btn.setEnabled(not smoke)
+        self.stop_model_btn.setEnabled(True)  # 随时可停推理服务
         self.recipe_check.setEnabled(not smoke)
+        self.gui_check.setEnabled(True)
+        if smoke:
+            self.gui_check.setChecked(True)
         self.scenes_spin.setEnabled(not smoke)
         self.pg_budget_spin.setEnabled(not smoke)
         self.test_budget_spin.setEnabled(not smoke)
         if smoke and not self.run_dir_edit.text().strip().endswith("_host_smoke"):
             self._suggest_run_dir()
+
+    def _selected_model(self) -> Optional[LocalModel]:
+        data = self.model_combo.currentData()
+        return data if isinstance(data, LocalModel) else None
+
+    def _selected_model_id(self) -> str:
+        m = self._selected_model()
+        if m is not None:
+            return m.model_id
+        text = self.model_combo.currentText().strip()
+        return text or "qwen3.5-4b"
+
+    def _reload_models(self) -> None:
+        preferred = (
+            getattr(self, "_preferred_model", "")
+            or self._selected_model_id()
+            or "qwen3.5-4b"
+        )
+        models = list_local_models(only_available=True)
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        if not models:
+            self.model_combo.addItem("(无可用本地模型)", None)
+            self.model_combo.blockSignals(False)
+            self.model_status_label.setText("模型状态: 未找到可用权重目录")
+            self.model_status_label.setStyleSheet(f"color: {_RED};")
+            return
+        for m in models:
+            kind = f" [{m.kind}]" if m.kind else ""
+            self.model_combo.addItem(f"{m.label}{kind}", m)
+        self.model_combo.blockSignals(False)
+        idx = -1
+        for i in range(self.model_combo.count()):
+            m = self.model_combo.itemData(i)
+            if isinstance(m, LocalModel) and (
+                m.key == preferred or m.model_id == preferred
+            ):
+                idx = i
+                break
+        self.model_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._preferred_model = self._selected_model_id()
+        self._refresh_model_status()
+
+    def _refresh_model_status(self) -> None:
+        st = fetch_status()
+        selected = self._selected_model()
+        text = f"模型状态: {st.state_text}"
+        if st.healthy and selected is not None:
+            live_match = (
+                st.model_id == selected.model_id
+                or Path(st.model_dir).name == Path(selected.model_dir).name
+            )
+            if not live_match and st.model_id:
+                text += f"（当前选择: {selected.model_id}）"
+        if st.ctl_ok:
+            text += " · hostctl"
+        self.model_status_label.setText(text)
+        if st.healthy:
+            color = _GREEN
+        elif st.loading:
+            color = _YELLOW
+        elif st.error:
+            color = _RED
+        else:
+            color = _MUTED
+        self.model_status_label.setStyleSheet(f"color: {color};")
+        self.stop_model_btn.setEnabled(st.healthy or st.loading or bool(st.process_hint))
+
+    def _deploy_selected_model(self) -> None:
+        m = self._selected_model()
+        if m is None:
+            QMessageBox.warning(self, "EmbodiedEvo", "请先选择可用的本地模型。")
+            return
+        self.deploy_model_btn.setEnabled(False)
+        self.model_status_label.setText(f"模型状态: 正在部署 {m.label}…")
+        self.model_status_label.setStyleSheet(f"color: {_YELLOW};")
+        self.log_edit.append(f"部署模型: {m.label} ({m.model_dir})")
+        ok, msg = deploy_model(m)
+        self.log_edit.append(msg)
+        if ok:
+            reasoning = str(self.reason_combo.currentData() or "high")
+            sync_ok, sync_msg = sync_codex_local_model(m, reasoning=reasoning)
+            self.log_edit.append(sync_msg)
+            self._preferred_model = m.model_id
+            if not sync_ok:
+                self.log_edit.append("警告: Codex 配置同步未完全成功")
+        else:
+            QMessageBox.warning(self, "EmbodiedEvo", msg)
+        self.deploy_model_btn.setEnabled(self.mode_combo.currentData() != "smoke")
+        self._refresh_model_status()
+        # 部署后短暂加速轮询，便于看到 loading → healthy
+        self._model_status_timer.setInterval(1500)
+        QTimer.singleShot(20000, lambda: self._model_status_timer.setInterval(2500))
+
+    def _stop_selected_model(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "EmbodiedEvo",
+            "确认停止本地模型推理服务（:8100）？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.stop_model_btn.setEnabled(False)
+        self.log_edit.append("停止本地模型服务…")
+        ok, msg = stop_model()
+        self.log_edit.append(msg if ok else f"停止失败: {msg}")
+        self._refresh_model_status()
 
     def _suggest_run_dir(self) -> None:
         key = str(self.task_combo.currentData() or "task")
@@ -570,12 +758,13 @@ class EmbodiedEvoTab(QWidget):
             test_scenes=int(self.scenes_spin.value()),
             baseline=baseline,
             use_recipe=False if smoke else self.recipe_check.isChecked(),
-            model=self.model_edit.text().strip() or "gpt-6-astra",
+            model=self._selected_model_id(),
             reasoning=str(self.reason_combo.currentData() or "xhigh"),
             playground_budget=int(self.pg_budget_spin.value()),
             test_budget=int(self.test_budget_spin.value()),
             python=self.python_edit.text().strip(),
             host_client=True,
+            show_sim_gui=bool(self.gui_check.isChecked()),
         )
 
     def _start(self) -> None:
@@ -603,6 +792,50 @@ class EmbodiedEvoTab(QWidget):
             return
         # smoke 不调模型，跳过 Codex / Docker 检查
         if req.command != "smoke":
+            selected = self._selected_model()
+            if selected is not None:
+                st = fetch_status()
+                if not st.healthy:
+                    reply = QMessageBox.question(
+                        self,
+                        "EmbodiedEvo",
+                        f"本地模型未就绪（{st.state_text}）。\n"
+                        f"是否先部署 {selected.label}？",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes,
+                    )
+                    if reply == QMessageBox.Yes:
+                        self._deploy_selected_model()
+                        st = fetch_status()
+                        if not st.healthy and not st.loading:
+                            return
+                    else:
+                        return
+                elif st.model_id and st.model_id != selected.model_id:
+                    reply = QMessageBox.question(
+                        self,
+                        "EmbodiedEvo",
+                        f"当前运行的是 {st.model_id}，选择的是 {selected.model_id}。\n"
+                        "是否停止并重新部署所选模型？",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.Yes,
+                    )
+                    if reply == QMessageBox.Yes:
+                        stop_model()
+                        self._deploy_selected_model()
+                    else:
+                        req.model = st.model_id
+                # Codex 配置与即将使用的 model id 对齐
+                for m in list_local_models(only_available=True):
+                    if m.model_id == req.model:
+                        selected = m
+                        break
+                sync_ok, sync_msg = sync_codex_local_model(
+                    selected, reasoning=req.reasoning
+                )
+                self.log_edit.append(sync_msg)
+                if not sync_ok:
+                    self.log_edit.append("警告: Codex 配置同步未完全成功")
             probe = probe_repo(req.repo)
             if probe.isolation != "docker":
                 if not probe.has_host_codex:
@@ -666,6 +899,13 @@ class EmbodiedEvoTab(QWidget):
         self._set_idle(False)
         self.status_label.setText("EmbodiedEvo: 运行中")
         self.status_label.setStyleSheet(f"color: {_GREEN};")
+        # smoke 图形化：更频繁刷新观测图；若开了仿真窗口会另弹 Isaac 视窗
+        self._poll.setInterval(800 if req.command == "smoke" else 2000)
+        if req.show_sim_gui:
+            self.log_edit.append(
+                "已请求图形化仿真窗口（非 headless）；"
+                "本页「观测图」区也会刷新 current_cam_*"
+            )
         self._poll.start()
 
     def _stop(self) -> None:

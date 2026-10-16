@@ -116,27 +116,34 @@ def _find_solution(run: Path) -> Optional[Path]:
 
 def _collect_images(run: Path, limit: int = 48) -> List[Path]:
     roots = [
+        run / "smoke" / "workspace" / "observations",
         run / "playground" / "workspace" / "observations",
         run / "workspace" / "observations",
+        run / "smoke" / "raw_observations",
         run / "playground",
         run / "test",
+        run / "smoke",
     ]
     found: List[Path] = []
     seen = set()
     for root in roots:
         if not root.exists():
             continue
-        for path in sorted(root.rglob("*")):
+        for path in root.rglob("*"):
             if not path.is_file() or path.suffix.lower() not in _IMAGE_EXTS:
+                continue
+            # Prefer agent-facing current_cam_*; skip raw duplicates when possible
+            name = path.name.lower()
+            if name.startswith("raw_cam_"):
                 continue
             key = str(path)
             if key in seen:
                 continue
             seen.add(key)
             found.append(path)
-            if len(found) >= limit:
-                return found
-    return found
+    # Newest first so the live preview follows the latest smoke step
+    found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return found[:limit]
 
 
 def _scene_scores_from_report(report: Dict[str, object]) -> List[SceneScore]:

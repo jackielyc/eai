@@ -97,7 +97,7 @@
     },
     "lingbot_depth_topic_combo": {
       "kind": "combo",
-      "index": 3,
+      "index": 2,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -193,7 +193,7 @@
     },
     "lingbot_video_topic_combo": {
       "kind": "combo",
-      "index": 3,
+      "index": 2,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -263,7 +263,7 @@
     },
     "lingbot_world_topic_combo": {
       "kind": "combo",
-      "index": 3,
+      "index": 2,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -469,10 +469,10 @@
     },
     "sim_eval_task_combo": {
       "kind": "combo",
-      "index": 1,
-      "text": "arrange_largest_number",
-      "data": "arrange_largest_number",
-      "edit": "arrange_largest_number"
+      "index": 3,
+      "text": "build_tower",
+      "data": "build_tower",
+      "edit": "build_tower"
     },
     "sim_eval_policy_combo": {
       "kind": "combo",
@@ -767,7 +767,7 @@
     },
     "sim_rynnvalue_hud_check": {
       "kind": "check",
-      "checked": true
+      "checked": false
     },
     "sim_rynnvalue_refresh_spin": {
       "kind": "dspin",
@@ -831,7 +831,7 @@
     },
     "arm_text_cmd_edit": {
       "kind": "line",
-      "text": "右臂移到 x=0.1259 y=-0.1563 z=0.7961"
+      "text": "左臂移到 x=-0.1033 y=0.0118 z=0.7959；右臂移到 x=0.3392 y=-0.1115 z=0.7775"
     },
     "left_hand_slider_a": {
       "kind": "slider",
@@ -851,7 +851,7 @@
     },
     "arm_move_speed_slider": {
       "kind": "slider",
-      "value": 45
+      "value": 100
     },
     "move_target_relative_radio": {
       "kind": "radio",
@@ -911,7 +911,7 @@
     },
     "mv6d_lingbot_depth_check": {
       "kind": "check",
-      "checked": true
+      "checked": false
     },
     "mv6d_fill_cmd_check": {
       "kind": "check",
@@ -919,9 +919,9 @@
     },
     "mv6d_wrist_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "左腕",
-      "data": "/camera/left_wrist_color"
+      "index": 1,
+      "text": "右腕",
+      "data": "/camera/right_wrist_color"
     },
     "mv6d_interval_spin": {
       "kind": "dspin",
@@ -933,11 +933,11 @@
     },
     "mv6d_head_u_spin": {
       "kind": "spin",
-      "value": 444
+      "value": 482
     },
     "mv6d_head_v_spin": {
       "kind": "spin",
-      "value": 280
+      "value": 248
     },
     "mv6d_gt_enable_check": {
       "kind": "check",
@@ -945,19 +945,19 @@
     },
     "mv6d_gt_x_spin": {
       "kind": "dspin",
-      "value": 0.1283
+      "value": 0.3392
     },
     "mv6d_gt_y_spin": {
       "kind": "dspin",
-      "value": -0.0582
+      "value": -0.1115
     },
     "mv6d_gt_z_spin": {
       "kind": "dspin",
-      "value": 0.7675
+      "value": 0.7775
     },
     "mv6d_gt_roll_spin": {
       "kind": "dspin",
-      "value": 0.0
+      "value": 90.0
     },
     "mv6d_gt_pitch_spin": {
       "kind": "dspin",
@@ -965,7 +965,7 @@
     },
     "mv6d_gt_yaw_spin": {
       "kind": "dspin",
-      "value": 0.0
+      "value": -4.01
     },
     "skeleton_cam_combo": {
       "kind": "combo",
@@ -1526,7 +1526,8 @@
     "chat_panel.provider_combo": {
       "kind": "combo",
       "index": 0,
-      "text": "（无运行中的推理服务）"
+      "text": "本地 Qwen · qwen3.5-4b",
+      "data": "{'api_base': 'http://127.0.0.1:8100/v1', 'api_key': 'EMPTY', 'family': '本地 Qwen', 'label': '本地 Qwen · qwen3.5-4b', 'model': 'qwen3.5-4b'}"
     },
     "chat_panel.model_edit": {
       "kind": "line",
@@ -1604,7 +1605,7 @@
     },
     "tab:EmbodiedEvo.mode_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 1,
       "text": "run（Playground+Test）",
       "data": "run"
     },
@@ -1612,11 +1613,15 @@
       "kind": "check",
       "checked": true
     },
+    "tab:EmbodiedEvo.gui_check": {
+      "kind": "check",
+      "checked": true
+    },
     "tab:EmbodiedEvo.task_combo": {
       "kind": "combo",
-      "index": 36,
-      "text": "stack bowls",
-      "data": "stack_bowls"
+      "index": 1,
+      "text": "arrange largest number",
+      "data": "arrange_largest_number"
     },
     "tab:EmbodiedEvo.gpu_edit": {
       "kind": "line",
@@ -1634,9 +1639,11 @@
       "kind": "spin",
       "value": 100
     },
-    "tab:EmbodiedEvo.model_edit": {
-      "kind": "line",
-      "text": "gpt-6-astra"
+    "tab:EmbodiedEvo.model_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "Qwen3.5-4B [full]",
+      "data": "LocalModel(key='qwen3.5-4b', label='Qwen3.5-4B', model_id='qwen3.5-4b', model_dir='/share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-4B', available=True, kind='full')"
     },
     "tab:EmbodiedEvo.reason_combo": {
       "kind": "combo",
@@ -1646,7 +1653,7 @@
     },
     "tab:EmbodiedEvo.run_dir_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/EmbodiedEvo/runs/202610151957_stack_bowls"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/EmbodiedEvo/runs/202610161140_arrange_largest_number"
     },
     "tab:EmbodiedEvo.history_combo": {
       "kind": "combo",
@@ -1695,7 +1702,7 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "手臂/手",
+  "control_tab": "EmbodiedEvo",
   "splitter_sizes": [
     256,
     1258,

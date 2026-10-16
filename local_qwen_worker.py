@@ -7,6 +7,7 @@
   GET  /health
   GET  /v1/models
   POST /v1/chat/completions
+  POST /v1/responses   # Codex / EmbodiedEvo 用（简化实现，支持文本+图像）
 
 用法:
   bash run_local_qwen.sh
@@ -544,10 +545,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "invalid JSON"})
             return
 
-        if path != "/v1/chat/completions":
-            self._send_json(404, {"error": f"unknown path {path}"})
+        if path == "/v1/chat/completions":
+            self._handle_chat_completions(payload)
             return
+        if path == "/v1/responses":
+            self._handle_responses(payload)
+            return
+        self._send_json(404, {"error": f"unknown path {path}"})
 
+    def _handle_chat_completions(self, payload: Dict[str, Any]) -> None:
         messages = payload.get("messages") or []
         max_tokens = int(payload.get("max_tokens") or 512)
         temperature = float(payload.get("temperature") or 0.0)
@@ -559,6 +565,9 @@ class Handler(BaseHTTPRequestHandler):
             enable_thinking = bool(payload.get("enable_thinking"))
         tmp_paths: List[str] = []
         try:
+            if not _STATE.get("ready"):
+                self._send_json(503, {"error": "model still loading"})
+                return
             _, image_paths = _extract_user_content(messages)
             tmp_paths.extend(image_paths)
             answer = run_chat(
@@ -594,6 +603,335 @@ class Handler(BaseHTTPRequestHandler):
                     os.remove(p)
                 except OSError:
                     pass
+
+    def _send_sse(self, event_type: str, data: Dict[str, Any]) -> None:
+        payload = dict(data)
+        payload.setdefault("type", event_type)
+        chunk = f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        self.wfile.write(chunk.encode("utf-8"))
+        self.wfile.flush()
+
+    def _handle_responses(self, payload: Dict[str, Any]) -> None:
+        """Minimal OpenAI Responses API for Codex/EmbodiedEvo.
+
+        Supports text (+ image). Codex requires SSE when stream=true (default for CLI).
+        Tool/function calling is best-effort via prompt injection.
+        """
+        if not _STATE.get("ready"):
+            self._send_json(503, {"error": "model still loading"})
+            return
+        messages = _responses_input_to_messages(payload)
+        tools = payload.get("tools") or []
+        if tools:
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a coding agent. Available tools (JSON schemas):\n"
+                        + json.dumps(tools, ensure_ascii=False)
+                        + "\nIf you need a tool, reply with ONLY:\n"
+                        '{"tool_call":{"name":"...","arguments":{...}}}\n'
+                        "Otherwise reply with plain text."
+                    ),
+                },
+                *messages,
+            ]
+        max_tokens = int(
+            payload.get("max_output_tokens")
+            or payload.get("max_tokens")
+            or 1024
+        )
+        temperature = float(payload.get("temperature") or 0.0)
+        # Codex always streams; treat missing stream as true for Responses.
+        want_stream = payload.get("stream")
+        if want_stream is None:
+            want_stream = True
+        tmp_paths: List[str] = []
+        try:
+            _, image_paths = _extract_user_content(messages)
+            tmp_paths.extend(image_paths)
+            answer = run_chat(
+                messages,
+                image_paths,
+                max_new_tokens=max_tokens,
+                enable_thinking=False,
+                temperature=temperature,
+            )
+            output_items = _responses_output_from_answer(answer)
+            rid = f"resp_local_qwen_{int(time.time() * 1000)}"
+            response_obj = {
+                "id": rid,
+                "object": "response",
+                "created_at": int(time.time()),
+                "status": "completed",
+                "model": payload.get("model") or MODEL_ID,
+                "output": output_items,
+                "error": None,
+            }
+            if not want_stream:
+                self._send_json(200, response_obj)
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+
+            seq = 0
+            self._send_sse(
+                "response.created",
+                {
+                    "sequence_number": seq,
+                    "response": {**response_obj, "status": "in_progress", "output": []},
+                },
+            )
+            seq += 1
+            self._send_sse(
+                "response.in_progress",
+                {
+                    "sequence_number": seq,
+                    "response": {**response_obj, "status": "in_progress", "output": []},
+                },
+            )
+            seq += 1
+
+            # Emit text path (most Codex turns); tool_call path as a single completed item.
+            if output_items and output_items[0].get("type") == "function_call":
+                item = output_items[0]
+                self._send_sse(
+                    "response.output_item.added",
+                    {
+                        "sequence_number": seq,
+                        "output_index": 0,
+                        "item": {**item, "status": "in_progress", "arguments": ""},
+                    },
+                )
+                seq += 1
+                args = str(item.get("arguments") or "")
+                self._send_sse(
+                    "response.function_call_arguments.delta",
+                    {
+                        "sequence_number": seq,
+                        "output_index": 0,
+                        "item_id": item.get("id"),
+                        "delta": args,
+                    },
+                )
+                seq += 1
+                self._send_sse(
+                    "response.function_call_arguments.done",
+                    {
+                        "sequence_number": seq,
+                        "output_index": 0,
+                        "item_id": item.get("id"),
+                        "arguments": args,
+                    },
+                )
+                seq += 1
+                self._send_sse(
+                    "response.output_item.done",
+                    {"sequence_number": seq, "output_index": 0, "item": item},
+                )
+                seq += 1
+            else:
+                msg_id = f"msg_local_{int(time.time() * 1000)}"
+                text = ""
+                if output_items:
+                    content = output_items[0].get("content") or []
+                    if content and isinstance(content[0], dict):
+                        text = str(content[0].get("text") or "")
+                item = {
+                    "type": "message",
+                    "id": msg_id,
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                }
+                self._send_sse(
+                    "response.output_item.added",
+                    {"sequence_number": seq, "output_index": 0, "item": item},
+                )
+                seq += 1
+                part = {"type": "output_text", "text": ""}
+                self._send_sse(
+                    "response.content_part.added",
+                    {
+                        "sequence_number": seq,
+                        "item_id": msg_id,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "part": part,
+                    },
+                )
+                seq += 1
+                # Fake token stream so Codex keeps the connection alive.
+                step = max(1, len(text) // 8) if text else 1
+                for i in range(0, max(len(text), 1), step):
+                    delta = text[i : i + step] if text else ""
+                    if not delta and not text:
+                        break
+                    self._send_sse(
+                        "response.output_text.delta",
+                        {
+                            "sequence_number": seq,
+                            "item_id": msg_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": delta,
+                        },
+                    )
+                    seq += 1
+                self._send_sse(
+                    "response.output_text.done",
+                    {
+                        "sequence_number": seq,
+                        "item_id": msg_id,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "text": text,
+                    },
+                )
+                seq += 1
+                done_item = {
+                    "type": "message",
+                    "id": msg_id,
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text}],
+                }
+                self._send_sse(
+                    "response.content_part.done",
+                    {
+                        "sequence_number": seq,
+                        "item_id": msg_id,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "part": {"type": "output_text", "text": text},
+                    },
+                )
+                seq += 1
+                self._send_sse(
+                    "response.output_item.done",
+                    {"sequence_number": seq, "output_index": 0, "item": done_item},
+                )
+                seq += 1
+                response_obj["output"] = [done_item]
+
+            self._send_sse(
+                "response.completed",
+                {"sequence_number": seq, "response": response_obj},
+            )
+        except Exception as exc:
+            detail = f"{exc}\n{traceback.format_exc()}"
+            _log(detail)
+            if want_stream and not self.wfile.closed:
+                try:
+                    self._send_sse(
+                        "error",
+                        {"message": str(exc), "type": "error"},
+                    )
+                except Exception:
+                    pass
+            else:
+                self._send_json(500, {"error": str(exc)})
+        finally:
+            for p in tmp_paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
+def _responses_input_to_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = payload.get("input")
+    if raw is None and payload.get("messages"):
+        return list(payload.get("messages") or [])
+    if isinstance(raw, str):
+        return [{"role": "user", "content": raw}]
+    if not isinstance(raw, list):
+        return [{"role": "user", "content": str(raw)}]
+    messages: List[Dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, str):
+            messages.append({"role": "user", "content": item})
+            continue
+        if not isinstance(item, dict):
+            continue
+        # Chat-style message
+        if "role" in item and "content" in item:
+            messages.append({"role": item.get("role") or "user", "content": item.get("content")})
+            continue
+        # Responses item types
+        typ = str(item.get("type") or "")
+        role = str(item.get("role") or "user")
+        if typ in {"message", "input_text", ""} and item.get("content") is not None:
+            content = item.get("content")
+            if isinstance(content, list):
+                parts: List[Any] = []
+                for p in content:
+                    if isinstance(p, str):
+                        parts.append({"type": "text", "text": p})
+                    elif isinstance(p, dict):
+                        ptype = str(p.get("type") or "")
+                        if ptype in {"input_text", "text"}:
+                            parts.append({"type": "text", "text": p.get("text") or p.get("content") or ""})
+                        elif ptype in {"input_image", "image_url"}:
+                            url = p.get("image_url")
+                            if isinstance(url, dict):
+                                url = url.get("url")
+                            url = url or p.get("url") or ""
+                            parts.append({"type": "image_url", "image_url": {"url": url}})
+                        else:
+                            parts.append(p)
+                messages.append({"role": role, "content": parts})
+            else:
+                messages.append({"role": role, "content": content})
+        elif typ == "input_text":
+            messages.append({"role": "user", "content": item.get("text") or ""})
+        elif typ == "function_call_output":
+            messages.append(
+                {
+                    "role": "tool",
+                    "content": str(item.get("output") or item.get("content") or ""),
+                    "name": item.get("name") or "",
+                }
+            )
+    return messages or [{"role": "user", "content": ""}]
+
+
+def _responses_output_from_answer(answer: str) -> List[Dict[str, Any]]:
+    text = (answer or "").strip()
+    # Best-effort tool_call JSON
+    if text.startswith("{") and '"tool_call"' in text:
+        try:
+            data = json.loads(text)
+            call = data.get("tool_call") or {}
+            name = str(call.get("name") or "").strip()
+            args = call.get("arguments")
+            if name:
+                if not isinstance(args, str):
+                    args = json.dumps(args or {}, ensure_ascii=False)
+                return [
+                    {
+                        "type": "function_call",
+                        "id": f"call_local_{int(time.time() * 1000)}",
+                        "call_id": f"call_local_{int(time.time() * 1000)}",
+                        "name": name,
+                        "arguments": args,
+                    }
+                ]
+        except Exception:
+            pass
+    return [
+        {
+            "type": "message",
+            "id": f"msg_local_{int(time.time() * 1000)}",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text}],
+        }
+    ]
 
 
 def main() -> int:

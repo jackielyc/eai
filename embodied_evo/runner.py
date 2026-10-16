@@ -36,6 +36,7 @@ class RunRequest:
     test_budget: int = 100
     python: str = ""
     host_client: bool = True  # smoke 默认无模型 host client
+    show_sim_gui: bool = True  # smoke 默认弹出 Isaac 仿真窗口
 
 
 class EmbodiedEvoRunner:
@@ -63,10 +64,17 @@ class EmbodiedEvoRunner:
         cwd = str(req.repo.resolve())
         env = _clean_child_env(req.repo, python=py)
 
+        # Isaac 视窗：勾选「显示仿真窗口」时非 headless；默认仍可 headless 跑测
+        env["EMBODIEDEVO_ROBODOJO_HEADLESS"] = "0" if req.show_sim_gui else "1"
+        if req.show_sim_gui and not env.get("DISPLAY"):
+            log("警告: 未检测到 DISPLAY，仿真窗口可能无法弹出")
+
         if req.command == "smoke":
             if req.run_dir.exists() and any(req.run_dir.iterdir()):
                 raise RuntimeError(f"smoke 需要空的 run-dir: {req.run_dir}")
             env["EMBODIEDEVO_USE_RECIPE"] = "0"
+            # host smoke 默认做一小段可见关节摆动（否则 step 只是保持当前姿态）
+            env["EMBODIEDEVO_SMOKE_DEMO_MOTION"] = "1"
             argv = [
                 py,
                 "-m",
@@ -84,7 +92,16 @@ class EmbodiedEvoRunner:
                 argv.append("--host-client")
             log(f"$ cd {cwd}")
             log("$ " + " ".join(argv))
-            log("smoke: 无 API / 固定脚本客户端（--host-client）")
+            log(
+                "smoke: 无 API / 固定脚本客户端（--host-client）；"
+                + (
+                    "图形窗口开启 (EMBODIEDEVO_ROBODOJO_HEADLESS=0)；"
+                    if req.show_sim_gui
+                    else "headless；"
+                )
+                + "含可见关节摆动 (EMBODIEDEVO_SMOKE_DEMO_MOTION=1)"
+            )
+            log(f"DISPLAY={env.get('DISPLAY', '')}")
             log(f"PYTHONPATH={env.get('PYTHONPATH', '')}")
         else:
             _, prefix = resolve_cli(req.repo, py)
@@ -127,6 +144,12 @@ class EmbodiedEvoRunner:
             log(f"临时 task: {task_path}")
             log("agent isolation=host (本机 Codex，不用 Docker 镜像)")
             log(f"USE_RECIPE={env['EMBODIEDEVO_USE_RECIPE']}")
+            log(
+                "图形窗口开启 (EMBODIEDEVO_ROBODOJO_HEADLESS=0)"
+                if req.show_sim_gui
+                else "headless (EMBODIEDEVO_ROBODOJO_HEADLESS=1)"
+            )
+            log(f"DISPLAY={env.get('DISPLAY', '')}")
             log(f"PYTHONPATH={env.get('PYTHONPATH', '')}")
 
         proc = subprocess.Popen(
@@ -210,6 +233,13 @@ def _clean_child_env(repo: Path, *, python: str) -> dict:
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
     env["EMBODIEDEVO_REPO"] = root
+    # 默认接本地 Qwen Codex home（config.toml + auth.json）
+    codex_home = os.environ.get("EMBODIEDEVO_CODEX_HOME", "").strip() or str(
+        Path.home() / ".config" / "embodiedevo" / "codex"
+    )
+    if (Path(codex_home) / "config.toml").is_file():
+        env["EMBODIEDEVO_CODEX_HOME"] = codex_home
+        env["CODEX_HOME"] = codex_home
     # 显式指向 conda env，避免继承 ros-humble 的 CONDA_PREFIX
     if (Path(py_home) / "bin" / "python").exists() or (
         Path(python).parent.parent / "lib"
