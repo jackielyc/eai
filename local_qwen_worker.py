@@ -178,50 +178,92 @@ def load_model(model_dir: str) -> None:
     load_full_model(model_dir)
 
 
-def load_full_model(model_dir: str) -> None:
-    import torch
-    from transformers import AutoModelForImageTextToText, AutoProcessor
+def _model_is_causal_lm(model_dir: str) -> bool:
+    """Qwen3-Coder 等为 CausalLM；Qwen3.5-VL/3.5 MoE 多为 ImageTextToText。"""
+    cfg_path = os.path.join(model_dir, "config.json")
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return False
+    arches = [str(a) for a in (cfg.get("architectures") or [])]
+    joined = " ".join(arches + [str(cfg.get("model_type") or "")]).lower()
+    if "imagetext" in joined or "conditionalgeneration" in joined:
+        return False
+    if "forcausallm" in joined:
+        return True
+    # Qwen3-Coder: model_type=qwen3_moe（不是 qwen3_5_moe）
+    if "qwen3_moe" in joined and "qwen3_5" not in joined:
+        return True
+    return False
 
-    _log(f"loading model from {model_dir}")
-    processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+def _gpu_load_kwargs(model_dir: str) -> Dict[str, Any]:
+    import torch
 
     load_kwargs: Dict[str, Any] = {
         "trust_remote_code": True,
         "low_cpu_mem_usage": True,
+        "torch_dtype": torch.bfloat16 if torch.cuda.is_available() else torch.float32,
     }
-    # 新版 transformers 推荐 dtype=；旧版仍认 torch_dtype
-    load_kwargs["torch_dtype"] = dtype
-
-    if torch.cuda.is_available():
-        # 单卡放不下（如 35B MoE）时 accelerate 会把溢出权重落到 disk，
-        # MoE 必须显式提供 offload_folder，否则直接报错退出。
-        offload_root = os.environ.get("LOCAL_QWEN_OFFLOAD_DIR", "").strip()
-        if not offload_root:
-            offload_root = os.path.join(
-                tempfile.gettempdir(), "local_qwen_offload", os.path.basename(model_dir)
-            )
-        os.makedirs(offload_root, exist_ok=True)
-        props = torch.cuda.get_device_properties(0)
-        total_gib = max(1, int(props.total_memory / (1024**3)))
-        # 预留约 2GiB 给 KV / 激活，避免占满后 generate OOM
-        gpu_budget = max(4, total_gib - 2)
-        load_kwargs["device_map"] = "auto"
-        load_kwargs["max_memory"] = {0: f"{gpu_budget}GiB", "cpu": "64GiB"}
-        load_kwargs["offload_folder"] = offload_root
-        _log(
-            f"device_map=auto max_memory[0]={gpu_budget}GiB "
-            f"offload_folder={offload_root}"
-        )
-    else:
+    if not torch.cuda.is_available():
         load_kwargs["device_map"] = None
+        return load_kwargs
+    # 单卡放不下（如 35B MoE）时 accelerate 会把溢出权重落到 disk，
+    # MoE 必须显式提供 offload_folder，否则直接报错退出。
+    offload_root = os.environ.get("LOCAL_QWEN_OFFLOAD_DIR", "").strip()
+    if not offload_root:
+        offload_root = os.path.join(
+            tempfile.gettempdir(), "local_qwen_offload", os.path.basename(model_dir)
+        )
+    os.makedirs(offload_root, exist_ok=True)
+    props = torch.cuda.get_device_properties(0)
+    total_gib = max(1, int(props.total_memory / (1024**3)))
+    env_budget = os.environ.get("LOCAL_QWEN_GPU_BUDGET_GIB", "").strip()
+    if env_budget.isdigit():
+        gpu_budget = max(4, int(env_budget))
+    else:
+        gpu_budget = max(4, total_gib - 2)
+    load_kwargs["device_map"] = "auto"
+    load_kwargs["max_memory"] = {0: f"{gpu_budget}GiB", "cpu": "64GiB"}
+    load_kwargs["offload_folder"] = offload_root
+    _log(
+        f"device_map=auto max_memory[0]={gpu_budget}GiB "
+        f"offload_folder={offload_root}"
+    )
+    return load_kwargs
 
-    try:
-        model = AutoModelForImageTextToText.from_pretrained(model_dir, **load_kwargs)
-    except TypeError:
-        # 极旧版本可能不接受部分 kwargs
-        load_kwargs.pop("low_cpu_mem_usage", None)
-        model = AutoModelForImageTextToText.from_pretrained(model_dir, **load_kwargs)
+
+def load_full_model(model_dir: str) -> None:
+    import torch
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoModelForImageTextToText,
+        AutoProcessor,
+        AutoTokenizer,
+    )
+
+    _log(f"loading model from {model_dir}")
+    causal = _model_is_causal_lm(model_dir)
+    load_kwargs = _gpu_load_kwargs(model_dir)
+    modality = "causal_lm" if causal else "vl"
+
+    if causal:
+        _log("architecture=CausalLM (tokenizer path)")
+        processor = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+        try:
+            model = AutoModelForCausalLM.from_pretrained(model_dir, **load_kwargs)
+        except TypeError:
+            load_kwargs.pop("low_cpu_mem_usage", None)
+            model = AutoModelForCausalLM.from_pretrained(model_dir, **load_kwargs)
+    else:
+        _log("architecture=ImageTextToText (processor path)")
+        processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
+        try:
+            model = AutoModelForImageTextToText.from_pretrained(model_dir, **load_kwargs)
+        except TypeError:
+            load_kwargs.pop("low_cpu_mem_usage", None)
+            model = AutoModelForImageTextToText.from_pretrained(model_dir, **load_kwargs)
 
     if not torch.cuda.is_available():
         model = model.to("cpu")
@@ -236,10 +278,11 @@ def load_full_model(model_dir: str) -> None:
         _STATE["model_dir"] = model_dir
         _STATE["device"] = device
         _STATE["kind"] = "full"
+        _STATE["modality"] = modality
         _STATE["ready"] = True
         _STATE["error"] = ""
     _ensure_cudnn_ready()
-    _log(f"model ready on {device}")
+    _log(f"model ready on {device} modality={modality}")
 
 
 def load_lora_model(adapter_dir: str) -> None:
@@ -361,6 +404,7 @@ def run_chat(
             raise RuntimeError(_STATE.get("error") or "model not ready")
         model = _STATE["model"]
         processor = _STATE["processor"]
+        modality = str(_STATE.get("modality") or "vl")
 
     # 构造 chat 模板输入；有图时附加 image
     chat_messages: List[Dict[str, Any]] = []
@@ -389,50 +433,65 @@ def run_chat(
     if not chat_messages:
         chat_messages = [{"role": "user", "content": "你好"}]
 
-    # 若有图，把图挂到最后一条 user
-    images = None
-    if image_paths:
-        from PIL import Image
-
-        images = [Image.open(p).convert("RGB") for p in image_paths]
-        # Qwen3.5 processor 通常期望 messages 中带 image 占位；这里用 images= 参数
-        last_user_idx = None
-        for i in range(len(chat_messages) - 1, -1, -1):
-            if chat_messages[i].get("role") == "user":
-                last_user_idx = i
-                break
-        if last_user_idx is not None:
-            text = chat_messages[last_user_idx].get("content") or ""
-            content_parts: List[Dict[str, Any]] = [{"type": "image"} for _ in images]
-            content_parts.append({"type": "text", "text": text})
-            chat_messages[last_user_idx] = {
-                "role": "user",
-                "content": content_parts,
-            }
-
-    # Qwen3.5 默认会打开 <think>；关闭后模板写入空 think 块，避免长篇思考占满 max_tokens
-    template_kwargs: Dict[str, Any] = {
-        "tokenize": False,
-        "add_generation_prompt": True,
-        "enable_thinking": bool(enable_thinking),
-    }
-    try:
-        prompt = processor.apply_chat_template(chat_messages, **template_kwargs)
-    except TypeError:
-        template_kwargs.pop("enable_thinking", None)
-        prompt = processor.apply_chat_template(chat_messages, **template_kwargs)
-    inputs = processor(
-        text=[prompt],
-        images=images,
-        return_tensors="pt",
-        padding=True,
-    )
     import torch
 
-    device = next(model.parameters()).device
-    inputs = {
-        k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()
-    }
+    # CausalLM（Coder）：只用 tokenizer，忽略图像
+    if modality == "causal_lm":
+        template_kwargs: Dict[str, Any] = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        try:
+            prompt = processor.apply_chat_template(
+                chat_messages, **template_kwargs, enable_thinking=bool(enable_thinking)
+            )
+        except TypeError:
+            prompt = processor.apply_chat_template(chat_messages, **template_kwargs)
+        inputs = processor(prompt, return_tensors="pt")
+        device = next(model.parameters()).device
+        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+    else:
+        # 若有图，把图挂到最后一条 user
+        images = None
+        if image_paths:
+            from PIL import Image
+
+            images = [Image.open(p).convert("RGB") for p in image_paths]
+            last_user_idx = None
+            for i in range(len(chat_messages) - 1, -1, -1):
+                if chat_messages[i].get("role") == "user":
+                    last_user_idx = i
+                    break
+            if last_user_idx is not None:
+                text = chat_messages[last_user_idx].get("content") or ""
+                content_parts: List[Dict[str, Any]] = [{"type": "image"} for _ in images]
+                content_parts.append({"type": "text", "text": text})
+                chat_messages[last_user_idx] = {
+                    "role": "user",
+                    "content": content_parts,
+                }
+
+        # Qwen3.5 默认会打开 <think>；关闭后模板写入空 think 块，避免长篇思考占满 max_tokens
+        template_kwargs = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "enable_thinking": bool(enable_thinking),
+        }
+        try:
+            prompt = processor.apply_chat_template(chat_messages, **template_kwargs)
+        except TypeError:
+            template_kwargs.pop("enable_thinking", None)
+            prompt = processor.apply_chat_template(chat_messages, **template_kwargs)
+        inputs = processor(
+            text=[prompt],
+            images=images,
+            return_tensors="pt",
+            padding=True,
+        )
+        device = next(model.parameters()).device
+        inputs = {
+            k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()
+        }
 
     gen_kwargs: Dict[str, Any] = {
         "max_new_tokens": max(16, int(max_new_tokens)),
@@ -622,16 +681,52 @@ class Handler(BaseHTTPRequestHandler):
             return
         messages = _responses_input_to_messages(payload)
         tools = payload.get("tools") or []
+        # Debug one Codex turn shape (truncate) — helps diagnose reconnect loops.
+        try:
+            dbg = {
+                "n_tools": len(tools) if isinstance(tools, list) else 0,
+                "tool_names": [
+                    str((t.get("name") or (t.get("function") or {}).get("name") or t.get("type") or ""))
+                    for t in (tools if isinstance(tools, list) else [])[:12]
+                ],
+                "stream": payload.get("stream"),
+                "model": payload.get("model"),
+                "n_messages": len(messages),
+                "max_output_tokens": payload.get("max_output_tokens")
+                or payload.get("max_tokens"),
+            }
+            with open("/tmp/local_qwen_last_request.json", "w", encoding="utf-8") as f:
+                json.dump(dbg, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+                if isinstance(tools, list) and tools:
+                    f.write("\n--- first tool ---\n")
+                    f.write(json.dumps(tools[0], ensure_ascii=False)[:2000])
+                    f.write("\n")
+        except Exception:
+            pass
         if tools:
+            # Codex may send tools as {type,name,description,parameters} or
+            # nested {type:"function", function:{name,...}}.
+            tool_summaries = []
+            for t in tools if isinstance(tools, list) else []:
+                if not isinstance(t, dict):
+                    continue
+                fn = t.get("function") if isinstance(t.get("function"), dict) else None
+                name = str((fn or {}).get("name") or t.get("name") or "").strip()
+                desc = str((fn or {}).get("description") or t.get("description") or "")
+                params = (fn or {}).get("parameters") if fn else t.get("parameters")
+                if name:
+                    tool_summaries.append(
+                        {"name": name, "description": desc, "parameters": params or {}}
+                    )
             messages = [
                 {
                     "role": "system",
                     "content": (
-                        "You are a coding agent. Available tools (JSON schemas):\n"
-                        + json.dumps(tools, ensure_ascii=False)
-                        + "\nIf you need a tool, reply with ONLY:\n"
-                        '{"tool_call":{"name":"...","arguments":{...}}}\n'
-                        "Otherwise reply with plain text."
+                        "You are a coding agent. You MUST use tools via a single JSON object:\n"
+                        '{"tool_call":{"name":"<tool_name>","arguments":{...}}}\n'
+                        "Do not wrap in markdown. Available tools:\n"
+                        + json.dumps(tool_summaries, ensure_ascii=False)
                     ),
                 },
                 *messages,
@@ -657,6 +752,11 @@ class Handler(BaseHTTPRequestHandler):
                 enable_thinking=False,
                 temperature=temperature,
             )
+            try:
+                with open("/tmp/local_qwen_last_answer.txt", "w", encoding="utf-8") as f:
+                    f.write(answer or "")
+            except Exception:
+                pass
             output_items = _responses_output_from_answer(answer)
             rid = f"resp_local_qwen_{int(time.time() * 1000)}"
             response_obj = {
@@ -675,7 +775,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
+            # Codex 会一直等到连接关闭；keep-alive 会导致 exec 挂死。
+            self.send_header("Connection", "close")
             self.end_headers()
 
             seq = 0
@@ -822,6 +923,11 @@ class Handler(BaseHTTPRequestHandler):
                 "response.completed",
                 {"sequence_number": seq, "response": response_obj},
             )
+            try:
+                self.wfile.flush()
+            except Exception:
+                pass
+            self.close_connection = True
         except Exception as exc:
             detail = f"{exc}\n{traceback.format_exc()}"
             _log(detail)
@@ -835,6 +941,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             else:
                 self._send_json(500, {"error": str(exc)})
+            self.close_connection = True
         finally:
             for p in tmp_paths:
                 try:
@@ -852,6 +959,7 @@ def _responses_input_to_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]
     if not isinstance(raw, list):
         return [{"role": "user", "content": str(raw)}]
     messages: List[Dict[str, Any]] = []
+    type_hist: List[str] = []
     for item in raw:
         if isinstance(item, str):
             messages.append({"role": "user", "content": item})
@@ -859,70 +967,151 @@ def _responses_input_to_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]
         if not isinstance(item, dict):
             continue
         # Chat-style message
-        if "role" in item and "content" in item:
-            messages.append({"role": item.get("role") or "user", "content": item.get("content")})
+        if "role" in item and "content" in item and item.get("type") in (None, "", "message"):
+            role = str(item.get("role") or "user")
+            # local CausalLM templates often dislike role=tool
+            if role == "tool":
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Tool result:\n{item.get('content')}",
+                    }
+                )
+            else:
+                messages.append({"role": role, "content": item.get("content")})
             continue
         # Responses item types
         typ = str(item.get("type") or "")
+        type_hist.append(typ or "message")
         role = str(item.get("role") or "user")
         if typ in {"message", "input_text", ""} and item.get("content") is not None:
             content = item.get("content")
             if isinstance(content, list):
-                parts: List[Any] = []
+                texts: List[str] = []
                 for p in content:
                     if isinstance(p, str):
-                        parts.append({"type": "text", "text": p})
+                        texts.append(p)
                     elif isinstance(p, dict):
                         ptype = str(p.get("type") or "")
-                        if ptype in {"input_text", "text"}:
-                            parts.append({"type": "text", "text": p.get("text") or p.get("content") or ""})
-                        elif ptype in {"input_image", "image_url"}:
-                            url = p.get("image_url")
-                            if isinstance(url, dict):
-                                url = url.get("url")
-                            url = url or p.get("url") or ""
-                            parts.append({"type": "image_url", "image_url": {"url": url}})
-                        else:
-                            parts.append(p)
-                messages.append({"role": role, "content": parts})
+                        if ptype in {"input_text", "text", "output_text"}:
+                            texts.append(str(p.get("text") or p.get("content") or ""))
+                text = "\n".join(t for t in texts if t).strip()
+                if text:
+                    messages.append({"role": role if role in {"user", "assistant", "system"} else "user", "content": text})
             else:
-                messages.append({"role": role, "content": content})
+                messages.append(
+                    {
+                        "role": role if role in {"user", "assistant", "system"} else "user",
+                        "content": content,
+                    }
+                )
         elif typ == "input_text":
             messages.append({"role": "user", "content": item.get("text") or ""})
-        elif typ == "function_call_output":
+        elif typ == "function_call":
+            # Replay prior tool call so the model sees what it already did.
+            name = str(item.get("name") or "").strip()
+            args = item.get("arguments")
+            parsed_args: Any
+            if isinstance(args, str):
+                try:
+                    parsed_args = json.loads(args) if args.strip().startswith("{") else {"raw": args}
+                except Exception:
+                    parsed_args = {"raw": args}
+            else:
+                parsed_args = args or {}
             messages.append(
                 {
-                    "role": "tool",
-                    "content": str(item.get("output") or item.get("content") or ""),
-                    "name": item.get("name") or "",
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {"tool_call": {"name": name, "arguments": parsed_args}},
+                        ensure_ascii=False,
+                    ),
                 }
             )
+        elif typ == "function_call_output":
+            out = str(item.get("output") or item.get("content") or "")
+            call_id = str(item.get("call_id") or item.get("id") or "")
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Tool result (call_id={call_id}):\n{out}\n"
+                        "Continue the task. Prefer writing/editing files over repeating ls."
+                    ),
+                }
+            )
+    try:
+        with open("/tmp/local_qwen_input_types.txt", "w", encoding="utf-8") as f:
+            f.write(",".join(type_hist[:80]) + f"\nconverted_messages={len(messages)}\n")
+    except Exception:
+        pass
     return messages or [{"role": "user", "content": ""}]
+
+
+def _extract_tool_call_blob(text: str) -> Optional[Dict[str, Any]]:
+    """Parse {"tool_call":{...}} even if surrounded by prose/markdown fences."""
+    s = (text or "").strip()
+    if not s or '"tool_call"' not in s:
+        return None
+    # strip common fences
+    if "```" in s:
+        parts = s.split("```")
+        for p in parts:
+            if '"tool_call"' in p:
+                s = p.strip()
+                if s.startswith("json"):
+                    s = s[4:].strip()
+                break
+    # try whole string, then each balanced {...} substring containing tool_call
+    candidates = [s]
+    start = 0
+    while True:
+        i = s.find("{", start)
+        if i < 0:
+            break
+        depth = 0
+        for j in range(i, len(s)):
+            if s[j] == "{":
+                depth += 1
+            elif s[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidates.append(s[i : j + 1])
+                    start = j + 1
+                    break
+        else:
+            break
+    for cand in candidates:
+        if '"tool_call"' not in cand:
+            continue
+        try:
+            data = json.loads(cand)
+        except Exception:
+            continue
+        call = data.get("tool_call") if isinstance(data, dict) else None
+        if isinstance(call, dict) and call.get("name"):
+            return call
+    return None
 
 
 def _responses_output_from_answer(answer: str) -> List[Dict[str, Any]]:
     text = (answer or "").strip()
-    # Best-effort tool_call JSON
-    if text.startswith("{") and '"tool_call"' in text:
-        try:
-            data = json.loads(text)
-            call = data.get("tool_call") or {}
-            name = str(call.get("name") or "").strip()
-            args = call.get("arguments")
-            if name:
-                if not isinstance(args, str):
-                    args = json.dumps(args or {}, ensure_ascii=False)
-                return [
-                    {
-                        "type": "function_call",
-                        "id": f"call_local_{int(time.time() * 1000)}",
-                        "call_id": f"call_local_{int(time.time() * 1000)}",
-                        "name": name,
-                        "arguments": args,
-                    }
-                ]
-        except Exception:
-            pass
+    call = _extract_tool_call_blob(text)
+    if call:
+        name = str(call.get("name") or "").strip()
+        args = call.get("arguments")
+        if not isinstance(args, str):
+            args = json.dumps(args or {}, ensure_ascii=False)
+        cid = f"call_local_{int(time.time() * 1000)}"
+        return [
+            {
+                "type": "function_call",
+                "id": cid,
+                "call_id": cid,
+                "name": name,
+                "arguments": args,
+            }
+        ]
     return [
         {
             "type": "message",

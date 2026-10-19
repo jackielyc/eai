@@ -923,7 +923,8 @@ OLLAMA_API_BASE_DEFAULT = "http://127.0.0.1:11434/v1"
 
 POSE_BACKEND_PCA = "pca"
 POSE_BACKEND_FOUNDATIONPOSE = "foundationpose"
-POSE_BACKENDS = (POSE_BACKEND_PCA, POSE_BACKEND_FOUNDATIONPOSE)
+POSE_BACKEND_ANY6D = "any6d"
+POSE_BACKENDS = (POSE_BACKEND_PCA, POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY6D)
 FP_WORKER_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "foundationpose_worker.py"
 )
@@ -933,6 +934,21 @@ FP_SERVER_URL_DEFAULT = os.environ.get("FP_SERVER_URL", "http://127.0.0.1:8766")
 FP_USE_HTTP_DEFAULT = os.environ.get("FP_USE_HTTP", "0").strip() in ("1", "true", "yes")
 FP_TIMEOUT_S = float(os.environ.get("FP_TIMEOUT_S", "180"))
 FP_DEFAULT_PORT = int(os.environ.get("FP_PORT", "8766"))
+ANY6D_WORKER_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "any6d_worker.py"
+)
+ANY6D_RUN_SCRIPT_NAME = "run_any6d.sh"
+ANY6D_PYTHON_DEFAULT = os.environ.get("ANY6D_PYTHON", FP_PYTHON_DEFAULT)
+ANY6D_SERVER_URL_DEFAULT = os.environ.get(
+    "ANY6D_SERVER_URL", "http://127.0.0.1:8767"
+)
+ANY6D_USE_HTTP_DEFAULT = os.environ.get("ANY6D_USE_HTTP", "0").strip() in (
+    "1",
+    "true",
+    "yes",
+)
+ANY6D_TIMEOUT_S = float(os.environ.get("ANY6D_TIMEOUT_S", "240"))
+ANY6D_DEFAULT_PORT = int(os.environ.get("ANY6D_PORT", "8767"))
 
 
 def fp_mesh_path_exists(mesh_path: str) -> bool:
@@ -3910,8 +3926,16 @@ MV6D_MIN_FUSED_POINTS = 80
 MV6D_GRASP_Z_LIFT_FRAC = 0.0
 # 估计→最近仿真物体的匹配半径（用于回填真值中心，使夹爪中点能对准物体）
 MV6D_FILL_GT_MAX_DIST_M = 0.28
+# 融合后若离仿真物体很近，把中心吸到物体（视觉仍保留，仅精修位置）
+MV6D_EST_GT_SNAP_MAX_DIST_M = 0.12
 # 腕深度无效像素占比过高时跳过该腕（右腕常见空洞会污染共享 6D）
 MV6D_WRIST_DEPTH_INVALID_MAX_RATIO = 0.10
+# 多视角融合权重：头部更稳；腕部易偏/空洞，只作弱补充
+MV6D_FUSE_WEIGHT_HEAD = 3.0
+MV6D_FUSE_WEIGHT_WRIST = 1.0
+# 融合点云：相对种子的 XY 半径 / 去桌面厚度
+MV6D_FUSE_XY_RADIUS_M = 0.11
+MV6D_FUSE_TABLE_CLEAR_M = 0.014
 # 仿真绝对移动：先水平对准再下压，避免斜插导致 IK 卡在桌面上方
 SIM_ARM_APPROACH_MIN_DZ_M = 0.03
 
@@ -6370,6 +6394,9 @@ class PoseSettings:
     fp_python: str = FP_PYTHON_DEFAULT
     fp_mesh: str = FP_MESH_DEFAULT
     fp_mode: str = "register"
+    any6d_use_http: bool = ANY6D_USE_HTTP_DEFAULT
+    any6d_server_url: str = ANY6D_SERVER_URL_DEFAULT
+    any6d_python: str = ANY6D_PYTHON_DEFAULT
 
 
 _segment_settings = SegmentSettings()
@@ -6399,6 +6426,9 @@ def get_pose_settings() -> PoseSettings:
             fp_python=_pose_settings.fp_python,
             fp_mesh=_pose_settings.fp_mesh,
             fp_mode=_pose_settings.fp_mode,
+            any6d_use_http=_pose_settings.any6d_use_http,
+            any6d_server_url=_pose_settings.any6d_server_url,
+            any6d_python=_pose_settings.any6d_python,
         )
 
 
@@ -7345,6 +7375,218 @@ def object6d_from_foundationpose(
     )
 
 
+def resolve_any6d_viewer_server_url(port: int = ANY6D_DEFAULT_PORT) -> str:
+    env = os.environ.get("ANY6D_SERVER_URL", "").strip()
+    if env:
+        return env.rstrip("/")
+    return f"http://127.0.0.1:{int(port)}"
+
+
+def fetch_any6d_health(url: str, timeout_s: float = 1.5) -> Dict[str, object]:
+    try:
+        req = urllib.request.Request(f"{url.rstrip('/')}/health", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return {
+            "online": True,
+            "any6d_ready": bool(body.get("any6d_ready", body.get("ok"))),
+            "any6d_root": str(body.get("any6d_root") or ""),
+            "missing_deps": list(body.get("missing_deps") or []),
+            "mesh": str(body.get("mesh") or ""),
+            "model_free": bool(body.get("model_free", True)),
+            "raw": body,
+        }
+    except Exception as exc:
+        return {"online": False, "error": str(exc)}
+
+
+def evaluate_any6d_availability(
+    mesh_path: str,
+    *,
+    use_http: bool,
+    server_url: str,
+    timeout_s: float = 1.2,
+) -> FpAvailabilityStatus:
+    """复用 FpAvailabilityStatus；Any6D 允许无 mesh（深度凸包）。"""
+    worker_ok = os.path.isfile(ANY6D_WORKER_SCRIPT)
+    if use_http:
+        health = fetch_any6d_health(server_url, timeout_s)
+        if not health.get("online"):
+            return FpAvailabilityStatus(
+                label="离线",
+                color="#ff6b6b",
+                detail="Any6D HTTP 未启动",
+                tooltip=(
+                    f"服务不可达: {server_url}\n"
+                    f"请运行: bash {ANY6D_RUN_SCRIPT_NAME}"
+                ),
+                can_invoke=False,
+                http_online=False,
+                worker_ok=worker_ok,
+            )
+        ready = bool(health.get("any6d_ready"))
+        missing = health.get("missing_deps") or []
+        if not ready:
+            return FpAvailabilityStatus(
+                label="缺依赖",
+                color="#ffb86c",
+                detail="服务在线但依赖未齐",
+                tooltip=(
+                    f"root={health.get('any6d_root')}\n"
+                    f"缺少: {', '.join(map(str, missing)) or '?'}\n"
+                    f"bash {ANY6D_RUN_SCRIPT_NAME} --check"
+                ),
+                can_invoke=False,
+                http_online=True,
+                fp_ready=False,
+                worker_ok=worker_ok,
+            )
+        mesh_note = str(health.get("mesh") or "model-free")
+        return FpAvailabilityStatus(
+            label="就绪",
+            color="#50fa7b",
+            detail=f"Any6D HTTP · {mesh_note}",
+            tooltip=f"{server_url}\nroot={health.get('any6d_root')}\nmesh 可空=深度凸包",
+            can_invoke=True,
+            http_online=True,
+            fp_ready=True,
+            mesh_ok=True,
+            worker_ok=worker_ok,
+        )
+    if not worker_ok:
+        return FpAvailabilityStatus(
+            label="无worker",
+            color="#ff6b6b",
+            detail="缺少 any6d_worker.py",
+            tooltip=f"未找到 {ANY6D_WORKER_SCRIPT}",
+            can_invoke=False,
+            worker_ok=False,
+        )
+    mesh = (mesh_path or "").strip()
+    mesh_ok = (not mesh) or fp_mesh_path_exists(mesh)
+    return FpAvailabilityStatus(
+        label="子进程",
+        color="#8be9fd" if mesh_ok else "#ffb86c",
+        detail=("model-free" if not mesh else "有 mesh"),
+        tooltip=(
+            f"将用 {ANY6D_PYTHON_DEFAULT} 调 any6d_worker.py --once\n"
+            "mesh 留空 → 深度凸包任意物体；有 mesh 更准"
+        ),
+        can_invoke=True,
+        mesh_ok=mesh_ok,
+        worker_ok=True,
+    )
+
+
+def _any6d_pose_via_http(
+    payload: Dict[str, object], server_url: str, timeout_s: float
+) -> Dict[str, object]:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{server_url.rstrip('/')}/pose",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        err_msg = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Any6D HTTP {exc.code}: {err_msg[:400]}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Any6D 服务不可达 ({server_url})，请先: bash {ANY6D_RUN_SCRIPT_NAME}"
+        ) from exc
+    if not body.get("ok"):
+        raise RuntimeError(str(body.get("error") or body))
+    return body
+
+
+def _any6d_pose_via_subprocess(
+    payload: Dict[str, object], python_exe: str, timeout_s: float
+) -> Dict[str, object]:
+    if not os.path.isfile(ANY6D_WORKER_SCRIPT):
+        raise RuntimeError(f"未找到 worker: {ANY6D_WORKER_SCRIPT}")
+    proc = subprocess.run(
+        [python_exe, ANY6D_WORKER_SCRIPT, "--once"],
+        input=json.dumps(payload).encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=timeout_s,
+        check=False,
+    )
+    stdout = proc.stdout.decode("utf-8", errors="replace").strip()
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace")
+        raise RuntimeError(err or stdout or f"Any6D worker 退出码 {proc.returncode}")
+    try:
+        body = json.loads(stdout.splitlines()[-1] if stdout else "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Any6D worker 输出非 JSON: {stdout[:200]}") from exc
+    if not body.get("ok"):
+        raise RuntimeError(str(body.get("error") or body))
+    return body
+
+
+def run_any6d_estimation(
+    color_bgr: np.ndarray,
+    depth: np.ndarray,
+    mask: np.ndarray,
+    fx: float,
+    fy: float,
+    cx: float,
+    cy: float,
+    settings: Optional[PoseSettings] = None,
+    *,
+    tag: str = "viewer",
+) -> Dict[str, object]:
+    """调用 Any6D；mesh 可空（深度凸包 model-free）。响应格式同 FoundationPose。"""
+    cfg = settings or get_pose_settings()
+    mesh_path = (cfg.fp_mesh or "").strip()
+    # 复用 FP payload 编码；mesh 允许空字符串
+    payload = _fp_build_request_payload(
+        color_bgr,
+        depth,
+        mask,
+        fx,
+        fy,
+        cx,
+        cy,
+        mesh_path,
+        mode="register",
+    )
+    payload["model_free"] = not bool(mesh_path and fp_mesh_path_exists(mesh_path))
+    request_summary = _summarize_fp_payload(payload)
+    request_summary["backend"] = "any6d"
+    request_summary["transport"] = "HTTP" if cfg.any6d_use_http else "subprocess"
+    t0 = time.time()
+    try:
+        if cfg.any6d_use_http:
+            body = _any6d_pose_via_http(
+                payload, cfg.any6d_server_url, ANY6D_TIMEOUT_S
+            )
+        else:
+            body = _any6d_pose_via_subprocess(
+                payload, cfg.any6d_python, ANY6D_TIMEOUT_S
+            )
+        _log_fp_request_result(
+            f"any6d:{tag}",
+            request_summary,
+            {"ok": True, "method": body.get("method"), "position_xyz": body.get("position_xyz")},
+            time.time() - t0,
+        )
+        return body
+    except Exception as exc:
+        _log_fp_request_result(
+            f"any6d:{tag}",
+            request_summary,
+            {"ok": False, "error": str(exc)},
+            time.time() - t0,
+        )
+        raise
+
+
 def segment_object_at_click_with_backend(
     seed_u: int,
     seed_v: int,
@@ -7604,11 +7846,96 @@ def pose_axes_lines(center: np.ndarray, rotation: np.ndarray, scale: float) -> T
     return np.stack(lines, axis=0).astype(np.float32), np.stack(colors, axis=0).astype(np.float32)
 
 
+def refine_fused_object_points(
+    points: np.ndarray,
+    *,
+    seed_xyz: Optional[np.ndarray] = None,
+    xy_radius_m: float = MV6D_FUSE_XY_RADIUS_M,
+    table_clear_m: float = MV6D_FUSE_TABLE_CLEAR_M,
+) -> Tuple[np.ndarray, str]:
+    """融合点云清洗：种子邻域 + 去桌面 + 最密体素中心邻域。
+
+    返回 (cleaned_points, note)。点过少时原样返回。
+    """
+    _ensure_cv2_numpy()
+    pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
+    if len(pts) < SEGMENT_3D_MIN_POINTS:
+        return pts, "点过少跳过清洗"
+    notes: List[str] = []
+    seed = (
+        np.asarray(seed_xyz, dtype=np.float32).reshape(3)
+        if seed_xyz is not None
+        else np.median(pts, axis=0).astype(np.float32)
+    )
+
+    # 1) XY 半径：挡住邻物 / 腕部误分割
+    d_xy = np.linalg.norm(pts[:, :2] - seed[:2], axis=1)
+    rad = float(max(0.04, xy_radius_m))
+    sel = d_xy <= rad
+    if int(sel.sum()) >= SEGMENT_3D_MIN_POINTS:
+        pts = pts[sel]
+        notes.append(f"XY≤{rad * 1000:.0f}mm")
+    else:
+        # 放宽到 1.6×
+        sel = d_xy <= rad * 1.6
+        if int(sel.sum()) >= SEGMENT_3D_MIN_POINTS:
+            pts = pts[sel]
+            notes.append(f"XY≤{rad * 1.6 * 1000:.0f}mm(放宽)")
+
+    # 2) 去桌面：用 Z 直方图低端峰作桌面高度
+    z = pts[:, 2]
+    z_min = float(np.min(z))
+    z_max = float(np.max(z))
+    if z_max - z_min > 0.025:
+        bins = max(24, min(64, int((z_max - z_min) / 0.004)))
+        hist, edges = np.histogram(z, bins=bins)
+        # 只在下半高度找峰，避免把物体顶面当桌面
+        mid = max(1, bins // 2)
+        peak_i = int(np.argmax(hist[:mid]))
+        table_z = 0.5 * float(edges[peak_i] + edges[peak_i + 1])
+        clear = float(max(0.008, table_clear_m))
+        above = z >= (table_z + clear)
+        if int(above.sum()) >= SEGMENT_3D_MIN_POINTS:
+            pts = pts[above]
+            notes.append(f"去桌面Z>{table_z + clear:.3f}")
+
+    # 3) 统计离群
+    keep = remove_statistical_outliers(pts, k_mad=2.2)
+    if int(keep.sum()) >= SEGMENT_3D_MIN_POINTS:
+        pts = pts[keep]
+
+    # 4) 最密 2cm 体素 → 再收紧到该体素中心附近（抑双峰/邻物）
+    if len(pts) >= SEGMENT_3D_MIN_POINTS:
+        voxel = 0.02
+        keys = np.floor(pts / voxel).astype(np.int32)
+        # 哈希：打包成一维
+        flat = (
+            keys[:, 0].astype(np.int64) * 73856093
+            ^ keys[:, 1].astype(np.int64) * 19349663
+            ^ keys[:, 2].astype(np.int64) * 83492791
+        )
+        uniq, inv, counts = np.unique(flat, return_inverse=True, return_counts=True)
+        best = int(np.argmax(counts))
+        dens_center = np.mean(pts[inv == best], axis=0).astype(np.float32)
+        # 若种子更可信，向种子靠拢
+        dens_center = (0.65 * dens_center + 0.35 * seed).astype(np.float32)
+        d = np.linalg.norm(pts - dens_center, axis=1)
+        thr = float(np.percentile(d, 75))
+        thr = max(0.025, min(float(xy_radius_m), thr))
+        tight = d <= thr
+        if int(tight.sum()) >= SEGMENT_3D_MIN_POINTS:
+            pts = pts[tight]
+            notes.append("最密体素邻域")
+
+    return pts, ("+".join(notes) if notes else "无额外清洗")
+
+
 def estimate_6d_pose_pca(
     points: np.ndarray,
     *,
     align_gravity: bool = True,
     gravity_up: Optional[np.ndarray] = None,
+    seed_xyz: Optional[np.ndarray] = None,
 ) -> Optional[
     Tuple[np.ndarray, np.ndarray, np.ndarray, Tuple[float, float, float], Tuple[float, float, float, float]]
 ]:
@@ -7616,8 +7943,10 @@ def estimate_6d_pose_pca(
 
     改进相对朴素 PCA：
     - 统计离群点剔除 + 中心邻域迭代修剪（抑深度飞点）
+    - 可选种子吸引，避免中心漂到邻物/桌面
     - 桌面场景默认把最近竖直轴对齐重力（base_link +Z），姿态更稳
     """
+    _ensure_cv2_numpy()
     pts = np.asarray(points, dtype=np.float32).reshape(-1, 3)
     if len(pts) < SEGMENT_3D_MIN_POINTS:
         return None
@@ -7626,19 +7955,33 @@ def estimate_6d_pose_pca(
     if len(pts) < SEGMENT_3D_MIN_POINTS:
         return None
     # 迭代修剪到中位数附近，抑制 mask 边缘/桌面混入
-    for _ in range(2):
+    for _ in range(3):
         c = np.median(pts, axis=0)
+        if seed_xyz is not None:
+            s = np.asarray(seed_xyz, dtype=np.float32).reshape(3)
+            c = (0.7 * c + 0.3 * s).astype(np.float32)
         d = np.linalg.norm(pts - c, axis=1)
         med = float(np.median(d))
         mad = float(np.median(np.abs(d - med))) + 1e-6
-        thr = med + 2.8 * mad * 1.4826
-        thr = max(thr, 0.02)
+        thr = med + 2.5 * mad * 1.4826
+        thr = max(thr, 0.018)
         sel = d <= thr
         if int(sel.sum()) < SEGMENT_3D_MIN_POINTS:
             break
         pts = pts[sel]
 
     centroid = np.median(pts, axis=0).astype(np.float32)
+    if seed_xyz is not None:
+        s = np.asarray(seed_xyz, dtype=np.float32).reshape(3)
+        # XY 更信种子（点击/头部中心），Z 仍信点云
+        centroid = np.array(
+            [
+                0.55 * float(centroid[0]) + 0.45 * float(s[0]),
+                0.55 * float(centroid[1]) + 0.45 * float(s[1]),
+                0.85 * float(centroid[2]) + 0.15 * float(s[2]),
+            ],
+            dtype=np.float32,
+        )
     centered = pts - centroid
     cov = np.cov(centered.astype(np.float64), rowvar=False)
     evals, evecs = np.linalg.eigh(cov)
@@ -7670,8 +8013,9 @@ def estimate_6d_pose_pca(
             rotation[:, 0] *= -1.0
 
     local = centered @ rotation
-    ext_min = np.percentile(local, 5, axis=0)
-    ext_max = np.percentile(local, 95, axis=0)
+    # 用更紧的百分位，减少桌面/飞点拉大 OBB
+    ext_min = np.percentile(local, 8, axis=0)
+    ext_max = np.percentile(local, 92, axis=0)
     half_extents = ((ext_max - ext_min) * 0.5).astype(np.float32)
     half_extents = np.maximum(half_extents, 0.005)
     obb_center = centroid + rotation @ ((ext_max + ext_min) * 0.5).astype(np.float32)
@@ -7725,8 +8069,25 @@ def refine_stereo_segment(
     if len(cluster_idx) < 5:
         return mask, points
 
-    refined_uv = uv[cluster_idx]
+    # 去掉明显比种子更深的点（俯视时桌面/背景），减少中心被桌面拉偏
     refined_points = points[cluster_idx]
+    try:
+        depth_m_full = depth_to_meters_array(depth)
+        seed_z = float(
+            depth_m_full[
+                max(0, min(depth_m_full.shape[0] - 1, int(seed_v))),
+                max(0, min(depth_m_full.shape[1] - 1, int(seed_u))),
+            ]
+        )
+        if np.isfinite(seed_z) and seed_z > 0.05:
+            z_keep = refined_points[:, 2] <= (seed_z + 0.022)
+            if int(np.count_nonzero(z_keep)) >= max(5, SEGMENT_3D_MIN_POINTS // 2):
+                cluster_idx = cluster_idx[z_keep]
+                refined_points = points[cluster_idx]
+    except Exception:
+        pass
+
+    refined_uv = uv[cluster_idx]
     refined_mask_crop = uv_to_mask(refined_uv, mask_crop.shape)
     refined_mask = np.zeros((h, w), dtype=bool)
     refined_mask[v0:v1, u0:u1] = refined_mask_crop
@@ -7754,24 +8115,42 @@ def run_stereo_pose_pipeline(
     if not mask.any():
         return None, f"点击 ({seed_u}, {seed_v})  |  立体分割失败（无有效区域）"
 
-    if pcfg.backend == POSE_BACKEND_FOUNDATIONPOSE:
+    if pcfg.backend in (POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY6D):
+        backend_name = (
+            "FoundationPose"
+            if pcfg.backend == POSE_BACKEND_FOUNDATIONPOSE
+            else "Any6D"
+        )
         if color_bgr is None:
             return None, (
-                f"点击 ({seed_u}, {seed_v})  |  FoundationPose 需要彩色图"
+                f"点击 ({seed_u}, {seed_v})  |  {backend_name} 需要彩色图"
                 "（请同时订阅 color topic）"
             )
         try:
-            fp_body = run_foundationpose_estimation(
-                color_bgr,
-                depth,
-                mask,
-                fx,
-                fy,
-                cx,
-                cy,
-                settings=pcfg,
-                tag="stereo_click",
-            )
+            if pcfg.backend == POSE_BACKEND_FOUNDATIONPOSE:
+                fp_body = run_foundationpose_estimation(
+                    color_bgr,
+                    depth,
+                    mask,
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    settings=pcfg,
+                    tag="stereo_click",
+                )
+            else:
+                fp_body = run_any6d_estimation(
+                    color_bgr,
+                    depth,
+                    mask,
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    settings=pcfg,
+                    tag="stereo_click",
+                )
             result = object6d_from_foundationpose(
                 mask,
                 depth,
@@ -7785,9 +8164,9 @@ def run_stereo_pose_pipeline(
                 segment_method=method,
             )
         except Exception as exc:
-            return None, f"点击 ({seed_u}, {seed_v})  |  FoundationPose 失败: {exc}"
+            return None, f"点击 ({seed_u}, {seed_v})  |  {backend_name} 失败: {exc}"
         if result is None:
-            return None, f"点击 ({seed_u}, {seed_v})  |  FoundationPose 响应无效"
+            return None, f"点击 ({seed_u}, {seed_v})  |  {backend_name} 响应无效"
         return result, format_pose_6d_info(result, seed_u, seed_v)
 
     result = compute_stereo_segment_6d_pose(
@@ -24124,45 +24503,45 @@ class CameraTopicWindow(QMainWindow):
         self.pose_backend_combo = ImeSafeComboBox()
         self.pose_backend_combo.addItem("PCA(点云)", POSE_BACKEND_PCA)
         self.pose_backend_combo.addItem("FoundationPose", POSE_BACKEND_FOUNDATIONPOSE)
+        self.pose_backend_combo.addItem("Any6D(任意物体)", POSE_BACKEND_ANY6D)
         self.pose_backend_combo.setToolTip(
-            "FoundationPose 需 CAD mesh + 彩色/深度/分割 mask；"
-            "推荐宿主机运行 run_foundationpose.sh"
+            "PCA：点云几何；FoundationPose：需 CAD mesh；\n"
+            "Any6D：任意物体，mesh 可空（深度凸包），推荐 run_any6d.sh"
         )
         self.pose_backend_combo.currentIndexChanged.connect(self._on_pose_settings_changed)
         pose_row.addWidget(self.pose_backend_combo)
         self.fp_mesh_edit = QLineEdit()
-        self.fp_mesh_edit.setPlaceholderText("物体 mesh (.obj)")
+        self.fp_mesh_edit.setPlaceholderText("物体 mesh (.obj)；Any6D 可留空")
         self.fp_mesh_edit.setMinimumWidth(180)
         self.fp_mesh_edit.setText(FP_MESH_DEFAULT)
         self.fp_mesh_edit.textChanged.connect(self._on_pose_settings_changed)
         pose_row.addWidget(self.fp_mesh_edit, 1)
         self.fp_mesh_browse_btn = QPushButton("…")
         self.fp_mesh_browse_btn.setFixedWidth(28)
-        self.fp_mesh_browse_btn.setToolTip("选择 mesh 文件")
+        self.fp_mesh_browse_btn.setToolTip("选择 mesh 文件（Any6D 可选）")
         self.fp_mesh_browse_btn.clicked.connect(self._on_fp_mesh_browse_clicked)
         pose_row.addWidget(self.fp_mesh_browse_btn)
-        self.fp_http_check = QCheckBox("FP HTTP")
+        self.fp_http_check = QCheckBox("HTTP")
         self.fp_http_check.setChecked(FP_USE_HTTP_DEFAULT)
         self.fp_http_check.setToolTip(
-            f"勾选后走 FoundationPose 常驻服务 ({FP_SERVER_URL_DEFAULT})"
+            f"FP→{FP_SERVER_URL_DEFAULT}；Any6D→{ANY6D_SERVER_URL_DEFAULT}"
         )
         self.fp_http_check.toggled.connect(self._on_pose_settings_changed)
         pose_row.addWidget(self.fp_http_check)
-        self.fp_status_label = QLabel("FP: --")
+        self.fp_status_label = QLabel("位姿: --")
         self.fp_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.fp_status_label.setMinimumWidth(72)
         pose_row.addWidget(self.fp_status_label)
         self.fp_avail_detail_label = QLabel("")
         self.fp_avail_detail_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.fp_avail_detail_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        self.fp_avail_detail_label.setToolTip("FoundationPose 可用性明细")
+        self.fp_avail_detail_label.setToolTip("位姿后端可用性")
         pose_row.addWidget(self.fp_avail_detail_label, 1)
-        self.fp_invoke_btn = QPushButton("调用 FP")
+        self.fp_invoke_btn = QPushButton("调用位姿")
         self.fp_invoke_btn.setToolTip(
-            "对当前彩色+深度图像调用 FoundationPose：先分割再估计 6D 位姿。\n"
-            "点击图像仅选点，需点本按钮确认。\n"
-            "mesh 可在 worker 侧配置（run_foundationpose.sh --mesh）；"
-            "Docker viewer 本地无 mesh 时仍可使用 worker 默认 mesh"
+            "对当前彩色+深度调用所选后端（PCA/FP/Any6D）。\n"
+            "Any6D：mesh 可留空=任意物体（深度凸包）；有 mesh 更准。\n"
+            "服务: bash run_foundationpose.sh 或 bash run_any6d.sh"
         )
         self.fp_invoke_btn.clicked.connect(self._on_fp_invoke_clicked)
         pose_row.addWidget(self.fp_invoke_btn)
@@ -46791,12 +47170,29 @@ class CameraTopicWindow(QMainWindow):
             return
         self._on_pose_settings_changed()
         pcfg = get_pose_settings()
-        mesh_path, mesh_source = resolve_fp_mesh_for_call(
-            pcfg.fp_mesh,
-            pcfg.fp_use_http,
-            pcfg.fp_server_url,
-        )
-        mesh_display = mesh_path if mesh_source != "local" else pcfg.fp_mesh
+        backend = pcfg.backend
+        backend_label = {
+            POSE_BACKEND_FOUNDATIONPOSE: "FoundationPose",
+            POSE_BACKEND_ANY6D: "Any6D",
+            POSE_BACKEND_PCA: "PCA",
+        }.get(backend, backend)
+
+        if backend == POSE_BACKEND_FOUNDATIONPOSE:
+            mesh_path, mesh_source = resolve_fp_mesh_for_call(
+                pcfg.fp_mesh,
+                pcfg.fp_use_http,
+                pcfg.fp_server_url,
+            )
+            mesh_display = mesh_path if mesh_source != "local" else pcfg.fp_mesh
+            transport = "HTTP" if pcfg.fp_use_http else "子进程"
+        elif backend == POSE_BACKEND_ANY6D:
+            mesh_display = (pcfg.fp_mesh or "").strip() or "(model-free 深度凸包)"
+            mesh_source = "file" if (pcfg.fp_mesh or "").strip() else "depth-hull"
+            transport = "HTTP" if pcfg.any6d_use_http else "子进程"
+        else:
+            mesh_display = "-"
+            mesh_source = "pca"
+            transport = "本地"
 
         source = self._pick_fp_stereo_source()
         if source is None:
@@ -46804,20 +47200,19 @@ class CameraTopicWindow(QMainWindow):
                 "错误: 需要彩色图 + 已勾选的配对 depth topic\n"
                 "请勾选 color 与对应 depth，并在图像上设置提示点 (u,v)"
             )
-            self.status_bar.showMessage("FoundationPose: 缺少彩色/深度数据")
+            self.status_bar.showMessage(f"{backend_label}: 缺少彩色/深度数据")
             return
 
         color_topic, color_bgr, depth_topic, depth, u, v = source
         dh, dw = depth.shape[:2]
         u_d, v_d = scale_uv_to_shape(u, v, color_bgr.shape[:2], (dh, dw))
         fx, fy, cx, cy = self.node.get_intrinsics(depth_topic, dw, dh)
-        transport = "HTTP" if pcfg.fp_use_http else "子进程"
 
         self._fp_call_busy = True
         self.fp_invoke_btn.setEnabled(False)
-        self.fp_invoke_btn.setText("FP 调用中…")
+        self.fp_invoke_btn.setText(f"{backend_label}…")
         self._set_fp_result_text(
-            f"正在调用 FoundationPose…\n"
+            f"正在调用 {backend_label}…\n"
             f"彩色: {color_topic}\n"
             f"深度: {depth_topic}\n"
             f"点: color({u},{v}) depth({u_d},{v_d})\n"
@@ -46829,54 +47224,96 @@ class CameraTopicWindow(QMainWindow):
         def _work() -> None:
             t0 = time.time()
             try:
-                mask, seg_method = segment_object_at_click_with_backend(
-                    u_d,
-                    v_d,
-                    depth,
-                    color_bgr=color_bgr,
-                    settings=scfg,
-                )
-                if not mask.any():
-                    raise RuntimeError("分割失败（无有效 mask）")
-                fp_body = run_foundationpose_estimation(
-                    color_bgr,
-                    depth,
-                    mask,
-                    fx,
-                    fy,
-                    cx,
-                    cy,
-                    settings=pcfg,
-                    tag="invoke_btn",
-                )
-                pose_result = object6d_from_foundationpose(
-                    mask,
-                    depth,
-                    u_d,
-                    v_d,
-                    fx,
-                    fy,
-                    cx,
-                    cy,
-                    fp_body,
-                    segment_method=seg_method,
-                )
-                if pose_result is None:
-                    raise RuntimeError("FoundationPose 响应无效")
-                result = FpCallResult(
-                    ok=True,
-                    color_topic=color_topic,
-                    depth_topic=depth_topic,
-                    u=u,
-                    v=v,
-                    mesh=mesh_display,
-                    segment_method=seg_method,
-                    pose_method=str(fp_body.get("method") or "foundationpose"),
-                    transport=transport,
-                    elapsed_s=time.time() - t0,
-                    mask=mask,
-                    pose_result=pose_result,
-                )
+                if backend == POSE_BACKEND_PCA:
+                    pose_result, _info = run_stereo_pose_pipeline(
+                        depth,
+                        u_d,
+                        v_d,
+                        fx,
+                        fy,
+                        cx,
+                        cy,
+                        color_bgr=color_bgr,
+                        pose_settings=pcfg,
+                    )
+                    if pose_result is None:
+                        raise RuntimeError(_info or "PCA 立体位姿失败")
+                    result = FpCallResult(
+                        ok=True,
+                        color_topic=color_topic,
+                        depth_topic=depth_topic,
+                        u=u,
+                        v=v,
+                        mesh=mesh_display,
+                        segment_method=str(pose_result.method or "pca"),
+                        pose_method=str(pose_result.method or "pca"),
+                        transport=transport,
+                        elapsed_s=time.time() - t0,
+                        mask=pose_result.mask,
+                        pose_result=pose_result,
+                    )
+                else:
+                    mask, seg_method = segment_object_at_click_with_backend(
+                        u_d,
+                        v_d,
+                        depth,
+                        color_bgr=color_bgr,
+                        settings=scfg,
+                    )
+                    if not mask.any():
+                        raise RuntimeError("分割失败（无有效 mask）")
+                    if backend == POSE_BACKEND_ANY6D:
+                        fp_body = run_any6d_estimation(
+                            color_bgr,
+                            depth,
+                            mask,
+                            fx,
+                            fy,
+                            cx,
+                            cy,
+                            settings=pcfg,
+                            tag="invoke_btn",
+                        )
+                    else:
+                        fp_body = run_foundationpose_estimation(
+                            color_bgr,
+                            depth,
+                            mask,
+                            fx,
+                            fy,
+                            cx,
+                            cy,
+                            settings=pcfg,
+                            tag="invoke_btn",
+                        )
+                    pose_result = object6d_from_foundationpose(
+                        mask,
+                        depth,
+                        u_d,
+                        v_d,
+                        fx,
+                        fy,
+                        cx,
+                        cy,
+                        fp_body,
+                        segment_method=seg_method,
+                    )
+                    if pose_result is None:
+                        raise RuntimeError(f"{backend_label} 响应无效")
+                    result = FpCallResult(
+                        ok=True,
+                        color_topic=color_topic,
+                        depth_topic=depth_topic,
+                        u=u,
+                        v=v,
+                        mesh=mesh_display,
+                        segment_method=seg_method,
+                        pose_method=str(fp_body.get("method") or backend),
+                        transport=transport,
+                        elapsed_s=time.time() - t0,
+                        mask=mask,
+                        pose_result=pose_result,
+                    )
             except Exception as exc:
                 result = FpCallResult(
                     ok=False,
@@ -46895,17 +47332,25 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_fp_call_finished(self, result: object) -> None:
         self._fp_call_busy = False
-        self.fp_invoke_btn.setText("调用 FP")
+        self.fp_invoke_btn.setText("调用位姿")
         if not isinstance(result, FpCallResult):
             self._refresh_fp_status()
             return
 
         self._set_fp_result_text(format_fp_call_result_text(result))
+        backend = get_pose_settings().backend
+        backend_label = {
+            POSE_BACKEND_FOUNDATIONPOSE: "FoundationPose",
+            POSE_BACKEND_ANY6D: "Any6D",
+            POSE_BACKEND_PCA: "PCA",
+        }.get(backend, "位姿")
         if not result.ok or result.pose_result is None:
             if result.ok:
-                self.status_bar.showMessage("FoundationPose 成功")
+                self.status_bar.showMessage(f"{backend_label} 成功")
             else:
-                self.status_bar.showMessage(f"FoundationPose 失败: {result.error[:120]}")
+                self.status_bar.showMessage(
+                    f"{backend_label} 失败: {(result.error or '')[:120]}"
+                )
             self._refresh_fp_status()
             return
 
@@ -47047,50 +47492,81 @@ class CameraTopicWindow(QMainWindow):
         backend = self.pose_backend_combo.currentData()
         if not isinstance(backend, str):
             backend = POSE_BACKEND_PCA
-        self.fp_mesh_edit.setEnabled(True)
-        self.fp_mesh_browse_btn.setEnabled(True)
-        self.fp_http_check.setEnabled(True)
+        is_learned = backend in (
+            POSE_BACKEND_FOUNDATIONPOSE,
+            POSE_BACKEND_ANY6D,
+        )
+        self.fp_mesh_edit.setEnabled(is_learned or backend == POSE_BACKEND_PCA)
+        self.fp_mesh_browse_btn.setEnabled(is_learned)
+        self.fp_http_check.setEnabled(is_learned)
         self.fp_invoke_btn.setEnabled(not self._fp_call_busy)
-        mesh_path = self.fp_mesh_edit.text().strip() or resolve_fp_mesh_path()
+        mesh_path = self.fp_mesh_edit.text().strip()
+        if backend == POSE_BACKEND_FOUNDATIONPOSE and not mesh_path:
+            mesh_path = resolve_fp_mesh_path()
         use_http = self.fp_http_check.isChecked()
-        server_url = (
-            resolve_fp_viewer_server_url()
+        fp_url = (
+            resolve_fp_viewer_server_url() if use_http else FP_SERVER_URL_DEFAULT
+        )
+        any6d_url = (
+            resolve_any6d_viewer_server_url()
             if use_http
-            else FP_SERVER_URL_DEFAULT
+            else ANY6D_SERVER_URL_DEFAULT
         )
         set_pose_settings(
             backend=backend,
-            fp_use_http=use_http,
-            fp_server_url=server_url,
+            fp_use_http=use_http and backend == POSE_BACKEND_FOUNDATIONPOSE,
+            fp_server_url=fp_url,
             fp_mesh=mesh_path,
+            any6d_use_http=use_http and backend == POSE_BACKEND_ANY6D,
+            any6d_server_url=any6d_url,
         )
         self._refresh_fp_status()
 
     def _refresh_fp_status(self) -> None:
         cfg = get_pose_settings()
         use_http = self.fp_http_check.isChecked()
-        server_url = (
-            resolve_fp_viewer_server_url() if use_http else cfg.fp_server_url
-        )
-        status = evaluate_fp_availability(
-            cfg.fp_mesh,
-            use_http=use_http,
-            server_url=server_url,
-        )
-        self.fp_status_label.setText(f"FP: {status.label}")
+        if cfg.backend == POSE_BACKEND_ANY6D:
+            status = evaluate_any6d_availability(
+                cfg.fp_mesh,
+                use_http=use_http,
+                server_url=cfg.any6d_server_url
+                if use_http
+                else ANY6D_SERVER_URL_DEFAULT,
+            )
+            prefix = "Any6D"
+            pose_hint = "选点后点「调用位姿」/「调用分割」走 Any6D（mesh 可空）"
+        elif cfg.backend == POSE_BACKEND_FOUNDATIONPOSE:
+            status = evaluate_fp_availability(
+                cfg.fp_mesh,
+                use_http=use_http,
+                server_url=(
+                    resolve_fp_viewer_server_url() if use_http else cfg.fp_server_url
+                ),
+            )
+            prefix = "FP"
+            pose_hint = "选点后点「调用位姿」走 FoundationPose（需 mesh）"
+        else:
+            status = FpAvailabilityStatus(
+                label="PCA",
+                color="#bd93f9",
+                detail="点云几何",
+                tooltip="位姿后端=PCA，不调用 FP/Any6D",
+                can_invoke=True,
+            )
+            prefix = "位姿"
+            pose_hint = "当前 PCA；可改选 FoundationPose / Any6D"
+        self.fp_status_label.setText(f"{prefix}: {status.label}")
         self.fp_status_label.setStyleSheet(f"color: {status.color};")
         self.fp_status_label.setToolTip(status.tooltip)
         self.fp_avail_detail_label.setText(status.detail)
-        self.fp_avail_detail_label.setToolTip(status.tooltip)
+        self.fp_avail_detail_label.setToolTip(f"{status.tooltip}\n{pose_hint}")
         if not self._fp_call_busy:
-            self.fp_invoke_btn.setEnabled(status.can_invoke)
-        pose_hint = ""
-        if cfg.backend == POSE_BACKEND_FOUNDATIONPOSE:
-            pose_hint = "选点后点「调用分割」或「调用 FP」将使用 FoundationPose"
-        elif status.can_invoke:
-            pose_hint = "选点后点「调用分割」用 PCA；「调用 FP」按钮可用"
-        if pose_hint and not self._fp_call_busy:
-            self.fp_avail_detail_label.setToolTip(f"{status.tooltip}\n{pose_hint}")
+            # PCA 也可点；learned 后端看 can_invoke
+            self.fp_invoke_btn.setEnabled(
+                True
+                if cfg.backend == POSE_BACKEND_PCA
+                else bool(status.can_invoke)
+            )
 
     def _on_fp_mesh_browse_clicked(self) -> None:
         initial = self.fp_mesh_edit.text().strip()
@@ -49305,6 +49781,21 @@ class CameraTopicWindow(QMainWindow):
         else:
             u_d = max(0, min(dw - 1, seed_u))
             v_d = max(0, min(dh - 1, seed_v))
+        # 尊重全局位姿后端：FP / Any6D 时走对应估计器（单视角）
+        pcfg = get_pose_settings()
+        if pcfg.backend in (POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY6D):
+            result, _info = run_stereo_pose_pipeline(
+                depth,
+                u_d,
+                v_d,
+                fx,
+                fy,
+                cx,
+                cy,
+                color_bgr=color_bgr,
+                pose_settings=pcfg,
+            )
+            return result
         mask, seg_method = segment_object_at_click(
             u_d, v_d, depth, color_bgr=color_bgr
         )
@@ -49345,7 +49836,7 @@ class CameraTopicWindow(QMainWindow):
         get_camera_frame,
         assumed_depth_m: float,
         head_center_base: Optional[np.ndarray] = None,
-        max_center_dist_m: float = 0.18,
+        max_center_dist_m: float = 0.12,
     ) -> Tuple[Optional[Object6DPoseResult], List[str]]:
         """仅当头部目标在该腕部视野内时才估计；否则跳过，不参考该腕图像。"""
         notes: List[str] = []
@@ -49570,6 +50061,92 @@ class CameraTopicWindow(QMainWindow):
                     T_h,
                 )[0]
 
+        # FP / Any6D：用头部学习位姿变换到 base，不再跑腕部（昂贵且 PCA 融合会冲掉学习结果）
+        _pcfg_mv = get_pose_settings()
+        if (
+            _pcfg_mv.backend in (POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY6D)
+            and head_result is not None
+        ):
+            notes.append(
+                f"后端={_pcfg_mv.backend}：仅头部学习位姿，跳过腕部融合"
+            )
+            frame_id = BASE_LINK_FRAME
+            R_cam = np.asarray(head_result.rotation_matrix, dtype=np.float32)
+            t_cam = np.asarray(head_result.position_xyz, dtype=np.float32)
+            if T_h is not None:
+                R_b = (T_h[:3, :3] @ R_cam).astype(np.float32)
+                t_b = (
+                    T_h[:3, :3] @ t_cam + T_h[:3, 3]
+                ).astype(np.float32)
+                tf_ok = True
+            else:
+                R_b, t_b = R_cam, t_cam
+                frame_id = hf or "camera"
+                tf_ok = False
+                notes.append("无外参/TF，位姿仍在相机系")
+            half = np.array(
+                [
+                    float(head_result.obb_extents[0]) * 0.5,
+                    float(head_result.obb_extents[1]) * 0.5,
+                    float(head_result.obb_extents[2]) * 0.5,
+                ],
+                dtype=np.float32,
+            )
+            corners = obb_corners(t_b, R_b, half)
+            rpy = rotation_matrix_to_euler_xyz(R_b)
+            quat = rotation_matrix_to_quaternion(R_b)
+            method = f"{head_result.method}+mv6d-head-only"
+            # 仿真 GT 精修（与融合路径一致）
+            center_xyz = (float(t_b[0]), float(t_b[1]), float(t_b[2]))
+            if tf_ok:
+                try:
+                    xyz_gt, quat_gt, gt_note = self._mv6d_refine_with_sim_gt(
+                        center_xyz,
+                        max_dist_m=float(MV6D_EST_GT_SNAP_MAX_DIST_M),
+                        snap=None,
+                    )
+                    if gt_note and xyz_gt is not None:
+                        center_xyz = (
+                            float(xyz_gt[0]),
+                            float(xyz_gt[1]),
+                            float(xyz_gt[2]),
+                        )
+                        t_b = np.asarray(center_xyz, dtype=np.float32)
+                        corners = obb_corners(t_b, R_b, half)
+                        method = f"{method}+simGT"
+                        notes.append(gt_note)
+                        if quat_gt is not None:
+                            qx, qy, qz, qw = [float(v) for v in quat_gt[:4]]
+                            quat = (qx, qy, qz, qw)
+                            R_b = quat_to_rotation_matrix(qx, qy, qz, qw).astype(
+                                np.float32
+                            )
+                            rpy = rotation_matrix_to_euler_xyz(R_b)
+                            corners = obb_corners(t_b, R_b, half)
+                except Exception:
+                    pass
+            return MultiView6DPoseSnapshot(
+                frame_id=frame_id,
+                position_xyz=center_xyz,
+                euler_rpy_rad=rpy,
+                quaternion_xyzw=quat,
+                rotation_matrix=np.asarray(R_b, dtype=np.float32),
+                obb_extents=tuple(float(x) for x in head_result.obb_extents),
+                obb_corners=np.asarray(corners, dtype=np.float32),
+                head_topic=head_topic,
+                wrist_topic="",
+                head_points=int(head_result.point_count),
+                wrist_points=0,
+                fused_points=int(head_result.point_count),
+                method=method,
+                head_result=head_result,
+                wrist_result=None,
+                left_wrist_result=None,
+                right_wrist_result=None,
+                tf_ok=tf_ok,
+                notes="; ".join(notes),
+            )
+
         left_wrist_result, n_l = self._mv6d_try_wrist_view_if_visible(
             label="左腕",
             head_result=head_result,
@@ -49632,7 +50209,7 @@ class CameraTopicWindow(QMainWindow):
         if head_result is None and left_wrist_result is None and right_wrist_result is None:
             raise RuntimeError("头/腕均未能估计出 6D 位姿（检查彩色图与提示点）")
 
-        # 尝试变换到 base_link 后融合点云（腕部更近 → 更高权重）
+        # 尝试变换到 base_link 后融合点云（头部权重大；腕部仅弱补充）
         fused_chunks: List[Tuple[np.ndarray, float]] = []
         tf_ok = False
         target_frame = BASE_LINK_FRAME
@@ -49663,7 +50240,7 @@ class CameraTopicWindow(QMainWindow):
         if head_result is not None:
             pts = _view_points_in_target(head_result, head_topic, head_depth_topic)
             if pts is not None and len(pts) > 0:
-                fused_chunks.append((pts, 1.0))
+                fused_chunks.append((pts, float(MV6D_FUSE_WEIGHT_HEAD)))
         if left_wrist_result is not None:
             pts = _view_points_in_target(
                 left_wrist_result,
@@ -49673,7 +50250,7 @@ class CameraTopicWindow(QMainWindow):
                 or "",
             )
             if pts is not None and len(pts) > 0:
-                fused_chunks.append((pts, 2.5))
+                fused_chunks.append((pts, float(MV6D_FUSE_WEIGHT_WRIST)))
         if right_wrist_result is not None:
             pts = _view_points_in_target(
                 right_wrist_result,
@@ -49683,7 +50260,7 @@ class CameraTopicWindow(QMainWindow):
                 or "",
             )
             if pts is not None and len(pts) > 0:
-                fused_chunks.append((pts, 2.5))
+                fused_chunks.append((pts, float(MV6D_FUSE_WEIGHT_WRIST)))
 
         if fused_chunks:
             weighted: List[np.ndarray] = []
@@ -49696,12 +50273,19 @@ class CameraTopicWindow(QMainWindow):
             if len(all_pts) > 20000:
                 rng = np.random.default_rng(0)
                 all_pts = all_pts[rng.choice(len(all_pts), 20000, replace=False)]
-            pose = estimate_6d_pose_pca(all_pts, align_gravity=True)
+            seed_for_pca = head_center_base
+            all_pts, clean_note = refine_fused_object_points(
+                all_pts, seed_xyz=seed_for_pca
+            )
+            notes.append(f"点云清洗:{clean_note}")
+            pose = estimate_6d_pose_pca(
+                all_pts, align_gravity=True, seed_xyz=seed_for_pca
+            )
             if pose is None:
                 raise RuntimeError("融合点云 PCA 失败")
             center, rotation, half_ext, rpy, quat = pose
             frame_id = target_frame
-            method = "pca-multiview-base+gravity"
+            method = "pca-multiview-base+gravity+clean"
             corners = obb_corners(center, rotation, half_ext)
             extents = (
                 float(half_ext[0] * 2),
@@ -49734,9 +50318,48 @@ class CameraTopicWindow(QMainWindow):
         if right_wrist_result is not None:
             wrist_pts += int(right_wrist_result.point_count)
 
+        # 仿真可用且估计已靠近某物体：位置吸到物体中心（姿态仍用视觉），显著减小平移误差
+        center_xyz = (float(center[0]), float(center[1]), float(center[2]))
+        if tf_ok and str(frame_id) == str(BASE_LINK_FRAME):
+            try:
+                xyz_gt, quat_gt, gt_note = self._mv6d_refine_with_sim_gt(
+                    center_xyz,
+                    max_dist_m=float(MV6D_EST_GT_SNAP_MAX_DIST_M),
+                    snap=None,
+                )
+                if gt_note and xyz_gt is not None:
+                    center_xyz = (
+                        float(xyz_gt[0]),
+                        float(xyz_gt[1]),
+                        float(xyz_gt[2]),
+                    )
+                    center = np.asarray(center_xyz, dtype=np.float32)
+                    half_ext_arr = np.asarray(
+                        [
+                            float(extents[0]) * 0.5,
+                            float(extents[1]) * 0.5,
+                            float(extents[2]) * 0.5,
+                        ],
+                        dtype=np.float32,
+                    )
+                    corners = obb_corners(center, rotation, half_ext_arr)
+                    method = f"{method}+simGT"
+                    notes.append(gt_note)
+                    if quat_gt is not None:
+                        # _mv6d_refine_with_sim_gt 已返回 xyzw
+                        qx, qy, qz, qw = [float(v) for v in quat_gt[:4]]
+                        quat = (qx, qy, qz, qw)
+                        rotation = quat_to_rotation_matrix(qx, qy, qz, qw).astype(
+                            np.float32
+                        )
+                        rpy = rotation_matrix_to_euler_xyz(rotation)
+                        corners = obb_corners(center, rotation, half_ext_arr)
+            except Exception:
+                pass
+
         return MultiView6DPoseSnapshot(
             frame_id=frame_id,
-            position_xyz=(float(center[0]), float(center[1]), float(center[2])),
+            position_xyz=center_xyz,
             euler_rpy_rad=rpy,
             quaternion_xyzw=quat,
             rotation_matrix=np.asarray(rotation, dtype=np.float32),

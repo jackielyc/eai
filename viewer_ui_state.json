@@ -97,7 +97,7 @@
     },
     "lingbot_depth_topic_combo": {
       "kind": "combo",
-      "index": 2,
+      "index": 1,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -193,7 +193,7 @@
     },
     "lingbot_video_topic_combo": {
       "kind": "combo",
-      "index": 2,
+      "index": 1,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -263,7 +263,7 @@
     },
     "lingbot_world_topic_combo": {
       "kind": "combo",
-      "index": 2,
+      "index": 1,
       "text": "/rynnvalue/live_hud",
       "data": "/rynnvalue/live_hud"
     },
@@ -1087,7 +1087,7 @@
     },
     "reward_topic_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 2,
       "text": "/camera/head_color",
       "data": "/camera/head_color"
     },
@@ -1653,7 +1653,7 @@
     },
     "tab:EmbodiedEvo.run_dir_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/EmbodiedEvo/runs/202610161140_arrange_largest_number"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/EmbodiedEvo/runs/202610161144_arrange_largest_number"
     },
     "tab:EmbodiedEvo.history_combo": {
       "kind": "combo",
@@ -1717,12 +1717,12 @@
   "topic_checks": {
     "/libero/preview": true,
     "/rynnvalue/live_hud": true,
-    "/camera/left_wrist_color": true,
-    "/camera/head_color": true,
-    "/camera/right_wrist_color": true,
-    "/camera/left_wrist_depth": true,
-    "/camera/head_depth": true,
-    "/camera/right_wrist_depth": true
+    "/camera/left_wrist_color": false,
+    "/camera/head_color": false,
+    "/camera/right_wrist_color": false,
+    "/camera/left_wrist_depth": false,
+    "/camera/head_depth": false,
+    "/camera/right_wrist_depth": false
   },
   "topic_user_unchecked": [],
   "workspace_collapsed": true
