@@ -44,6 +44,7 @@ MODEL_CONDA_ENVS: Dict[str, str] = {
     # Sim / eval clients
     "robodojo": "RoboDojo",
     "embodiedevo": "embodiedevo",
+    "aspire": "aspire",
     "rlinf": "RLinf",
     "libero": "libero",
     "molmospaces": "molmospaces",
@@ -67,6 +68,7 @@ MODEL_CONDA_ENV_OVERRIDES: Dict[str, str] = {
     "psi_policy": "PSI_POLICY_CONDA_ENV",
     "rynnvalue": "RYNNVALUE_CONDA_ENV",
     "embodiedevo": "EMBODIEDEVO_CONDA_ENV",
+    "aspire": "ASPIRE_CONDA_ENV",
 }
 
 

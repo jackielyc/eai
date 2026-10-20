@@ -74,14 +74,16 @@ ensure_clone rise RLinf
 ensure_py humanego 3.11
 ensure_py sam3 3.10
 ensure_py foundationpose 3.10
+ensure_py aspire 3.11
 
 echo
 echo "=== status ==="
 "${MINICONDA3}/bin/python" "${EAI_DIR}/tools/model_conda_envs.py" || true
 
 echo
-echo "Note: sam3 / foundationpose / humanego are minimal python envs."
+echo "Note: sam3 / foundationpose / humanego / aspire are minimal python envs."
 echo "  Install deps when needed:"
 echo "    bash ${EAI_DIR}/run_sam3.sh --install"
 echo "    bash ${EAI_DIR}/run_foundationpose.sh --install"
 echo "    (humanego) conda activate humanego && bash setup.sh in its repo"
+echo "    (aspire) viewer ASPIRE 页点「安装 host 依赖」，或 python -c 'from aspire.catalog import ensure_host_env; ensure_host_env()'"

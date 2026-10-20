@@ -9,6 +9,7 @@
     "EmbodiedEvo",
     "真机评测",
     "本地摄像头",
+    "RAX",
     "数据集",
     "RynnValue",
     "RoboICL",
@@ -30,6 +31,9 @@
     "ICL",
     "HumanEgo",
     "PhysicalRSI",
-    "编程冲SOTA"
-  ]
+    "编程冲SOTA",
+    "其他",
+    "ASPIRE"
+  ],
+  "misc_children": []
 }

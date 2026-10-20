@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D / R1 / Franka） / 本地摄像头（本机 MJPEG 推流 + SSH 反向隧道 + 预览） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / EmbodiedEvo / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D：采集标定 / baseline / 模型·HIL / FAQ / RRD 回放；R1 / Franka） / 本地摄像头（本机 MJPEG 推流 + SSH 反向隧道 + 预览） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / EmbodiedEvo / RAX / ASPIRE / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -158,10 +158,12 @@ from PyQt5.QtCore import (
     QByteArray,
     QBuffer,
     QIODevice,
+    QMimeData,
 )
 from PyQt5.QtGui import (
     QCloseEvent,
     QDesktopServices,
+    QDrag,
     QFont,
     QIcon,
     QImage,
@@ -190,6 +192,7 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QRadioButton,
@@ -3078,6 +3081,11 @@ LINGBOT_WORLD_PROMPT_DEFAULT = (
     "surrounded by distant snow-capped mountains under a bright blue sky "
     "with drifting white clouds."
 )
+# 控制区「其他」折叠页：其余顶栏 tab 可拖入作为子标签
+CONTROL_MISC_TAB_TITLE = "其他"
+_EAI_CONTROL_TAB_MIME = "application/x-eai-control-tab"
+_EAI_CONTROL_TAB_SRC_MIME = "application/x-eai-control-tab-src"
+
 # 控制区 tab 正式标题（与 addTab 一致）
 CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "大脑",
@@ -3105,12 +3113,15 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "Astra",
     "PhysicalRSI",
     "EmbodiedEvo",
+    "RAX",
+    "ASPIRE",
     "编程冲SOTA",
     "主机资源",
     "HumanEgo",
     "数据集",
     "sub task",
     "sub image",
+    CONTROL_MISC_TAB_TITLE,
 )
 # 仿真评测页后端选择条默认顺序：(key, 显示名, 隐藏 radio 属性名)
 # key 用于持久化；radio 仍保留以兼容 viewer_ui_state / 既有 isChecked 逻辑
@@ -3286,6 +3297,13 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "embodied-evo": "EmbodiedEvo",
     "eevo": "EmbodiedEvo",
     "EmbodiedEvo": "EmbodiedEvo",
+    "rax": "RAX",
+    "RAX": "RAX",
+    "robot-agent-exploration": "RAX",
+    "aspire": "ASPIRE",
+    "ASPIRE": "ASPIRE",
+    "cap-harness": "ASPIRE",
+    "cap_harness": "ASPIRE",
     "prog_sota": "编程冲SOTA",
     "progsota": "编程冲SOTA",
     "sota": "编程冲SOTA",
@@ -3313,6 +3331,10 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "datasets": "数据集",
     "data": "数据集",
     "数据集": "数据集",
+    "misc": CONTROL_MISC_TAB_TITLE,
+    "other": CONTROL_MISC_TAB_TITLE,
+    "others": CONTROL_MISC_TAB_TITLE,
+    "其他": CONTROL_MISC_TAB_TITLE,
 }
 # 悬停 tip 优先展示的短别名（未列出则从 CONTROL_TAB_ALIASES 自动挑）
 CONTROL_TAB_PREFERRED_ALIAS: Dict[str, str] = {
@@ -3341,12 +3363,15 @@ CONTROL_TAB_PREFERRED_ALIAS: Dict[str, str] = {
     "Astra": "astra",
     "PhysicalRSI": "rsi",
     "EmbodiedEvo": "eevo",
+    "RAX": "rax",
+    "ASPIRE": "aspire",
     "编程冲SOTA": "sota",
     "主机资源": "system",
     "HumanEgo": "humanego",
     "数据集": "dataset",
     "sub task": "test",
     "sub image": "bagel",
+    CONTROL_MISC_TAB_TITLE: "misc",
 }
 
 
@@ -3401,6 +3426,15 @@ def format_control_tab_launch_tooltip(title: str) -> str:
     title = (title or "").strip()
     if not title or title == "…":
         return "正在构建控制区…"
+    if title == CONTROL_MISC_TAB_TITLE:
+        return (
+            f"「{CONTROL_MISC_TAB_TITLE}」\n"
+            "\n"
+            "将任意顶栏标签拖到本标签上，即可收入为子标签。\n"
+            "子标签可在页内拖动排序，也可拖回顶栏。\n"
+            "\n"
+            "布局写入 eai/control_tabs_order.json（order + misc_children）"
+        )
     aliases = control_tab_cli_aliases(title)
     primary = aliases[0] if aliases else title
     tok = _shell_tab_token(primary)
@@ -3416,8 +3450,173 @@ def format_control_tab_launch_tooltip(title: str) -> str:
         f"别名: {alias_line}\n"
         f"环境变量: EAI_ONLY_TAB={primary}\n"
         "\n"
-        "可拖动标签调整顺序（写入 eai/control_tabs_order.json）"
+        "可拖动标签调整顺序；拖到「其他」可收入为子标签\n"
+        "（写入 eai/control_tabs_order.json）"
     )
+
+
+class NestableControlTabBar(QTabBar):
+    """控制区顶栏 /「其他」子栏：拖拽排序，并可跨栏拖入、拖出「其他」。"""
+
+    tabsReordered = pyqtSignal()
+    tabNestToMisc = pyqtSignal(str)
+    tabPopOut = pyqtSignal(str, int)  # title, insert_at（-1=追加到「其他」旁）
+
+    def __init__(self, role: str, parent=None) -> None:
+        super().__init__(parent)
+        self._role = "misc" if role == "misc" else "outer"
+        self.setMovable(False)
+        self.setAcceptDrops(True)
+        self.setElideMode(Qt.ElideRight)
+        self._drag_start_pos: Optional[QPoint] = None
+        self._drag_index = -1
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context_menu)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if event.button() == Qt.LeftButton:
+            self._drag_start_pos = QPoint(event.pos())
+            self._drag_index = self.tabAt(event.pos())
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        if not (event.buttons() & Qt.LeftButton):
+            super().mouseMoveEvent(event)
+            return
+        if self._drag_start_pos is None or self._drag_index < 0:
+            super().mouseMoveEvent(event)
+            return
+        if (
+            (event.pos() - self._drag_start_pos).manhattanLength()
+            < QApplication.startDragDistance()
+        ):
+            super().mouseMoveEvent(event)
+            return
+        title = str(self.tabText(self._drag_index) or "").strip()
+        if not title or title == "…":
+            super().mouseMoveEvent(event)
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setData(_EAI_CONTROL_TAB_MIME, title.encode("utf-8"))
+        mime.setData(_EAI_CONTROL_TAB_SRC_MIME, self._role.encode("utf-8"))
+        mime.setText(title)
+        drag.setMimeData(mime)
+        drag.exec_(Qt.MoveAction)
+        self._drag_start_pos = None
+        self._drag_index = -1
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # type: ignore[override]
+        self._drag_start_pos = None
+        self._drag_index = -1
+        super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasFormat(_EAI_CONTROL_TAB_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasFormat(_EAI_CONTROL_TAB_MIME):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        mime = event.mimeData()
+        if not mime.hasFormat(_EAI_CONTROL_TAB_MIME):
+            event.ignore()
+            return
+        title = bytes(mime.data(_EAI_CONTROL_TAB_MIME)).decode("utf-8", errors="replace").strip()
+        src = bytes(mime.data(_EAI_CONTROL_TAB_SRC_MIME)).decode("utf-8", errors="replace").strip()
+        if not title:
+            event.ignore()
+            return
+        onto = self.tabAt(event.pos())
+        onto_title = str(self.tabText(onto) or "").strip() if onto >= 0 else ""
+
+        if self._role == "outer":
+            if (
+                onto_title == CONTROL_MISC_TAB_TITLE
+                and title != CONTROL_MISC_TAB_TITLE
+                and onto >= 0
+            ):
+                # 落在「其他」中部 → 收入；落在边缘 → 按排序插入
+                rect = self.tabRect(onto)
+                x = event.pos().x()
+                margin = max(6, rect.width() // 4)
+                if rect.left() + margin <= x <= rect.right() - margin:
+                    self.tabNestToMisc.emit(title)
+                    event.acceptProposedAction()
+                    return
+            insert_at = onto if onto >= 0 else self.count()
+            if src == "misc":
+                self.tabPopOut.emit(title, insert_at)
+                event.acceptProposedAction()
+                return
+            if src == "outer":
+                from_idx = self._index_of_title(title)
+                if from_idx < 0:
+                    event.ignore()
+                    return
+                to_idx = insert_at
+                if to_idx > from_idx:
+                    to_idx -= 1
+                if to_idx != from_idx and 0 <= to_idx < self.count():
+                    self.moveTab(from_idx, to_idx)
+                    self.tabsReordered.emit()
+                event.acceptProposedAction()
+                return
+
+        # misc 子栏
+        if title == CONTROL_MISC_TAB_TITLE:
+            event.ignore()
+            return
+        if src == "outer":
+            self.tabNestToMisc.emit(title)
+            event.acceptProposedAction()
+            return
+        if src == "misc":
+            from_idx = self._index_of_title(title)
+            if from_idx < 0:
+                event.ignore()
+                return
+            to_idx = onto if onto >= 0 else self.count()
+            if to_idx > from_idx:
+                to_idx -= 1
+            if to_idx != from_idx and 0 <= to_idx < self.count():
+                self.moveTab(from_idx, to_idx)
+                self.tabsReordered.emit()
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def _index_of_title(self, title: str) -> int:
+        for i in range(self.count()):
+            if self.tabText(i) == title:
+                return i
+        return -1
+
+    def _on_context_menu(self, pos: QPoint) -> None:
+        idx = self.tabAt(pos)
+        if idx < 0:
+            return
+        title = str(self.tabText(idx) or "").strip()
+        if not title or title == "…":
+            return
+        menu = QMenu(self)
+        if self._role == "outer" and title != CONTROL_MISC_TAB_TITLE:
+            act = menu.addAction(f"移入「{CONTROL_MISC_TAB_TITLE}」")
+            chosen = menu.exec_(self.mapToGlobal(pos))
+            if chosen is act:
+                self.tabNestToMisc.emit(title)
+            return
+        if self._role == "misc":
+            act = menu.addAction("移回顶栏")
+            chosen = menu.exec_(self.mapToGlobal(pos))
+            if chosen is act:
+                self.tabPopOut.emit(title, -1)
 
 
 CAD_MESHES_DIR = os.path.join(EAI_DIR, "meshes")
@@ -3968,6 +4167,34 @@ REAL_ROBOT_SELECTOR_SPECS: Tuple[Tuple[str, str, str], ...] = (
 )
 REAL_ROBOT_ORDER_KEYS: Tuple[str, ...] = tuple(
     k for k, _label, _attr in REAL_ROBOT_SELECTOR_SPECS
+)
+# A2D 真机采集/标定/HIL 运维（真机评测 → A2D）
+A2D_DOCKER_CONTAINER_DEFAULT = os.environ.get(
+    "A2D_DOCKER_CONTAINER", "a2d-tele-release-2-1-0rc3-latest"
+).strip() or "a2d-tele-release-2-1-0rc3-latest"
+A2D_PSI_POLICY_ROOT_DEFAULT = os.environ.get(
+    "A2D_PSI_POLICY_ROOT",
+    "/home/psibot/ceyao_dev/psi-policy-v2",
+).strip() or "/home/psibot/ceyao_dev/psi-policy-v2"
+A2D_POLICY_CLIENT_DIR_DEFAULT = os.path.join(
+    A2D_PSI_POLICY_ROOT_DEFAULT, "model_inference_client_cena"
+)
+A2D_CKPT_PATH_DEFAULT = os.environ.get(
+    "A2D_CKPT_PATH",
+    "/home/psibot/ceyao_dev/psi-policy-v2/outputs/2026-09-17/"
+    "18-45-07-pbp-generalization-abs-sh-dc12-hil-teleop-ac48-a2d-act-rgb-3view-proprio/"
+    "checkpoints/last/last-step=348000-val_mse=0.008769.ckpt",
+).strip()
+A2D_RRD_PATH_DEFAULT = os.environ.get(
+    "A2D_RRD_PATH",
+    "/root/project/rerun_data/episode_00001.rrd",
+).strip() or "/root/project/rerun_data/episode_00001.rrd"
+A2D_OPS_DOC_URL = (
+    "https://test-d4btraxpj8kh.feishu.cn/wiki/QuFswA02fiHTrfkctIdcmpc7nPh"
+)
+A2D_HMI_CALIB_TIP = (
+    "浏览器打开 HMI → 运维管理 → 本体参数设置 → 头部俯仰角度改为 5° → "
+    "点击「真机测试」。标定 Pixel_err 要求 < 3px（文字为绿色）。"
 )
 ROBOT_FK_JOINTS_TOPIC = "/fk/joint_states"
 ROBOT_LEFT_HAND_TOPIC = "/ry_hand/left/joint_states"
@@ -10211,6 +10438,25 @@ def save_chat_user_settings(data: Dict[str, object]) -> str:
     return CHAT_USER_SETTINGS_PATH
 
 
+def _sanitize_control_tab_title_list(
+    raw: Sequence[object], *, allow_misc: bool = True
+) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    known = set(CONTROL_TAB_TITLES)
+    for item in raw:
+        title = str(item or "").strip()
+        if not title or title in seen:
+            continue
+        if title not in known:
+            continue
+        if not allow_misc and title == CONTROL_MISC_TAB_TITLE:
+            continue
+        seen.add(title)
+        out.append(title)
+    return out
+
+
 def load_control_tabs_order() -> List[str]:
     """加载控制区 tab 自定义顺序；无效则返回空列表。"""
     try:
@@ -10222,35 +10468,58 @@ def load_control_tabs_order() -> List[str]:
             raw = data.get("order") or []
         else:
             raw = []
-        out: List[str] = []
-        seen = set()
-        for item in raw:
-            title = str(item or "").strip()
-            if not title or title in seen:
-                continue
-            if title not in CONTROL_TAB_TITLES:
-                continue
-            seen.add(title)
-            out.append(title)
-        return out
+        return _sanitize_control_tab_title_list(raw if isinstance(raw, list) else [])
     except FileNotFoundError:
         return []
     except Exception:
         return []
 
 
-def save_control_tabs_order(titles: Sequence[str]) -> str:
-    cleaned: List[str] = []
-    seen = set()
-    for item in titles:
-        title = str(item or "").strip()
-        if not title or title in seen:
-            continue
-        seen.add(title)
-        cleaned.append(title)
+def load_control_misc_children() -> List[str]:
+    """加载收入「其他」的子标签顺序。"""
+    try:
+        with open(CONTROL_TABS_ORDER_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return []
+        raw = data.get("misc_children") or []
+        return _sanitize_control_tab_title_list(
+            raw if isinstance(raw, list) else [], allow_misc=False
+        )
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+def save_control_tabs_order(
+    titles: Sequence[str],
+    misc_children: Optional[Sequence[str]] = None,
+) -> str:
+    cleaned = _sanitize_control_tab_title_list(titles)
+    if misc_children is None:
+        misc_cleaned = load_control_misc_children()
+    else:
+        misc_cleaned = _sanitize_control_tab_title_list(
+            misc_children, allow_misc=False
+        )
+    # 子标签不应再出现在顶栏顺序里（「其他」本身除外）
+    misc_set = set(misc_cleaned)
+    cleaned = [
+        t for t in cleaned if t not in misc_set or t == CONTROL_MISC_TAB_TITLE
+    ]
+    if CONTROL_MISC_TAB_TITLE not in cleaned and (
+        CONTROL_MISC_TAB_TITLE in CONTROL_TAB_TITLES
+    ):
+        cleaned.append(CONTROL_MISC_TAB_TITLE)
     os.makedirs(os.path.dirname(CONTROL_TABS_ORDER_PATH), exist_ok=True)
     with open(CONTROL_TABS_ORDER_PATH, "w", encoding="utf-8") as f:
-        json.dump({"order": cleaned}, f, ensure_ascii=False, indent=2)
+        json.dump(
+            {"order": cleaned, "misc_children": misc_cleaned},
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
     return CONTROL_TABS_ORDER_PATH
 
 
@@ -17222,6 +17491,75 @@ def build_ros_shell_prefix() -> str:
         parts.append(f"export FASTRTPS_DEFAULT_PROFILES_FILE={dds}")
     parts.append("export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}")
     return " && ".join(parts)
+
+
+def a2d_docker_container_name(override: str = "") -> str:
+    name = (override or "").strip()
+    if name:
+        return name
+    env = os.environ.get("A2D_DOCKER_CONTAINER", "").strip()
+    return env or A2D_DOCKER_CONTAINER_DEFAULT
+
+
+def a2d_docker_cli_available() -> bool:
+    return shutil.which("docker") is not None
+
+
+def launch_a2d_ros_detached(
+    ros_cmd: str,
+    *,
+    cwd: Optional[str] = None,
+    extra_env: str = "",
+) -> Tuple[bool, str]:
+    """在当前环境（通常已是 a2d 容器）detached 拉起一条 ros2 命令。"""
+    prefix = build_ros_shell_prefix()
+    env_prefix = f"{extra_env} && " if extra_env.strip() else ""
+    full = f"{prefix} && {env_prefix}{ros_cmd}"
+    workdir = cwd or resolve_a2d_workspace_dir()
+    ok = QProcess.startDetached("bash", ["-lc", full], workdir)
+    if ok:
+        return True, f"已启动: {ros_cmd}"
+    return False, f"启动失败: {ros_cmd}"
+
+
+def run_a2d_docker_action(
+    action: str,
+    container: str = "",
+    *,
+    capture: bool = False,
+) -> Tuple[bool, str]:
+    """对 A2D 容器执行 docker ps/start/stop/restart；返回 (ok, 消息/输出)。"""
+    name = a2d_docker_container_name(container)
+    if not a2d_docker_cli_available():
+        return (
+            False,
+            "当前环境无 docker CLI（viewer 多半已在容器内）。"
+            f"请到宿主机终端执行: docker {action} {name}",
+        )
+    if action == "ps":
+        cmd = ["docker", "ps", "--format", "table {{.Names}}\t{{.Status}}\t{{.Image}}"]
+    elif action in ("start", "stop", "restart"):
+        cmd = ["docker", action, name]
+    else:
+        return False, f"未知 docker 动作: {action}"
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"docker {action} 异常: {exc}"
+    out = (result.stdout or "").strip()
+    err = (result.stderr or "").strip()
+    text = out or err or f"docker {action} exit={result.returncode}"
+    if result.returncode != 0:
+        return False, text
+    if capture or action == "ps":
+        return True, text
+    return True, f"docker {action} {name} 完成"
 
 
 def _pgrep_pattern(pattern: str) -> bool:
@@ -24224,9 +24562,10 @@ class CameraTopicWindow(QMainWindow):
         control_tabs.setObjectName("controlTabs")
         control_tabs.setDocumentMode(True)
         control_tabs.setTabPosition(QTabWidget.North)
-        control_tabs.setMovable(True)
+        control_tabs.setMovable(False)
         control_tabs.setUsesScrollButtons(True)
-        control_tabs.tabBar().setElideMode(Qt.ElideRight)
+        self._control_tab_bar = NestableControlTabBar("outer", control_tabs)
+        control_tabs.setTabBar(self._control_tab_bar)
         # 各 tab 悬停 tip 见 _refresh_control_tab_tooltips（含 --tab 启动命令）
 
         self._ui_prefix = prefix
@@ -28077,8 +28416,8 @@ class CameraTopicWindow(QMainWindow):
 
         # 稍后 addTab：仿真评测 / 真机评测 放在末尾
 
-        real_tab = QWidget()
-        real_outer = QVBoxLayout(real_tab)
+        real_inner = QWidget()
+        real_outer = QVBoxLayout(real_inner)
         real_outer.setContentsMargins(8, 6, 8, 6)
         real_outer.setSpacing(6)
 
@@ -28214,6 +28553,10 @@ class CameraTopicWindow(QMainWindow):
         self.real_eval_ready_label.setWordWrap(True)
         self.real_eval_ready_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         real_outer.addWidget(self.real_eval_ready_label)
+
+        # A2D：采集标定 / 模型·HIL / 常见问题 / 视频回放（仅 A2D 后端显示）
+        self.a2d_ops_panel = self._build_a2d_ops_panel()
+        real_outer.addWidget(self.a2d_ops_panel)
 
         real_cam_row = QHBoxLayout()
         real_cam_row.setSpacing(6)
@@ -31086,7 +31429,7 @@ class CameraTopicWindow(QMainWindow):
         self._on_roboicl_mode_changed()
 
         control_tabs.addTab(sim_tab, "仿真评测")
-        control_tabs.addTab(real_tab, "真机评测")
+        control_tabs.addTab(_wrap_in_vscroll(real_inner), "真机评测")
         control_tabs.addTab(local_cam_tab, "本地摄像头")
         control_tabs.addTab(reward_tab, "Reward评测")
         control_tabs.addTab(reward_wf_tab, "Reward训练")
@@ -31184,6 +31527,16 @@ class CameraTopicWindow(QMainWindow):
 
         self.embodied_evo_tab = EmbodiedEvoTab()
         control_tabs.addTab(self.embodied_evo_tab, "EmbodiedEvo")
+
+        from rax_panel.tab import RaxTab
+
+        self.rax_tab = RaxTab()
+        control_tabs.addTab(self.rax_tab, "RAX")
+
+        from aspire.tab import AspireTab
+
+        self.aspire_tab = AspireTab()
+        control_tabs.addTab(self.aspire_tab, "ASPIRE")
 
         from prog_sota.tab import ProgSotaTab
 
@@ -31561,6 +31914,29 @@ class CameraTopicWindow(QMainWindow):
         control_tabs.addTab(test_tab, "sub task")
         control_tabs.addTab(bagel_tab, "sub image")
 
+        misc_page = QWidget()
+        misc_layout = QVBoxLayout(misc_page)
+        misc_layout.setContentsMargins(6, 6, 6, 6)
+        misc_layout.setSpacing(6)
+        self._misc_empty_hint = QLabel(
+            f"将任意顶栏标签拖到「{CONTROL_MISC_TAB_TITLE}」上（或右键 → 移入），"
+            "即可收入为本页子标签；子标签可拖回顶栏。"
+        )
+        self._misc_empty_hint.setWordWrap(True)
+        self._misc_empty_hint.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        misc_layout.addWidget(self._misc_empty_hint)
+        self.misc_inner_tabs = QTabWidget()
+        self.misc_inner_tabs.setObjectName("miscInnerTabs")
+        self.misc_inner_tabs.setDocumentMode(True)
+        self.misc_inner_tabs.setMovable(False)
+        self.misc_inner_tabs.setUsesScrollButtons(True)
+        self._misc_tab_bar = NestableControlTabBar("misc", self.misc_inner_tabs)
+        self.misc_inner_tabs.setTabBar(self._misc_tab_bar)
+        misc_layout.addWidget(self.misc_inner_tabs, 1)
+        control_tabs.addTab(misc_page, CONTROL_MISC_TAB_TITLE)
+        self._misc_page = misc_page
+        self._update_misc_empty_hint()
+
         self._refresh_real_eval_status()
         self._update_ctx_ui()
 
@@ -31730,6 +32106,7 @@ class CameraTopicWindow(QMainWindow):
         self.status_bar.showMessage("就绪")
         self._apply_only_tabs(self._only_tabs)
         self._restore_control_tabs_order()
+        self._restore_control_misc_children()
         self._refresh_control_tab_tooltips()
         self._restore_sim_backends_order()
         self._restore_real_robot_backends_order()
@@ -31745,7 +32122,16 @@ class CameraTopicWindow(QMainWindow):
         self._sim_backend_tabs_order_guard = False
         self._real_robot_tabs_order_guard = False
         self._arm_panel_tabs_order_guard = False
-        self.control_tabs.tabBar().tabMoved.connect(self._on_control_tab_moved)
+        outer_bar = getattr(self, "_control_tab_bar", None)
+        if outer_bar is not None:
+            outer_bar.tabsReordered.connect(self._on_control_tab_moved)
+            outer_bar.tabNestToMisc.connect(self._nest_control_tab_into_misc)
+            outer_bar.tabPopOut.connect(self._pop_control_tab_from_misc)
+        misc_bar = getattr(self, "_misc_tab_bar", None)
+        if misc_bar is not None:
+            misc_bar.tabsReordered.connect(self._on_control_tab_moved)
+            misc_bar.tabNestToMisc.connect(self._nest_control_tab_into_misc)
+            misc_bar.tabPopOut.connect(self._pop_control_tab_from_misc)
         self.chat_panel.status_message.connect(self.status_bar.showMessage)
         self._init_qwen_deploy_controller()
         self._stack_launcher.status_message.connect(self.status_bar.showMessage)
@@ -35850,6 +36236,10 @@ class CameraTopicWindow(QMainWindow):
             )
         # 评测进行中禁止切换后端
         self._set_real_robot_backend_switch_enabled(not self._real_eval_active)
+        # A2D 采集/标定/HIL 运维面板仅在 A2D 后端显示
+        a2d_ops = getattr(self, "a2d_ops_panel", None)
+        if a2d_ops is not None:
+            a2d_ops.setVisible(backend == REAL_ROBOT_BACKEND_A2D)
         has_scripts = self._real_robot_backend_has_stack_scripts(backend)
         if backend in REAL_ROBOT_EXTERNAL_STACK_BACKENDS and not has_scripts:
             self.real_eval_stack_btn.setEnabled(True)  # 仍可点，点击后给出配置提示
@@ -36048,6 +36438,490 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_real_eval_clear_log_clicked(self) -> None:
         self.real_eval_log_edit.clear()
+
+    def _a2d_ops_group_style(self) -> str:
+        return (
+            f"QGroupBox {{ color: {UI_TEXT_PRIMARY}; border: 1px solid {UI_BORDER}; "
+            f"margin-top: 6px; padding-top: 4px; }}"
+            f"QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; "
+            f"color: {UI_TEXT_SECONDARY}; }}"
+        )
+
+    def _build_a2d_ops_panel(self) -> QWidget:
+        """真机评测 → A2D：采集标定 / 标定检查 / 模型·HIL / FAQ / 视频。"""
+        panel = QWidget()
+        root = QVBoxLayout(panel)
+        root.setContentsMargins(0, 4, 0, 0)
+        root.setSpacing(6)
+
+        title = QLabel("A2D 采集标定 · 模型测试 / HIL · 运维")
+        title.setStyleSheet(
+            f"color: {UI_TEXT_PRIMARY}; font-weight: bold;"
+        )
+        root.addWidget(title)
+        tip = QLabel(
+            "按现场文档一键拉起常用步骤；viewer 已在容器内时 ROS 命令直接执行，"
+            "docker 启停需宿主机 CLI（或挂载 docker.sock）。"
+            f" Pixel_err < 3px 为绿。"
+        )
+        tip.setWordWrap(True)
+        tip.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        root.addWidget(tip)
+
+        # —— 容器 ——
+        docker_box = QGroupBox("容器管理")
+        docker_box.setStyleSheet(self._a2d_ops_group_style())
+        docker_l = QVBoxLayout(docker_box)
+        docker_l.setContentsMargins(8, 10, 8, 8)
+        docker_l.setSpacing(6)
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("容器名"))
+        self.a2d_docker_name_edit = QLineEdit(A2D_DOCKER_CONTAINER_DEFAULT)
+        self.a2d_docker_name_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.a2d_docker_name_edit.setToolTip("对应 A2D_DOCKER_CONTAINER / docker ps 名称")
+        name_row.addWidget(self.a2d_docker_name_edit, 1)
+        self.a2d_doc_btn = QPushButton("打开文档")
+        self.a2d_doc_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_doc_btn.setToolTip(A2D_OPS_DOC_URL)
+        self.a2d_doc_btn.clicked.connect(self._on_a2d_open_doc)
+        name_row.addWidget(self.a2d_doc_btn)
+        docker_l.addLayout(name_row)
+        dbtn_row = QHBoxLayout()
+        dbtn_row.setSpacing(6)
+        for text, slot, tip_text in (
+            ("查看容器", self._on_a2d_docker_ps, "docker ps"),
+            ("关闭容器", self._on_a2d_docker_stop, "docker stop <容器>"),
+            ("开启容器", self._on_a2d_docker_start, "docker start <容器>"),
+            ("重启容器", self._on_a2d_docker_restart, "docker restart <容器>"),
+        ):
+            btn = QPushButton(text)
+            btn.setFocusPolicy(Qt.NoFocus)
+            btn.setToolTip(tip_text)
+            btn.clicked.connect(slot)
+            dbtn_row.addWidget(btn)
+        dbtn_row.addStretch(1)
+        docker_l.addLayout(dbtn_row)
+        root.addWidget(docker_box)
+
+        # —— 采集标定 ——
+        calib_box = QGroupBox("采集标定流程")
+        calib_box.setStyleSheet(self._a2d_ops_group_style())
+        calib_l = QVBoxLayout(calib_box)
+        calib_l.setContentsMargins(8, 10, 8, 8)
+        calib_l.setSpacing(6)
+        calib_hint = QLabel(
+            "顺序：tracker 标定 → 启动 GUI → 开启 ROS 服务与脚踏模式。"
+            "（需已进入 a2d 容器 / 与现场同 ROS_DOMAIN）"
+        )
+        calib_hint.setWordWrap(True)
+        calib_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        calib_l.addWidget(calib_hint)
+        cbtn_row = QHBoxLayout()
+        cbtn_row.setSpacing(6)
+        self.a2d_tracker_calib_btn = QPushButton("1. Tracker 标定")
+        self.a2d_tracker_calib_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_tracker_calib_btn.setToolTip("ros2 run vr_calibration calibrate_node")
+        self.a2d_tracker_calib_btn.clicked.connect(self._on_a2d_tracker_calib)
+        cbtn_row.addWidget(self.a2d_tracker_calib_btn)
+        self.a2d_start_gui_btn = QPushButton("2. 启动 GUI")
+        self.a2d_start_gui_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_start_gui_btn.setToolTip(
+            "ros2 launch scripts_pack start_gui.launch.py"
+        )
+        self.a2d_start_gui_btn.clicked.connect(self._on_a2d_start_gui)
+        cbtn_row.addWidget(self.a2d_start_gui_btn)
+        self.a2d_ros_pedal_btn = QPushButton("3. ROS 服务 + 脚踏")
+        self.a2d_ros_pedal_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_ros_pedal_btn.setToolTip(
+            "启动 robot-service / 手臂栈（含 pedal_controller）"
+        )
+        self.a2d_ros_pedal_btn.clicked.connect(self._on_a2d_ros_and_pedal)
+        cbtn_row.addWidget(self.a2d_ros_pedal_btn)
+        cbtn_row.addStretch(1)
+        calib_l.addLayout(cbtn_row)
+        root.addWidget(calib_box)
+
+        # —— 查看标定 ——
+        check_box = QGroupBox("查看机器人标定")
+        check_box.setStyleSheet(self._a2d_ops_group_style())
+        check_l = QVBoxLayout(check_box)
+        check_l.setContentsMargins(8, 10, 8, 8)
+        check_l.setSpacing(6)
+        check_tip = QLabel(A2D_HMI_CALIB_TIP)
+        check_tip.setWordWrap(True)
+        check_tip.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        check_l.addWidget(check_tip)
+        check_row = QHBoxLayout()
+        check_row.setSpacing(6)
+        self.a2d_baseline_btn = QPushButton("启动 baseline_check")
+        self.a2d_baseline_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_baseline_btn.setToolTip(
+            "ros2 launch reset_baseline baseline_check.launch.py（需已开 ROS 服务）"
+        )
+        self.a2d_baseline_btn.clicked.connect(self._on_a2d_baseline_check)
+        check_row.addWidget(self.a2d_baseline_btn)
+        self.a2d_hmi_tip_btn = QPushButton("HMI 操作说明")
+        self.a2d_hmi_tip_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_hmi_tip_btn.clicked.connect(self._on_a2d_hmi_tip)
+        check_row.addWidget(self.a2d_hmi_tip_btn)
+        check_row.addStretch(1)
+        check_l.addLayout(check_row)
+        root.addWidget(check_box)
+
+        # —— 模型 / HIL ——
+        model_box = QGroupBox("模型测试和 HIL")
+        model_box.setStyleSheet(self._a2d_ops_group_style())
+        model_l = QVBoxLayout(model_box)
+        model_l.setContentsMargins(8, 10, 8, 8)
+        model_l.setSpacing(6)
+        policy_row = QHBoxLayout()
+        policy_row.addWidget(QLabel("psi-policy 根目录"))
+        self.a2d_policy_root_edit = QLineEdit(A2D_PSI_POLICY_ROOT_DEFAULT)
+        self.a2d_policy_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.a2d_policy_root_edit.setToolTip(
+            "含 .venv 与 model_inference_client_cena；可用 A2D_PSI_POLICY_ROOT 覆盖"
+        )
+        policy_row.addWidget(self.a2d_policy_root_edit, 1)
+        self.a2d_policy_browse_btn = QPushButton("浏览…")
+        self.a2d_policy_browse_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_policy_browse_btn.clicked.connect(self._on_a2d_browse_policy_root)
+        policy_row.addWidget(self.a2d_policy_browse_btn)
+        model_l.addLayout(policy_row)
+        ckpt_row = QHBoxLayout()
+        ckpt_row.addWidget(QLabel("ckpt_path"))
+        self.a2d_ckpt_edit = QLineEdit(A2D_CKPT_PATH_DEFAULT)
+        self.a2d_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.a2d_ckpt_edit.setToolTip(
+            "写入环境变量 CKPT_PATH（若 client 脚本读取）；"
+            "也可在 outputs/ 下选 last.ckpt"
+        )
+        ckpt_row.addWidget(self.a2d_ckpt_edit, 1)
+        self.a2d_ckpt_browse_btn = QPushButton("浏览…")
+        self.a2d_ckpt_browse_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_ckpt_browse_btn.clicked.connect(self._on_a2d_browse_ckpt)
+        ckpt_row.addWidget(self.a2d_ckpt_browse_btn)
+        model_l.addLayout(ckpt_row)
+        mbtn_row = QHBoxLayout()
+        mbtn_row.setSpacing(6)
+        self.a2d_infer_server_btn = QPushButton("启动 inference server")
+        self.a2d_infer_server_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_infer_server_btn.setToolTip(
+            "ros2 run model_inference run_inference_server（容器内）"
+        )
+        self.a2d_infer_server_btn.clicked.connect(self._on_a2d_infer_server)
+        mbtn_row.addWidget(self.a2d_infer_server_btn)
+        self.a2d_policy_infer_btn = QPushButton("模型推理模式")
+        self.a2d_policy_infer_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_policy_infer_btn.setToolTip(
+            "source .venv && python run_policy_inference.py"
+        )
+        self.a2d_policy_infer_btn.clicked.connect(
+            lambda: self._on_a2d_policy_client(hil=False)
+        )
+        mbtn_row.addWidget(self.a2d_policy_infer_btn)
+        self.a2d_hil_btn = QPushButton("HIL 模式")
+        self.a2d_hil_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_hil_btn.setToolTip(
+            "python run_policy_inference.py 2>&1 | tee hil_repro_act.log"
+        )
+        self.a2d_hil_btn.clicked.connect(lambda: self._on_a2d_policy_client(hil=True))
+        mbtn_row.addWidget(self.a2d_hil_btn)
+        self.a2d_open_outputs_btn = QPushButton("打开 outputs")
+        self.a2d_open_outputs_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_open_outputs_btn.clicked.connect(self._on_a2d_open_outputs)
+        mbtn_row.addWidget(self.a2d_open_outputs_btn)
+        mbtn_row.addStretch(1)
+        model_l.addLayout(mbtn_row)
+        root.addWidget(model_box)
+
+        # —— 常见问题 ——
+        faq_box = QGroupBox("常见问题和解决办法")
+        faq_box.setStyleSheet(self._a2d_ops_group_style())
+        faq_l = QVBoxLayout(faq_box)
+        faq_l.setContentsMargins(8, 10, 8, 8)
+        faq_l.setSpacing(6)
+        faq_hint = QLabel(
+            "Steam VR / GUI 打不开（刚开机或重启后）→ xhost +；"
+            "tracker 连不上 → 重启 Steam VR；手部异常 → rui-hand 排查。"
+        )
+        faq_hint.setWordWrap(True)
+        faq_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        faq_l.addWidget(faq_hint)
+        fbtn_row = QHBoxLayout()
+        fbtn_row.setSpacing(6)
+        self.a2d_xhost_btn = QPushButton("xhost +")
+        self.a2d_xhost_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_xhost_btn.setToolTip("宿主机: xhost +（GUI / Steam VR 打不开时）")
+        self.a2d_xhost_btn.clicked.connect(self._on_a2d_xhost)
+        fbtn_row.addWidget(self.a2d_xhost_btn)
+        self.a2d_steamvr_btn = QPushButton("重启 Steam VR")
+        self.a2d_steamvr_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_steamvr_btn.setToolTip(
+            "ros2 launch vr_tracker steamvr.launch.py"
+        )
+        self.a2d_steamvr_btn.clicked.connect(self._on_a2d_steamvr)
+        fbtn_row.addWidget(self.a2d_steamvr_btn)
+        self.a2d_rui_hand_btn = QPushButton("检查手 (rui-hand)")
+        self.a2d_rui_hand_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_rui_hand_btn.setToolTip(
+            "sudo rui-hand → 设备连接 → RS485 → 波特率 460800 → 串口扫描打开端口"
+        )
+        self.a2d_rui_hand_btn.clicked.connect(self._on_a2d_rui_hand)
+        fbtn_row.addWidget(self.a2d_rui_hand_btn)
+        fbtn_row.addStretch(1)
+        faq_l.addLayout(fbtn_row)
+        root.addWidget(faq_box)
+
+        # —— 观看视频 ——
+        video_box = QGroupBox("观看采集的视频")
+        video_box.setStyleSheet(self._a2d_ops_group_style())
+        video_l = QVBoxLayout(video_box)
+        video_l.setContentsMargins(8, 10, 8, 8)
+        video_l.setSpacing(6)
+        rrd_row = QHBoxLayout()
+        rrd_row.addWidget(QLabel("rrd_path"))
+        self.a2d_rrd_edit = QLineEdit(A2D_RRD_PATH_DEFAULT)
+        self.a2d_rrd_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.a2d_rrd_edit.setToolTip(
+            "ros2 launch rrd_replay rrd_replay.launch.py rrd_path:=…"
+        )
+        rrd_row.addWidget(self.a2d_rrd_edit, 1)
+        self.a2d_rrd_browse_btn = QPushButton("浏览…")
+        self.a2d_rrd_browse_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_rrd_browse_btn.clicked.connect(self._on_a2d_browse_rrd)
+        rrd_row.addWidget(self.a2d_rrd_browse_btn)
+        video_l.addLayout(rrd_row)
+        vbtn_row = QHBoxLayout()
+        vbtn_row.setSpacing(6)
+        self.a2d_rrd_play_btn = QPushButton("播放 RRD")
+        self.a2d_rrd_play_btn.setFocusPolicy(Qt.NoFocus)
+        self.a2d_rrd_play_btn.setToolTip("启动 rrd_replay 观看采集视频")
+        self.a2d_rrd_play_btn.clicked.connect(self._on_a2d_play_rrd)
+        vbtn_row.addWidget(self.a2d_rrd_play_btn)
+        vbtn_row.addStretch(1)
+        video_l.addLayout(vbtn_row)
+        root.addWidget(video_box)
+
+        return panel
+
+    def _a2d_container_name(self) -> str:
+        edit = getattr(self, "a2d_docker_name_edit", None)
+        raw = edit.text().strip() if edit is not None else ""
+        return a2d_docker_container_name(raw)
+
+    def _log_a2d_ops(self, line: str) -> None:
+        self._append_real_eval_log(f"[A2D运维] {line}")
+        if hasattr(self, "status_bar") and self.status_bar is not None:
+            self.status_bar.showMessage(line[:120], 5000)
+
+    def _on_a2d_open_doc(self) -> None:
+        QDesktopServices.openUrl(QUrl(A2D_OPS_DOC_URL))
+        self._log_a2d_ops(f"打开文档: {A2D_OPS_DOC_URL}")
+
+    def _on_a2d_docker_ps(self) -> None:
+        ok, text = run_a2d_docker_action("ps", self._a2d_container_name(), capture=True)
+        self._log_a2d_ops(("OK\n" if ok else "FAIL\n") + text)
+
+    def _on_a2d_docker_stop(self) -> None:
+        name = self._a2d_container_name()
+        reply = QMessageBox.question(
+            self,
+            "关闭容器",
+            f"确认 docker stop {name}？\n"
+            "若当前 viewer 跑在该容器内，界面会一起退出。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        ok, text = run_a2d_docker_action("stop", name)
+        self._log_a2d_ops(text if ok else f"FAIL: {text}")
+
+    def _on_a2d_docker_start(self) -> None:
+        ok, text = run_a2d_docker_action("start", self._a2d_container_name())
+        self._log_a2d_ops(text if ok else f"FAIL: {text}")
+
+    def _on_a2d_docker_restart(self) -> None:
+        name = self._a2d_container_name()
+        reply = QMessageBox.question(
+            self,
+            "重启容器",
+            f"确认 docker restart {name}？\n"
+            "若当前 viewer 跑在该容器内，界面会短暂中断。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        ok, text = run_a2d_docker_action("restart", name)
+        self._log_a2d_ops(text if ok else f"FAIL: {text}")
+
+    def _on_a2d_tracker_calib(self) -> None:
+        ok, msg = launch_a2d_ros_detached("ros2 run vr_calibration calibrate_node")
+        self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
+
+    def _on_a2d_start_gui(self) -> None:
+        ok, msg = launch_a2d_ros_detached(
+            "ros2 launch scripts_pack start_gui.launch.py"
+        )
+        self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
+
+    def _on_a2d_ros_and_pedal(self) -> None:
+        self._log_a2d_ops("启动 ROS 服务与脚踏（走 A2D 机器人栈）…")
+        self._append_real_eval_log("[栈] 后端=A2D，采集标定流程 → RobotStackLauncher")
+        self._on_robot_stack_clicked()
+
+    def _on_a2d_baseline_check(self) -> None:
+        ok, msg = launch_a2d_ros_detached(
+            "ros2 launch reset_baseline baseline_check.launch.py"
+        )
+        self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
+        if ok:
+            QMessageBox.information(self, "查看机器人标定", A2D_HMI_CALIB_TIP)
+
+    def _on_a2d_hmi_tip(self) -> None:
+        QMessageBox.information(self, "HMI 标定检查", A2D_HMI_CALIB_TIP)
+
+    def _on_a2d_browse_policy_root(self) -> None:
+        cur = self.a2d_policy_root_edit.text().strip() or A2D_PSI_POLICY_ROOT_DEFAULT
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 psi-policy-v2 根目录", cur
+        )
+        if selected:
+            self.a2d_policy_root_edit.setText(selected)
+
+    def _on_a2d_browse_ckpt(self) -> None:
+        cur = self.a2d_ckpt_edit.text().strip() or A2D_CKPT_PATH_DEFAULT
+        start = os.path.dirname(cur) if cur else A2D_PSI_POLICY_ROOT_DEFAULT
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 checkpoint",
+            start,
+            "Checkpoint (*.ckpt *.pt *.pth);;All (*)",
+        )
+        if path:
+            self.a2d_ckpt_edit.setText(path)
+
+    def _on_a2d_infer_server(self) -> None:
+        ok, msg = launch_a2d_ros_detached(
+            "ros2 run model_inference run_inference_server"
+        )
+        self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
+
+    def _on_a2d_policy_client(self, *, hil: bool) -> None:
+        root = os.path.expanduser(self.a2d_policy_root_edit.text().strip())
+        client_dir = os.path.join(root, "model_inference_client_cena")
+        venv_act = os.path.join(root, ".venv", "bin", "activate")
+        if not os.path.isdir(client_dir):
+            self._log_a2d_ops(f"未找到 client 目录: {client_dir}")
+            QMessageBox.warning(
+                self,
+                "模型测试 / HIL",
+                f"未找到目录:\n{client_dir}\n\n请确认 psi-policy 根目录。",
+            )
+            return
+        if not os.path.isfile(venv_act):
+            self._log_a2d_ops(f"未找到 venv: {venv_act}（需出现 psipolicy-env）")
+            QMessageBox.warning(
+                self,
+                "模型测试 / HIL",
+                f"未找到 .venv:\n{venv_act}\n\n"
+                "请先在该目录创建并激活虚拟环境。",
+            )
+            return
+        ckpt = self.a2d_ckpt_edit.text().strip()
+        env_bits = []
+        if ckpt:
+            env_bits.append(f"export CKPT_PATH={shlex.quote(ckpt)}")
+            env_bits.append(f"export ckpt_path={shlex.quote(ckpt)}")
+        env_export = " && ".join(env_bits)
+        env_prefix = f"{env_export} && " if env_export else ""
+        if hil:
+            py_cmd = "python run_policy_inference.py 2>&1 | tee hil_repro_act.log"
+            label = "HIL"
+        else:
+            py_cmd = "python run_policy_inference.py"
+            label = "模型推理"
+        full = (
+            f"set -e && cd {shlex.quote(root)} && source .venv/bin/activate && "
+            f"cd {shlex.quote(client_dir)} && {env_prefix}{py_cmd}"
+        )
+        if QProcess.startDetached("bash", ["-lc", full], client_dir):
+            self._log_a2d_ops(f"已启动{label}: {py_cmd} @ {client_dir}")
+        else:
+            self._log_a2d_ops(f"启动{label}失败")
+
+    def _on_a2d_open_outputs(self) -> None:
+        root = os.path.expanduser(self.a2d_policy_root_edit.text().strip())
+        out_dir = os.path.join(root, "outputs")
+        if not os.path.isdir(out_dir):
+            self._log_a2d_ops(f"outputs 不存在: {out_dir}")
+            QMessageBox.information(self, "outputs", f"目录不存在:\n{out_dir}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(out_dir)))
+        self._log_a2d_ops(f"打开 outputs: {out_dir}")
+
+    def _on_a2d_xhost(self) -> None:
+        try:
+            result = subprocess.run(
+                ["bash", "-lc", "xhost +"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            text = (result.stdout or result.stderr or "").strip() or f"exit={result.returncode}"
+            self._log_a2d_ops(
+                f"xhost +: {text}" if result.returncode == 0 else f"xhost + FAIL: {text}"
+            )
+        except Exception as exc:
+            self._log_a2d_ops(f"xhost + 异常: {exc}")
+
+    def _on_a2d_steamvr(self) -> None:
+        ok, msg = launch_a2d_ros_detached(
+            "ros2 launch vr_tracker steamvr.launch.py"
+        )
+        self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
+
+    def _on_a2d_rui_hand(self) -> None:
+        QMessageBox.information(
+            self,
+            "检查手 (rui-hand)",
+            "将尝试启动 sudo rui-hand。\n\n"
+            "GUI 内操作：点「设备连接」→ RS485 → 波特率 460800 → "
+            "串口扫描 → 打开端口。",
+        )
+        if QProcess.startDetached("bash", ["-lc", "sudo rui-hand"]):
+            self._log_a2d_ops("已启动 sudo rui-hand")
+        else:
+            self._log_a2d_ops("启动 rui-hand 失败（可能需要在终端手动 sudo）")
+
+    def _on_a2d_browse_rrd(self) -> None:
+        cur = self.a2d_rrd_edit.text().strip() or A2D_RRD_PATH_DEFAULT
+        start = os.path.dirname(cur) if cur else "/root/project/rerun_data"
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择采集 RRD", start, "Rerun (*.rrd);;All (*)"
+        )
+        if path:
+            self.a2d_rrd_edit.setText(path)
+
+    def _on_a2d_play_rrd(self) -> None:
+        path = self.a2d_rrd_edit.text().strip()
+        if not path:
+            QMessageBox.warning(self, "观看采集视频", "请填写 rrd_path")
+            return
+        # 优先走已有回放启动器（与「回放」页一致）
+        if hasattr(self, "_start_rrd_replay"):
+            ok = self._start_rrd_replay(path, 1)
+            if ok:
+                self._log_a2d_ops(f"已启动 RRD 回放: {path}")
+                return
+            self._log_a2d_ops(f"内置回放启动未成功，改用 launch: {path}")
+        quoted = path.replace("'", "'\\''")
+        ok, msg = launch_a2d_ros_detached(
+            f"ros2 launch rrd_replay rrd_replay.launch.py rrd_path:='{quoted}'"
+        )
+        self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
 
     def _on_real_eval_local_cam_help(self) -> None:
         QMessageBox.information(
@@ -38199,6 +39073,226 @@ class CameraTopicWindow(QMainWindow):
             return []
         return [tabs.tabText(i) for i in range(tabs.count())]
 
+    def _misc_child_titles(self) -> List[str]:
+        inner = getattr(self, "misc_inner_tabs", None)
+        if inner is None:
+            return []
+        return [inner.tabText(i) for i in range(inner.count())]
+
+    def _update_misc_empty_hint(self) -> None:
+        hint = getattr(self, "_misc_empty_hint", None)
+        inner = getattr(self, "misc_inner_tabs", None)
+        if hint is None or inner is None:
+            return
+        hint.setVisible(inner.count() == 0)
+
+    def _index_of_control_tab(self, title: str) -> int:
+        tabs = getattr(self, "control_tabs", None)
+        if tabs is None:
+            return -1
+        for i in range(tabs.count()):
+            if tabs.tabText(i) == title:
+                return i
+        return -1
+
+    def _index_of_misc_child(self, title: str) -> int:
+        inner = getattr(self, "misc_inner_tabs", None)
+        if inner is None:
+            return -1
+        for i in range(inner.count()):
+            if inner.tabText(i) == title:
+                return i
+        return -1
+
+    def _current_control_tab_title(self) -> str:
+        tabs = getattr(self, "control_tabs", None)
+        if tabs is None or tabs.count() <= 0:
+            return ""
+        title = str(tabs.tabText(tabs.currentIndex()) or "").strip()
+        if title != CONTROL_MISC_TAB_TITLE:
+            return title
+        inner = getattr(self, "misc_inner_tabs", None)
+        if inner is not None and inner.count() > 0:
+            child = str(inner.tabText(inner.currentIndex()) or "").strip()
+            if child:
+                return child
+        return title
+
+    def _select_control_tab_by_title(self, title: str) -> bool:
+        title = (title or "").strip()
+        if not title:
+            return False
+        tabs = getattr(self, "control_tabs", None)
+        if tabs is None:
+            return False
+        outer_idx = self._index_of_control_tab(title)
+        if outer_idx >= 0:
+            tabs.blockSignals(True)
+            try:
+                tabs.setCurrentIndex(outer_idx)
+            finally:
+                tabs.blockSignals(False)
+            return True
+        misc_idx = self._index_of_misc_child(title)
+        if misc_idx < 0:
+            return False
+        other_idx = self._index_of_control_tab(CONTROL_MISC_TAB_TITLE)
+        if other_idx < 0:
+            return False
+        tabs.blockSignals(True)
+        try:
+            tabs.setCurrentIndex(other_idx)
+        finally:
+            tabs.blockSignals(False)
+        inner = self.misc_inner_tabs
+        inner.blockSignals(True)
+        try:
+            inner.setCurrentIndex(misc_idx)
+        finally:
+            inner.blockSignals(False)
+        return True
+
+    def _persist_control_tabs_layout(self) -> None:
+        if getattr(self, "_control_tabs_order_guard", False):
+            return
+        titles = self._control_tab_titles()
+        if not titles:
+            return
+        try:
+            prev = load_control_tabs_order()
+            merged: List[str] = list(titles)
+            seen = set(merged)
+            for title in prev:
+                if title not in seen:
+                    merged.append(title)
+                    seen.add(title)
+            for title in CONTROL_TAB_TITLES:
+                if title not in seen:
+                    merged.append(title)
+                    seen.add(title)
+            misc_children = self._misc_child_titles()
+            path = save_control_tabs_order(merged, misc_children=misc_children)
+            status_bar = getattr(self, "status_bar", None)
+            if status_bar is not None:
+                status_bar.showMessage(f"已保存 tab 布局 → {path}", 3000)
+        except Exception as exc:
+            status_bar = getattr(self, "status_bar", None)
+            if status_bar is not None:
+                status_bar.showMessage(f"保存 tab 布局失败: {exc}", 4000)
+
+    def _nest_control_tab_into_misc(self, title: str) -> None:
+        title = (title or "").strip()
+        if not title or title == CONTROL_MISC_TAB_TITLE or title == "…":
+            return
+        if self._index_of_misc_child(title) >= 0:
+            other_idx = self._index_of_control_tab(CONTROL_MISC_TAB_TITLE)
+            if other_idx >= 0:
+                self.control_tabs.setCurrentIndex(other_idx)
+                self.misc_inner_tabs.setCurrentIndex(self._index_of_misc_child(title))
+            return
+        tabs = getattr(self, "control_tabs", None)
+        inner = getattr(self, "misc_inner_tabs", None)
+        if tabs is None or inner is None:
+            return
+        idx = self._index_of_control_tab(title)
+        if idx < 0:
+            return
+        widget = tabs.widget(idx)
+        if widget is None:
+            return
+        tip = tabs.tabToolTip(idx)
+        self._control_tabs_order_guard = True
+        try:
+            tabs.removeTab(idx)
+            new_i = inner.addTab(widget, title)
+            if tip:
+                inner.setTabToolTip(new_i, tip)
+            other_idx = self._index_of_control_tab(CONTROL_MISC_TAB_TITLE)
+            if other_idx >= 0:
+                tabs.setCurrentIndex(other_idx)
+            inner.setCurrentIndex(new_i)
+        finally:
+            self._control_tabs_order_guard = False
+        self._update_misc_empty_hint()
+        self._refresh_control_tab_tooltips()
+        self._persist_control_tabs_layout()
+        status_bar = getattr(self, "status_bar", None)
+        if status_bar is not None:
+            status_bar.showMessage(
+                f"已将「{title}」移入「{CONTROL_MISC_TAB_TITLE}」", 2500
+            )
+
+    def _pop_control_tab_from_misc(self, title: str, insert_at: int = -1) -> None:
+        title = (title or "").strip()
+        if not title or title == CONTROL_MISC_TAB_TITLE:
+            return
+        tabs = getattr(self, "control_tabs", None)
+        inner = getattr(self, "misc_inner_tabs", None)
+        if tabs is None or inner is None:
+            return
+        if self._index_of_control_tab(title) >= 0:
+            return
+        misc_idx = self._index_of_misc_child(title)
+        if misc_idx < 0:
+            return
+        widget = inner.widget(misc_idx)
+        if widget is None:
+            return
+        tip = inner.tabToolTip(misc_idx)
+        self._control_tabs_order_guard = True
+        try:
+            inner.removeTab(misc_idx)
+            other_idx = self._index_of_control_tab(CONTROL_MISC_TAB_TITLE)
+            if insert_at < 0:
+                target = other_idx if other_idx >= 0 else tabs.count()
+            else:
+                target = max(0, min(int(insert_at), tabs.count()))
+            new_i = tabs.insertTab(target, widget, title)
+            if tip:
+                tabs.setTabToolTip(new_i, tip)
+            tabs.setCurrentIndex(new_i)
+        finally:
+            self._control_tabs_order_guard = False
+        self._update_misc_empty_hint()
+        self._refresh_control_tab_tooltips()
+        self._persist_control_tabs_layout()
+        status_bar = getattr(self, "status_bar", None)
+        if status_bar is not None:
+            status_bar.showMessage(f"已将「{title}」移回顶栏", 2500)
+
+    def _restore_control_misc_children(self) -> None:
+        """按 eai/control_tabs_order.json 的 misc_children 收入「其他」。"""
+        if getattr(self, "_only_tabs", None):
+            return
+        children = load_control_misc_children()
+        if not children:
+            self._update_misc_empty_hint()
+            return
+        self._control_tabs_order_guard = True
+        try:
+            for title in children:
+                # 内联移动，避免中途反复写盘
+                if not title or title == CONTROL_MISC_TAB_TITLE:
+                    continue
+                if self._index_of_misc_child(title) >= 0:
+                    continue
+                tabs = self.control_tabs
+                inner = self.misc_inner_tabs
+                idx = self._index_of_control_tab(title)
+                if idx < 0:
+                    continue
+                widget = tabs.widget(idx)
+                if widget is None:
+                    continue
+                tip = tabs.tabToolTip(idx)
+                tabs.removeTab(idx)
+                new_i = inner.addTab(widget, title)
+                if tip:
+                    inner.setTabToolTip(new_i, tip)
+        finally:
+            self._control_tabs_order_guard = False
+        self._update_misc_empty_hint()
+
     def _refresh_control_tab_tooltips(self) -> None:
         """为每个控制区 tab 设置悬停提示：可用 --tab 如何启动。"""
         tabs = getattr(self, "control_tabs", None)
@@ -38207,6 +39301,14 @@ class CameraTopicWindow(QMainWindow):
         for i in range(tabs.count()):
             title = tabs.tabText(i)
             tabs.setTabToolTip(i, format_control_tab_launch_tooltip(title))
+        inner = getattr(self, "misc_inner_tabs", None)
+        if inner is None:
+            return
+        for i in range(inner.count()):
+            title = inner.tabText(i)
+            tip = format_control_tab_launch_tooltip(title)
+            tip += f"\n\n当前位于「{CONTROL_MISC_TAB_TITLE}」；拖回顶栏或右键 → 移回顶栏"
+            inner.setTabToolTip(i, tip)
 
     def _restore_control_tabs_order(self) -> None:
         """按 eai/control_tabs_order.json 恢复当前可见 tab 顺序。"""
@@ -38238,6 +39340,8 @@ class CameraTopicWindow(QMainWindow):
         for attr, prefix in (
             ("physical_rsi_tab", "tab:PhysicalRSI."),
             ("embodied_evo_tab", "tab:EmbodiedEvo."),
+            ("rax_tab", "tab:RAX."),
+            ("aspire_tab", "tab:ASPIRE."),
             ("prog_sota_tab", "tab:编程冲SOTA."),
         ):
             panel = getattr(self, attr, None)
@@ -38256,10 +39360,7 @@ class CameraTopicWindow(QMainWindow):
             widgets.update(_ui_state_collect_owner(owner, prefix=prefix))
 
         geo = self.geometry()
-        tabs = getattr(self, "control_tabs", None)
-        control_tab = ""
-        if tabs is not None and tabs.count() > 0:
-            control_tab = str(tabs.tabText(tabs.currentIndex()) or "")
+        control_tab = self._current_control_tab_title()
 
         splitter = getattr(self, "_main_splitter", None)
         splitter_sizes: List[int] = []
@@ -38349,17 +39450,9 @@ class CameraTopicWindow(QMainWindow):
             except Exception:
                 pass
 
-        tabs = getattr(self, "control_tabs", None)
         control_tab = str(state.get("control_tab") or "").strip()
-        if tabs is not None and control_tab:
-            for i in range(tabs.count()):
-                if tabs.tabText(i) == control_tab:
-                    tabs.blockSignals(True)
-                    try:
-                        tabs.setCurrentIndex(i)
-                    finally:
-                        tabs.blockSignals(False)
-                    break
+        if control_tab:
+            self._select_control_tab_by_title(control_tab)
 
         splitter = getattr(self, "_main_splitter", None)
         sizes = state.get("splitter_sizes")
@@ -38417,34 +39510,9 @@ class CameraTopicWindow(QMainWindow):
                 still[key] = payload
         self._pending_combo_state = still
 
-    def _on_control_tab_moved(self, _from: int, _to: int) -> None:
-        if getattr(self, "_control_tabs_order_guard", False):
-            return
-        titles = self._control_tab_titles()
-        if not titles:
-            return
-        try:
-            # 合并：当前可见顺序优先，再补上已保存但不在当前窗口的 tab
-            # （避免 --tab 过滤启动时把完整顺序冲掉）
-            prev = load_control_tabs_order()
-            merged: List[str] = list(titles)
-            seen = set(merged)
-            for title in prev:
-                if title not in seen:
-                    merged.append(title)
-                    seen.add(title)
-            for title in CONTROL_TAB_TITLES:
-                if title not in seen:
-                    merged.append(title)
-                    seen.add(title)
-            path = save_control_tabs_order(merged)
-            status_bar = getattr(self, "status_bar", None)
-            if status_bar is not None:
-                status_bar.showMessage(f"已保存 tab 顺序 → {path}", 3000)
-        except Exception as exc:
-            status_bar = getattr(self, "status_bar", None)
-            if status_bar is not None:
-                status_bar.showMessage(f"保存 tab 顺序失败: {exc}", 4000)
+    def _on_control_tab_moved(self, *_args) -> None:
+        """顶栏或「其他」子栏拖拽排序后写盘。"""
+        self._persist_control_tabs_layout()
 
     def _sim_backend_selector_keys(self) -> List[str]:
         bar = getattr(self, "sim_backend_tab_bar", None)

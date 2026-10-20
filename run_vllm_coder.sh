@@ -9,6 +9,7 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 SERVED_NAME="${SERVED_MODEL_NAME:-qwen3-coder-30b-a3b}"
 PARSER="${TOOL_CALL_PARSER:-qwen3_coder}"
+# EmbodiedEvo/Codex 系统提示 + instruction.md 很容易顶满 16k；默认抬到 32k。
 MAX_LEN="${MAX_MODEL_LEN:-32768}"
 GPU_UTIL="${GPU_MEMORY_UTILIZATION:-0.90}"
 LOG="${LOG:-$ROOT/log/persist/vllm_coder.log}"

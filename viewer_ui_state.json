@@ -801,6 +801,22 @@
       "kind": "line",
       "text": ""
     },
+    "a2d_docker_name_edit": {
+      "kind": "line",
+      "text": "a2d-tele-release-2-1-0rc3-latest"
+    },
+    "a2d_policy_root_edit": {
+      "kind": "line",
+      "text": "/home/psibot/ceyao_dev/psi-policy-v2"
+    },
+    "a2d_ckpt_edit": {
+      "kind": "line",
+      "text": "/home/psibot/ceyao_dev/psi-policy-v2/outputs/2026-09-17/18-45-07-pbp-generalization-abs-sh-dc12-hil-teleop-ac48-a2d-act-rgb-3view-proprio/checkpoints/last/last-step=348000-val_mse=0.008769.ckpt"
+    },
+    "a2d_rrd_edit": {
+      "kind": "line",
+      "text": "/root/project/rerun_data/episode_00001.rrd"
+    },
     "real_eval_cam_url_edit": {
       "kind": "line",
       "text": "http://127.0.0.1:8090/cam.mjpg"
@@ -831,7 +847,7 @@
     },
     "arm_text_cmd_edit": {
       "kind": "line",
-      "text": "左臂移到 x=-0.1033 y=0.0118 z=0.7959；右臂移到 x=0.3392 y=-0.1115 z=0.7775"
+      "text": "左臂移到 x=-0.1862 y=-0.2096 z=0.7839"
     },
     "left_hand_slider_a": {
       "kind": "slider",
@@ -911,7 +927,7 @@
     },
     "mv6d_lingbot_depth_check": {
       "kind": "check",
-      "checked": false
+      "checked": true
     },
     "mv6d_fill_cmd_check": {
       "kind": "check",
@@ -919,9 +935,9 @@
     },
     "mv6d_wrist_combo": {
       "kind": "combo",
-      "index": 1,
-      "text": "右腕",
-      "data": "/camera/right_wrist_color"
+      "index": 0,
+      "text": "左腕",
+      "data": "/camera/left_wrist_color"
     },
     "mv6d_interval_spin": {
       "kind": "dspin",
@@ -933,11 +949,11 @@
     },
     "mv6d_head_u_spin": {
       "kind": "spin",
-      "value": 482
+      "value": 222
     },
     "mv6d_head_v_spin": {
       "kind": "spin",
-      "value": 248
+      "value": 286
     },
     "mv6d_gt_enable_check": {
       "kind": "check",
@@ -945,19 +961,19 @@
     },
     "mv6d_gt_x_spin": {
       "kind": "dspin",
-      "value": 0.3392
+      "value": -0.1862
     },
     "mv6d_gt_y_spin": {
       "kind": "dspin",
-      "value": -0.1115
+      "value": -0.2096
     },
     "mv6d_gt_z_spin": {
       "kind": "dspin",
-      "value": 0.7775
+      "value": 0.7839
     },
     "mv6d_gt_roll_spin": {
       "kind": "dspin",
-      "value": 90.0
+      "value": 0.0
     },
     "mv6d_gt_pitch_spin": {
       "kind": "dspin",
@@ -965,7 +981,7 @@
     },
     "mv6d_gt_yaw_spin": {
       "kind": "dspin",
-      "value": -4.01
+      "value": -3.19
     },
     "skeleton_cam_combo": {
       "kind": "combo",
@@ -1015,7 +1031,7 @@
     },
     "test_qwen_model_combo": {
       "kind": "combo",
-      "index": 4,
+      "index": 5,
       "text": "Qwen3.5-35B-A3B (全量)",
       "data": "{'kind': 'full', 'label': 'Qwen3.5-35B-A3B', 'model_id': 'Qwen3.5-35B-A3B', 'name': 'Qwen3.5-35B-A3B', 'path': '/share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-35B-A3B', 'readable': '1', 'root': '/share_data/projects/mahjong/share/personal/liyichao/models/Qwen'}"
     },
@@ -1526,8 +1542,7 @@
     "chat_panel.provider_combo": {
       "kind": "combo",
       "index": 0,
-      "text": "本地 Qwen · qwen3.5-4b",
-      "data": "{'api_base': 'http://127.0.0.1:8100/v1', 'api_key': 'EMPTY', 'family': '本地 Qwen', 'label': '本地 Qwen · qwen3.5-4b', 'model': 'qwen3.5-4b'}"
+      "text": "（无运行中的推理服务）"
     },
     "chat_panel.model_edit": {
       "kind": "line",
@@ -1641,7 +1656,7 @@
     },
     "tab:EmbodiedEvo.model_combo": {
       "kind": "combo",
-      "index": 0,
+      "index": 1,
       "text": "Qwen3.5-4B [full]",
       "data": "LocalModel(key='qwen3.5-4b', label='Qwen3.5-4B', model_id='qwen3.5-4b', model_dir='/share_data/projects/mahjong/share/personal/liyichao/models/Qwen/Qwen3.5-4B', available=True, kind='full')"
     },
@@ -1653,13 +1668,111 @@
     },
     "tab:EmbodiedEvo.run_dir_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/EmbodiedEvo/runs/202610161144_arrange_largest_number"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/EmbodiedEvo/runs/202610191943_arrange_largest_number"
     },
     "tab:EmbodiedEvo.history_combo": {
       "kind": "combo",
       "index": 0,
       "text": "(历史 run…)",
       "data": ""
+    },
+    "tab:RAX.repo_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/rax"
+    },
+    "tab:RAX.run_root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/rax-robodojo-native"
+    },
+    "tab:RAX.python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/rax/bin/python"
+    },
+    "tab:RAX.port_spin": {
+      "kind": "spin",
+      "value": 8765
+    },
+    "tab:ASPIRE.repo_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/ASPIRE"
+    },
+    "tab:ASPIRE.python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/aspire/bin/python"
+    },
+    "tab:ASPIRE.mode_combo": {
+      "kind": "combo",
+      "index": 2,
+      "text": "run（跑示例 episode）",
+      "data": "run"
+    },
+    "tab:ASPIRE.gpu_edit": {
+      "kind": "line",
+      "text": "0"
+    },
+    "tab:ASPIRE.example_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "LIBERO · object_swap seed1",
+      "data": "('LIBERO · object_swap seed1', 'libero-pro', 'libero_object_swap', 0, 'examples/libero/object_swap_seed1.py', 2000, 800, 512)"
+    },
+    "tab:ASPIRE.plan_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "LIBERO smoke",
+      "data": "configs/validation/libero-smoke.yaml"
+    },
+    "tab:ASPIRE.bench_edit": {
+      "kind": "line",
+      "text": "libero-pro"
+    },
+    "tab:ASPIRE.suite_edit": {
+      "kind": "line",
+      "text": "libero_object_swap"
+    },
+    "tab:ASPIRE.task_spin": {
+      "kind": "spin",
+      "value": 0
+    },
+    "tab:ASPIRE.seed_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "tab:ASPIRE.program_edit": {
+      "kind": "line",
+      "text": "examples/libero/object_swap_seed1.py"
+    },
+    "tab:ASPIRE.output_edit": {
+      "kind": "line",
+      "text": "outputs/ui"
+    },
+    "tab:ASPIRE.history_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "（最近 run）",
+      "data": ""
+    },
+    "tab:ASPIRE.steps_spin": {
+      "kind": "spin",
+      "value": 2000
+    },
+    "tab:ASPIRE.init_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "saved",
+      "data": "saved"
+    },
+    "tab:ASPIRE.no_videos_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "tab:ASPIRE.doctor_reset_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "tab:ASPIRE.providers_edit": {
+      "kind": "line",
+      "text": ""
     },
     "tab:编程冲SOTA.backend_combo": {
       "kind": "combo",
@@ -1710,7 +1823,7 @@
   ],
   "geometry": [
     0,
-    56,
+    51,
     1920,
     1029
   ],

@@ -22,8 +22,13 @@ MODELS_ROOT = Path(
 )
 LAKE_OUTPUT_ROOT = EAI_DIR / "train" / "lake_qwen35" / "output"
 RUN_SCRIPT = EAI_DIR / "run_local_qwen.sh"
+VLLM_SCRIPT = EAI_DIR / "run_vllm_coder.sh"
 WORKER_NAME = "local_qwen_worker.py"
-API_PORT = int(os.environ.get("LOCAL_QWEN_PORT", "8100"))
+VLLM_PROC_MATCH = "vllm.entrypoints.openai.api_server"
+WORKER_PORT = int(os.environ.get("LOCAL_QWEN_PORT", "8100"))
+VLLM_PORT = int(os.environ.get("LOCAL_VLLM_PORT", "8000"))
+# Prefer vLLM (option A) when unset; LOCAL_QWEN_API_BASE still wins.
+API_PORT = int(os.environ.get("LOCAL_API_PORT", str(VLLM_PORT)))
 CTL_URL = os.environ.get("LOCAL_QWEN_CTL_URL", "http://127.0.0.1:18101").rstrip("/")
 API_BASE = os.environ.get(
     "LOCAL_QWEN_API_BASE", f"http://127.0.0.1:{API_PORT}/v1"
@@ -36,6 +41,12 @@ LOG_PATH = EAI_DIR / "log" / "embodied_evo_local_qwen.log"
 
 # (key, label, model_id, path_or_dirname)
 _PRESETS: Tuple[Tuple[str, str, str, str], ...] = (
+    (
+        "qwen3-coder-30b-a3b",
+        "Qwen3-Coder-30B-A3B (vLLM)",
+        "qwen3-coder-30b-a3b",
+        "Qwen3-Coder-30B-A3B",
+    ),
     ("qwen3.5-4b", "Qwen3.5-4B", "qwen3.5-4b", "Qwen3.5-4B"),
     ("qwen3.5-vl-4b", "Qwen3.5-VL-4B", "qwen3.5-vl-4b", "Qwen3.5-VL-4B"),
     ("qwen3.5-35b-a3b", "Qwen3.5-35B-A3B", "qwen3.5-35b-a3b", "Qwen3.5-35B-A3B"),
@@ -197,8 +208,34 @@ def _http_json(url: str, *, method: str = "GET", payload: Optional[Dict[str, Any
         return False, {}
 
 
+def uses_vllm(model: Optional[LocalModel] = None) -> bool:
+    """Coder / explicit backend → vLLM; else HF worker."""
+    forced = (os.environ.get("LOCAL_QWEN_BACKEND") or "").strip().lower()
+    if forced in ("vllm", "worker"):
+        return forced == "vllm"
+    if model is None:
+        return True  # option A default
+    blob = f"{model.key} {model.model_id} {model.model_dir} {model.label}".lower()
+    return "coder" in blob
+
+
+def api_base_for(model: Optional[LocalModel] = None) -> str:
+    """按后端选 API base。
+
+    run_local.sh 会导出 LOCAL_QWEN_API_BASE=:8100（HF worker 遗留）。
+    Coder / vLLM 必须走 :8000，不能被该变量盖掉。
+    """
+    if uses_vllm(model):
+        return f"http://127.0.0.1:{VLLM_PORT}/v1"
+    override = (os.environ.get("LOCAL_QWEN_API_BASE") or "").strip().rstrip("/")
+    # worker 模型：可用 LOCAL_QWEN_API_BASE，但忽略误指向 vLLM 端口的值
+    if override and f":{VLLM_PORT}" not in override:
+        return override
+    return f"http://127.0.0.1:{WORKER_PORT}/v1"
+
+
 def fetch_health(timeout_s: float = 1.5) -> Dict[str, Any]:
-    ok, body = _http_json(f"http://127.0.0.1:{API_PORT}/health", timeout_s=timeout_s)
+    ok, body = _http_json(f"http://127.0.0.1:{WORKER_PORT}/health", timeout_s=timeout_s)
     return body if ok else {}
 
 
@@ -207,10 +244,10 @@ def hostctl_ok(timeout_s: float = 0.8) -> bool:
     return ok and bool(body.get("ok"))
 
 
-def _worker_pids() -> List[int]:
+def _pgrep_f(pattern: str) -> List[int]:
     try:
         proc = subprocess.run(
-            ["pgrep", "-f", WORKER_NAME],
+            ["pgrep", "-f", pattern],
             capture_output=True,
             text=True,
             timeout=2,
@@ -226,10 +263,62 @@ def _worker_pids() -> List[int]:
     return pids
 
 
+def _worker_pids() -> List[int]:
+    return _pgrep_f(WORKER_NAME)
+
+
+def _vllm_pids() -> List[int]:
+    return _pgrep_f(VLLM_PROC_MATCH)
+
+
+def _status_from_vllm(timeout_s: float = 1.5) -> Optional[ModelStatus]:
+    ok, body = _http_json(
+        f"http://127.0.0.1:{VLLM_PORT}/v1/models", timeout_s=timeout_s
+    )
+    if not ok:
+        return None
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, list) or not data:
+        # Port open but still loading / empty
+        if _vllm_pids():
+            return ModelStatus(
+                healthy=False,
+                loading=True,
+                model_id="",
+                model_dir="",
+                device="cuda",
+                kind="vllm",
+                error="",
+                process_hint="pid=" + ",".join(str(p) for p in _vllm_pids()[:3]),
+                ctl_ok=hostctl_ok(),
+                api_base=f"http://127.0.0.1:{VLLM_PORT}/v1",
+            )
+        return None
+    first = data[0] if isinstance(data[0], dict) else {}
+    mid = str(first.get("id") or "")
+    mdir = str(first.get("root") or first.get("model_dir") or "")
+    return ModelStatus(
+        healthy=True,
+        loading=False,
+        model_id=mid,
+        model_dir=mdir,
+        device="cuda",
+        kind="vllm",
+        error="",
+        process_hint="",
+        ctl_ok=hostctl_ok(),
+        api_base=f"http://127.0.0.1:{VLLM_PORT}/v1",
+    )
+
+
 def fetch_status(timeout_s: float = 1.5) -> ModelStatus:
-    body = fetch_health(timeout_s=timeout_s)
     ctl = hostctl_ok()
-    pids = _worker_pids()
+    vllm = _status_from_vllm(timeout_s=timeout_s)
+    if vllm is not None:
+        return vllm
+
+    body = fetch_health(timeout_s=timeout_s)
+    pids = _worker_pids() + _vllm_pids()
     if body.get("ok"):
         return ModelStatus(
             healthy=True,
@@ -241,6 +330,7 @@ def fetch_status(timeout_s: float = 1.5) -> ModelStatus:
             error=str(body.get("error") or ""),
             process_hint="",
             ctl_ok=ctl,
+            api_base=f"http://127.0.0.1:{WORKER_PORT}/v1",
         )
     if body.get("loading"):
         return ModelStatus(
@@ -253,6 +343,7 @@ def fetch_status(timeout_s: float = 1.5) -> ModelStatus:
             error=str(body.get("error") or ""),
             process_hint="",
             ctl_ok=ctl,
+            api_base=f"http://127.0.0.1:{WORKER_PORT}/v1",
         )
     hint = ""
     if pids:
@@ -268,6 +359,7 @@ def fetch_status(timeout_s: float = 1.5) -> ModelStatus:
         error=err,
         process_hint=hint,
         ctl_ok=ctl,
+        api_base=API_BASE,
     )
 
 
@@ -285,23 +377,31 @@ def sync_codex_local_model(model: LocalModel, *, reasoning: str = "high") -> Tup
     """把 Codex HOME 指向本地 Responses 服务并写入所选 model id。"""
     from embodied_evo.catalog import ensure_codex_home, resolve_codex_home
 
+    base = api_base_for(model)
+    via = "vLLM" if uses_vllm(model) else "local_qwen_worker"
     home = resolve_codex_home()
     ok, msg, home = ensure_codex_home(
         provider="compatible",
-        base_url=API_BASE,
+        base_url=base,
         api_key=os.environ.get("OPENAI_API_KEY", "local-qwen"),
     )
     config = home / "config.toml"
+    # Codex 默认以为上下文 ~258k；本地 vLLM 实际只有 MAX_MODEL_LEN（默认 16k）。
+    # 不写 model_context_window 会导致不 compact，直到 vLLM 直接 400。
+    ctx = int(os.environ.get("LOCAL_QWEN_CONTEXT_WINDOW", "16384"))
+    compact = int(os.environ.get("LOCAL_QWEN_AUTO_COMPACT", str(max(4096, ctx - 4096))))
     text = (
-        f"# Local {model.label} via eai local_qwen_worker (Responses-compatible shim)\n"
+        f"# Local {model.label} via {via} (Responses)\n"
         f'model = "{model.model_id}"\n'
         f'model_reasoning_effort = "{reasoning}"\n'
+        f"model_context_window = {ctx}\n"
+        f"model_auto_compact_token_limit = {compact}\n"
         'model_provider = "compatible"\n'
         'cli_auth_credentials_store = "file"\n'
         "\n"
         "[model_providers.compatible]\n"
         f'name = "Local {model.label}"\n'
-        f'base_url = "{API_BASE}"\n'
+        f'base_url = "{base}"\n'
         'wire_api = "responses"\n'
         "requires_openai_auth = true\n"
         "supports_websockets = false\n"
@@ -312,11 +412,38 @@ def sync_codex_local_model(model: LocalModel, *, reasoning: str = "high") -> Tup
     except OSError:
         pass
     os.environ["EMBODIEDEVO_CODEX_HOME"] = str(home)
-    return True, f"已同步 Codex → {model.model_id} @ {API_BASE} ({msg})"
+    return True, f"已同步 Codex → {model.model_id} @ {base} ({msg})"
+
+
+def _deploy_vllm(model: LocalModel) -> Tuple[bool, str]:
+    if not VLLM_SCRIPT.is_file():
+        return False, f"未找到 {VLLM_SCRIPT}"
+    env = os.environ.copy()
+    env["MODEL_DIR"] = model.model_dir
+    env["SERVED_MODEL_NAME"] = model.model_id
+    env["PORT"] = str(VLLM_PORT)
+    env["HOST"] = "127.0.0.1"
+    try:
+        proc = subprocess.run(
+            ["bash", str(VLLM_SCRIPT)],
+            cwd=str(EAI_DIR),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"vLLM 启动失败: {exc}"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 0:
+        return False, out or f"vLLM 启动退出码 {proc.returncode}"
+    base = api_base_for(model)
+    return True, out or f"已启动 {model.label} (vLLM) → {base}"
 
 
 def deploy_model(model: LocalModel) -> Tuple[bool, str]:
-    """部署所选本地模型。优先 hostctl，否则直接拉起 run_local_qwen.sh。"""
+    """部署所选本地模型。Coder → vLLM :8000；其它 → local_qwen_worker :8100。"""
     if not model.available or not model.model_dir:
         return False, f"模型不可用: {model.label}"
 
@@ -334,6 +461,9 @@ def deploy_model(model: LocalModel) -> Tuple[bool, str]:
             False,
             f"已在运行其它模型（{live}）。请先停止再部署 {model.label}。",
         )
+
+    if uses_vllm(model):
+        return _deploy_vllm(model)
 
     payload = {
         "model_dir": model.model_dir,
@@ -361,7 +491,7 @@ def deploy_model(model: LocalModel) -> Tuple[bool, str]:
     env["PYTHONNOUSERSITE"] = "1"
     env["LOCAL_QWEN_MODEL_DIR"] = model.model_dir
     env["LOCAL_QWEN_MODEL_ID"] = model.model_id
-    env["LOCAL_QWEN_PORT"] = str(API_PORT)
+    env["LOCAL_QWEN_PORT"] = str(WORKER_PORT)
     py = str(env.get("LOCAL_QWEN_PYTHON") or DEFAULT_PYTHON).strip()
     cmd = [
         "bash",
@@ -369,7 +499,7 @@ def deploy_model(model: LocalModel) -> Tuple[bool, str]:
         "--host",
         "127.0.0.1",
         "--port",
-        str(API_PORT),
+        str(WORKER_PORT),
         "--model",
         model.model_dir,
         "--model-id",
@@ -391,28 +521,42 @@ def deploy_model(model: LocalModel) -> Tuple[bool, str]:
         return False, f"启动失败: {exc}"
     log_fh.write(f"[embodied_evo] start pid={proc.pid} {' '.join(cmd)}\n")
     log_fh.flush()
-    # 不关闭 log_fh：子进程继续写；交给 GC / 进程生命周期
-    return True, f"已启动 {model.label} pid={proc.pid} → {API_BASE}"
+    base = api_base_for(model)
+    return True, f"已启动 {model.label} pid={proc.pid} → {base}"
 
 
 def stop_model() -> Tuple[bool, str]:
-    """停止本地 Qwen 推理服务。"""
+    """停止本地推理服务（vLLM :8000 与/或 worker :8100）。"""
     if hostctl_ok():
         ok, body = _http_json(f"{CTL_URL}/stop", method="POST", timeout_s=15.0)
         msg = str(body.get("message") or body)
-        return (ok and bool(body.get("ok", ok))), msg
+        # still try local ports below
+        if ok and body.get("ok", ok):
+            pass
 
-    # 优先按端口释放，避免误杀其它进程
-    try:
-        subprocess.run(
-            ["fuser", "-k", f"{API_PORT}/tcp"],
-            capture_output=True,
-            timeout=3,
-            check=False,
-        )
-    except Exception:
-        pass
-    for pid in _worker_pids():
+    if VLLM_SCRIPT.is_file():
+        try:
+            subprocess.run(
+                ["bash", str(VLLM_SCRIPT), "stop"],
+                cwd=str(EAI_DIR),
+                capture_output=True,
+                timeout=15,
+                check=False,
+            )
+        except Exception:
+            pass
+
+    for port in (VLLM_PORT, WORKER_PORT):
+        try:
+            subprocess.run(
+                ["fuser", "-k", f"{port}/tcp"],
+                capture_output=True,
+                timeout=3,
+                check=False,
+            )
+        except Exception:
+            pass
+    for pid in _worker_pids() + _vllm_pids():
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -422,4 +566,4 @@ def stop_model() -> Tuple[bool, str]:
                 os.kill(pid, signal.SIGKILL)
             except Exception:
                 pass
-    return True, "已停止本地 Qwen 推理服务"
+    return True, "已停止本地推理服务（vLLM/worker）"

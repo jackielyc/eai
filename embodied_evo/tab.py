@@ -204,7 +204,7 @@ class EmbodiedEvoTab(QWidget):
         self.model_combo.setFont(QFont(_MONO, 9))
         self.model_combo.setToolTip(
             "从本机 models/Qwen 等目录选择可用权重；"
-            "部署后走 http://127.0.0.1:8100/v1（Responses）"
+            "Coder→vLLM :8000；其它→worker :8100（Responses）"
         )
         model_row.addWidget(self.model_combo, 2)
         self.refresh_models_btn = QPushButton("刷新")
@@ -233,7 +233,7 @@ class EmbodiedEvoTab(QWidget):
         model_ctl.addWidget(self.deploy_model_btn)
         self.stop_model_btn = QPushButton("停止模型")
         self.stop_model_btn.setObjectName("dangerAction")
-        self.stop_model_btn.setToolTip("停止 :8100 上的本地 Qwen 服务")
+        self.stop_model_btn.setToolTip("停止本地推理（vLLM :8000 / worker :8100）")
         self.stop_model_btn.clicked.connect(self._stop_selected_model)
         model_ctl.addWidget(self.stop_model_btn)
         form.addRow("服务", model_ctl)
@@ -447,12 +447,16 @@ class EmbodiedEvoTab(QWidget):
         sim = data.get("simulator") if isinstance(data.get("simulator"), dict) else {}
         # 若已配置本地 Codex（Qwen），不要被 task.toml 的 gpt-6-astra 覆盖
         local_codex = Path.home() / ".config" / "embodiedevo" / "codex" / "config.toml"
-        preferred_model = os.environ.get("EMBODIEDEVO_MODEL", "").strip() or "qwen3.5-4b"
+        preferred_model = (
+            os.environ.get("EMBODIEDEVO_MODEL", "").strip() or "qwen3-coder-30b-a3b"
+        )
         use_local_qwen = False
         if local_codex.is_file():
             try:
                 txt = local_codex.read_text(encoding="utf-8", errors="replace")
-                use_local_qwen = "127.0.0.1:8100" in txt
+                use_local_qwen = (
+                    "127.0.0.1:8100" in txt or "127.0.0.1:8000" in txt
+                )
                 if use_local_qwen:
                     for line in txt.splitlines():
                         s = line.strip()
@@ -626,7 +630,7 @@ class EmbodiedEvoTab(QWidget):
         reply = QMessageBox.question(
             self,
             "EmbodiedEvo",
-            "确认停止本地模型推理服务（:8100）？",
+            "确认停止本地模型推理服务（vLLM :8000 / worker :8100）？",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
