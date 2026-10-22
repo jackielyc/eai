@@ -1668,7 +1668,7 @@
     },
     "tab:EmbodiedEvo.run_dir_edit": {
       "kind": "line",
-      "text": "/share_data/projects/mahjong/share/personal/liyichao/EmbodiedEvo/runs/202610191943_arrange_largest_number"
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/EmbodiedEvo/runs/202610221210_arrange_largest_number"
     },
     "tab:EmbodiedEvo.history_combo": {
       "kind": "combo",
@@ -1774,6 +1774,94 @@
       "kind": "line",
       "text": ""
     },
+    "tab:FLORA.root_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/models"
+    },
+    "tab:FLORA.python_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/flora/bin/python"
+    },
+    "tab:FLORA.cache_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/models/Flora"
+    },
+    "tab:FLORA.mode_combo": {
+      "kind": "combo",
+      "index": 4,
+      "text": "⑤ 评分规则奖励 Rubric",
+      "data": "rubric"
+    },
+    "tab:FLORA.gpu_edit": {
+      "kind": "line",
+      "text": "0"
+    },
+    "tab:FLORA.tp_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "tab:FLORA.samples_spin": {
+      "kind": "spin",
+      "value": 1
+    },
+    "tab:FLORA.video_edit": {
+      "kind": "line",
+      "text": "/share_data/projects/mahjong/share/personal/liyichao/RynnValue/example/Put_the_box_in_the_drawer_and_close_it.mp4"
+    },
+    "tab:FLORA.left_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "tab:FLORA.right_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "tab:FLORA.profile_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "human",
+      "data": "human"
+    },
+    "tab:FLORA.yam32_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "tab:FLORA.audit_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "tab:FLORA.rationale_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "tab:FLORA.dry_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "tab:FLORA.overwrite_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "tab:FLORA.task_edit": {
+      "kind": "line",
+      "text": "Pick up a plate，Close the wooden drawer"
+    },
+    "tab:FLORA.robot_edit": {
+      "kind": "line",
+      "text": "bimanual robot"
+    },
+    "tab:FLORA.cameras_edit": {
+      "kind": "line",
+      "text": "a top (scene) camera, a left-wrist camera, a right-wrist camera"
+    },
+    "tab:FLORA.output_edit": {
+      "kind": "line",
+      "text": ""
+    },
+    "tab:FLORA.rubric_edit": {
+      "kind": "plain",
+      "text": "[\n  {\"action\": \"Grasp the cup\", \"grading\": [\n    {\"label\": \"Not attempted\", \"points\": 0.0},\n    {\"label\": \"Grasped after re-tries\", \"points\": 0.1},\n    {\"label\": \"Clean grasp\", \"points\": 0.2}\n  ]},\n  {\"action\": \"Set the cup on the tray\", \"grading\": [\n    {\"label\": \"Not attempted\", \"points\": 0.0},\n    {\"label\": \"Placed but tipped over\", \"points\": 0.4},\n    {\"label\": \"Placed upright\", \"points\": 0.8}\n  ]}\n]"
+    },
     "tab:编程冲SOTA.backend_combo": {
       "kind": "combo",
       "index": 0,
@@ -1815,7 +1903,7 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "EmbodiedEvo",
+  "control_tab": "FLORA",
   "splitter_sizes": [
     256,
     1258,
@@ -1823,7 +1911,7 @@
   ],
   "geometry": [
     0,
-    51,
+    56,
     1920,
     1029
   ],

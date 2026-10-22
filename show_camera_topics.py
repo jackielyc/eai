@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D：采集标定 / baseline / 模型·HIL / FAQ / RRD 回放；R1 / Franka） / 本地摄像头（本机 MJPEG 推流 + SSH 反向隧道 + 预览） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / EmbodiedEvo / RAX / ASPIRE / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D：采集标定 / baseline / 模型·HIL / FAQ / RRD 回放；R1 / Franka） / 本地摄像头（本机 MJPEG 推流 + SSH 反向隧道 + 预览） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / EmbodiedEvo / RAX / ASPIRE / FLORA / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -3115,6 +3115,7 @@ CONTROL_TAB_TITLES: Tuple[str, ...] = (
     "EmbodiedEvo",
     "RAX",
     "ASPIRE",
+    "FLORA",
     "编程冲SOTA",
     "主机资源",
     "HumanEgo",
@@ -3304,6 +3305,10 @@ CONTROL_TAB_ALIASES: Dict[str, str] = {
     "ASPIRE": "ASPIRE",
     "cap-harness": "ASPIRE",
     "cap_harness": "ASPIRE",
+    "flora": "FLORA",
+    "FLORA": "FLORA",
+    "Flora": "FLORA",
+    "flora-tempseg": "FLORA",
     "prog_sota": "编程冲SOTA",
     "progsota": "编程冲SOTA",
     "sota": "编程冲SOTA",
@@ -3365,6 +3370,7 @@ CONTROL_TAB_PREFERRED_ALIAS: Dict[str, str] = {
     "EmbodiedEvo": "eevo",
     "RAX": "rax",
     "ASPIRE": "aspire",
+    "FLORA": "flora",
     "编程冲SOTA": "sota",
     "主机资源": "system",
     "HumanEgo": "humanego",
@@ -31538,6 +31544,11 @@ class CameraTopicWindow(QMainWindow):
         self.aspire_tab = AspireTab()
         control_tabs.addTab(self.aspire_tab, "ASPIRE")
 
+        from flora.tab import FloraTab
+
+        self.flora_tab = FloraTab()
+        control_tabs.addTab(self.flora_tab, "FLORA")
+
         from prog_sota.tab import ProgSotaTab
 
         self.prog_sota_tab = ProgSotaTab()
@@ -39342,6 +39353,7 @@ class CameraTopicWindow(QMainWindow):
             ("embodied_evo_tab", "tab:EmbodiedEvo."),
             ("rax_tab", "tab:RAX."),
             ("aspire_tab", "tab:ASPIRE."),
+            ("flora_tab", "tab:FLORA."),
             ("prog_sota_tab", "tab:编程冲SOTA."),
         ):
             panel = getattr(self, attr, None)

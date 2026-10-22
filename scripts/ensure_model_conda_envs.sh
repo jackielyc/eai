@@ -75,15 +75,31 @@ ensure_py humanego 3.11
 ensure_py sam3 3.10
 ensure_py foundationpose 3.10
 ensure_py aspire 3.11
+# flora: 共享盘上 --copy 偶发失败；允许普通 conda create（无 --copy）
+reject_symlink_env flora
+if env_ready flora; then
+  echo "[skip] flora already exists (real env)"
+else
+  if [[ -d "${ENVS}/flora" ]]; then
+    echo "[clean] removing incomplete flora"
+    rm -rf "${ENVS}/flora"
+  fi
+  echo "[create] flora python=3.12 (no --copy)"
+  "${CONDA_BIN}" create -y -p "${ENVS}/flora" "python=3.12" || {
+    echo "[warn] conda create flora failed; viewer FLORA 页「安装环境」会改用 venv 回退"
+  }
+fi
 
 echo
 echo "=== status ==="
 "${MINICONDA3}/bin/python" "${EAI_DIR}/tools/model_conda_envs.py" || true
 
 echo
-echo "Note: sam3 / foundationpose / humanego / aspire are minimal python envs."
+echo "Note: sam3 / foundationpose / humanego / aspire / flora are minimal python envs."
 echo "  Install deps when needed:"
 echo "    bash ${EAI_DIR}/run_sam3.sh --install"
 echo "    bash ${EAI_DIR}/run_foundationpose.sh --install"
 echo "    (humanego) conda activate humanego && bash setup.sh in its repo"
 echo "    (aspire) viewer ASPIRE 页点「安装 host 依赖」，或 python -c 'from aspire.catalog import ensure_host_env; ensure_host_env()'"
+echo "    (flora) viewer FLORA 页点「安装环境」+「下载模型」，或:"
+echo "      python -c 'from flora.catalog import ensure_conda_env, ensure_repos; ensure_conda_env(); ensure_repos()'"

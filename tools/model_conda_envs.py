@@ -45,6 +45,7 @@ MODEL_CONDA_ENVS: Dict[str, str] = {
     "robodojo": "RoboDojo",
     "embodiedevo": "embodiedevo",
     "aspire": "aspire",
+    "flora": "flora",
     "rlinf": "RLinf",
     "libero": "libero",
     "molmospaces": "molmospaces",
@@ -69,6 +70,7 @@ MODEL_CONDA_ENV_OVERRIDES: Dict[str, str] = {
     "rynnvalue": "RYNNVALUE_CONDA_ENV",
     "embodiedevo": "EMBODIEDEVO_CONDA_ENV",
     "aspire": "ASPIRE_CONDA_ENV",
+    "flora": "FLORA_CONDA_ENV",
 }
 
 
