@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <!--
+      A2D 容器默认 FASTRTPS_DEFAULT_PROFILES_FILE=/etc/dds/fastdds_profiles_tele.xml
+      与 fastdds_profiles_a2d.xml 一致：128MB SHM（相机大图）。
+
+      宿主机要直接 ros2 收图，需：
+        1) Domain=0 + rmw_fastrtps_cpp + 本 profile（或 a2d）
+        2) /dev/shm/fastrtps_* 对宿主机用户可写（容器内相机用 root 创建时默认 644）
+      使用: bash scripts/enable_host_ros2_camera.sh
+    -->
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>shm_transport</transport_id>
+            <type>SHM</type>
+            <segment_size>134217728</segment_size>
+        </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="shm_participant" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>shm_transport</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+        </rtps>
+    </participant>
+</profiles>

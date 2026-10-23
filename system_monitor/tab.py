@@ -222,18 +222,17 @@ class SystemMonitorTab(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
         self._timer.timeout.connect(self._sample_once)
-        QTimer.singleShot(50, self._sample_once)
-        self._timer.start()
+        # 不在构造时 start：后台每秒采样会抢主线程，切其它 tab 也卡
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
         if not self._paused and not self._timer.isActive():
             self._timer.start()
+            QTimer.singleShot(0, self._sample_once)
 
     def hideEvent(self, event) -> None:  # noqa: N802
         super().hideEvent(event)
-        if self._paused:
-            self._timer.stop()
+        self._timer.stop()
 
     def _set_sort(self, by_cpu: bool) -> None:
         self._sort_cpu = by_cpu

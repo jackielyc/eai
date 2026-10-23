@@ -22,6 +22,10 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=1
 
+if [[ -n "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" && ! -f "${FASTRTPS_DEFAULT_PROFILES_FILE}" ]]; then
+    echo "警告: FASTRTPS_DEFAULT_PROFILES_FILE 无效 (${FASTRTPS_DEFAULT_PROFILES_FILE})，已 unset" >&2
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+fi
 if [[ -f "${HOST_DDS_XML}" ]]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE="${HOST_DDS_XML}"
     echo ">>> 宿主机 DDS: ${HOST_DDS_XML} (SHM + UDP)"

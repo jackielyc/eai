@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="UTF-8" ?>
 <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
     <!--
-      宿主机用 DDS 配置：启用 UDP 组播，用于与 Docker 外通信。
-      注意：若 Docker 内仅使用 SHM 发布（fastdds_profiles_a2d.xml），
-      宿主机仍无法收到图像数据，须在 Docker 内运行 viewer（见 run_in_docker.sh）。
+      宿主机通用：SHM + 内置 UDP。
+      若要直接收 Docker 内 /camera/* 图像，请改用 fastdds_profiles_tele.xml
+      （与容器 128MB SHM 一致），并运行:
+        bash scripts/enable_host_ros2_camera.sh
+      （开放 /dev/shm/fastrtps_* 权限；root 创建的段默认 644，宿主机加不进去）。
     -->
     <transport_descriptors>
         <transport_descriptor>

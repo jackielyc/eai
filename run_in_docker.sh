@@ -25,7 +25,15 @@ REMOTE_DIR="${EAI_DIR_HOST}"
 A2D_SCRIPTS_DIR="${A2D_SCRIPTS_DIR:-${PSIBOT_HOME}/workspace_liyichao/install/scripts_pack/share/scripts_pack/scripts}"
 WORKSPACE_INSTALL="${PSIBOT_HOME}/workspace_liyichao/install/setup.bash"
 A2D_SDK_HOME="${A2D_SDK_HOME:-${PSIBOT_HOME}/a2d_sdk}"
-FASTDDS_XML="${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"
+# 优先 a2d_sdk；缺失时用仓库内兜底，避免 FASTRTPS 指向不存在文件触发 XMLPARSER realpath 报错
+EAI_A2D_DDS_XML="${EAI_DIR_HOST}/dds/fastdds_profiles_a2d.xml"
+if [[ -f "${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml" ]]; then
+    FASTDDS_XML="${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"
+elif [[ -f "${EAI_A2D_DDS_XML}" ]]; then
+    FASTDDS_XML="${EAI_A2D_DDS_XML}"
+else
+    FASTDDS_XML=""
+fi
 # 用宿主机 psibot 的 uid/gid 启动（镜像内 psibot 常为 1000，与宿主机不一致）
 HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
@@ -245,17 +253,27 @@ if ! docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -d "${REMOTE_DIR}/im
     exit 1
 fi
 
-if [[ -f "${FASTDDS_XML}" ]]; then
+FASTDDS_IN_CONTAINER=""
+if [[ -n "${FASTDDS_XML}" && -f "${FASTDDS_XML}" ]]; then
     docker exec -u "${CONTAINER_USER}" "${CONTAINER}" mkdir -p "${REMOTE_DIR}/.cache/a2d_dds" 2>/dev/null || true
-    if docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -f "${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"; then
+    if docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -f "${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml" 2>/dev/null; then
         FASTDDS_IN_CONTAINER="${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"
+    elif docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -f "${EAI_A2D_DDS_XML}" 2>/dev/null; then
+        FASTDDS_IN_CONTAINER="${EAI_A2D_DDS_XML}"
     else
         docker exec -u "${CONTAINER_USER}" "${CONTAINER}" mkdir -p /tmp/a2d_dds
         docker cp "${FASTDDS_XML}" "${CONTAINER}:/tmp/a2d_dds/fastdds_profiles_a2d.xml"
-        FASTDDS_IN_CONTAINER="/tmp/a2d_dds/fastdds_profiles_a2d.xml"
+        if docker exec -u "${CONTAINER_USER}" "${CONTAINER}" test -f /tmp/a2d_dds/fastdds_profiles_a2d.xml 2>/dev/null; then
+            FASTDDS_IN_CONTAINER="/tmp/a2d_dds/fastdds_profiles_a2d.xml"
+        fi
     fi
+fi
+DOCKER_FASTDDS_ENV=()
+if [[ -n "${FASTDDS_IN_CONTAINER}" ]]; then
+    echo ">>> 容器 DDS: ${FASTDDS_IN_CONTAINER}"
+    DOCKER_FASTDDS_ENV+=(-e "FASTRTPS_DEFAULT_PROFILES_FILE=${FASTDDS_IN_CONTAINER}")
 else
-    FASTDDS_IN_CONTAINER="/tmp/a2d_dds/fastdds_profiles_a2d.xml"
+    echo ">>> 未找到 FastDDS XML，不设置 FASTRTPS_DEFAULT_PROFILES_FILE（避免 XMLPARSER realpath 报错）"
 fi
 
 DISPLAY="${DISPLAY:-:0}"
@@ -561,7 +579,7 @@ docker exec \
     -e "GTK_IM_MODULE=${GTK_IM_MODULE:-fcitx}" \
     -e "XMODIFIERS=${XMODIFIERS:-@im=fcitx}" \
     "${DOCKER_XAUTH_ENV[@]}" \
-    -e FASTRTPS_DEFAULT_PROFILES_FILE="${FASTDDS_IN_CONTAINER}" \
+    "${DOCKER_FASTDDS_ENV[@]}" \
     -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
     -e ROS_DOMAIN_ID=0 \
     -e ROS_LOCALHOST_ONLY=1 \
@@ -575,12 +593,21 @@ docker exec \
 set -eo pipefail
 mkdir -p /tmp/a2d_runtime ${EAI_DIR_HOST}/.cache/a2d_runtime
 chmod 700 /tmp/a2d_runtime ${EAI_DIR_HOST}/.cache/a2d_runtime 2>/dev/null || true
+# 容器/镜像可能预置了失效的 FASTRTPS 路径，先清掉再按需设置
+if [[ -n \"\${FASTRTPS_DEFAULT_PROFILES_FILE:-}\" && ! -f \"\${FASTRTPS_DEFAULT_PROFILES_FILE}\" ]]; then
+    echo \"警告: FASTRTPS_DEFAULT_PROFILES_FILE 指向不存在的文件: \${FASTRTPS_DEFAULT_PROFILES_FILE}，已 unset\" >&2
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+fi
 source /opt/ros/humble/setup.bash
 if [[ -f /opt/psi/rt/a2d-tele/install/setup.bash ]]; then
     source /opt/psi/rt/a2d-tele/install/setup.bash
 fi
 if [[ -f ${WORKSPACE_INSTALL} ]]; then
     source ${WORKSPACE_INSTALL}
+fi
+# a2d-tele setup 可能再次写入失效路径
+if [[ -n \"\${FASTRTPS_DEFAULT_PROFILES_FILE:-}\" && ! -f \"\${FASTRTPS_DEFAULT_PROFILES_FILE}\" ]]; then
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
 fi
 export A2D_SCRIPTS_DIR=\"${A2D_SCRIPTS_DIR}\"
 export PSIBOT_HOME=\"${PSIBOT_HOME_CONTAINER}\"

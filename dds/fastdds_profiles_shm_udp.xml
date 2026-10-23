@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <!--
+      Docker 内「宿主机可见」桥接用：SHM（收容器内相机）+ 内置 UDP（发给宿主机）。
+      相机节点仍可用仅 SHM 的 a2d 配置；本 profile 只给 bridge / 宿主机 viewer。
+    -->
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>shm_transport</transport_id>
+            <type>SHM</type>
+            <segment_size>134217728</segment_size>
+        </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="shm_udp_participant" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>shm_transport</transport_id>
+            </userTransports>
+            <!-- 打开 UDPv4 等内置传输，宿主机才能收到图像 -->
+            <useBuiltinTransports>true</useBuiltinTransports>
+        </rtps>
+    </participant>
+</profiles>

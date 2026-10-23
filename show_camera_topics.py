@@ -13,7 +13,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
   bash run_local.sh --tab "sub image" "sub task"  # 同时展示多个 tab
   bash run_local.sh --tab bagel,test              # 逗号分隔亦可
 
-顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D：采集标定 / baseline / 模型·HIL / FAQ / RRD 回放；R1 / Franka） / 本地摄像头（本机 MJPEG 推流 + SSH 反向隧道 + 预览） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / EmbodiedEvo / RAX / ASPIRE / FLORA / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
+顶部控制区按功能分为标签页：大脑 / 回放 / 分割 / 视觉基础模型 / 空间感知模型 / 3D重建模型 / 视频生成模型 / 世界模型 / CAD / 训练 / 手臂·手 / 手骨架遥控 / 仿真评测（Isaac / MuJoCo / MolmoSpaces / Psi-MolmoSpaces / IsaacLab-Arena / LIBERO / RoboTwin / 扩展：SimplerEnv·CALVIN·RoboCasa·ManiSkill·Genesis 等；各后端含业内评测榜单） / 真机评测（A2D：docker/local — 采集标定 / baseline / 模型·HIL / FAQ / RRD 回放；R1 / Franka） / 本地摄像头（本机直连监控 + MJPEG 推流 + SSH 反向隧道 + 预览） / Reward评测 / Reward训练 / 仿真强化学习训练 / RoboMeter / RynnValue / RoboICL / ICL / Astra / PhysicalRSI / EmbodiedEvo / RAX / ASPIRE / FLORA / 编程冲SOTA / HumanEgo / 数据集（开源梳理 + 本地浏览） / sub task / sub image。
 独立前端「测试工作室」：bash test_studio/run_test_studio.sh。
 
 前置条件：robot-service + 手/臂服务栈已运行，control_mode=0，手臂/手部已使能。
@@ -67,6 +67,7 @@ import socket
 import subprocess
 import shutil
 import tempfile
+import queue
 import threading
 import time
 import uuid
@@ -3664,6 +3665,29 @@ _SIM_TOPIC_TO_CAM_KEY: Dict[str, str] = {
     "/camera/left_wrist_depth": "cam_left_wrist",
     "/camera/right_wrist_color": "cam_right_wrist",
     "/camera/right_wrist_depth": "cam_right_wrist",
+    # A2D 真机常用 hand_* 命名（与 left_wrist_* 等价）
+    "/camera/hand_left_color": "cam_left_wrist",
+    "/camera/hand_left_depth": "cam_left_wrist",
+    "/camera/hand_right_color": "cam_right_wrist",
+    "/camera/hand_right_depth": "cam_right_wrist",
+}
+# 真机默认应勾选的彩色相机（头 + 左右腕/手）
+ESSENTIAL_A2D_CAMERA_COLOR_TOPICS = frozenset({
+    "/camera/head_color",
+    "/camera/hand_left_color",
+    "/camera/hand_right_color",
+    "/camera/left_wrist_color",
+    "/camera/right_wrist_color",
+})
+
+# 腕部彩色/深度 topic 别名：仿真 left_wrist_* ↔ 真机 hand_* 
+WRIST_COLOR_TOPIC_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "left": ("/camera/left_wrist_color", "/camera/hand_left_color"),
+    "right": ("/camera/right_wrist_color", "/camera/hand_right_color"),
+}
+WRIST_DEPTH_TOPIC_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "left": ("/camera/left_wrist_depth", "/camera/hand_left_depth"),
+    "right": ("/camera/right_wrist_depth", "/camera/hand_right_depth"),
 }
 _SIM_FRAME_TO_CAM_KEY: Dict[str, str] = {
     "camera_frame": "cam_head",
@@ -4111,9 +4135,15 @@ def list_reconstructed_meshes(meshes_dir: Optional[str] = None) -> List[Tuple[st
 PSI_POLICY_CONFIG_DEFAULT = "example_workspace_imle_rgb"
 PSI_POLICY_LOGGING_MODES = ("offline", "online", "disabled")
 MAX_GL_SEGMENT_POINTS = 4000
-UI_IMAGE_MIN_INTERVAL_S = 1.0 / 15.0
-UI_DEPTH_MIN_INTERVAL_S = 1.0 / 8.0
-UI_ROBOT_STATE_MIN_INTERVAL_S = 0.25
+UI_IMAGE_MIN_INTERVAL_S = 1.0 / 5.0
+UI_DEPTH_MIN_INTERVAL_S = 1.0 / 2.0
+UI_ROBOT_STATE_MIN_INTERVAL_S = 0.5
+# 预览缩放上限：先缩小再转 QPixmap，避免 UI 线程对 1280x800 做 Smooth 缩放卡死
+UI_PREVIEW_MAX_EDGE = 640
+# 同时显示太多路（尤其 depth）会卡死主线程；默认最多自动勾选这些彩色
+# 默认不自动勾选任何相机：实时刷图会与切 tab 抢主线程导致「无响应」
+UI_DEFAULT_COLOR_TOPIC_SUFFIXES: tuple = ()
+
 UI_TF_LOOKUP_TIMEOUT_S = 0.0
 MOVE_TF_LOOKUP_TIMEOUT_S = 1.0
 IK_TARGET_FRAME = "base_link"
@@ -4210,11 +4240,24 @@ ROBOT_RIGHT_TCP_TOPIC = "/mink_fk/right_tcp_pose"
 ROBOT_TELE_LEFT_TCP_TOPIC = "/tele/fk/left_pose"
 ROBOT_TELE_RIGHT_TCP_TOPIC = "/tele/fk/right_pose"
 ROBOT_TCP_SOURCE_TOPICS = {
-    "left": (ROBOT_TELE_LEFT_TCP_TOPIC, ROBOT_LEFT_TCP_TOPIC),
-    "right": (ROBOT_TELE_RIGHT_TCP_TOPIC, ROBOT_RIGHT_TCP_TOPIC),
+    # mink_fk 优先；tele/fk 常有空端点，放到后面按需订阅
+    "left": (ROBOT_LEFT_TCP_TOPIC, ROBOT_TELE_LEFT_TCP_TOPIC),
+    "right": (ROBOT_RIGHT_TCP_TOPIC, ROBOT_TELE_RIGHT_TCP_TOPIC),
 }
 ROBOT_LEFT_HAND_CMD_TOPIC = "/ry_hand/left/set_angles"
 ROBOT_RIGHT_HAND_CMD_TOPIC = "/ry_hand/right/set_angles"
+# 无本机 ruiyan 驱动时：机器人 onboard left/right_hand_command_node 订这些
+WBC_LEFT_EE_CMD_TOPIC = "/wbc/left_ee_command"
+WBC_RIGHT_EE_CMD_TOPIC = "/wbc/right_ee_command"
+# 宿主机→Docker 手令 UDP 中继（network=host 下 127.0.0.1 互通；绕过 FastDDS SHM 单向）
+HAND_CMD_RELAY_HOST = os.environ.get("HAND_CMD_RELAY_HOST", "127.0.0.1")
+HAND_CMD_RELAY_PORT = int(os.environ.get("HAND_CMD_RELAY_PORT", "19283"))
+HAND_CMD_RELAY_ENABLED = os.environ.get("HAND_CMD_RELAY", "1").strip().lower() not in (
+    "0",
+    "false",
+    "off",
+    "no",
+)
 BASE_LINK_FRAME = "base_link"
 LEFT_IK_TARGET_TOPIC = "/ik/left_target"
 RIGHT_IK_TARGET_TOPIC = "/ik/right_target"
@@ -4224,6 +4267,7 @@ WBC_TARGET_JOINTS_TOPIC = "/wbc/target_joints"
 CONTROL_MODE_TOPIC = "/control_mode"
 ARM_ENABLE_STATE_TOPIC = "/arm/enable_state"
 ARM_SET_ENABLE_SERVICE = "/arm/set_enable"
+ARM_RESET_TO_INITIAL_SERVICE = "/arm/reset_to_initial"
 HAND_ENABLE_STATE_TOPIC = "/hand/enable_state"
 HAND_SET_ENABLE_SERVICE = "/hand/set_enable"
 REPLAY_START_SERVICE = "/rrd_replay/start_replay"
@@ -5960,7 +6004,8 @@ LLM_PROVIDER_PRESETS: Dict[str, Tuple[str, str, str]] = {
 }
 IK_SYNC_TIMEOUT_S = 3.0
 MANUAL_OFFSET_MAX_M = 0.5
-MANUAL_OFFSET_STEP_M = 0.01
+MANUAL_OFFSET_MAX_CM = MANUAL_OFFSET_MAX_M * 100.0  # UI 用 cm
+MANUAL_OFFSET_STEP_CM = 1.0
 
 HAND_JOINT_NAMES = [
     "thumb_rotation",
@@ -5972,12 +6017,17 @@ HAND_JOINT_NAMES = [
 ]
 LEFT_HAND_JOINT_NAMES = list(HAND_JOINT_NAMES)
 RIGHT_HAND_JOINT_NAMES = list(HAND_JOINT_NAMES)
+# 与 a2d hand_joint_mapping 一致（原始量纲）。本机 hand_node 会再 *2000 后钳位到上限，仍可达最大速。
 HAND_CMD_VELOCITY = [2000.0] * 6
-HAND_CMD_EFFORT = [1200.0] * 6
+HAND_CMD_EFFORT = [800.0] * 6
 LEFT_HAND_CMD_VELOCITY = HAND_CMD_VELOCITY
 LEFT_HAND_CMD_EFFORT = HAND_CMD_EFFORT
-LEFT_HAND_ANGLE_A_DEFAULT = 0
-LEFT_HAND_ANGLE_B_DEFAULT = 45
+# 手指间距离（拇指↔对侧指尖近似）：0cm=全合，HAND_FINGER_GAP_MAX_CM=全张
+HAND_FINGER_GAP_MAX_CM = 12.0
+HAND_FINGER_GAP_STEP_CM = 0.1
+HAND_FINGER_GAP_SLIDER_MAX = int(round(HAND_FINGER_GAP_MAX_CM / HAND_FINGER_GAP_STEP_CM))
+LEFT_HAND_GAP_A_DEFAULT_CM = HAND_FINGER_GAP_MAX_CM  # 张开
+LEFT_HAND_GAP_B_DEFAULT_CM = 6.0  # 半开
 SKELETON_LOCAL_CAM_PREFIX = "local_webcam:"
 SKELETON_NETWORK_CAM_SOURCE = "network_stream"
 SKELETON_NETWORK_URL_DEFAULT = "http://127.0.0.1:8090/cam.mjpg"
@@ -6006,19 +6056,73 @@ LOCAL_WEBCAM_SSH_EXTRA_DEFAULT = (
     "-o ServerAliveInterval=30 -o ExitOnForwardFailure=yes"
 )
 LOCAL_WEBCAM_TAB_HELP = (
-    "本页用按钮完成本机摄像头转发（对应原先两条命令）：\n\n"
+    "本页支持两类用法：\n\n"
+    "【本机直连监控】摄像头插在当前机器（如 RealSense / USB 摄像头）时：\n"
+    "选设备 →「打开本机监控」，直接 V4L2 预览，无需推流/隧道。\n"
+    "Linux RealSense 彩色节点多为 /dev/video4（YUYV），深度多为 video0。\n\n"
+    "【转发到远端】摄像头在 Mac/笔记本、UI 在 Remote SSH 时：\n"
     "1) 「启动推流」→ 本机 MJPEG：\n"
     "   python3 examples/local_webcam_mjpeg_server.py --device 0 --port 8090\n"
     "2) 「启动隧道」→ SSH 反向端口：\n"
-    "   ssh -N -R 8090:127.0.0.1:8090 -p 10693 root@42.192.34.154\n\n"
-    "【Remote SSH / VNC】摄像头在 Mac、eai 在远端时：\n"
-    "请在 Mac 本机运行独立助手（同样两个按钮）：\n"
-    "   python3 examples/local_webcam_forward_ui.py\n"
-    "然后在本页或「真机评测」点「打开预览」。\n\n"
+    "   ssh -N -R 8090:127.0.0.1:8090 -p 10693 root@42.192.34.154\n"
+    "也可在 Mac 运行: python3 examples/local_webcam_forward_ui.py\n"
+    "然后点「打开预览」（URL 默认 http://127.0.0.1:8090/cam.mjpg）。\n\n"
     "macOS 首次推流需在「系统设置 → 隐私与安全性 → 摄像头」允许终端/Python。"
 )
-RIGHT_HAND_ANGLE_A_DEFAULT = 0
-RIGHT_HAND_ANGLE_B_DEFAULT = 45
+
+
+def list_local_v4l_devices() -> List[Tuple[str, str]]:
+    """扫描 /dev/video*，返回 [(index, 简述), ...]（跳过无像素格式的元数据节点）。"""
+    items: List[Tuple[str, str]] = []
+    for i in range(16):
+        path = f"/dev/video{i}"
+        if not os.path.exists(path):
+            continue
+        fourcc = ""
+        kind = "采集"
+        try:
+            import subprocess as _sp
+
+            out = _sp.check_output(
+                ["v4l2-ctl", "-d", path, "--list-formats-ext"],
+                text=True,
+                stderr=_sp.STDOUT,
+                timeout=2,
+            )
+            for line in out.splitlines():
+                s = line.strip()
+                if s.startswith("[") and "]:" in s and "'" in s:
+                    parts = s.split("'")
+                    if len(parts) >= 2:
+                        fourcc = parts[1].strip()
+                        break
+            if not fourcc:
+                continue
+            up = fourcc.upper()
+            if up in ("YUYV", "YUY2", "MJPG", "JPEG", "RGB3", "BGR3", "NV12"):
+                kind = "彩色"
+            elif up.startswith("Z16"):
+                kind = "深度"
+            elif up in ("GREY", "Y8  ", "Y8", "Y16 ", "Y16", "BYR2"):
+                kind = "红外/灰"
+            label = f"{i}  {path}  {kind}  ({fourcc})"
+        except Exception:
+            label = f"{i}  {path}"
+        items.append((str(i), label))
+    return items
+
+
+def suggest_local_webcam_device() -> str:
+    """优先彩色节点（YUYV/MJPG），否则列表第一项，再否则 0。"""
+    devices = list_local_v4l_devices()
+    for idx, label in devices:
+        if "彩色" in label:
+            return idx
+    if devices:
+        return devices[0][0]
+    return "0"
+RIGHT_HAND_GAP_A_DEFAULT_CM = HAND_FINGER_GAP_MAX_CM
+RIGHT_HAND_GAP_B_DEFAULT_CM = 6.0
 
 LEFT_ARM_JOINT_NAMES = [f"joint{i}_l" for i in range(1, 8)]
 RIGHT_ARM_JOINT_NAMES = [f"joint{i}_r" for i in range(1, 8)]
@@ -8577,12 +8681,55 @@ def slerp_xyzw(
 
 def make_manual_offset_spinbox() -> QDoubleSpinBox:
     spin = QDoubleSpinBox()
-    spin.setRange(-MANUAL_OFFSET_MAX_M, MANUAL_OFFSET_MAX_M)
-    spin.setSingleStep(MANUAL_OFFSET_STEP_M)
-    spin.setDecimals(3)
-    spin.setSuffix("m")
-    spin.setFixedWidth(76)
+    spin.setRange(-MANUAL_OFFSET_MAX_CM, MANUAL_OFFSET_MAX_CM)
+    spin.setSingleStep(MANUAL_OFFSET_STEP_CM)
+    spin.setDecimals(1)
+    spin.setSuffix(" cm")
+    spin.setFixedWidth(84)
     return spin
+
+
+def make_positive_offset_spinbox(default_cm: float = 5.0) -> QDoubleSpinBox:
+    """单方向步长（cm，≥0），用于前/后/左/右/上/下各自输入框。"""
+    spin = QDoubleSpinBox()
+    spin.setRange(0.0, MANUAL_OFFSET_MAX_CM)
+    spin.setSingleStep(MANUAL_OFFSET_STEP_CM)
+    spin.setDecimals(1)
+    spin.setSuffix(" cm")
+    spin.setFixedWidth(84)
+    spin.setValue(float(default_cm))
+    return spin
+
+
+# 六向：前(+X) 后(-X) 左(+Y) 右(-Y) 上(+Z) 下(-Z)
+ARM_DIR_ORDER: Tuple[str, ...] = (
+    "forward",
+    "back",
+    "left",
+    "right",
+    "up",
+    "down",
+)
+ARM_DIR_LABEL_CN: Dict[str, str] = {
+    "forward": "前",
+    "back": "后",
+    "left": "左",
+    "right": "右",
+    "up": "上",
+    "down": "下",
+}
+
+
+def manual_offset_spin_to_m(spin: QDoubleSpinBox) -> float:
+    """UI 偏移旋钮（cm）→ 米。"""
+    return float(spin.value()) * 0.01
+
+
+def set_manual_offset_spin_m(spin: QDoubleSpinBox, meters: float) -> None:
+    """按米写入偏移旋钮（内部换算为 cm 并夹紧）。"""
+    cm = float(meters) * 100.0
+    cm = max(-MANUAL_OFFSET_MAX_CM, min(MANUAL_OFFSET_MAX_CM, cm))
+    spin.setValue(cm)
 
 
 def compute_relative_move_goal(
@@ -8600,7 +8747,10 @@ def compute_relative_move_goal(
     return ResolvedArmMoveGoal(
         position_xyz=goal_xyz,
         quaternion_xyzw=current_quat,
-        label=f"{side_name}相对偏移 Δ({dx:+.3f}, {dy:+.3f}, {dz:+.3f}) m",
+        label=(
+            f"{side_name}相对偏移 "
+            f"Δ({dx * 100:+.1f}, {dy * 100:+.1f}, {dz * 100:+.1f}) cm"
+        ),
         arm_side=arm_side,
     )
 
@@ -9194,13 +9344,35 @@ def apply_segment_overlay(
     return display
 
 
-def cv2_to_qpixmap(cv_image: np.ndarray) -> QPixmap:
-    display = cv_image
+def cv2_to_qpixmap(
+    cv_image: np.ndarray,
+    *,
+    max_edge: Optional[int] = None,
+) -> QPixmap:
+    display = np.asarray(cv_image)
     if len(display.shape) == 2:
         display = cv2.normalize(display, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
         display = cv2.applyColorMap(display, cv2.COLORMAP_JET)
 
-    rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+    if max_edge is None:
+        max_edge = UI_PREVIEW_MAX_EDGE
+    if max_edge and max_edge > 0:
+        h0, w0 = display.shape[:2]
+        edge = max(h0, w0)
+        if edge > max_edge:
+            scale = float(max_edge) / float(edge)
+            display = cv2.resize(
+                display,
+                (max(1, int(w0 * scale)), max(1, int(h0 * scale))),
+                interpolation=cv2.INTER_AREA,
+            )
+
+    if display.ndim == 2:
+        rgb = cv2.cvtColor(display, cv2.COLOR_GRAY2RGB)
+    else:
+        rgb = cv2.cvtColor(display, cv2.COLOR_BGR2RGB)
+    # 必须 contiguous，且 QImage 不拥有 buffer → copy
+    rgb = np.ascontiguousarray(rgb)
     h, w, ch = rgb.shape
     qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
     return QPixmap.fromImage(qimg.copy())
@@ -9690,15 +9862,35 @@ def make_tcp_axis_lines(center: np.ndarray, rotation: np.ndarray, scale: float =
     return np.stack(lines, axis=0).astype(np.float32)
 
 
-def slider_to_hand_position(slider_pct: int) -> float:
-    """游标 0~100 直接映射关节 position：0=完全张开，100=完全闭合。"""
-    slider_pct = max(0, min(100, int(slider_pct)))
-    return slider_pct / 100.0
+def hand_gap_cm_to_slider(cm: float) -> int:
+    cm = max(0.0, min(HAND_FINGER_GAP_MAX_CM, float(cm)))
+    return int(round(cm / HAND_FINGER_GAP_STEP_CM))
 
 
-def format_hand_angle_label(slider_pct: int) -> str:
-    pos = slider_to_hand_position(slider_pct)
-    return f"角度 {pos:.2f}"
+def slider_to_hand_gap_cm(slider: int) -> float:
+    slider = max(0, min(HAND_FINGER_GAP_SLIDER_MAX, int(slider)))
+    return slider * HAND_FINGER_GAP_STEP_CM
+
+
+def hand_gap_cm_to_position(cm: float) -> float:
+    """指间距离 cm → 关节 position：0cm=全合(1)，max=全张(0)。"""
+    cm = max(0.0, min(HAND_FINGER_GAP_MAX_CM, float(cm)))
+    if HAND_FINGER_GAP_MAX_CM <= 1e-9:
+        return 1.0
+    return 1.0 - (cm / HAND_FINGER_GAP_MAX_CM)
+
+
+def slider_to_hand_position(slider: int) -> float:
+    """游标（0.1cm 步进）→ 关节 position。"""
+    return hand_gap_cm_to_position(slider_to_hand_gap_cm(slider))
+
+
+def format_hand_gap_label(slider: int) -> str:
+    return f"{slider_to_hand_gap_cm(slider):.1f} cm"
+
+
+# 兼容旧名
+format_hand_angle_label = format_hand_gap_label
 
 
 def make_hand_command(
@@ -9733,6 +9925,85 @@ def make_left_hand_command(position: float | Sequence[float]) -> JointState:
 
 def make_right_hand_command(position: float | Sequence[float]) -> JointState:
     return make_hand_command("right", position)
+
+
+_hand_cmd_relay_sock: Optional[socket.socket] = None
+_hand_cmd_relay_warned = False
+
+
+def _hand_cmd_relay_socket() -> Optional[socket.socket]:
+    global _hand_cmd_relay_sock, _hand_cmd_relay_warned
+    if not HAND_CMD_RELAY_ENABLED:
+        return None
+    if _hand_cmd_relay_sock is not None:
+        return _hand_cmd_relay_sock
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        _hand_cmd_relay_sock = sock
+        return sock
+    except OSError as exc:
+        if not _hand_cmd_relay_warned:
+            _hand_cmd_relay_warned = True
+            print(f"[hand_cmd_relay] UDP socket 创建失败: {exc}", file=sys.stderr)
+        return None
+
+
+def _relay_udp_payload(payload: dict) -> None:
+    """经 UDP 中继把 JSON 送进 Docker（与 ROS pub 并行；DDS 不通时仍可控制）。"""
+    sock = _hand_cmd_relay_socket()
+    if sock is None:
+        return
+    try:
+        sock.sendto(
+            (json.dumps(payload, separators=(",", ":")) + "\n").encode("utf-8"),
+            (HAND_CMD_RELAY_HOST, HAND_CMD_RELAY_PORT),
+        )
+    except OSError:
+        pass
+
+
+def relay_hand_command(side: str, msg: JointState) -> None:
+    side = "right" if side == "right" else "left"
+    _relay_udp_payload(
+        {
+            "type": "hand",
+            "side": side,
+            "name": list(msg.name),
+            "position": [float(x) for x in msg.position],
+            "velocity": [float(x) for x in msg.velocity],
+            "effort": [float(x) for x in msg.effort],
+        }
+    )
+
+
+def relay_wbc_joints(msg: JointState) -> None:
+    _relay_udp_payload(
+        {
+            "type": "wbc_joints",
+            "frame_id": str(msg.header.frame_id or ""),
+            "name": list(msg.name),
+            "position": [float(x) for x in msg.position],
+            "velocity": [float(x) for x in msg.velocity],
+            "effort": [float(x) for x in msg.effort],
+        }
+    )
+
+
+def relay_control_mode(mode: int) -> None:
+    _relay_udp_payload({"type": "control_mode", "mode": int(mode)})
+
+
+def relay_arm_enable(enable: bool = True) -> None:
+    _relay_udp_payload({"type": "arm_enable", "data": bool(enable)})
+
+
+def relay_hand_enable(enable: bool = True) -> None:
+    _relay_udp_payload({"type": "hand_enable", "data": bool(enable)})
+
+
+def relay_arm_reset_to_initial(data: bool = True) -> None:
+    _relay_udp_payload({"type": "arm_reset", "data": bool(data)})
 
 
 @dataclass
@@ -13483,6 +13754,8 @@ class ChatPanelWidget(QWidget):
 
 class RosBridge(QObject):
     frame_updated = pyqtSignal(str, object)
+    # 合并投递：避免跨线程 QueuedConnection 堆积大量图像拷贝导致 UI 卡死/内存暴涨
+    frame_tick = pyqtSignal()
     topics_updated = pyqtSignal(dict)
     status_message = pyqtSignal(str)
     frame_stats = pyqtSignal(str, int, float)
@@ -13634,7 +13907,14 @@ class ScaledPixmapLabel(QLabel):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        self._refresh_scaled()
+        # 切 tab 会连环 resize，立即 Smooth 缩放会卡死点击
+        t = getattr(self, "_resize_timer", None)
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(self._refresh_scaled)
+            self._resize_timer = t
+        t.start(80)
 
     def _refresh_scaled(self) -> None:
         if self._source_pixmap is None or self._source_pixmap.isNull():
@@ -13642,7 +13922,7 @@ class ScaledPixmapLabel(QLabel):
         scaled = self._source_pixmap.scaled(
             self.size(),
             Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.FastTransformation,
         )
         super().setPixmap(scaled)
 
@@ -13856,7 +14136,7 @@ class ClickableImageLabel(QLabel):
                 pose_axis_len=self._pose_axis_len,
             )
         else:
-            display = self._source_image.copy()
+            display = self._source_image
         hud = self._pose_hud
         if hud and self._pose_position is not None and self._pose_rotation is not None:
             rpy = rotation_matrix_to_euler_xyz(
@@ -13908,10 +14188,11 @@ class ClickableImageLabel(QLabel):
         if target.width() < 16 or target.height() < 16:
             self.setPixmap(self._latest_pixmap)
             return
+        # Fast：实时预览用；Smooth 会把主线程打满 → 「无响应」
         scaled = self._latest_pixmap.scaled(
             target,
             Qt.KeepAspectRatio,
-            Qt.SmoothTransformation,
+            Qt.FastTransformation,
         )
         self.setPixmap(scaled)
 
@@ -13947,7 +14228,13 @@ class ClickableImageLabel(QLabel):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._render_pixmap()
+        t = getattr(self, "_resize_timer", None)
+        if t is None:
+            t = QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(self._render_pixmap)
+            self._resize_timer = t
+        t.start(80)
 
 
 class CameraPanel(QWidget):
@@ -14204,7 +14491,8 @@ class CameraPanel(QWidget):
             self._status_callback(f"[{self.topic}] 已选提示点 ({u}, {v})")
 
     def update_frame(self, cv_image: np.ndarray) -> None:
-        self._latest_image = cv_image.copy()
+        # 不在此再 copy：帧已由 take_pending_ui_frames 交接给 UI 线程
+        self._latest_image = np.asarray(cv_image)
         self.image_label.set_source_image(self._latest_image)
 
         self._frame_count += 1
@@ -14886,10 +15174,31 @@ class DepthPanel3D(QWidget):
         self._last_display_time = now
         snap = self._latest_depth
         fx, fy, cx, cy = self._intrinsics
+        need_cloud = bool(self._gl_ready)
 
         def _work() -> None:
             try:
-                result = build_depth_viz_data(snap.copy(), fx, fy, cx, cy)
+                if need_cloud:
+                    result = build_depth_viz_data(snap.copy(), fx, fy, cx, cy)
+                else:
+                    # 2D 预览：只做伪彩，不做点云（多路 depth 时点云会卡死 UI）
+                    preview_vis = build_depth_preview_image(snap)
+                    h, w = snap.shape[:2]
+                    ph, pw = preview_vis.shape[:2]
+                    result = DepthVizResult(
+                        preview_vis=preview_vis,
+                        preview_shape=(ph, pw),
+                        preview_intrinsics=(
+                            fx * (pw / w),
+                            fy * (ph / h),
+                            cx * (pw / w),
+                            cy * (ph / h),
+                        ),
+                        points=np.zeros((0, 3), dtype=np.float32),
+                        colors=np.zeros((0, 4), dtype=np.float32),
+                        point_count=0,
+                        full_shape=(h, w),
+                    )
             except Exception:
                 result = None
             self._depth_viz_bridge.finished.emit(result)
@@ -15022,18 +15331,41 @@ class CameraTopicNode(Node):
         self._robot_resubscribe_count: Dict[str, int] = {}
         self._robot_last_subscribe_time: Dict[str, float] = {}
         self._robot_tcp_topic_received: Dict[str, bool] = {}
+        self._robot_tcp_give_up: Dict[str, bool] = {}
+        self._topic_graph_cache: Optional[Dict[str, List[str]]] = None
+        self._topic_graph_cache_at = 0.0
+        self._last_tcp_accept_time: Dict[str, float] = {}
+        self._tcp_min_interval_s = 0.1  # mink_fk~100Hz，UI 限到 10Hz 防卡顿
+        self._pending_ui_frames: Dict[str, np.ndarray] = {}
+        self._pending_ui_stats: Dict[str, Tuple[int, float]] = {}
+        self._pending_ui_lock = threading.Lock()
+        self._frame_tick_pending = False
 
         self._robot_lock = threading.Lock()
         self._robot_state = RobotStateSnapshot([], [], [], [], [], None, None, 0.0)
         self._last_robot_state_emit = 0.0
-        from tf2_ros import Buffer as _TfBuffer, TransformListener
+        from tf2_ros import Buffer as _TfBuffer
 
+        # TF / 机器人订阅 / 相机扫描：不在启动时自动做，等 UI 按钮
         self._tf_buffer = _TfBuffer()
-        self._tf_listener = TransformListener(self._tf_buffer, self, spin_thread=True)
-        # A2D: image frame_id 是 camera_frame，但默认 TF 树没有它；自动补发 base_link->camera_frame
+        self._tf_listener = None
         self._head_camera_tf = None
-        if attach_head_camera_tf is not None:
-            self._head_camera_tf = attach_head_camera_tf(self)
+        self._robot_subs_ready = False
+        self._topic_scan_ready = False
+        self._TransformListener = None  # lazy import
+        self._allow_robot_qos_probe = False
+        self._pending_head_camera_tf = False
+        self._robot_connect_steps = []
+        self._robot_connect_step_i = 0
+        self._robot_connect_label = ""
+        self._robot_connect_error = ""
+        self._robot_connect_running = False
+        self._robot_ui_quiet_until = 0.0
+        self._robot_extras_due_at = 0.0
+        self._robot_extra_step_list = None
+        self._robot_extra_step_i = 0
+        self._robot_cb_last = {}
+        self._ros_op_queue: "queue.SimpleQueue[Callable[[], None]]" = queue.SimpleQueue()
         self._left_hand_cmd_pub = self.create_publisher(
             JointState,
             ROBOT_LEFT_HAND_CMD_TOPIC,
@@ -15042,6 +15374,17 @@ class CameraTopicNode(Node):
         self._right_hand_cmd_pub = self.create_publisher(
             JointState,
             ROBOT_RIGHT_HAND_CMD_TOPIC,
+            10,
+        )
+        # 机器人本体 hand_command_node（无 Docker / 无本机 ruiyan 时生效）
+        self._left_ee_cmd_pub = self.create_publisher(
+            JointState,
+            WBC_LEFT_EE_CMD_TOPIC,
+            10,
+        )
+        self._right_ee_cmd_pub = self.create_publisher(
+            JointState,
+            WBC_RIGHT_EE_CMD_TOPIC,
             10,
         )
         self._left_ik_pub = self.create_publisher(
@@ -15076,20 +15419,11 @@ class CameraTopicNode(Node):
         )
         self._ik_sync_client = self.create_client(Trigger, "/ik/sync_joint_state")
         self._arm_set_enable_client = self.create_client(SetBool, ARM_SET_ENABLE_SERVICE)
+        self._arm_reset_client = self.create_client(SetBool, ARM_RESET_TO_INITIAL_SERVICE)
         self._hand_set_enable_client = self.create_client(SetBool, HAND_SET_ENABLE_SERVICE)
         self._replay_start_client = self.create_client(Trigger, REPLAY_START_SERVICE)
         self._replay_stop_client = self.create_client(Trigger, REPLAY_STOP_SERVICE)
-        self._wbc_target_joints_sub = self.create_subscription(
-            JointState,
-            WBC_TARGET_JOINTS_TOPIC,
-            self._on_wbc_target_joints,
-            QoSProfile(
-                reliability=ReliabilityPolicy.RELIABLE,
-                history=HistoryPolicy.KEEP_LAST,
-                depth=10,
-                durability=DurabilityPolicy.VOLATILE,
-            ),
-        )
+        self._wbc_target_joints_sub = None
         self._left_hand_at_a = True
         self._right_hand_at_a = True
         self._slow_motion_active = False
@@ -15133,9 +15467,7 @@ class CameraTopicNode(Node):
         self._hand_enabled_since = 0.0
         self._replay_running_state = 0
         self._scan_timer = None
-        self._setup_robot_subscriptions()
-
-        self._scan_timer = self.create_timer(2.0, self._on_timer)
+        # 不自动 _setup_robot_subscriptions / 不启动 topic 扫描定时器
 
     def prepare_shutdown(self) -> None:
         """关闭窗口时停止 ROS 定时器与慢速移动，避免退出阻塞。"""
@@ -15161,6 +15493,7 @@ class CameraTopicNode(Node):
             self._scan_timer = None
         self._stop_replay_prep_mode_timer()
         self._tf_listener = None
+        self._robot_extras_due_at = 0.0
 
     def is_left_hand_at_a(self) -> bool:
         return self._left_hand_at_a
@@ -15195,37 +15528,54 @@ class CameraTopicNode(Node):
     def get_arm_enable_label(self) -> str:
         if not self._arm_enable_received_at:
             return "手臂: 等待 /arm/enable_state ..."
-        return f"手臂: {'已使能' if self._arm_enabled else '未使能 (点「移动」将自动使能)'}"
+        return f"手臂: {'已使能' if self._arm_enabled else '未使能（请点「启用手臂」）'}"
 
     def request_arm_enable(self, enable: bool = True) -> str:
         if enable and self._arm_enabled:
             return "手臂已使能"
         if not enable and not self._arm_enabled:
             return "手臂已关闭"
-        if not self._arm_set_enable_client.service_is_ready():
-            if not self._arm_set_enable_client.wait_for_service(timeout_sec=1.5):
-                return f"服务 {ARM_SET_ENABLE_SERVICE} 不可用（请确认 topic_router 已启动）"
+        # 宿主机桥：UDP + ROS 服务（无 Docker）
+        relay_arm_enable(bool(enable))
+        self._call_set_enable_async(self._arm_set_enable_client, bool(enable), "arm")
+        self.get_logger().info(f"arm/set_enable({enable}) via host bridge")
+        # 本地立即门控，避免关使能后短暂窗口仍可点移动 / 发轨迹
+        prev = self._arm_enabled
+        self._arm_enabled = bool(enable)
+        self._arm_enabled_since = time.time() if enable else 0.0
+        if self._arm_enable_received_at <= 0:
+            self._arm_enable_received_at = time.time()
+        if prev != self._arm_enabled:
+            self.ros_bridge.arm_enable_changed.emit(self._arm_enabled)
+        if enable:
+            return "已请求启用手臂（宿主机桥，请等待「已使能」）"
+        return "已请求关闭手臂"
+
+    def request_arm_reset_to_initial(self) -> str:
+        """调用 /arm/reset_to_initial，把手臂（含腰/头）回到初始位姿。"""
+        relay_arm_reset_to_initial(True)
+        if not self._arm_reset_client.service_is_ready():
+            if not self._arm_reset_client.wait_for_service(timeout_sec=0.3):
+                return "已中继请求回初始位（请确认 arm_control 已运行）"
         req = SetBool.Request()
-        req.data = bool(enable)
-        future = self._arm_set_enable_client.call_async(req)
+        req.data = True
+        future = self._arm_reset_client.call_async(req)
 
         def _done(fut) -> None:
             try:
                 result = fut.result()
                 if result and result.success:
                     self.get_logger().info(
-                        f"arm/set_enable({enable}) OK: {result.message}"
+                        f"arm/reset_to_initial OK: {result.message}"
                     )
                 else:
                     msg = result.message if result else "无响应"
-                    self.get_logger().warn(f"arm/set_enable 失败: {msg}")
+                    self.get_logger().warn(f"arm/reset_to_initial 失败: {msg}")
             except Exception as exc:
-                self.get_logger().warn(f"arm/set_enable 异常: {exc}")
+                self.get_logger().warn(f"arm/reset_to_initial 异常: {exc}")
 
         future.add_done_callback(_done)
-        if enable:
-            return "已请求启用手臂（初始化约需数秒，请等待状态变为「已使能」）"
-        return "已请求关闭手臂"
+        return "已请求手臂回初始位"
 
     def is_hand_enabled(self) -> bool:
         return self._hand_enabled
@@ -15254,31 +15604,39 @@ class CameraTopicNode(Node):
             return "手部已使能"
         if not enable and not self._hand_enabled:
             return "手部已关闭"
-        if not self._hand_set_enable_client.service_is_ready():
-            if not self._hand_set_enable_client.wait_for_service(timeout_sec=1.5):
-                return f"服务 {HAND_SET_ENABLE_SERVICE} 不可用（请确认 topic_router 已启动）"
-        req = SetBool.Request()
-        req.data = bool(enable)
-        future = self._hand_set_enable_client.call_async(req)
-
-        def _done(fut) -> None:
-            try:
-                result = fut.result()
-                if result and result.success:
-                    self.get_logger().info(
-                        f"hand/set_enable({enable}) OK: {result.message}"
-                    )
-                else:
-                    msg = result.message if result else "无响应"
-                    self.get_logger().warn(f"hand/set_enable 失败: {msg}")
-            except Exception as exc:
-                self.get_logger().warn(f"hand/set_enable 异常: {exc}")
-
-        future.add_done_callback(_done)
+        relay_hand_enable(bool(enable))
+        self._call_set_enable_async(self._hand_set_enable_client, bool(enable), "hand")
+        self.get_logger().info(f"hand/set_enable({enable}) via host bridge")
         if enable:
-            return "已请求启用手部"
+            return "已请求启用手部（宿主机桥）"
         return "已请求关闭手部"
 
+    def _call_set_enable_async(self, client, enable: bool, label: str) -> None:
+        def _do() -> None:
+            try:
+                if not client.service_is_ready():
+                    if not client.wait_for_service(timeout_sec=0.4):
+                        return
+                req = SetBool.Request()
+                req.data = bool(enable)
+                fut = client.call_async(req)
+
+                def _done(f) -> None:
+                    try:
+                        res = f.result()
+                        self.get_logger().info(
+                            f"{label}/set_enable({enable}) -> "
+                            f"{getattr(res, 'success', None)} "
+                            f"{getattr(res, 'message', '')}"
+                        )
+                    except Exception as exc:
+                        self.get_logger().warn(f"{label}/set_enable 失败: {exc}")
+
+                fut.add_done_callback(_done)
+            except Exception as exc:
+                self.get_logger().warn(f"{label}/set_enable 异常: {exc}")
+
+        self.enqueue_ros_op(_do)
     def get_replay_state(self) -> int:
         return self._replay_running_state
 
@@ -15382,7 +15740,12 @@ class CameraTopicNode(Node):
         tcp = state.left_tcp if side == "left" else state.right_tcp
         if tcp is None or not tcp.valid:
             return None
-        transformed = transform_pose_to_base(
+        # mink_fk / host_fk 标 frame=map，数值即 base_link：先走别名，禁止先 lookup_transform
+        #（无 TF 时 Duration(1s) 会把 Qt 主线程卡死）
+        src = normalize_frame_id(tcp.frame_id)
+        if src == normalize_frame_id(IK_TARGET_FRAME) or src in MINK_FK_FRAME_ALIASES:
+            return tcp.xyz, tcp.quat_xyzw
+        return transform_pose_to_base(
             tcp.xyz,
             tcp.quat_xyzw,
             tcp.frame_id,
@@ -15390,14 +15753,6 @@ class CameraTopicNode(Node):
             base_frame=IK_TARGET_FRAME,
             timeout_s=timeout_s,
         )
-        if transformed is not None:
-            return transformed
-        src = normalize_frame_id(tcp.frame_id)
-        if src == normalize_frame_id(IK_TARGET_FRAME):
-            return tcp.xyz, tcp.quat_xyzw
-        if src in MINK_FK_FRAME_ALIASES:
-            return tcp.xyz, tcp.quat_xyzw
-        return None
 
     def _get_left_tcp_in_base(
         self,
@@ -15416,10 +15771,10 @@ class CameraTopicNode(Node):
         if not self._arm_enabled:
             if self._arm_enable_received_at <= 0:
                 blockers.append(
-                    f"未收到 {ARM_ENABLE_STATE_TOPIC}（点「移动」将尝试自动使能）"
+                    f"未收到 {ARM_ENABLE_STATE_TOPIC}（请先点「启用手臂」）"
                 )
             else:
-                blockers.append("手臂未使能（点「移动」将自动使能，或按 F2 /「启用手臂」）")
+                blockers.append("手臂未使能（请先点「启用手臂」）")
         state = self.get_robot_state()
         if state.left_tcp is None or not state.left_tcp.valid:
             blockers.append("无左臂 TCP 数据（/tele/fk/left_pose 或 /mink_fk/left_tcp_pose）")
@@ -15440,7 +15795,8 @@ class CameraTopicNode(Node):
     def _format_arm_tcp_current_line(self, side: str) -> str:
         state = self.get_robot_state()
         side_name = arm_side_label(side)
-        tcp = self._tcp_pose_in_ik_frame(side)
+        # UI 展示路径禁止阻塞 TF
+        tcp = self._tcp_pose_in_ik_frame(side, timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
         if tcp is not None:
             xyz, quat = tcp
             return format_xyz_rpy_line(side_name, xyz, quat)
@@ -15565,6 +15921,7 @@ class CameraTopicNode(Node):
         msg = UInt32()
         msg.data = int(mode)
         self._control_mode_pub.publish(msg)
+        relay_control_mode(int(mode))
         self._control_mode = int(mode)
 
     def request_model_control_mode(self) -> str:
@@ -15640,7 +15997,57 @@ class CameraTopicNode(Node):
         return msg
 
     def _publish_wbc_joint_target(self, positions: List[float]) -> None:
-        self._wbc_joint_pub.publish(self._make_wbc_joint_msg(positions))
+        if not self._arm_enabled:
+            self.get_logger().warn(
+                "跳过关节目标：手臂未使能（请先点「启用手臂」）"
+            )
+            return
+        msg = self._make_wbc_joint_msg(positions)
+        self._wbc_joint_pub.publish(msg)
+        relay_wbc_joints(msg)
+
+    def _load_host_fk_q16(self) -> Optional[List[float]]:
+        """从 host_fk 状态文件或 HAL UI 缓存取 16 关节种子（腰2+双臂14）。"""
+        path = os.environ.get(
+            "EAI_HOST_FK_STATE",
+            os.path.join(tempfile.gettempdir(), "eai_host_fk_state.json"),
+        )
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            q = data.get("q16")
+            if isinstance(q, list) and len(q) >= 16:
+                age = time.time() - float(data.get("t") or 0.0)
+                if age < 5.0:
+                    return [float(x) for x in q[:16]]
+        except Exception:
+            pass
+        # 兜底：robot_state 里的腰+臂
+        names = [
+            "joint_lift_body",
+            "joint_body_pitch",
+            "joint1_l",
+            "joint2_l",
+            "joint3_l",
+            "joint4_l",
+            "joint5_l",
+            "joint6_l",
+            "joint7_l",
+            "joint1_r",
+            "joint2_r",
+            "joint3_r",
+            "joint4_r",
+            "joint5_r",
+            "joint6_r",
+            "joint7_r",
+        ]
+        with self._robot_lock:
+            d = dict(self._robot_state.waist)
+            d.update(dict(self._robot_state.left_arm))
+            d.update(dict(self._robot_state.right_arm))
+        if not all(n in d for n in names[2:]):
+            return None
+        return [float(d.get(n, 0.0)) for n in names]
 
     def _stop_slow_motion_prep_timer(self) -> None:
         if self._slow_motion_prep_timer is not None:
@@ -15800,7 +16207,13 @@ class CameraTopicNode(Node):
             sync_future = prep.get("sync_future")
             if sync_future is None:
                 if not self._ik_sync_client.wait_for_service(timeout_sec=0.0):
-                    self._abort_slow_motion_prep("IK sync 服务不可用，请确认 ik_node 运行")
+                    # 无 ik_node：改用宿主机 pinocchio CLIK → /wbc/arm_command
+                    self.get_logger().warn(
+                        "IK sync 不可用，改用宿主机 HostArmIK（无 ik_node）"
+                    )
+                    prep["use_host_ik"] = True
+                    prep["phase"] = "host_ik"
+                    self.ros_bridge.slow_motion_progress.emit(0.0, "宿主机 IK 求解中...")
                     return
                 prep["sync_future"] = self._ik_sync_client.call_async(Trigger.Request())
                 prep["sync_deadline"] = time.time() + IK_SYNC_TIMEOUT_S
@@ -15828,6 +16241,51 @@ class CameraTopicNode(Node):
             prep["warmup_step"] = 0
             prep["phase"] = "warmup"
             self.ros_bridge.slow_motion_progress.emit(0.0, "正在预热 IK 目标...")
+            return
+
+        if phase == "host_ik":
+            hold_xyz, hold_quat = prep["hold_pose"]  # type: ignore[misc]
+            self._slow_motion_hold_pose = (hold_xyz, hold_quat)
+            self._slow_motion_moving_side = str(prep.get("moving_side", "left"))
+            goal_xyz = prep["goal_xyz"]  # type: ignore[assignment]
+            goal_quat = prep["goal_quat"]  # type: ignore[assignment]
+            self._slow_motion_final_moving_pose = (goal_xyz, goal_quat)  # type: ignore[arg-type]
+            seed = self._load_host_fk_q16()
+            if seed is None:
+                self._abort_slow_motion_prep(
+                    "无法读取当前关节角（请确认 host_fk 已写 eai_host_fk_state.json，或 HAL 臂关节已就绪）"
+                )
+                return
+            try:
+                from host_arm_ik import get_host_arm_ik
+
+                ik = get_host_arm_ik()
+                solved = ik.solve(
+                    seed,
+                    moving_side=str(prep.get("moving_side", "left")),
+                    goal_xyz=tuple(goal_xyz),  # type: ignore[arg-type]
+                    goal_xyzw=tuple(goal_quat),  # type: ignore[arg-type]
+                )
+            except Exception as exc:
+                self._abort_slow_motion_prep(f"宿主机 IK 失败: {exc}")
+                return
+            if solved is None:
+                sx, sy, sz = prep["start_xyz"]  # type: ignore[misc]
+                gx, gy, gz = goal_xyz  # type: ignore[misc]
+                cart = ((gx - sx) ** 2 + (gy - sy) ** 2 + (gz - sz) ** 2) ** 0.5
+                self._abort_slow_motion_prep(
+                    f"宿主机 IK 未收敛（笛卡尔距离 {cart:.3f} m），目标可能不可达"
+                )
+                return
+            prep["motion_start_joints"] = list(seed)
+            prep["goal_joints"] = list(solved)
+            prep["start_joints"] = list(seed)
+            max_d = max(abs(solved[i] - seed[i]) for i in range(16))
+            self.get_logger().info(
+                f"宿主机 IK 成功: max|Δq|={max_d:.4f} rad → 关节轨迹 "
+                f"(bridge 转发 /wbc/arm_command)"
+            )
+            self._start_joint_move_from_prep(prep, goal)
             return
 
         if phase == "warmup":
@@ -16048,25 +16506,51 @@ class CameraTopicNode(Node):
             f"移动中 {progress * 100:.0f}%",
         )
 
-    def apply_left_hand_angle(self, slider_pct: int) -> float:
-        """按游标位置发送左手角度命令，返回实际 position。"""
-        pos = slider_to_hand_position(slider_pct)
+    def _publish_hand_command(self, side: str, msg: JointState) -> bool:
+        """发到 ry_hand（本机驱动）+ wbc ee（机器人 onboard）+ UDP 桥。
+
+        未「启用手」时直接拒绝（UI 以前直发 set_angles，关使能仍能动）。
+        """
+        if not self._hand_enabled:
+            self.get_logger().warn(
+                "跳过手部指令：手未使能（请先点「启用手」）"
+            )
+            return False
+        side = "right" if side == "right" else "left"
+        if side == "right":
+            self._right_hand_cmd_pub.publish(msg)
+            self._right_ee_cmd_pub.publish(msg)
+        else:
+            self._left_hand_cmd_pub.publish(msg)
+            self._left_ee_cmd_pub.publish(msg)
+        relay_hand_command(side, msg)
+        return True
+
+    def apply_left_hand_angle(self, slider: int) -> float:
+        """按指间距离游标发送左手命令，返回关节 position（未使能则不发）。"""
+        gap_cm = slider_to_hand_gap_cm(slider)
+        pos = slider_to_hand_position(slider)
         msg = make_left_hand_command(pos)
         msg.header.stamp = self.get_clock().now().to_msg()
-        self._left_hand_cmd_pub.publish(msg)
+        if not self._publish_hand_command("left", msg):
+            return pos
         self.get_logger().info(
-            f"左手命令 -> position={pos:.3f} (游标={slider_pct}): {ROBOT_LEFT_HAND_CMD_TOPIC}"
+            f"左手命令 -> gap={gap_cm:.1f}cm position={pos:.3f}: "
+            f"{ROBOT_LEFT_HAND_CMD_TOPIC} + {WBC_LEFT_EE_CMD_TOPIC}"
         )
         return pos
 
-    def apply_right_hand_angle(self, slider_pct: int) -> float:
-        """按游标位置发送右手角度命令，返回实际 position。"""
-        pos = slider_to_hand_position(slider_pct)
+    def apply_right_hand_angle(self, slider: int) -> float:
+        """按指间距离游标发送右手命令，返回关节 position（未使能则不发）。"""
+        gap_cm = slider_to_hand_gap_cm(slider)
+        pos = slider_to_hand_position(slider)
         msg = make_right_hand_command(pos)
         msg.header.stamp = self.get_clock().now().to_msg()
-        self._right_hand_cmd_pub.publish(msg)
+        if not self._publish_hand_command("right", msg):
+            return pos
         self.get_logger().info(
-            f"右手命令 -> position={pos:.3f} (游标={slider_pct}): {ROBOT_RIGHT_HAND_CMD_TOPIC}"
+            f"右手命令 -> gap={gap_cm:.1f}cm position={pos:.3f}: "
+            f"{ROBOT_RIGHT_HAND_CMD_TOPIC} + {WBC_RIGHT_EE_CMD_TOPIC}"
         )
         return pos
 
@@ -16077,13 +16561,14 @@ class CameraTopicNode(Node):
         side = "right" if side == "right" else "left"
         msg = make_hand_command(side, positions)
         msg.header.stamp = self.get_clock().now().to_msg()
-        if side == "right":
-            self._right_hand_cmd_pub.publish(msg)
-            topic = ROBOT_RIGHT_HAND_CMD_TOPIC
-        else:
-            self._left_hand_cmd_pub.publish(msg)
-            topic = ROBOT_LEFT_HAND_CMD_TOPIC
+        if not self._publish_hand_command(side, msg):
+            return [float(v) for v in msg.position]
         vals = [float(v) for v in msg.position]
+        topic = (
+            f"{ROBOT_RIGHT_HAND_CMD_TOPIC}+{WBC_RIGHT_EE_CMD_TOPIC}"
+            if side == "right"
+            else f"{ROBOT_LEFT_HAND_CMD_TOPIC}+{WBC_LEFT_EE_CMD_TOPIC}"
+        )
         self.get_logger().debug(
             f"{'右' if side == 'right' else '左'}手关节命令 {vals} -> {topic}"
         )
@@ -16108,6 +16593,374 @@ class CameraTopicNode(Node):
         self.get_logger().info(f"右手切换 -> 状态{preset}")
         self.ros_bridge.right_hand_preset_changed.emit(self._right_hand_at_a)
         return self._right_hand_at_a, pos
+
+    def ensure_topic_scan(self) -> None:
+        """大脑页「刷新 Topic」：启动扫描定时器并立刻扫一次。
+
+        get_topic_names_and_types 在 FastDDS 下可卡数秒，禁止在 Qt 线程同步调用；
+        一律丢到 ROS spin 线程执行。
+        """
+        def _do() -> None:
+            if self._scan_timer is None:
+                self._scan_timer = self.create_timer(2.0, self._on_timer)
+                self._topic_scan_ready = True
+                self.get_logger().info("已启动相机 topic 扫描定时器")
+            self._topic_graph_cache = None
+            self._topic_graph_cache_at = 0.0
+            self._on_timer()
+
+        self.enqueue_ros_op(_do)
+
+    def _robot_fast_qos(self, *, reliable: bool = False) -> QoSProfile:
+        return QoSProfile(
+            reliability=(
+                ReliabilityPolicy.RELIABLE if reliable else ReliabilityPolicy.BEST_EFFORT
+            ),
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+
+    def _create_robot_sub_fast(self, msg_type, topic: str, callback, *, reliable: bool = False):
+        """单次 create_subscription，不查 publisher、不 destroy（destroy 易占 GIL 卡 UI）。"""
+        if topic in self._robot_subscriptions_map:
+            return self._robot_subscriptions_map[topic]
+        qos = self._robot_fast_qos(reliable=reliable)
+        t0 = time.perf_counter()
+        sub = self.create_subscription(msg_type, topic, callback, qos)
+        dt = time.perf_counter() - t0
+        self._robot_subscriptions_map[topic] = sub
+        self._robot_subscribe_attempts[topic] = 0
+        self._robot_last_subscribe_time[topic] = time.time()
+        if dt > 0.05:
+            try:
+                self.get_logger().warn(
+                    f"create_subscription 慢: {topic} 耗时 {dt:.2f}s"
+                )
+            except Exception:
+                pass
+        return sub
+
+    def enqueue_ros_op(self, fn: Callable[[], None]) -> None:
+        """把操作丢到 ROS spin 线程执行，避免阻塞 Qt UI。"""
+        try:
+            self._ros_op_queue.put_nowait(fn)
+        except Exception:
+            pass
+
+    def drain_ros_ops(self, *, max_ops: int = 2) -> int:
+        """由 ROS spin 线程调用：每次最多执行 max_ops 个排队操作。"""
+        n = 0
+        while n < max_ops:
+            try:
+                fn = self._ros_op_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn()
+            except Exception as exc:
+                try:
+                    self.get_logger().error(f"ROS 排队操作失败: {exc}")
+                except Exception:
+                    pass
+            n += 1
+        return n
+
+    def begin_robot_subscription_steps(self) -> int:
+        """点击连接：本进程不订关节/TCP（GIL）；使能状态轻量订阅。
+
+        TCP 由独立 robot_tcp_bridge 进程订阅，UI 轮询 JSON。
+        """
+        if self._robot_subs_ready:
+            self._robot_connect_steps = []
+            self._robot_connect_step_i = 0
+            self._robot_connect_running = False
+            self.ensure_enable_state_subscriptions()
+            return 0
+        self._allow_robot_qos_probe = False
+        # 连接后几秒内抑制 robot_state UI 刷新，避免 TCP 一到就刷标签/按钮
+        self._robot_ui_quiet_until = time.time() + 2.0
+        self._robot_extras_due_at = 0.0  # 禁止空闲补订关节
+        self._robot_connect_steps = []
+        self._robot_connect_step_i = 0
+        self._robot_connect_running = False
+        self._robot_connect_label = "已连接"
+        self._robot_connect_error = ""
+        self._robot_subs_ready = True
+        self._pending_head_camera_tf = False
+        self._robot_use_tcp_bridge = True
+        self.ensure_enable_state_subscriptions()
+        self.get_logger().info(
+            "机器人状态已连接（TCP 走独立 bridge；使能走本进程轻量订阅）"
+        )
+        return 0
+
+    def clear_robot_subscriptions(self) -> None:
+        """取消连接：销毁本进程机器人相关订阅，并复位连接标志。
+
+        TCP bridge 由 UI 侧 `_stop_robot_tcp_bridge` 停止。
+        """
+        self._robot_connect_running = False
+        self._robot_connect_steps = []
+        self._robot_connect_step_i = 0
+        self._robot_connect_label = ""
+        self._robot_connect_error = ""
+        self._robot_subs_ready = False
+        self._robot_use_tcp_bridge = False
+        self._pending_head_camera_tf = False
+        self._robot_extras_due_at = 0.0
+        self._robot_extra_step_list = None
+        self._robot_extra_step_i = 0
+        self._allow_robot_qos_probe = False
+
+        topics = list(self._robot_subscriptions_map.keys())
+
+        def _destroy_all() -> None:
+            for topic in topics:
+                sub = self._robot_subscriptions_map.pop(topic, None)
+                if sub is None:
+                    continue
+                try:
+                    self.destroy_subscription(sub)
+                except Exception:
+                    pass
+            self.get_logger().info("已取消机器人状态连接（订阅已清理）")
+
+        if topics:
+            self.enqueue_ros_op(_destroy_all)
+        else:
+            self.get_logger().info("已取消机器人状态连接")
+
+        with self._robot_lock:
+            self._robot_state = RobotStateSnapshot(
+                [], [], [], [], [], None, None, 0.0
+            )
+        try:
+            self._touch_robot_state()
+        except Exception:
+            pass
+
+    def ensure_enable_state_subscriptions(self) -> None:
+        """订阅 arm/hand enable_state 与 control_mode（排队到 ROS 线程）。"""
+        enable_qos = self._robot_fast_qos(reliable=True)
+
+        def _sub(topic: str, cb) -> None:
+            if topic in self._robot_subscriptions_map:
+                return
+            sub = self.create_subscription(UInt32, topic, cb, enable_qos)
+            self._robot_subscriptions_map[topic] = sub
+            self.get_logger().info(f"已订阅 {topic}")
+
+        def _do() -> None:
+            _sub(ARM_ENABLE_STATE_TOPIC, self._on_arm_enable_state)
+            _sub(HAND_ENABLE_STATE_TOPIC, self._on_hand_enable_state)
+            _sub(CONTROL_MODE_TOPIC, self._on_control_mode)
+
+        self.enqueue_ros_op(_do)
+
+    def apply_bridged_tcp_state(self, data: dict) -> None:
+        """从 bridge JSON 更新左右 TCP（UI 定时器调用，不碰 DDS）。"""
+        if not data:
+            return
+        changed = False
+        for side, key in (("left", "left"), ("right", "right")):
+            pose = data.get(key)
+            if not isinstance(pose, dict):
+                continue
+            xyz = pose.get("xyz") or []
+            quat = pose.get("xyzw") or []
+            if len(xyz) < 3 or len(quat) < 4:
+                continue
+            snap = TcpPoseSnapshot(
+                frame_id=str(pose.get("frame") or "map"),
+                xyz=(float(xyz[0]), float(xyz[1]), float(xyz[2])),
+                quat_xyzw=(
+                    float(quat[0]),
+                    float(quat[1]),
+                    float(quat[2]),
+                    float(quat[3]),
+                ),
+                valid=True,
+            )
+            with self._robot_lock:
+                if side == "left":
+                    if not _should_accept_tcp_update(self._robot_state.left_tcp, snap):
+                        continue
+                    self._robot_state.left_tcp = snap
+                else:
+                    if not _should_accept_tcp_update(self._robot_state.right_tcp, snap):
+                        continue
+                    self._robot_state.right_tcp = snap
+                changed = True
+        if changed:
+            self._touch_robot_state()
+
+    def _ros_robot_connect_one_step(self) -> None:
+        steps = getattr(self, "_robot_connect_steps", None) or []
+        total = len(steps)
+        i = int(getattr(self, "_robot_connect_step_i", 0) or 0)
+        if self._robot_subs_ready or i >= total:
+            self._robot_subs_ready = True
+            self._robot_connect_running = False
+            self._pending_head_camera_tf = False
+            self._robot_connect_label = "已连接"
+            return
+        label, fn = steps[i]
+        self._robot_connect_label = label
+        try:
+            fn()
+        except Exception as exc:
+            self._robot_connect_error = f"{label}: {exc}"
+            self.get_logger().error(f"订阅步骤 {label} 失败: {exc}")
+        # 主动让出 GIL，避免连续 create_subscription 把 Qt 饿死
+        time.sleep(0.08)
+        self._robot_connect_step_i = i + 1
+        if self._robot_connect_step_i >= total:
+            self._robot_subs_ready = True
+            self._robot_connect_running = False
+            # 默认不自动挂 head TF（很重）；需要相机叠加时再懒挂
+            self._pending_head_camera_tf = False
+            self._robot_connect_label = "已连接"
+            self.get_logger().info(
+                "已分步订阅机器人核心状态: left/right tcp（未订关节）"
+            )
+            # 关节/手/使能等按需延后；默认更晚，减少点击后卡顿
+            self._robot_extras_due_at = time.time() + 3.0
+        else:
+            self.enqueue_ros_op(self._ros_robot_connect_one_step)
+
+    def _robot_extra_steps(self) -> list:
+        hand_qos = self._robot_fast_qos(reliable=False)
+        enable_qos = self._robot_fast_qos(reliable=True)
+
+        def _hand(topic, cb):
+            if topic in self._robot_subscriptions_map:
+                return
+            sub = self.create_subscription(JointState, topic, cb, hand_qos)
+            self._robot_subscriptions_map[topic] = sub
+
+        def _en(topic, cb):
+            if topic in self._robot_subscriptions_map:
+                return
+            sub = self.create_subscription(UInt32, topic, cb, enable_qos)
+            self._robot_subscriptions_map[topic] = sub
+
+        return [
+            ("arm_joints", lambda: self._create_robot_sub_fast(
+                JointState, ROBOT_ARM_TOPIC, self._on_arm_joint_state
+            )),
+            ("fk_joints", lambda: self._create_robot_sub_fast(
+                JointState, ROBOT_FK_JOINTS_TOPIC, self._on_fk_joint_state
+            )),
+            ("left_hand", lambda: _hand(ROBOT_LEFT_HAND_TOPIC, self._on_left_hand_state)),
+            ("right_hand", lambda: _hand(ROBOT_RIGHT_HAND_TOPIC, self._on_right_hand_state)),
+            ("control_mode", lambda: self._create_robot_sub_fast(
+                UInt32, CONTROL_MODE_TOPIC, self._on_control_mode, reliable=True
+            )),
+            ("arm_enable", lambda: _en(ARM_ENABLE_STATE_TOPIC, self._on_arm_enable_state)),
+            ("hand_enable", lambda: _en(HAND_ENABLE_STATE_TOPIC, self._on_hand_enable_state)),
+            ("replay", lambda: (
+                None
+                if REPLAY_RUNNING_STATE_TOPIC in self._robot_subscriptions_map
+                else self._robot_subscriptions_map.__setitem__(
+                    REPLAY_RUNNING_STATE_TOPIC,
+                    self.create_subscription(
+                        UInt8,
+                        REPLAY_RUNNING_STATE_TOPIC,
+                        self._on_replay_running_state,
+                        self._robot_fast_qos(reliable=True),
+                    ),
+                )
+            )),
+        ]
+
+    def maybe_pump_robot_extras(self) -> None:
+        """空闲时每次最多补订 1 个次要 topic（由 ROS spin 调用）。"""
+        due = float(getattr(self, "_robot_extras_due_at", 0.0) or 0.0)
+        if due <= 0 or time.time() < due:
+            return
+        if getattr(self, "_robot_connect_running", False):
+            return
+        steps = getattr(self, "_robot_extra_step_list", None)
+        if steps is None:
+            steps = self._robot_extra_steps()
+            self._robot_extra_step_list = steps
+            self._robot_extra_step_i = 0
+        i = int(getattr(self, "_robot_extra_step_i", 0) or 0)
+        if i >= len(steps):
+            self._robot_extras_due_at = 0.0
+            return
+        label, fn = steps[i]
+        try:
+            fn()
+        except Exception as exc:
+            self.get_logger().warn(f"空闲补订 {label} 失败: {exc}")
+        self._robot_extra_step_i = i + 1
+        # 下一补订至少隔 0.4s，给 Qt 留 GIL
+        self._robot_extras_due_at = time.time() + 0.4
+
+    def robot_connect_progress(self) -> tuple:
+        """UI 轮询：返回 (done, label, index, total, error)。"""
+        steps = getattr(self, "_robot_connect_steps", None) or []
+        total = len(steps)
+        i = int(getattr(self, "_robot_connect_step_i", 0) or 0)
+        label = str(getattr(self, "_robot_connect_label", "") or "")
+        err = str(getattr(self, "_robot_connect_error", "") or "")
+        done = bool(self._robot_subs_ready) and not bool(
+            getattr(self, "_robot_connect_running", False)
+        )
+        if done and total:
+            i = total
+            label = "已连接"
+        return done, label, i, total, err
+
+    def step_robot_subscriptions(self) -> tuple:
+        """兼容：仅读进度，不在 UI 线程执行 create_subscription。"""
+        return self.robot_connect_progress()
+
+    def ensure_robot_subscriptions(self) -> str:
+        """兼容旧调用：启动异步连接并忙等（尽量别从 UI 调）。"""
+        if self._robot_subs_ready:
+            return "机器人状态已连接"
+        n = self.begin_robot_subscription_steps()
+        if n <= 0:
+            return "机器人状态已连接"
+        deadline = time.time() + 30.0
+        while time.time() < deadline:
+            self.drain_ros_ops(max_ops=4)
+            done, label, i, total, err = self.robot_connect_progress()
+            if err and done:
+                return f"订阅失败({label}): {err}"
+            if done:
+                return "已订阅机器人状态（臂/手/TCP/使能/回放）"
+            time.sleep(0.02)
+        return "订阅超时"
+
+    def ensure_head_camera_tf_lazy(self) -> None:
+        """空闲时补挂 head camera TF（投递到 ROS 线程，不挡 UI）。"""
+        if not getattr(self, "_pending_head_camera_tf", False):
+            return
+        if self._head_camera_tf is not None:
+            self._pending_head_camera_tf = False
+            return
+        if attach_head_camera_tf is None:
+            self._pending_head_camera_tf = False
+            return
+        self._pending_head_camera_tf = False
+        self.enqueue_ros_op(self._ros_attach_head_camera_tf)
+
+    def _ros_attach_head_camera_tf(self) -> None:
+        if self._head_camera_tf is not None:
+            return
+        if attach_head_camera_tf is None:
+            return
+        try:
+            self._head_camera_tf = attach_head_camera_tf(self)
+        except Exception as exc:
+            self.get_logger().warn(f"延迟挂载 head camera TF 失败: {exc}")
+
+    def robot_subscriptions_ready(self) -> bool:
+        return bool(self._robot_subs_ready)
 
     def _setup_robot_subscriptions(self) -> None:
         hand_qos = QoSProfile(
@@ -16178,15 +17031,18 @@ class CameraTopicNode(Node):
         reliable = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
+            depth=1,
             durability=DurabilityPolicy.VOLATILE,
         )
         best_effort = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST,
-            depth=10,
+            depth=1,
             durability=DurabilityPolicy.VOLATILE,
         )
+        # 默认不查 publisher QoS：get_publishers_info_by_topic 在 FastDDS 下可卡 UI 数秒
+        if not getattr(self, "_allow_robot_qos_probe", False):
+            return [best_effort, reliable]
         derived = self._qos_from_publisher_info(topic)
         if derived is not None:
             return [derived, reliable, best_effort]
@@ -16194,20 +17050,21 @@ class CameraTopicNode(Node):
 
     def _control_qos_candidates_for_topic(self, topic: str) -> List[QoSProfile]:
         candidates: List[QoSProfile] = []
-        derived = self._qos_from_publisher_info(topic)
-        if derived is not None:
-            candidates.append(derived)
+        if getattr(self, "_allow_robot_qos_probe", False):
+            derived = self._qos_from_publisher_info(topic)
+            if derived is not None:
+                candidates.append(derived)
         candidates.extend([
             QoSProfile(
                 reliability=ReliabilityPolicy.RELIABLE,
                 history=HistoryPolicy.KEEP_LAST,
-                depth=10,
+                depth=1,
                 durability=DurabilityPolicy.VOLATILE,
             ),
             QoSProfile(
                 reliability=ReliabilityPolicy.BEST_EFFORT,
                 history=HistoryPolicy.KEEP_LAST,
-                depth=10,
+                depth=1,
                 durability=DurabilityPolicy.VOLATILE,
             ),
         ])
@@ -16216,7 +17073,7 @@ class CameraTopicNode(Node):
     def _robot_qos_for_topic(self, topic: str, attempt: int = 0) -> QoSProfile:
         candidates = self._robot_qos_candidates_for_topic(topic)
         qos = candidates[min(attempt, len(candidates) - 1)]
-        self.get_logger().info(
+        self.get_logger().debug(
             f"{topic}: robot QoS attempt={attempt} reliability={qos.reliability.name}"
         )
         return qos
@@ -16258,19 +17115,56 @@ class CameraTopicNode(Node):
         self._robot_subscribe_attempts[topic] = attempt
         self._robot_last_subscribe_time[topic] = time.time()
 
-    def _maybe_retry_robot_subscriptions(self) -> None:
+    def _cached_topic_graph(self, *, max_age_s: float = 2.0) -> Dict[str, List[str]]:
         now = time.time()
-        all_topics = dict(self.get_topic_names_and_types())
+        if (
+            self._topic_graph_cache is not None
+            and now - self._topic_graph_cache_at < max_age_s
+        ):
+            return self._topic_graph_cache
+        graph = dict(self.get_topic_names_and_types())
+        self._topic_graph_cache = graph
+        self._topic_graph_cache_at = now
+        return graph
+
+    def _side_has_tcp(self, side: str) -> bool:
+        with self._robot_lock:
+            tcp = self._robot_state.left_tcp if side == "left" else self._robot_state.right_tcp
+            return tcp is not None and bool(tcp.valid)
+
+    def _maybe_retry_robot_subscriptions(self) -> None:
+        """重试 TCP 订阅；默认关闭自动重订，避免启动刷屏/卡顿。
+
+        设 EAI_RETRY_TCP_SUB=1 可恢复慢速重试（仍会放弃幽灵 /tele/fk）。
+        """
+        if not self._robot_subs_ready:
+            return
+        if os.environ.get("EAI_RETRY_TCP_SUB", "0").strip().lower() in (
+            "0",
+            "false",
+            "off",
+            "no",
+            "",
+        ):
+            return
+        now = time.time()
+        all_topics = self._cached_topic_graph()
+        # mink_fk 优先；tele/fk 常有空 publisher（ik 建了端点却不发），避免无限重订卡 UI
         retry_specs = [
             (ROBOT_LEFT_TCP_TOPIC, PoseStamped, "left"),
-            (ROBOT_TELE_LEFT_TCP_TOPIC, PoseStamped, "left"),
             (ROBOT_RIGHT_TCP_TOPIC, PoseStamped, "right"),
+            (ROBOT_TELE_LEFT_TCP_TOPIC, PoseStamped, "left"),
             (ROBOT_TELE_RIGHT_TCP_TOPIC, PoseStamped, "right"),
         ]
         for topic, msg_type, side in retry_specs:
             if topic not in all_topics:
                 continue
             if self._robot_tcp_topic_received.get(topic, False):
+                continue
+            # 该侧已有 TCP（例如 mink_fk）则不必再刷 tele/fk
+            if self._side_has_tcp(side):
+                continue
+            if self._robot_tcp_give_up.get(topic, False):
                 continue
             if topic not in self._robot_subscriptions_map:
                 callback = (
@@ -16283,10 +17177,29 @@ class CameraTopicNode(Node):
                 continue
             retries = self._robot_resubscribe_count.get(topic, 0)
             candidates = self._robot_qos_candidates_for_topic(topic)
-            if retries >= len(candidates):
-                continue
             last_sub = self._robot_last_subscribe_time.get(topic, 0.0)
-            if now - last_sub < 5.0:
+            # 整轮 QoS 试完后：mink 再慢周期试一次；tele/fk 直接放弃（幽灵端点）
+            if retries >= len(candidates):
+                if topic in (ROBOT_TELE_LEFT_TCP_TOPIC, ROBOT_TELE_RIGHT_TCP_TOPIC):
+                    self._robot_tcp_give_up[topic] = True
+                    self.get_logger().warn(
+                        f"{topic}: 有 publisher 但无数据，停止重订阅（改用 /mink_fk）"
+                    )
+                    continue
+                if now - last_sub < 30.0:
+                    continue
+                # mink_fk：最多再完整轮询 1 次后放弃，避免卡死 UI
+                cycles = int(self._robot_resubscribe_count.get(f"{topic}__cycles", 0))
+                if cycles >= 1:
+                    self._robot_tcp_give_up[topic] = True
+                    self.get_logger().warn(
+                        f"{topic}: 多次未收到 TCP，停止重订阅（请确认 fk_node）"
+                    )
+                    continue
+                self._robot_resubscribe_count[f"{topic}__cycles"] = cycles + 1
+                self._robot_resubscribe_count[topic] = 0
+                retries = 0
+            elif now - last_sub < 5.0:
                 continue
             callback = (
                 (lambda msg, t=topic: self._on_left_tcp_pose(msg, t))
@@ -16346,14 +17259,32 @@ class CameraTopicNode(Node):
     def _touch_robot_state(self) -> None:
         self._robot_state.updated_at = time.time()
         now = time.time()
+        quiet_until = float(getattr(self, "_robot_ui_quiet_until", 0.0) or 0.0)
+        if quiet_until and now < quiet_until:
+            return
         if now - self._last_robot_state_emit < UI_ROBOT_STATE_MIN_INTERVAL_S:
             return
         self._last_robot_state_emit = now
         self.ros_bridge.robot_state_updated.emit()
 
+    def _throttle_robot_cb(self, key: str, min_interval: float = 0.1) -> bool:
+        """高频 joint 回调入口限频；True=应处理。避免占满 GIL 导致 Qt 假死。"""
+        now = time.time()
+        last_map = getattr(self, "_robot_cb_last", None)
+        if last_map is None:
+            last_map = {}
+            self._robot_cb_last = last_map
+        if now - float(last_map.get(key, 0.0) or 0.0) < min_interval:
+            return False
+        last_map[key] = now
+        return True
+
     def _on_arm_joint_state(self, msg: JointState) -> None:
+        first = self._hal_arm_received_at <= 0
+        if not first and not self._throttle_robot_cb("arm", 0.1):
+            return
         positions = [float(v) for v in msg.position]
-        if self._hal_arm_received_at <= 0:
+        if first:
             self.get_logger().info(f"HAL 关节状态就绪: {ROBOT_ARM_TOPIC}")
         self._hal_arm_received_at = time.time()
         left, right = _arm_from_raw_positions(list(msg.name), positions)
@@ -16362,9 +17293,11 @@ class CameraTopicNode(Node):
                 self._robot_state.left_arm = left
             if right:
                 self._robot_state.right_arm = right
-            self._touch_robot_state()
+        self._touch_robot_state()
 
     def _on_fk_joint_state(self, msg: JointState) -> None:
+        if not self._throttle_robot_cb("fk", 0.1):
+            return
         joints = _joint_dict_from_msg(msg)
         left, right, waist = _split_arm_joints(joints)
         with self._robot_lock:
@@ -16374,27 +17307,39 @@ class CameraTopicNode(Node):
                 self._robot_state.right_arm = right
             if waist:
                 self._robot_state.waist = waist
-            self._touch_robot_state()
+        self._touch_robot_state()
 
     def _on_left_hand_state(self, msg: JointState) -> None:
+        if not self._throttle_robot_cb("left_hand", 0.1):
+            return
         hand = [(n, float(msg.position[i])) for i, n in enumerate(msg.name) if i < len(msg.position)]
         with self._robot_lock:
             self._robot_state.left_hand = hand
-            self._touch_robot_state()
+        self._touch_robot_state()
 
     def _on_right_hand_state(self, msg: JointState) -> None:
+        if not self._throttle_robot_cb("right_hand", 0.1):
+            return
         hand = [(n, float(msg.position[i])) for i, n in enumerate(msg.name) if i < len(msg.position)]
         with self._robot_lock:
             self._robot_state.right_hand = hand
-            self._touch_robot_state()
+        self._touch_robot_state()
 
     def _on_left_tcp_pose(self, msg: PoseStamped, source_topic: str = ROBOT_LEFT_TCP_TOPIC) -> None:
+        now = time.time()
+        first = not self._robot_tcp_topic_received.get(source_topic, False)
+        if (
+            not first
+            and now - self._last_tcp_accept_time.get("left", 0.0) < self._tcp_min_interval_s
+        ):
+            return
         incoming = _pose_from_msg(msg)
         with self._robot_lock:
             if not _should_accept_tcp_update(self._robot_state.left_tcp, incoming):
                 return
             self._robot_state.left_tcp = incoming
-            if not self._robot_tcp_topic_received.get(source_topic, False):
+            self._last_tcp_accept_time["left"] = now
+            if first:
                 self._robot_tcp_topic_received[source_topic] = True
                 p = msg.pose.position
                 frame = msg.header.frame_id or BASE_LINK_FRAME
@@ -16405,12 +17350,20 @@ class CameraTopicNode(Node):
             self._touch_robot_state()
 
     def _on_right_tcp_pose(self, msg: PoseStamped, source_topic: str = ROBOT_RIGHT_TCP_TOPIC) -> None:
+        now = time.time()
+        first = not self._robot_tcp_topic_received.get(source_topic, False)
+        if (
+            not first
+            and now - self._last_tcp_accept_time.get("right", 0.0) < self._tcp_min_interval_s
+        ):
+            return
         incoming = _pose_from_msg(msg)
         with self._robot_lock:
             if not _should_accept_tcp_update(self._robot_state.right_tcp, incoming):
                 return
             self._robot_state.right_tcp = incoming
-            if not self._robot_tcp_topic_received.get(source_topic, False):
+            self._last_tcp_accept_time["right"] = now
+            if first:
                 self._robot_tcp_topic_received[source_topic] = True
                 p = msg.pose.position
                 frame = msg.header.frame_id or BASE_LINK_FRAME
@@ -16532,14 +17485,16 @@ class CameraTopicNode(Node):
         if pending_enabled is not None:
             self.enabled_topics = pending_enabled
             self._resubscribe()
-            self.get_logger().info(f"subscribed to {len(self.enabled_topics)} image topics")
+            self.get_logger().debug(
+                f"subscribed to {len(self.enabled_topics)} image topics"
+            )
 
         self._refresh_topics()
         self._maybe_retry_subscriptions()
         self._maybe_retry_robot_subscriptions()
 
     def _refresh_topics(self) -> None:
-        all_topics = dict(self.get_topic_names_and_types())
+        all_topics = self._cached_topic_graph()
         camera_topics = {
             name: types
             for name, types in sorted(all_topics.items())
@@ -16605,17 +17560,18 @@ class CameraTopicNode(Node):
         if derived is not None:
             candidates.append(derived)
 
+        # depth 必须小：原始 Image 很大，depth=30 会在回调跟不上时把内存打爆并卡死 UI
         candidates.extend([
             QoSProfile(
                 reliability=ReliabilityPolicy.RELIABLE,
                 history=HistoryPolicy.KEEP_LAST,
-                depth=30,
+                depth=1,
                 durability=DurabilityPolicy.VOLATILE,
             ),
             QoSProfile(
                 reliability=ReliabilityPolicy.BEST_EFFORT,
                 history=HistoryPolicy.KEEP_LAST,
-                depth=5,
+                depth=1,
                 durability=DurabilityPolicy.VOLATILE,
             ),
         ])
@@ -16625,32 +17581,40 @@ class CameraTopicNode(Node):
         candidates = self._qos_candidates_for_topic(topic)
         idx = min(attempt, len(candidates) - 1)
         qos = candidates[idx]
-        self.get_logger().info(
+        # 强制夹紧 depth，即使从 publisher 推导出更大值
+        try:
+            if int(getattr(qos, "depth", 1) or 1) > 2:
+                qos = QoSProfile(
+                    reliability=qos.reliability,
+                    history=HistoryPolicy.KEEP_LAST,
+                    depth=1,
+                    durability=qos.durability,
+                )
+        except Exception:
+            pass
+        self.get_logger().debug(
             f"{topic}: QoS attempt={attempt} reliability={qos.reliability.name} depth={qos.depth}"
         )
         return qos
 
+    @staticmethod
+    def _image_type_fallbacks(types: Optional[List[str]] = None) -> List[str]:
+        """ROS graph 尚未发现时，按 Image / CompressedImage 尝试订阅。"""
+        out: List[str] = []
+        for name in list(types or []) + [
+            "sensor_msgs/msg/Image",
+            "sensor_msgs/msg/CompressedImage",
+            "sensor_msgs/Image",
+            "sensor_msgs/CompressedImage",
+        ]:
+            if name and name not in out:
+                out.append(name)
+        return out
+
     def _maybe_retry_subscriptions(self) -> None:
-        if not self.enabled_topics:
-            return
-        now = time.time()
-        for topic in sorted(self.enabled_topics):
-            if self._frame_counts.get(topic, 0) > 0:
-                continue
-            last_sub = self._last_subscribe_time.get(topic, 0.0)
-            if now - last_sub < 5.0:
-                continue
-            attempt = self._subscribe_attempts.get(topic, 0) + 1
-            if attempt > 3:
-                continue
-            self.get_logger().warn(f"{topic}: 未收到图像，第 {attempt} 次重新订阅")
-            self._subscribe_attempts[topic] = attempt
-            types = dict(self.get_topic_names_and_types()).get(topic, [])
-            if topic in self.subscriptions_map:
-                self.destroy_subscription(self.subscriptions_map.pop(topic))
-            qos = self._qos_for_topic(topic, attempt - 1)
-            if self._subscribe_topic(topic, types, qos):
-                self._last_subscribe_time[topic] = now
+        # 不再自动反复重订阅：无图时刷 QoS 只会卡 UI / 刷屏。
+        # 用户取消勾选再勾选，或点刷新，会走 set_enabled_topics → _resubscribe。
+        return
 
     def _resubscribe(self) -> None:
         for sub in self.subscriptions_map.values():
@@ -16660,21 +17624,21 @@ class CameraTopicNode(Node):
         self.subscriptions_map.clear()
         self.camera_info_subs.clear()
 
-        all_topics = dict(self.get_topic_names_and_types())
+        all_topics = self._cached_topic_graph()
         for topic in sorted(self.enabled_topics):
-            types = all_topics.get(topic, [])
+            types = self._image_type_fallbacks(all_topics.get(topic, []))
             attempt = self._subscribe_attempts.get(topic, 0)
             qos = self._qos_for_topic(topic, attempt)
             if self._subscribe_topic(topic, types, qos):
                 self._last_subscribe_time[topic] = time.time()
-                self.get_logger().info(f"订阅成功: {topic}")
+                self.get_logger().debug(f"订阅: {topic}")
                 if is_depth_topic(topic):
                     self._subscribe_camera_info(topic, qos)
             else:
                 self.get_logger().warn(f"跳过非图像 topic: {topic}")
 
     def _subscribe_topic(self, topic: str, types: List[str], qos: QoSProfile) -> bool:
-        for type_name in types:
+        for type_name in self._image_type_fallbacks(types):
             msg_type = IMAGE_TYPES.get(type_name)
             if msg_type is CompressedImage:
                 sub = self.create_subscription(
@@ -16711,8 +17675,8 @@ class CameraTopicNode(Node):
             return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
         return self.cv_bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
 
-    def _should_emit_frame_to_ui(self, topic: str) -> bool:
-        now = time.time()
+    def _should_emit_frame_to_ui(self, topic: str, now: Optional[float] = None) -> bool:
+        now = time.time() if now is None else now
         interval = UI_DEPTH_MIN_INTERVAL_S if is_depth_topic(topic) else UI_IMAGE_MIN_INTERVAL_S
         last = self._last_ui_emit_time.get(topic, 0.0)
         if now - last < interval:
@@ -16720,21 +17684,74 @@ class CameraTopicNode(Node):
         self._last_ui_emit_time[topic] = now
         return True
 
+    def take_pending_ui_frames(
+        self,
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, Tuple[int, float]]]:
+        """UI 线程取走待显示帧（每 topic 最多一帧），清空合并队列。"""
+        with self._pending_ui_lock:
+            frames = self._pending_ui_frames
+            stats = self._pending_ui_stats
+            self._pending_ui_frames = {}
+            self._pending_ui_stats = {}
+            self._frame_tick_pending = False
+            return frames, stats
+
     def _publish_frame_to_ui(self, topic: str, cv_image: np.ndarray, now: float) -> None:
-        self._frame_counts[topic] = self._frame_counts.get(topic, 0) + 1
+        count = self._frame_counts.get(topic, 0) + 1
+        self._frame_counts[topic] = count
         self._last_frame_time[topic] = now
-        if not self._should_emit_frame_to_ui(topic):
+        # Viewer 可通过 _ui_frame_paused_until 暂停（切 tab）；用 bridge 上的标记
+        pause_until = float(getattr(self.ros_bridge, "_ui_frame_paused_until", 0.0) or 0.0)
+        if now < pause_until:
             return
-        self.ros_bridge.frame_updated.emit(topic, cv_image.copy())
-        self.ros_bridge.frame_stats.emit(topic, self._frame_counts[topic], now)
+        if not self._should_emit_frame_to_ui(topic, now):
+            return
+        # 在 ROS 线程先缩图，减轻 UI 线程与 Qt 队列压力
+        try:
+            img = np.asarray(cv_image)
+            h0, w0 = img.shape[:2]
+            edge = max(h0, w0)
+            max_edge = UI_PREVIEW_MAX_EDGE
+            if is_depth_topic(topic):
+                max_edge = min(max_edge, 480)
+            if edge > max_edge > 0:
+                scale = float(max_edge) / float(edge)
+                img = cv2.resize(
+                    img,
+                    (max(1, int(w0 * scale)), max(1, int(h0 * scale))),
+                    interpolation=cv2.INTER_NEAREST if is_depth_topic(topic) else cv2.INTER_AREA,
+                )
+            cv_image = img
+        except Exception:
+            pass
+        # 合并：同 topic 只保留最新一帧，避免 Qt 队列堆积拷贝
+        with self._pending_ui_lock:
+            self._pending_ui_frames[topic] = cv_image
+            self._pending_ui_stats[topic] = (count, now)
+            need_tick = not self._frame_tick_pending
+            self._frame_tick_pending = True
+        if need_tick:
+            self.ros_bridge.frame_tick.emit()
 
     def _image_callback(self, msg: Image, topic: str) -> None:
         try:
+            now = time.time()
             if msg.header.frame_id:
                 self._camera_frame_ids[topic] = msg.header.frame_id
+            # 心跳：未到显示间隔则不解码，避免 CPU/内存打满
+            count = self._frame_counts.get(topic, 0)
+            self._last_frame_time[topic] = now
+            if count > 0:
+                interval = (
+                    UI_DEPTH_MIN_INTERVAL_S
+                    if is_depth_topic(topic)
+                    else UI_IMAGE_MIN_INTERVAL_S
+                )
+                if now - self._last_ui_emit_time.get(topic, 0.0) < interval:
+                    self._frame_counts[topic] = count + 1
+                    return
             cv_image = self._convert_image(msg)
-            now = time.time()
-            if self._frame_counts.get(topic, 0) == 0:
+            if count == 0:
                 self.get_logger().info(
                     f"首帧 {topic}: {msg.width}x{msg.height} encoding={msg.encoding}"
                 )
@@ -16752,11 +17769,22 @@ class CameraTopicNode(Node):
 
     def _compressed_callback(self, msg: CompressedImage, topic: str) -> None:
         try:
+            now = time.time()
             if msg.header.frame_id:
                 self._camera_frame_ids[topic] = msg.header.frame_id
+            count = self._frame_counts.get(topic, 0)
+            self._last_frame_time[topic] = now
+            if count > 0:
+                interval = (
+                    UI_DEPTH_MIN_INTERVAL_S
+                    if is_depth_topic(topic)
+                    else UI_IMAGE_MIN_INTERVAL_S
+                )
+                if now - self._last_ui_emit_time.get(topic, 0.0) < interval:
+                    self._frame_counts[topic] = count + 1
+                    return
             cv_image = self.cv_bridge.compressed_imgmsg_to_cv2(msg)
-            now = time.time()
-            if self._frame_counts.get(topic, 0) == 0:
+            if count == 0:
                 self.get_logger().info(f"首帧 {topic}: compressed {len(msg.data)} bytes")
             self._publish_frame_to_ui(topic, cv_image, now)
         except Exception as exc:
@@ -16801,14 +17829,39 @@ def resolve_scripts_pack_dir() -> Optional[str]:
 
 
 def resolve_a2d_workspace_dir() -> str:
-    """与 GUI 一致，优先使用 a2d-tele 工作区 install。"""
-    for candidate in (
-        "/opt/psi/rt/a2d-tele",
-        os.path.expanduser("~/workspace_liyichao/a2d-tele"),
-    ):
-        if os.path.isfile(os.path.join(candidate, "install/setup.bash")):
+    """与 GUI 一致，优先使用含 install/setup.bash 的 a2d-tele 工作区。
+
+    可用 A2D_WORKSPACE / PSIBOT_HOME 覆盖。若均未安装，仍返回常见默认路径
+    （供 UI 展示）；真正启动前须再校验 install 是否存在。
+    """
+    env = os.environ.get("A2D_WORKSPACE", "").strip()
+    psibot_home = os.environ.get("PSIBOT_HOME", "/home/psibot").strip() or "/home/psibot"
+    candidates: List[str] = []
+    if env:
+        candidates.append(os.path.expanduser(env))
+    candidates.extend(
+        [
+            "/opt/psi/rt/a2d-tele",
+            os.path.join(psibot_home, "workspace_liyichao", "a2d-tele"),
+            os.path.expanduser("~/workspace_liyichao/a2d-tele"),
+            os.path.join(psibot_home, "workspace_liyichao"),
+            os.path.expanduser("~/workspace_liyichao"),
+        ]
+    )
+    seen = set()  # type: ignore[var-annotated]
+    ordered: List[str] = []
+    for c in candidates:
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        ordered.append(c)
+    for candidate in ordered:
+        if os.path.isfile(os.path.join(candidate, "install", "setup.bash")):
             return candidate
-    return "/opt/psi/rt/a2d-tele"
+    for candidate in ordered:
+        if os.path.isdir(candidate):
+            return candidate
+    return ordered[0] if ordered else "/opt/psi/rt/a2d-tele"
 
 
 def normalize_real_robot_backend(backend: str) -> str:
@@ -17511,21 +18564,132 @@ def a2d_docker_cli_available() -> bool:
     return shutil.which("docker") is not None
 
 
+def _a2d_local_workspace_ready() -> bool:
+    """宿主机/当前环境是否已有 a2d-tele install（可直接 ros2 launch）。"""
+    ws = resolve_a2d_workspace_dir()
+    return os.path.isfile(os.path.join(ws, "install", "setup.bash"))
+
+
 def launch_a2d_ros_detached(
     ros_cmd: str,
     *,
     cwd: Optional[str] = None,
     extra_env: str = "",
+    container: str = "",
+    force_local: bool = False,
 ) -> Tuple[bool, str]:
-    """在当前环境（通常已是 a2d 容器）detached 拉起一条 ros2 命令。"""
-    prefix = build_ros_shell_prefix()
+    """Detached 拉起一条 ros2 命令。
+
+    - force_local=True：始终在本机执行，绝不 docker exec
+    - 已在 a2d 容器内，或本机有 a2d-tele install：在当前环境执行
+    - 否则（例如 ./run_local.sh 宿主机 viewer 的 docker 模式）：docker exec 进 A2D 容器执行
+    """
     env_prefix = f"{extra_env} && " if extra_env.strip() else ""
-    full = f"{prefix} && {env_prefix}{ros_cmd}"
-    workdir = cwd or resolve_a2d_workspace_dir()
-    ok = QProcess.startDetached("bash", ["-lc", full], workdir)
-    if ok:
-        return True, f"已启动: {ros_cmd}"
-    return False, f"启动失败: {ros_cmd}"
+    use_local = (
+        force_local
+        or is_running_in_docker()
+        or _a2d_local_workspace_ready()
+    )
+    if use_local:
+        workdir = (cwd or "").strip() or resolve_a2d_workspace_dir()
+        local_setup = os.path.join(workdir, "install", "setup.bash")
+
+        if force_local:
+            # 无 install 时禁止 chdir/启动，避免 Qt 报 failed to chdir + 裸 humble 找不到包
+            if not os.path.isdir(workdir):
+                return (
+                    False,
+                    f"本机 workspace 不存在: {workdir}\n"
+                    "请在 A2D→local「本机环境」填写正确路径，或 export A2D_WORKSPACE=…",
+                )
+            if not os.path.isfile(local_setup):
+                return (
+                    False,
+                    f"本机缺少 a2d-tele install: {local_setup}\n"
+                    "当前机无 /opt/psi/rt/a2d-tele 时，请 colcon install 到本机，"
+                    "或改填真实 workspace / 改用 A2D→docker。",
+                )
+            parts = [
+                "set -e",
+                "source /opt/ros/humble/setup.bash",
+                f"source {shlex.quote(local_setup)}",
+            ]
+            scripts_dir = resolve_scripts_pack_dir()
+            if scripts_dir:
+                parts.append(f"export A2D_SCRIPTS_DIR={shlex.quote(scripts_dir)}")
+            dds = os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE", "").strip()
+            if dds and os.path.isfile(dds):
+                parts.append(
+                    f"export FASTRTPS_DEFAULT_PROFILES_FILE={shlex.quote(dds)}"
+                )
+            # 与 run_local.sh 一致：尊重已有 RMW（勿强行覆盖 cyclonedds）
+            parts.append(
+                "export RMW_IMPLEMENTATION="
+                "${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+            )
+            prefix = " && ".join(parts)
+        else:
+            # 非 force_local：若默认路径不存在，落到 HOME，避免 chdir 失败后仍半拉起进程
+            if not os.path.isdir(workdir):
+                workdir = os.environ.get("HOME") or os.getcwd() or "/"
+            prefix = build_ros_shell_prefix()
+        full = f"{prefix} && {env_prefix}{ros_cmd}"
+        ok = QProcess.startDetached("bash", ["-lc", full], workdir)
+        if ok:
+            where = "本机" if force_local else "本地"
+            return True, f"已启动({where}): {ros_cmd}"
+        return (
+            False,
+            f"启动失败: {ros_cmd}（workdir={workdir}；"
+            "若见 failed to chdir，请检查 workspace 路径）",
+        )
+
+    if not a2d_docker_cli_available():
+        return (
+            False,
+            "宿主机无 a2d-tele install，且无 docker CLI，无法启动 GUI。"
+            "请用 run_in_docker.sh、切到 A2D→local，或先 docker start A2D 容器。",
+        )
+    name = a2d_docker_container_name(container)
+    try:
+        st = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Running}}", name],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"检查容器失败: {exc}"
+    if st.returncode != 0 or (st.stdout or "").strip().lower() != "true":
+        return False, f"容器未运行: {name}（请先「开启容器」）"
+
+    # 容器内路径固定；带上宿主 DISPLAY，避免窗口落到错误 X server
+    disp = (os.environ.get("DISPLAY") or ":1").strip() or ":1"
+    inner = (
+        "set -e && source /opt/ros/humble/setup.bash && "
+        "source /opt/psi/rt/a2d-tele/install/setup.bash && "
+        f"export DISPLAY={shlex.quote(disp)} && "
+        "export XAUTHORITY=${XAUTHORITY:-/tmp/.Xauthority} && "
+        "export QT_QPA_PLATFORM=${QT_QPA_PLATFORM:-xcb} && "
+        f"{env_prefix}{ros_cmd}"
+    )
+    # -d：后台；不抢占当前 viewer 终端
+    cmd = ["docker", "exec", "-d", "-e", f"DISPLAY={disp}", name, "bash", "-lc", inner]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except Exception as exc:
+        return False, f"docker exec 异常: {exc}"
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip() or f"exit={result.returncode}"
+        return False, f"docker exec {name} 失败: {err}"
+    return True, f"已在容器 {name} 启动: {ros_cmd}"
 
 
 def run_a2d_docker_action(
@@ -17534,7 +18698,9 @@ def run_a2d_docker_action(
     *,
     capture: bool = False,
 ) -> Tuple[bool, str]:
-    """对 A2D 容器执行 docker ps/start/stop/restart；返回 (ok, 消息/输出)。"""
+    """已禁用：本机永远不用 Docker。"""
+    _ = (action, container, capture)
+    return False, "已禁用 Docker：请用宿主机 forwarder + host_arm_hand_bridge"
     name = a2d_docker_container_name(container)
     if not a2d_docker_cli_available():
         return (
@@ -17581,10 +18747,114 @@ def _pgrep_pattern(pattern: str) -> bool:
         return False
 
 
-def _is_stack_services_running() -> bool:
-    return _pgrep_pattern(STACK_SERVICES_LAUNCH) or _pgrep_pattern(
-        LEGACY_BASE_SERVICES_LAUNCH
+def _tcp_state_json_age_s(
+    path: str = "",
+) -> Tuple[float, bool]:
+    """返回 (age_s, ready)。文件缺失时 age 很大、ready=False。"""
+    p = path or os.environ.get(
+        "EAI_ROBOT_TCP_STATE",
+        os.path.join(tempfile.gettempdir(), "eai_robot_tcp_state.json"),
     )
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        updated = float(data.get("updated_at") or 0.0)
+        ready = bool(data.get("ready")) and bool(data.get("left")) and bool(
+            data.get("right")
+        )
+        if updated <= 0:
+            return 1e9, False
+        return max(0.0, time.time() - updated), ready
+    except Exception:
+        return 1e9, False
+
+
+def probe_host_min_node_status() -> List[Tuple[str, bool, str]]:
+    """最小栈节点状态：(显示名, 是否运行, 备注)。
+
+    用于「连接机器人」启停的宿主机节点：相机 / 手 / 臂。
+    """
+    cam = _pgrep_pattern(r"forwarder/app/bin/forwarder|/forwarder/app/bin/forwarder")
+    if not cam:
+        cam = _pgrep_pattern(r"a2d_sdk/.*/forwarder|bin/forwarder")
+    hand = _pgrep_pattern(r"lib/hand/hand_node|/hand/hand_node")
+    bridge = _pgrep_pattern(r"host_arm_hand_bridge\.py")
+    fk = _pgrep_pattern(r"host_fk_node\.py") or _pgrep_pattern(
+        r"(^|/)fk_node( |$)|lib/wbc/fk_node"
+    )
+    tcp_br = _pgrep_pattern(r"robot_tcp_bridge\.py")
+    age, tcp_ready = _tcp_state_json_age_s()
+    if tcp_br and tcp_ready and age < 3.0:
+        tcp_note = f"TCP {age:.1f}s"
+    elif tcp_br and age < 1e8:
+        tcp_note = f"TCP 过期 {age:.0f}s"
+    elif tcp_br:
+        tcp_note = "无 TCP 数据"
+    else:
+        tcp_note = ""
+    return [
+        ("相机 forwarder", cam, "看图"),
+        ("灵巧手 hand_node", hand, "控手"),
+        ("臂/手使能桥", bridge, "使能+指令"),
+        ("FK host_fk", fk, "臂 TCP"),
+        ("TCP bridge", tcp_br, tcp_note or "写 JSON"),
+    ]
+
+
+def format_host_min_node_status_text(
+    rows: Optional[List[Tuple[str, bool, str]]] = None,
+    *,
+    compact: bool = False,
+) -> str:
+    rows = rows if rows is not None else probe_host_min_node_status()
+    if compact:
+        # 手臂页高度紧，单行摘要，避免撑破手动控制区
+        bits: List[str] = []
+        short = {
+            "相机 forwarder": "相机",
+            "灵巧手 hand_node": "手",
+            "臂/手使能桥": "使能桥",
+            "FK host_fk": "FK",
+            "TCP bridge": "TCP",
+        }
+        for name, ok, note in rows:
+            mark = "●" if ok else "○"
+            label = short.get(name, name)
+            if name == "TCP bridge" and note and ok:
+                bits.append(f"{mark}{label}({note})")
+            else:
+                bits.append(f"{mark}{label}")
+        n_ok = sum(1 for _n, ok, _note in rows if ok)
+        return f"节点 {n_ok}/{len(rows)}  " + "  ".join(bits)
+    parts: List[str] = []
+    for name, ok, note in rows:
+        mark = "●" if ok else "○"
+        state = "运行" if ok else "停止"
+        extra = f" · {note}" if note else ""
+        parts.append(f"{mark} {name}: {state}{extra}")
+    return "\n".join(parts)
+
+
+def _is_stack_services_running() -> bool:
+    """手/臂栈是否在跑（永远不用 Docker）。
+
+    正式路径：arm_hand_services.launch.py / base_services.launch.py。
+    本机精简路径：scripts/host_arm_hand_bridge.py（使能 + UDP 中继）。
+    """
+    if _pgrep_pattern(STACK_SERVICES_LAUNCH) or _pgrep_pattern(
+        LEGACY_BASE_SERVICES_LAUNCH
+    ):
+        return True
+    if _pgrep_pattern("host_arm_hand_bridge.py"):
+        return True
+    # 兼容旧精简栈（若本机曾装 a2d-tele）
+    has_router = _pgrep_pattern("topic_router.launch.py") or _pgrep_pattern(
+        "topic_router_node"
+    )
+    has_arm = _pgrep_pattern("arm_control_node") or _pgrep_pattern(
+        "wbc/arm_control"
+    )
+    return bool(has_router and has_arm)
 
 
 def _ros_service_exists(service: str) -> bool:
@@ -17871,12 +19141,33 @@ class RobotStackLauncher(QObject):
         if self._base_launch_pending or base == "启动中":
             self.status_message.emit("手/臂服务栈正在启动…")
             return
+        # 永远不用 Docker：宿主机使能桥 + Ruiyan hand_node
+        host_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "scripts",
+            "start_host_arm_hand.sh",
+        )
+        ruiyan_script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "scripts",
+            "start_host_ruiyan.sh",
+        )
+        if os.path.isfile(host_script):
+            if not QProcess.startDetached("bash", [host_script, "start"]):
+                self.status_message.emit("宿主机手/臂桥启动失败")
+                return
+            if os.path.isfile(ruiyan_script):
+                QProcess.startDetached("bash", [ruiyan_script, "start"])
+            self._base_launch_pending = True
+            self.status_message.emit(
+                "正在启动宿主机手/臂使能桥 + Ruiyan（无 Docker）…"
+            )
+            return
         script = self._resolve_script(STACK_SERVICES_SCRIPT)
         if script is None:
             tried = resolve_scripts_pack_dir() or "(未找到 scripts_pack 目录)"
             self.status_message.emit(
-                f"未找到 {STACK_SERVICES_SCRIPT}（已查: {tried}）。"
-                "请设置 A2D_SCRIPTS_DIR 或 colcon build scripts_pack"
+                f"未找到宿主机桥与 {STACK_SERVICES_SCRIPT}（已查: {tried}）"
             )
             return
         script_dir = os.path.dirname(script)
@@ -17889,7 +19180,7 @@ class RobotStackLauncher(QObject):
             return
         self._base_launch_pending = True
         self.status_message.emit(
-            "正在启动手/臂服务（pedal_controller、topic_router、ik/fk、arm_control、hand）…"
+            "正在启动手/臂服务（本机 scripts_pack，无 Docker）…"
         )
 
     def _launch_base_services(self) -> None:
@@ -24611,9 +25902,12 @@ class CameraTopicWindow(QMainWindow):
         self.prefix_edit = QLineEdit(prefix)
         self.prefix_edit.setPlaceholderText("/camera")
         camera_layout.addWidget(self.prefix_edit, 1)
-        refresh_btn = QPushButton("刷新 Topic")
-        refresh_btn.clicked.connect(self._on_refresh_clicked)
-        camera_layout.addWidget(refresh_btn)
+        self.camera_connect_btn = QPushButton("连接相机 Topic")
+        self.camera_connect_btn.setToolTip(
+            "启动 ROS topic 扫描并刷新列表；默认启动不自动订阅，点此后再勾选图像。"
+        )
+        self.camera_connect_btn.clicked.connect(self._on_refresh_clicked)
+        camera_layout.addWidget(self.camera_connect_btn)
         select_all_btn = QPushButton("全选图像")
         select_all_btn.clicked.connect(self._select_all_images)
         camera_layout.addWidget(select_all_btn)
@@ -24647,6 +25941,39 @@ class CameraTopicWindow(QMainWindow):
         stack_row.addWidget(self.robot_stack_status, 1)
         stack_row.addWidget(self.robot_stack_btn)
         robot_layout.addLayout(stack_row)
+
+        robot_conn_row = QHBoxLayout()
+        self.robot_state_connect_btn = QPushButton("连接机器人")
+        self.robot_state_connect_btn.setToolTip(
+            "启动最小宿主机节点：相机 forwarder + 灵巧手 + 臂/手使能桥 + FK。\n"
+            "用于看图、控手、控臂。再点一次「取消连接」会停止这些节点。"
+        )
+        self.robot_state_connect_btn.clicked.connect(self._on_connect_robot_state_clicked)
+        self.robot_state_connect_label = QLabel("状态: 未连接")
+        self.robot_state_connect_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robot_state_connect_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        robot_conn_row.addWidget(self.robot_state_connect_btn)
+        robot_conn_row.addWidget(self.robot_state_connect_label, 1)
+        self.robot_nodes_refresh_btn = QPushButton("刷新节点")
+        self.robot_nodes_refresh_btn.setToolTip("刷新最小栈各 node 运行状态")
+        self.robot_nodes_refresh_btn.clicked.connect(self._refresh_host_min_node_status)
+        robot_conn_row.addWidget(self.robot_nodes_refresh_btn)
+        robot_layout.addLayout(robot_conn_row)
+
+        self.robot_nodes_status_label = QLabel("节点: （连接后显示）")
+        self.robot_nodes_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robot_nodes_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.robot_nodes_status_label.setWordWrap(True)
+        self.robot_nodes_status_label.setToolTip(
+            "最小栈节点（看图/控手/控臂）：\n"
+            "相机 forwarder · 灵巧手 hand_node · 臂/手使能桥 · FK · TCP bridge"
+        )
+        robot_layout.addWidget(self.robot_nodes_status_label)
+        self._host_min_node_status_timer = QTimer(self)
+        self._host_min_node_status_timer.setInterval(2000)
+        self._host_min_node_status_timer.timeout.connect(self._refresh_host_min_node_status)
+        self._host_min_node_status_timer.start()
+        QTimer.singleShot(300, self._refresh_host_min_node_status)
 
         enable_row = QHBoxLayout()
         enable_row.setSpacing(10)
@@ -28633,35 +29960,90 @@ class CameraTopicWindow(QMainWindow):
         self._real_eval_local_cam_timer.timeout.connect(self._on_real_eval_local_cam_tick)
         self._on_real_robot_backend_changed()
 
-        # —— 本地摄像头：推流 + SSH 反向隧道 + 预览 ——
+        # —— 本地摄像头：本机直连监控 + 推流 + SSH 反向隧道 + 预览 ——
         local_cam_tab = QWidget()
         local_cam_outer = QVBoxLayout(local_cam_tab)
         local_cam_outer.setContentsMargins(8, 6, 8, 6)
         local_cam_outer.setSpacing(6)
 
-        local_cam_hint = QLabel(LOCAL_WEBCAM_TAB_HELP.split("\n\n")[0] + " 点「用法」看完整步骤。")
+        local_cam_hint = QLabel(
+            "本机有摄像头时可直接「打开本机监控」；Remote SSH 转发请用下方推流/隧道，点「用法」。"
+        )
         local_cam_hint.setWordWrap(True)
         local_cam_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         local_cam_outer.addWidget(local_cam_hint)
 
-        # 1) 推流
-        mjpeg_group = QGroupBox("1. 本机推流 (MJPEG)")
-        mjpeg_group.setStyleSheet(
+        _local_cam_group_ss = (
             f"QGroupBox {{ color: {UI_TEXT_PRIMARY}; border: 1px solid {UI_BORDER}; "
             f"margin-top: 6px; padding-top: 4px; }}"
             f"QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; "
             f"color: {UI_TEXT_SECONDARY}; }}"
         )
+
+        # 0) 本机直连监控
+        monitor_group = QGroupBox("本机直连监控")
+        monitor_group.setStyleSheet(_local_cam_group_ss)
+        monitor_layout = QVBoxLayout(monitor_group)
+        monitor_layout.setContentsMargins(8, 10, 8, 8)
+        monitor_layout.setSpacing(6)
+        monitor_row = QHBoxLayout()
+        monitor_row.setSpacing(6)
+        monitor_row.addWidget(QLabel("设备"))
+        self.local_cam_device_combo = QComboBox()
+        self.local_cam_device_combo.setMinimumWidth(280)
+        self.local_cam_device_combo.setToolTip(
+            "Linux: /dev/videoN（RealSense 彩色多为 video4）；也可在右侧填 index"
+        )
+        monitor_row.addWidget(self.local_cam_device_combo, 1)
+        # 默认不扫描 /dev/video*（v4l2-ctl / OpenCV 探测会卡住启动）
+        self.local_cam_device_edit = QLineEdit("0")
+        self.local_cam_device_edit.setFixedWidth(72)
+        self.local_cam_device_edit.setToolTip(
+            "摄像头 index（macOS 一般为 0）或 /dev/videoN；与左侧列表同步"
+        )
+        monitor_row.addWidget(self.local_cam_device_edit)
+        self.local_cam_refresh_dev_btn = QPushButton("刷新设备")
+        self.local_cam_refresh_dev_btn.setFocusPolicy(Qt.NoFocus)
+        self.local_cam_refresh_dev_btn.setToolTip("重新扫描 /dev/video*")
+        self.local_cam_refresh_dev_btn.clicked.connect(self._on_local_cam_refresh_devices)
+        monitor_row.addWidget(self.local_cam_refresh_dev_btn)
+        self.local_cam_monitor_btn = QPushButton("打开本机监控")
+        self.local_cam_monitor_btn.setFocusPolicy(Qt.NoFocus)
+        self.local_cam_monitor_btn.setToolTip("直接打开本机 V4L2 设备预览（无需推流）")
+        self.local_cam_monitor_btn.clicked.connect(self._on_local_cam_monitor_toggled)
+        monitor_row.addWidget(self.local_cam_monitor_btn)
+        self.local_cam_rotate_btn = QPushButton("旋转 180°")
+        self.local_cam_rotate_btn.setFocusPolicy(Qt.NoFocus)
+        self.local_cam_rotate_btn.setToolTip("顺时针旋转预览画面：180° → 270° → 0° → 90° → 180°")
+        self.local_cam_rotate_btn.clicked.connect(self._on_local_cam_rotate_clicked)
+        monitor_row.addWidget(self.local_cam_rotate_btn)
+        monitor_layout.addLayout(monitor_row)
+        self.local_cam_monitor_status = QLabel("监控: 未开启")
+        self.local_cam_monitor_status.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.local_cam_monitor_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        monitor_layout.addWidget(self.local_cam_monitor_status)
+        local_cam_outer.addWidget(monitor_group)
+        self._local_cam_preview_mode = ""  # "device" | "url" | ""
+        self._local_cam_rotate_deg = 180  # 默认 180；可点按钮切 0 / 90 / 180 / 270
+        self._local_cam_device_combo_syncing = False
+        self.local_cam_device_combo.currentIndexChanged.connect(
+            self._on_local_cam_device_combo_changed
+        )
+        self.local_cam_device_edit.editingFinished.connect(
+            self._on_local_cam_device_edit_finished
+        )
+        self._local_cam_device_combo_syncing = True
+        self.local_cam_device_combo.addItem("点「刷新设备」扫描 /dev/video*", "0")
+        self._local_cam_device_combo_syncing = False
+
+        # 1) 推流
+        mjpeg_group = QGroupBox("1. 本机推流 (MJPEG) — Remote SSH 转发用")
+        mjpeg_group.setStyleSheet(_local_cam_group_ss)
         mjpeg_layout = QVBoxLayout(mjpeg_group)
         mjpeg_layout.setContentsMargins(8, 10, 8, 8)
         mjpeg_layout.setSpacing(6)
         mjpeg_row = QHBoxLayout()
         mjpeg_row.setSpacing(6)
-        mjpeg_row.addWidget(QLabel("设备"))
-        self.local_cam_device_edit = QLineEdit("0")
-        self.local_cam_device_edit.setFixedWidth(64)
-        self.local_cam_device_edit.setToolTip("摄像头 index（macOS 一般为 0）或 /dev/videoN")
-        mjpeg_row.addWidget(self.local_cam_device_edit)
         mjpeg_row.addWidget(QLabel("端口"))
         self.local_cam_port_spin = QSpinBox()
         self.local_cam_port_spin.setRange(1024, 65535)
@@ -28669,7 +30051,9 @@ class CameraTopicWindow(QMainWindow):
         mjpeg_row.addWidget(self.local_cam_port_spin)
         self.local_cam_mjpeg_btn = QPushButton("启动推流")
         self.local_cam_mjpeg_btn.setFocusPolicy(Qt.NoFocus)
-        self.local_cam_mjpeg_btn.setToolTip("等价于: python3 examples/local_webcam_mjpeg_server.py")
+        self.local_cam_mjpeg_btn.setToolTip(
+            "使用上方「设备」推流，等价于: python3 examples/local_webcam_mjpeg_server.py"
+        )
         self.local_cam_mjpeg_btn.clicked.connect(self._on_local_cam_mjpeg_toggled)
         mjpeg_row.addWidget(self.local_cam_mjpeg_btn)
         self.local_cam_mjpeg_status = QLabel("推流: 未启动")
@@ -28680,13 +30064,8 @@ class CameraTopicWindow(QMainWindow):
         local_cam_outer.addWidget(mjpeg_group)
 
         # 2) 隧道
-        tunnel_group = QGroupBox("2. SSH 反向隧道")
-        tunnel_group.setStyleSheet(
-            f"QGroupBox {{ color: {UI_TEXT_PRIMARY}; border: 1px solid {UI_BORDER}; "
-            f"margin-top: 6px; padding-top: 4px; }}"
-            f"QGroupBox::title {{ subcontrol-origin: margin; left: 8px; padding: 0 4px; "
-            f"color: {UI_TEXT_SECONDARY}; }}"
-        )
+        tunnel_group = QGroupBox("2. SSH 反向隧道 — Remote SSH 转发用")
+        tunnel_group.setStyleSheet(_local_cam_group_ss)
         tunnel_layout = QVBoxLayout(tunnel_group)
         tunnel_layout.setContentsMargins(8, 10, 8, 8)
         tunnel_layout.setSpacing(6)
@@ -28759,7 +30138,9 @@ class CameraTopicWindow(QMainWindow):
         self.local_cam_preview_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         local_cam_outer.addWidget(self.local_cam_preview_status)
 
-        self.local_cam_preview_label = QLabel("启动推流与隧道后，点「打开预览」")
+        self.local_cam_preview_label = QLabel(
+            "点「打开本机监控」直接看本机摄像头，或推流后点「打开预览」"
+        )
         self.local_cam_preview_label.setAlignment(Qt.AlignCenter)
         self.local_cam_preview_label.setMinimumHeight(200)
         self.local_cam_preview_label.setStyleSheet(
@@ -28839,43 +30220,53 @@ class CameraTopicWindow(QMainWindow):
         text_cmd_row.addWidget(self.arm_home_btn)
         manual_layout.addLayout(text_cmd_row)
 
+        _gap_tip = (
+            f"手指间距离（cm）：0=全合，{HAND_FINGER_GAP_MAX_CM:.0f}=全张；"
+            f"步进 {HAND_FINGER_GAP_STEP_CM} cm"
+        )
+        _left_gap_a = hand_gap_cm_to_slider(LEFT_HAND_GAP_A_DEFAULT_CM)
+        _left_gap_b = hand_gap_cm_to_slider(LEFT_HAND_GAP_B_DEFAULT_CM)
+        _right_gap_a = hand_gap_cm_to_slider(RIGHT_HAND_GAP_A_DEFAULT_CM)
+        _right_gap_b = hand_gap_cm_to_slider(RIGHT_HAND_GAP_B_DEFAULT_CM)
+
         hand_row = QHBoxLayout()
         hand_row.setSpacing(4)
         hand_row.addWidget(QLabel("左手 A:"))
-        self.left_hand_slider_a = QSlider(Qt.Horizontal)
-        self.left_hand_slider_a.setRange(0, 100)
-        self.left_hand_slider_a.setValue(LEFT_HAND_ANGLE_A_DEFAULT)
-        self.left_hand_slider_a.setMinimumWidth(72)
-        self.left_hand_slider_a.setMaximumWidth(140)
-        self.left_hand_slider_a.setToolTip("左手状态 A 的角度 (0=张, 100=合)")
-        self.left_hand_slider_a.valueChanged.connect(self._on_left_hand_sliders_changed)
-        hand_row.addWidget(self.left_hand_slider_a, 1)
-        self.left_hand_label_a = QLabel(format_hand_angle_label(LEFT_HAND_ANGLE_A_DEFAULT))
+        # 属性名含 gap，避免旧 UI 状态把「角度%」误恢复成距离
+        self.left_hand_gap_slider_a = QSlider(Qt.Horizontal)
+        self.left_hand_gap_slider_a.setRange(0, HAND_FINGER_GAP_SLIDER_MAX)
+        self.left_hand_gap_slider_a.setValue(_left_gap_a)
+        self.left_hand_gap_slider_a.setMinimumWidth(72)
+        self.left_hand_gap_slider_a.setMaximumWidth(140)
+        self.left_hand_gap_slider_a.setToolTip(f"左手状态 A：{_gap_tip}")
+        self.left_hand_gap_slider_a.valueChanged.connect(self._on_left_hand_sliders_changed)
+        hand_row.addWidget(self.left_hand_gap_slider_a, 1)
+        self.left_hand_label_a = QLabel(format_hand_gap_label(_left_gap_a))
         self.left_hand_label_a.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.left_hand_label_a.setMinimumWidth(48)
+        self.left_hand_label_a.setMinimumWidth(52)
         hand_row.addWidget(self.left_hand_label_a)
 
         hand_row.addWidget(QLabel("B:"))
-        self.left_hand_slider_b = QSlider(Qt.Horizontal)
-        self.left_hand_slider_b.setRange(0, 100)
-        self.left_hand_slider_b.setValue(LEFT_HAND_ANGLE_B_DEFAULT)
-        self.left_hand_slider_b.setMinimumWidth(72)
-        self.left_hand_slider_b.setMaximumWidth(140)
-        self.left_hand_slider_b.setToolTip("左手状态 B 的角度 (0=张, 100=合)")
-        self.left_hand_slider_b.valueChanged.connect(self._on_left_hand_sliders_changed)
-        hand_row.addWidget(self.left_hand_slider_b, 1)
-        self.left_hand_label_b = QLabel(format_hand_angle_label(LEFT_HAND_ANGLE_B_DEFAULT))
+        self.left_hand_gap_slider_b = QSlider(Qt.Horizontal)
+        self.left_hand_gap_slider_b.setRange(0, HAND_FINGER_GAP_SLIDER_MAX)
+        self.left_hand_gap_slider_b.setValue(_left_gap_b)
+        self.left_hand_gap_slider_b.setMinimumWidth(72)
+        self.left_hand_gap_slider_b.setMaximumWidth(140)
+        self.left_hand_gap_slider_b.setToolTip(f"左手状态 B：{_gap_tip}")
+        self.left_hand_gap_slider_b.valueChanged.connect(self._on_left_hand_sliders_changed)
+        hand_row.addWidget(self.left_hand_gap_slider_b, 1)
+        self.left_hand_label_b = QLabel(format_hand_gap_label(_left_gap_b))
         self.left_hand_label_b.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.left_hand_label_b.setMinimumWidth(48)
+        self.left_hand_label_b.setMinimumWidth(52)
         hand_row.addWidget(self.left_hand_label_b)
 
         self.left_hand_toggle_btn = QPushButton("切换")
-        self.left_hand_toggle_btn.setToolTip("在游标 A 与 B 设定的两个角度之间切换")
+        self.left_hand_toggle_btn.setToolTip("在游标 A 与 B 设定的两个指间距离之间切换")
         self.left_hand_toggle_btn.clicked.connect(self._on_left_hand_toggle)
         hand_row.addWidget(self.left_hand_toggle_btn)
 
         self.left_hand_apply_btn = QPushButton("应用")
-        self.left_hand_apply_btn.setToolTip("将主游标（当前激活状态 A 或 B）的角度立即发送")
+        self.left_hand_apply_btn.setToolTip("将主游标（当前激活状态 A 或 B）的指间距离立即发送")
         self.left_hand_apply_btn.clicked.connect(self._on_left_hand_apply_active)
         hand_row.addWidget(self.left_hand_apply_btn)
         manual_layout.addLayout(hand_row)
@@ -28883,43 +30274,68 @@ class CameraTopicWindow(QMainWindow):
         right_hand_row = QHBoxLayout()
         right_hand_row.setSpacing(4)
         right_hand_row.addWidget(QLabel("右手 A:"))
-        self.right_hand_slider_a = QSlider(Qt.Horizontal)
-        self.right_hand_slider_a.setRange(0, 100)
-        self.right_hand_slider_a.setValue(RIGHT_HAND_ANGLE_A_DEFAULT)
-        self.right_hand_slider_a.setMinimumWidth(72)
-        self.right_hand_slider_a.setMaximumWidth(140)
-        self.right_hand_slider_a.setToolTip("右手状态 A 的角度 (0=张, 100=合)")
-        self.right_hand_slider_a.valueChanged.connect(self._on_right_hand_sliders_changed)
-        right_hand_row.addWidget(self.right_hand_slider_a, 1)
-        self.right_hand_label_a = QLabel(format_hand_angle_label(RIGHT_HAND_ANGLE_A_DEFAULT))
+        self.right_hand_gap_slider_a = QSlider(Qt.Horizontal)
+        self.right_hand_gap_slider_a.setRange(0, HAND_FINGER_GAP_SLIDER_MAX)
+        self.right_hand_gap_slider_a.setValue(_right_gap_a)
+        self.right_hand_gap_slider_a.setMinimumWidth(72)
+        self.right_hand_gap_slider_a.setMaximumWidth(140)
+        self.right_hand_gap_slider_a.setToolTip(f"右手状态 A：{_gap_tip}")
+        self.right_hand_gap_slider_a.valueChanged.connect(self._on_right_hand_sliders_changed)
+        right_hand_row.addWidget(self.right_hand_gap_slider_a, 1)
+        self.right_hand_label_a = QLabel(format_hand_gap_label(_right_gap_a))
         self.right_hand_label_a.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.right_hand_label_a.setMinimumWidth(48)
+        self.right_hand_label_a.setMinimumWidth(52)
         right_hand_row.addWidget(self.right_hand_label_a)
 
         right_hand_row.addWidget(QLabel("B:"))
-        self.right_hand_slider_b = QSlider(Qt.Horizontal)
-        self.right_hand_slider_b.setRange(0, 100)
-        self.right_hand_slider_b.setValue(RIGHT_HAND_ANGLE_B_DEFAULT)
-        self.right_hand_slider_b.setMinimumWidth(72)
-        self.right_hand_slider_b.setMaximumWidth(140)
-        self.right_hand_slider_b.setToolTip("右手状态 B 的角度 (0=张, 100=合)")
-        self.right_hand_slider_b.valueChanged.connect(self._on_right_hand_sliders_changed)
-        right_hand_row.addWidget(self.right_hand_slider_b, 1)
-        self.right_hand_label_b = QLabel(format_hand_angle_label(RIGHT_HAND_ANGLE_B_DEFAULT))
+        self.right_hand_gap_slider_b = QSlider(Qt.Horizontal)
+        self.right_hand_gap_slider_b.setRange(0, HAND_FINGER_GAP_SLIDER_MAX)
+        self.right_hand_gap_slider_b.setValue(_right_gap_b)
+        self.right_hand_gap_slider_b.setMinimumWidth(72)
+        self.right_hand_gap_slider_b.setMaximumWidth(140)
+        self.right_hand_gap_slider_b.setToolTip(f"右手状态 B：{_gap_tip}")
+        self.right_hand_gap_slider_b.valueChanged.connect(self._on_right_hand_sliders_changed)
+        right_hand_row.addWidget(self.right_hand_gap_slider_b, 1)
+        self.right_hand_label_b = QLabel(format_hand_gap_label(_right_gap_b))
         self.right_hand_label_b.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.right_hand_label_b.setMinimumWidth(48)
+        self.right_hand_label_b.setMinimumWidth(52)
         right_hand_row.addWidget(self.right_hand_label_b)
 
         self.right_hand_toggle_btn = QPushButton("切换")
-        self.right_hand_toggle_btn.setToolTip("在游标 A 与 B 设定的两个角度之间切换")
+        self.right_hand_toggle_btn.setToolTip("在游标 A 与 B 设定的两个指间距离之间切换")
         self.right_hand_toggle_btn.clicked.connect(self._on_right_hand_toggle)
         right_hand_row.addWidget(self.right_hand_toggle_btn)
 
         self.right_hand_apply_btn = QPushButton("应用")
-        self.right_hand_apply_btn.setToolTip("将主游标（当前激活状态 A 或 B）的角度立即发送")
+        self.right_hand_apply_btn.setToolTip("将主游标（当前激活状态 A 或 B）的指间距离立即发送")
         self.right_hand_apply_btn.clicked.connect(self._on_right_hand_apply_active)
         right_hand_row.addWidget(self.right_hand_apply_btn)
         manual_layout.addLayout(right_hand_row)
+
+        arm_conn_row = QHBoxLayout()
+        arm_conn_row.setSpacing(6)
+        self.arm_robot_state_connect_btn = QPushButton("连接机器人")
+        self.arm_robot_state_connect_btn.setToolTip(
+            "启动最小宿主机节点：相机 + 手 + 臂（看图/控手/控臂）。\n"
+            "再点「取消连接」停止这些节点。"
+        )
+        self.arm_robot_state_connect_btn.clicked.connect(self._on_connect_robot_state_clicked)
+        self.arm_robot_state_connect_label = QLabel("状态: 未连接")
+        self.arm_robot_state_connect_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.arm_robot_state_connect_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        arm_conn_row.addWidget(self.arm_robot_state_connect_btn)
+        arm_conn_row.addWidget(self.arm_robot_state_connect_label, 1)
+        manual_layout.addLayout(arm_conn_row)
+
+        self.arm_nodes_status_label = QLabel("节点: —")
+        self.arm_nodes_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.arm_nodes_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.arm_nodes_status_label.setWordWrap(False)
+        self.arm_nodes_status_label.setMaximumHeight(22)
+        self.arm_nodes_status_label.setToolTip(
+            "最小栈摘要（详细列表见「回放」页节点状态）"
+        )
+        manual_layout.addWidget(self.arm_nodes_status_label)
 
         enable_row = QHBoxLayout()
         enable_row.setSpacing(6)
@@ -28992,8 +30408,8 @@ class CameraTopicWindow(QMainWindow):
         self.left_arm_move_btn.setEnabled(False)
         self.left_arm_move_btn.setToolTip(
             "将左臂 TCP 移动到目标位姿（时长随距离与「移动速度」滑块自适应）。\n"
-            f"目标可为分割位姿，或相对当前位置的手动偏移。\n"
-            f"未使能时会自动启用手臂；同时发布左右臂 IK 目标。"
+            "目标可为分割位姿，或相对当前位置的手动偏移。\n"
+            "须先「启用手臂」；关闭使能后本按钮不可用。"
         )
         self.left_arm_move_btn.clicked.connect(
             lambda: self._on_arm_move_clicked("left")
@@ -29004,8 +30420,8 @@ class CameraTopicWindow(QMainWindow):
         self.right_arm_move_btn.setEnabled(False)
         self.right_arm_move_btn.setToolTip(
             "将右臂 TCP 移动到目标位姿（时长随距离与「移动速度」滑块自适应）。\n"
-            f"目标可为分割位姿，或相对当前位置的手动偏移。\n"
-            f"未使能时会自动启用手臂；同时发布左右臂 IK 目标。"
+            "目标可为分割位姿，或相对当前位置的手动偏移。\n"
+            "须先「启用手臂」；关闭使能后本按钮不可用。"
         )
         self.right_arm_move_btn.clicked.connect(
             lambda: self._on_arm_move_clicked("right")
@@ -29051,31 +30467,100 @@ class CameraTopicWindow(QMainWindow):
         )
         target_row.addWidget(self.move_target_relative_radio)
         target_row.addWidget(self.move_target_segment_radio)
-        self.offset_x_label = QLabel("前ΔX")
-        target_row.addWidget(self.offset_x_label)
-        self.offset_x_spin = make_manual_offset_spinbox()
-        self.offset_x_spin.setToolTip("沿 base_link X 轴偏移（正=前，负=后）")
-        target_row.addWidget(self.offset_x_spin)
-        self.offset_y_label = QLabel("左ΔY")
-        target_row.addWidget(self.offset_y_label)
-        self.offset_y_spin = make_manual_offset_spinbox()
-        self.offset_y_spin.setToolTip("沿 base_link Y 轴偏移（正=左，负=右）")
-        target_row.addWidget(self.offset_y_spin)
-        self.offset_z_label = QLabel("上ΔZ")
-        target_row.addWidget(self.offset_z_label)
-        self.offset_z_spin = make_manual_offset_spinbox()
-        self.offset_z_spin.setToolTip("沿 base_link Z 轴偏移（正=上，负=下）")
-        target_row.addWidget(self.offset_z_spin)
-        target_row.addStretch()
-
+        target_row.addStretch(1)
         self._move_target_group.buttonToggled.connect(self._on_move_target_params_changed)
-        for spin in (self.offset_x_spin, self.offset_y_spin, self.offset_z_spin):
-            spin.valueChanged.connect(self._on_move_target_params_changed)
-        self._update_move_offset_ui_visibility()
         manual_layout.addLayout(target_row)
+
+        # 兼容旧逻辑：隐藏的 signed ΔXYZ（由六向输入框同步，供组合「臂移动」/文本指令）
+        self.offset_x_label = QLabel("ΔX")
+        self.offset_y_label = QLabel("ΔY")
+        self.offset_z_label = QLabel("ΔZ")
+        self.offset_x_spin = make_manual_offset_spinbox()
+        self.offset_y_spin = make_manual_offset_spinbox()
+        self.offset_z_spin = make_manual_offset_spinbox()
+        self.offset_x_spin.setValue(5.0)
+        for w in (
+            self.offset_x_label,
+            self.offset_y_label,
+            self.offset_z_label,
+            self.offset_x_spin,
+            self.offset_y_spin,
+            self.offset_z_spin,
+        ):
+            w.setVisible(False)
+            w.setMaximumHeight(0)
+
+        # 每臂六个输入框：前/后/左/右/上/下，每个后面跟控制按钮（只动该方向）
+        self._arm_dir_spins: Dict[str, Dict[str, QDoubleSpinBox]] = {
+            "left": {},
+            "right": {},
+        }
+        self._arm_dir_btns: Dict[str, Dict[str, QPushButton]] = {
+            "left": {},
+            "right": {},
+        }
+        self._arm_dir_labels: Dict[str, Dict[str, QLabel]] = {
+            "left": {},
+            "right": {},
+        }
+        self._arm_dir_row_titles: Dict[str, QLabel] = {}
+        self._arm_dir_extra_widgets: List[QWidget] = []
+        for arm_side, side_label in (("left", "左臂"), ("right", "右臂")):
+            title = QLabel(f"{side_label}")
+            title.setMinimumWidth(36)
+            title.setToolTip(
+                f"{side_label}：六个方向各自输入步长(cm)，点后方「移动」只沿该方向；"
+                f"「{side_label}移动」按六向净合成偏移。"
+            )
+            self._arm_dir_row_titles[arm_side] = title
+            # 两行各三个：前/后/左 ， 右/上/下
+            for row_i, row_dirs in enumerate(
+                (("forward", "back", "left"), ("right", "up", "down"))
+            ):
+                dir_row = QHBoxLayout()
+                dir_row.setSpacing(4)
+                if row_i == 0:
+                    dir_row.addWidget(title)
+                else:
+                    pad = QLabel("")
+                    pad.setMinimumWidth(36)
+                    dir_row.addWidget(pad)
+                    self._arm_dir_extra_widgets.append(pad)
+                for direction in row_dirs:
+                    cn = ARM_DIR_LABEL_CN[direction]
+                    lab = QLabel(cn)
+                    lab.setMinimumWidth(14)
+                    spin = make_positive_offset_spinbox(
+                        5.0 if direction == "forward" else 0.0
+                    )
+                    spin.setToolTip(
+                        f"{side_label}向「{cn}」的步长（cm，base_link）"
+                    )
+                    spin.valueChanged.connect(self._on_arm_dir_spin_changed)
+                    btn = QPushButton("移动")
+                    btn.setFixedWidth(40)
+                    btn.setToolTip(
+                        f"{side_label}只向「{cn}」移动（使用左侧输入框步长）"
+                    )
+                    btn.clicked.connect(
+                        lambda _=False, s=arm_side, d=direction: self._on_arm_direction_move(
+                            s, d
+                        )
+                    )
+                    dir_row.addWidget(lab)
+                    dir_row.addWidget(spin)
+                    dir_row.addWidget(btn)
+                    self._arm_dir_labels[arm_side][direction] = lab
+                    self._arm_dir_spins[arm_side][direction] = spin
+                    self._arm_dir_btns[arm_side][direction] = btn
+                dir_row.addStretch(1)
+                manual_layout.addLayout(dir_row)
+        self._sync_offset_spins_from_dir("left")
+        self._update_move_offset_ui_visibility()
         manual_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         manual_group.setMinimumHeight(0)
-        manual_group.setMaximumHeight(260)
+        # 勿过矮：节点摘要 + 手/臂/六向输入需完整可见；高度由 splitter 分配
+        manual_group.setMaximumHeight(560)
 
         # —— 功能子面板选择条（类似仿真后端；顺序 → arm_panels_order.json）——
         arm_panel_row = QHBoxLayout()
@@ -29346,10 +30831,13 @@ class CameraTopicWindow(QMainWindow):
         mv6d_row1.addWidget(self.mv6d_once_btn)
         mv6d_row1.addWidget(QLabel("腕相机"))
         self.mv6d_wrist_combo = ImeSafeComboBox()
-        self.mv6d_wrist_combo.addItem("左腕", "/camera/left_wrist_color")
-        self.mv6d_wrist_combo.addItem("右腕", "/camera/right_wrist_color")
+        # data 用逻辑侧 "left"/"right"；实际 topic 运行时按 hand_* / left_wrist_* 解析
+        self.mv6d_wrist_combo.addItem("左腕", "left")
+        self.mv6d_wrist_combo.addItem("右腕", "right")
         self.mv6d_wrist_combo.setToolTip(
-            "参与头+腕融合估计的腕相机；下方预览会同时显示左腕与右腕画面"
+            "参与头+腕融合估计的腕相机；下方预览同时显示左腕与右腕。\n"
+            "真机常见 /camera/hand_left_color、/camera/hand_right_color；"
+            "仿真为 /camera/left_wrist_color、/camera/right_wrist_color。"
         )
         mv6d_row1.addWidget(self.mv6d_wrist_combo)
         mv6d_row1.addWidget(QLabel("间隔"))
@@ -29368,9 +30856,9 @@ class CameraTopicWindow(QMainWindow):
         self.mv6d_sync_seed_btn.clicked.connect(self._on_mv6d_sync_seed_from_segment)
         mv6d_row1.addWidget(self.mv6d_sync_seed_btn)
         self.mv6d_overlay_check = QCheckBox("叠加到预览")
-        self.mv6d_overlay_check.setChecked(True)
+        self.mv6d_overlay_check.setChecked(False)
         self.mv6d_overlay_check.setToolTip(
-            "在仿真相机彩色/深度面板上持久绘制 OBB、坐标轴与 XYZ/RPY/误差数字条"
+            "估计完成后叠加到手臂页头/腕预览（不写主相机面板，避免每帧重绘卡顿）"
         )
         self.mv6d_overlay_check.toggled.connect(self._on_mv6d_overlay_toggled)
         mv6d_row1.addWidget(self.mv6d_overlay_check)
@@ -29541,8 +31029,7 @@ class CameraTopicWindow(QMainWindow):
         self._mv6d_lightbox: Optional[Mv6dLightboxWindow] = None
         self._mv6d_bridge = Mv6dCallBridge(self)
         self._mv6d_bridge.finished.connect(self._on_mv6d_estimate_finished)
-        # 进入面板时先刷一帧头部画面，方便点选
-        QTimer.singleShot(0, self._refresh_mv6d_live_previews_for_pick)
+        # 不在构建时刷预览（会卡启动）；切到本面板时再刷
 
         mv6d_page_layout.addWidget(mv6d_group, 1)
         self._arm_panel_page_by_key["mv6d"] = mv6d_page
@@ -29564,7 +31051,8 @@ class CameraTopicWindow(QMainWindow):
         self._arm_hand_splitter.addWidget(arm_bottom)
         self._arm_hand_splitter.setStretchFactor(0, 0)
         self._arm_hand_splitter.setStretchFactor(1, 1)
-        self._arm_hand_splitter.setSizes([160, 520])
+        # 上半手动区略加高，避免控件被 maxHeight/过小 splitter 裁切
+        self._arm_hand_splitter.setSizes([280, 400])
         control_layout.addWidget(self._arm_hand_splitter, 1)
         self._apply_arm_panel_stack()
         control_tabs.addTab(control_tab, "手臂/手")
@@ -31995,7 +33483,9 @@ class CameraTopicWindow(QMainWindow):
         bridge.right_hand_preset_changed.connect(self._update_right_hand_toggle_ui)
         bridge.slow_motion_progress.connect(self._on_slow_motion_progress)
         bridge.slow_motion_finished.connect(self._on_slow_motion_finished)
-        bridge.robot_state_updated.connect(self._schedule_robot_ui_refresh)
+        bridge.robot_state_updated.connect(
+            self._schedule_robot_ui_refresh, Qt.QueuedConnection
+        )
         bridge.arm_enable_changed.connect(self._on_arm_enable_ui_changed)
         bridge.hand_enable_changed.connect(self._on_hand_enable_ui_changed)
         bridge.control_mode_changed.connect(self._on_control_mode_ui_changed)
@@ -32143,6 +33633,20 @@ class CameraTopicWindow(QMainWindow):
             misc_bar.tabsReordered.connect(self._on_control_tab_moved)
             misc_bar.tabNestToMisc.connect(self._nest_control_tab_into_misc)
             misc_bar.tabPopOut.connect(self._pop_control_tab_from_misc)
+        # 不在切 tab / 启动时自动打开本机摄像头：VideoCapture 探测 /dev/video* 会卡死 UI
+        self._ui_frame_paused_until = 0.0
+        self.control_tabs.currentChanged.connect(self._on_control_tabs_current_changed)
+        try:
+            self.control_tabs.tabBar().tabBarClicked.connect(self._on_control_tab_bar_clicked)
+        except Exception:
+            pass
+        misc_inner = getattr(self, "misc_inner_tabs", None)
+        if misc_inner is not None:
+            misc_inner.currentChanged.connect(self._on_control_tabs_current_changed)
+            try:
+                misc_inner.tabBar().tabBarClicked.connect(self._on_control_tab_bar_clicked)
+            except Exception:
+                pass
         self.chat_panel.status_message.connect(self.status_bar.showMessage)
         self._init_qwen_deploy_controller()
         self._stack_launcher.status_message.connect(self.status_bar.showMessage)
@@ -32166,8 +33670,10 @@ class CameraTopicWindow(QMainWindow):
 
         bridge.topics_updated.connect(self._on_topics_updated)
         bridge.frame_updated.connect(self._on_frame_updated)
+        bridge.frame_tick.connect(self._on_frame_tick)
         bridge.status_message.connect(self.status_bar.showMessage)
         bridge.frame_stats.connect(self._on_frame_stats)
+        # 最小栈（相机/手/臂）改由「连接机器人」启停，启动时不自动拉起
 
         # File-backed LIBERO / Live HUD preview — safe only after topic_list_layout exists.
         if hasattr(self, "_rynnvalue_workspace_hud_timer"):
@@ -34819,28 +36325,39 @@ class CameraTopicWindow(QMainWindow):
         return changed
 
     def _sync_mv6d_preview_visibility(self) -> None:
-        """多视角 6D：无对应相机帧时隐藏头/左腕/右腕预览格。"""
+        """多视角 6D：始终保留头/左腕/右腕预览格；无帧时显示占位文案（不隐藏）。"""
         mapping = (
-            ("/camera/head_color", "mv6d_head_preview"),
-            ("/camera/left_wrist_color", "mv6d_left_wrist_preview"),
-            ("/camera/right_wrist_color", "mv6d_right_wrist_preview"),
+            (
+                "/camera/head_color",
+                "mv6d_head_preview",
+                "_mv6d_head_pix",
+                "头部 · 等待画面\n勾选 /camera/head_color 或开仿真预览",
+            ),
+            (
+                "left",
+                "mv6d_left_wrist_preview",
+                "_mv6d_left_wrist_pix",
+                "左腕 · 等待画面",
+            ),
+            (
+                "right",
+                "mv6d_right_wrist_preview",
+                "_mv6d_right_wrist_pix",
+                "右腕 · 等待画面",
+            ),
         )
-        age = 120.0 if self._any_sim_process_running() else 900.0
-        fresh = self._sim_bridge_fresh_cam_keys(max_age_s=age)
-        key_by_topic = {t: k for k, t in SIM_PREVIEW_CAM_TOPICS}
-        for topic, attr in mapping:
+        for topic, attr, cache_attr, placeholder in mapping:
             lab = getattr(self, attr, None)
             if lab is None:
                 continue
-            cam_key = key_by_topic.get(topic, "")
-            has = False
-            if cam_key and cam_key in fresh:
-                has = True
-            elif self._frame_cache.get(topic) is not None:
-                has = True
-            elif self._pick_mv6d_color_frame(topic) is not None:
-                has = True
-            lab.setVisible(bool(has))
+            lab.setVisible(True)
+            if self._pick_mv6d_color_frame(topic) is not None:
+                continue
+            # 无帧：清掉旧 pixmap，露出占位说明，避免空白黑块
+            if getattr(self, cache_attr, None) is None:
+                self._set_mv6d_preview_label(
+                    lab, None, placeholder, cache_attr=cache_attr
+                )
 
     def _activate_sim_camera_preview(self, force: bool = True) -> None:
         """展开图像预览；仅显示共享目录里实际有帧的头/腕相机（无则不占位）。
@@ -36459,60 +37976,138 @@ class CameraTopicWindow(QMainWindow):
         )
 
     def _build_a2d_ops_panel(self) -> QWidget:
-        """真机评测 → A2D：采集标定 / 标定检查 / 模型·HIL / FAQ / 视频。"""
+        """真机评测 → A2D：docker / local 两套对齐运维（采集标定 / HIL / FAQ / 视频）。"""
         panel = QWidget()
         root = QVBoxLayout(panel)
         root.setContentsMargins(0, 4, 0, 0)
         root.setSpacing(6)
 
         title = QLabel("A2D 采集标定 · 模型测试 / HIL · 运维")
-        title.setStyleSheet(
-            f"color: {UI_TEXT_PRIMARY}; font-weight: bold;"
-        )
+        title.setStyleSheet(f"color: {UI_TEXT_PRIMARY}; font-weight: bold;")
         root.addWidget(title)
-        tip = QLabel(
-            "按现场文档一键拉起常用步骤；viewer 已在容器内时 ROS 命令直接执行，"
-            "docker 启停需宿主机 CLI（或挂载 docker.sock）。"
-            f" Pixel_err < 3px 为绿。"
+
+        self.a2d_ops_mode_tabs = QTabWidget()
+        self.a2d_ops_mode_tabs.setObjectName("a2dOpsModeTabs")
+        self.a2d_ops_mode_tabs.setDocumentMode(True)
+        self.a2d_ops_mode_tabs.addTab(
+            self._build_a2d_ops_mode_page("docker"), "docker"
         )
+        self.a2d_ops_mode_tabs.addTab(
+            self._build_a2d_ops_mode_page("local"), "local"
+        )
+        self.a2d_ops_mode_tabs.setTabToolTip(
+            0,
+            "依赖 Docker：容器启停 + 必要时 docker exec 进 A2D 跑 ROS",
+        )
+        self.a2d_ops_mode_tabs.setTabToolTip(
+            1,
+            "纯本机：不依赖 docker；需本机 a2d-tele install / 同 ROS_DOMAIN",
+        )
+        root.addWidget(self.a2d_ops_mode_tabs)
+        return panel
+
+    def _build_a2d_ops_mode_page(self, mode: str) -> QWidget:
+        """构建 A2D docker 或 local 运维页；功能对齐，仅执行环境不同。"""
+        is_local = mode == "local"
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(0, 6, 0, 0)
+        root.setSpacing(6)
+
+        if is_local:
+            tip = QLabel(
+                "本机模式：全部命令在宿主机执行，不调用 docker。"
+                "需本机已有 a2d-tele install（或 /opt/psi/rt/a2d-tele）且与现场同 ROS_DOMAIN。"
+                " Pixel_err < 3px 为绿。"
+            )
+        else:
+            tip = QLabel(
+                "Docker 模式：按现场文档一键拉起常用步骤；"
+                "viewer 已在容器内时 ROS 直接执行，否则可 docker exec；"
+                "容器启停需宿主机 CLI（或挂载 docker.sock）。"
+                " Pixel_err < 3px 为绿。"
+            )
         tip.setWordWrap(True)
         tip.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         root.addWidget(tip)
 
-        # —— 容器 ——
-        docker_box = QGroupBox("容器管理")
-        docker_box.setStyleSheet(self._a2d_ops_group_style())
-        docker_l = QVBoxLayout(docker_box)
-        docker_l.setContentsMargins(8, 10, 8, 8)
-        docker_l.setSpacing(6)
-        name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("容器名"))
-        self.a2d_docker_name_edit = QLineEdit(A2D_DOCKER_CONTAINER_DEFAULT)
-        self.a2d_docker_name_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.a2d_docker_name_edit.setToolTip("对应 A2D_DOCKER_CONTAINER / docker ps 名称")
-        name_row.addWidget(self.a2d_docker_name_edit, 1)
-        self.a2d_doc_btn = QPushButton("打开文档")
-        self.a2d_doc_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_doc_btn.setToolTip(A2D_OPS_DOC_URL)
-        self.a2d_doc_btn.clicked.connect(self._on_a2d_open_doc)
-        name_row.addWidget(self.a2d_doc_btn)
-        docker_l.addLayout(name_row)
-        dbtn_row = QHBoxLayout()
-        dbtn_row.setSpacing(6)
-        for text, slot, tip_text in (
-            ("查看容器", self._on_a2d_docker_ps, "docker ps"),
-            ("关闭容器", self._on_a2d_docker_stop, "docker stop <容器>"),
-            ("开启容器", self._on_a2d_docker_start, "docker start <容器>"),
-            ("重启容器", self._on_a2d_docker_restart, "docker restart <容器>"),
-        ):
-            btn = QPushButton(text)
-            btn.setFocusPolicy(Qt.NoFocus)
-            btn.setToolTip(tip_text)
-            btn.clicked.connect(slot)
-            dbtn_row.addWidget(btn)
-        dbtn_row.addStretch(1)
-        docker_l.addLayout(dbtn_row)
-        root.addWidget(docker_box)
+        # —— 环境管理：docker=容器 / local=本机 workspace ——
+        if is_local:
+            env_box = QGroupBox("本机环境")
+            env_box.setStyleSheet(self._a2d_ops_group_style())
+            env_l = QVBoxLayout(env_box)
+            env_l.setContentsMargins(8, 10, 8, 8)
+            env_l.setSpacing(6)
+            ws_row = QHBoxLayout()
+            ws_row.addWidget(QLabel("workspace"))
+            self.a2d_local_ws_edit = QLineEdit(resolve_a2d_workspace_dir())
+            self.a2d_local_ws_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+            self.a2d_local_ws_edit.setToolTip(
+                "本机 a2d-tele 根目录（含 install/setup.bash）；"
+                "检查环境时读取此路径"
+            )
+            ws_row.addWidget(self.a2d_local_ws_edit, 1)
+            self.a2d_local_doc_btn = QPushButton("打开文档")
+            self.a2d_local_doc_btn.setFocusPolicy(Qt.NoFocus)
+            self.a2d_local_doc_btn.setToolTip(A2D_OPS_DOC_URL)
+            self.a2d_local_doc_btn.clicked.connect(self._on_a2d_open_doc)
+            ws_row.addWidget(self.a2d_local_doc_btn)
+            env_l.addLayout(ws_row)
+            self.a2d_local_env_status = QLabel("状态: 未检查")
+            self.a2d_local_env_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+            self.a2d_local_env_status.setWordWrap(True)
+            env_l.addWidget(self.a2d_local_env_status)
+            ebtn_row = QHBoxLayout()
+            ebtn_row.setSpacing(6)
+            for text, slot, tip_text in (
+                ("检查环境", self._on_a2d_local_check_env, "检查 install/setup.bash 与 scripts_pack"),
+                ("打开 workspace", self._on_a2d_local_open_ws, "在文件管理器打开 workspace"),
+                ("刷新路径", self._on_a2d_local_refresh_ws, "用 resolve_a2d_workspace_dir() 回填"),
+            ):
+                btn = QPushButton(text)
+                btn.setFocusPolicy(Qt.NoFocus)
+                btn.setToolTip(tip_text)
+                btn.clicked.connect(slot)
+                ebtn_row.addWidget(btn)
+            ebtn_row.addStretch(1)
+            env_l.addLayout(ebtn_row)
+            root.addWidget(env_box)
+        else:
+            docker_box = QGroupBox("容器管理")
+            docker_box.setStyleSheet(self._a2d_ops_group_style())
+            docker_l = QVBoxLayout(docker_box)
+            docker_l.setContentsMargins(8, 10, 8, 8)
+            docker_l.setSpacing(6)
+            name_row = QHBoxLayout()
+            name_row.addWidget(QLabel("容器名"))
+            self.a2d_docker_name_edit = QLineEdit(A2D_DOCKER_CONTAINER_DEFAULT)
+            self.a2d_docker_name_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+            self.a2d_docker_name_edit.setToolTip(
+                "对应 A2D_DOCKER_CONTAINER / docker ps 名称"
+            )
+            name_row.addWidget(self.a2d_docker_name_edit, 1)
+            self.a2d_doc_btn = QPushButton("打开文档")
+            self.a2d_doc_btn.setFocusPolicy(Qt.NoFocus)
+            self.a2d_doc_btn.setToolTip(A2D_OPS_DOC_URL)
+            self.a2d_doc_btn.clicked.connect(self._on_a2d_open_doc)
+            name_row.addWidget(self.a2d_doc_btn)
+            docker_l.addLayout(name_row)
+            dbtn_row = QHBoxLayout()
+            dbtn_row.setSpacing(6)
+            for text, slot, tip_text in (
+                ("查看容器", self._on_a2d_docker_ps, "docker ps"),
+                ("关闭容器", self._on_a2d_docker_stop, "docker stop <容器>"),
+                ("开启容器", self._on_a2d_docker_start, "docker start <容器>"),
+                ("重启容器", self._on_a2d_docker_restart, "docker restart <容器>"),
+            ):
+                btn = QPushButton(text)
+                btn.setFocusPolicy(Qt.NoFocus)
+                btn.setToolTip(tip_text)
+                btn.clicked.connect(slot)
+                dbtn_row.addWidget(btn)
+            dbtn_row.addStretch(1)
+            docker_l.addLayout(dbtn_row)
+            root.addWidget(docker_box)
 
         # —— 采集标定 ——
         calib_box = QGroupBox("采集标定流程")
@@ -36520,37 +38115,51 @@ class CameraTopicWindow(QMainWindow):
         calib_l = QVBoxLayout(calib_box)
         calib_l.setContentsMargins(8, 10, 8, 8)
         calib_l.setSpacing(6)
-        calib_hint = QLabel(
-            "顺序：tracker 标定 → 启动 GUI → 开启 ROS 服务与脚踏模式。"
-            "（需已进入 a2d 容器 / 与现场同 ROS_DOMAIN）"
-        )
+        if is_local:
+            calib_hint = QLabel(
+                "顺序：tracker 标定 → 启动 GUI → 开启 ROS 服务与脚踏模式。"
+                "（本机 a2d-tele / 与现场同 ROS_DOMAIN，不经过 docker）"
+            )
+            gui_tip = (
+                "ros2 launch scripts_pack start_gui.launch.py\n"
+                "本机模式：始终在宿主机执行"
+            )
+        else:
+            calib_hint = QLabel(
+                "顺序：tracker 标定 → 启动 GUI → 开启 ROS 服务与脚踏模式。"
+                "（需已进入 a2d 容器 / 与现场同 ROS_DOMAIN）"
+            )
+            gui_tip = (
+                "ros2 launch scripts_pack start_gui.launch.py\n"
+                "宿主机 viewer 会自动 docker exec 进 A2D 容器执行"
+            )
         calib_hint.setWordWrap(True)
         calib_hint.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         calib_l.addWidget(calib_hint)
         cbtn_row = QHBoxLayout()
         cbtn_row.setSpacing(6)
-        self.a2d_tracker_calib_btn = QPushButton("1. Tracker 标定")
-        self.a2d_tracker_calib_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_tracker_calib_btn.setToolTip("ros2 run vr_calibration calibrate_node")
-        self.a2d_tracker_calib_btn.clicked.connect(self._on_a2d_tracker_calib)
-        cbtn_row.addWidget(self.a2d_tracker_calib_btn)
-        self.a2d_start_gui_btn = QPushButton("2. 启动 GUI")
-        self.a2d_start_gui_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_start_gui_btn.setToolTip(
-            "ros2 launch scripts_pack start_gui.launch.py"
-        )
-        self.a2d_start_gui_btn.clicked.connect(self._on_a2d_start_gui)
-        cbtn_row.addWidget(self.a2d_start_gui_btn)
-        self.a2d_ros_pedal_btn = QPushButton("3. ROS 服务 + 脚踏")
-        self.a2d_ros_pedal_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_ros_pedal_btn.setToolTip(
-            "启动 robot-service / 手臂栈（含 pedal_controller）"
-        )
-        self.a2d_ros_pedal_btn.clicked.connect(self._on_a2d_ros_and_pedal)
-        cbtn_row.addWidget(self.a2d_ros_pedal_btn)
+        tracker_btn = QPushButton("1. Tracker 标定")
+        tracker_btn.setFocusPolicy(Qt.NoFocus)
+        tracker_btn.setToolTip("ros2 run vr_calibration calibrate_node")
+        tracker_btn.clicked.connect(self._on_a2d_tracker_calib)
+        cbtn_row.addWidget(tracker_btn)
+        gui_btn = QPushButton("2. 启动 GUI")
+        gui_btn.setFocusPolicy(Qt.NoFocus)
+        gui_btn.setToolTip(gui_tip)
+        gui_btn.clicked.connect(self._on_a2d_start_gui)
+        cbtn_row.addWidget(gui_btn)
+        pedal_btn = QPushButton("3. ROS 服务 + 脚踏")
+        pedal_btn.setFocusPolicy(Qt.NoFocus)
+        pedal_btn.setToolTip("启动 robot-service / 手臂栈（含 pedal_controller）")
+        pedal_btn.clicked.connect(self._on_a2d_ros_and_pedal)
+        cbtn_row.addWidget(pedal_btn)
         cbtn_row.addStretch(1)
         calib_l.addLayout(cbtn_row)
         root.addWidget(calib_box)
+        if not is_local:
+            self.a2d_tracker_calib_btn = tracker_btn
+            self.a2d_start_gui_btn = gui_btn
+            self.a2d_ros_pedal_btn = pedal_btn
 
         # —— 查看标定 ——
         check_box = QGroupBox("查看机器人标定")
@@ -36564,20 +38173,23 @@ class CameraTopicWindow(QMainWindow):
         check_l.addWidget(check_tip)
         check_row = QHBoxLayout()
         check_row.setSpacing(6)
-        self.a2d_baseline_btn = QPushButton("启动 baseline_check")
-        self.a2d_baseline_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_baseline_btn.setToolTip(
+        baseline_btn = QPushButton("启动 baseline_check")
+        baseline_btn.setFocusPolicy(Qt.NoFocus)
+        baseline_btn.setToolTip(
             "ros2 launch reset_baseline baseline_check.launch.py（需已开 ROS 服务）"
         )
-        self.a2d_baseline_btn.clicked.connect(self._on_a2d_baseline_check)
-        check_row.addWidget(self.a2d_baseline_btn)
-        self.a2d_hmi_tip_btn = QPushButton("HMI 操作说明")
-        self.a2d_hmi_tip_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_hmi_tip_btn.clicked.connect(self._on_a2d_hmi_tip)
-        check_row.addWidget(self.a2d_hmi_tip_btn)
+        baseline_btn.clicked.connect(self._on_a2d_baseline_check)
+        check_row.addWidget(baseline_btn)
+        hmi_btn = QPushButton("HMI 操作说明")
+        hmi_btn.setFocusPolicy(Qt.NoFocus)
+        hmi_btn.clicked.connect(self._on_a2d_hmi_tip)
+        check_row.addWidget(hmi_btn)
         check_row.addStretch(1)
         check_l.addLayout(check_row)
         root.addWidget(check_box)
+        if not is_local:
+            self.a2d_baseline_btn = baseline_btn
+            self.a2d_hmi_tip_btn = hmi_btn
 
         # —— 模型 / HIL ——
         model_box = QGroupBox("模型测试和 HIL")
@@ -36587,63 +38199,74 @@ class CameraTopicWindow(QMainWindow):
         model_l.setSpacing(6)
         policy_row = QHBoxLayout()
         policy_row.addWidget(QLabel("psi-policy 根目录"))
-        self.a2d_policy_root_edit = QLineEdit(A2D_PSI_POLICY_ROOT_DEFAULT)
-        self.a2d_policy_root_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.a2d_policy_root_edit.setToolTip(
+        policy_edit = QLineEdit(A2D_PSI_POLICY_ROOT_DEFAULT)
+        policy_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        policy_edit.setToolTip(
             "含 .venv 与 model_inference_client_cena；可用 A2D_PSI_POLICY_ROOT 覆盖"
         )
-        policy_row.addWidget(self.a2d_policy_root_edit, 1)
-        self.a2d_policy_browse_btn = QPushButton("浏览…")
-        self.a2d_policy_browse_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_policy_browse_btn.clicked.connect(self._on_a2d_browse_policy_root)
-        policy_row.addWidget(self.a2d_policy_browse_btn)
+        policy_row.addWidget(policy_edit, 1)
+        policy_browse = QPushButton("浏览…")
+        policy_browse.setFocusPolicy(Qt.NoFocus)
+        policy_browse.clicked.connect(self._on_a2d_browse_policy_root)
+        policy_row.addWidget(policy_browse)
         model_l.addLayout(policy_row)
         ckpt_row = QHBoxLayout()
         ckpt_row.addWidget(QLabel("ckpt_path"))
-        self.a2d_ckpt_edit = QLineEdit(A2D_CKPT_PATH_DEFAULT)
-        self.a2d_ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.a2d_ckpt_edit.setToolTip(
+        ckpt_edit = QLineEdit(A2D_CKPT_PATH_DEFAULT)
+        ckpt_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        ckpt_edit.setToolTip(
             "写入环境变量 CKPT_PATH（若 client 脚本读取）；"
             "也可在 outputs/ 下选 last.ckpt"
         )
-        ckpt_row.addWidget(self.a2d_ckpt_edit, 1)
-        self.a2d_ckpt_browse_btn = QPushButton("浏览…")
-        self.a2d_ckpt_browse_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_ckpt_browse_btn.clicked.connect(self._on_a2d_browse_ckpt)
-        ckpt_row.addWidget(self.a2d_ckpt_browse_btn)
+        ckpt_row.addWidget(ckpt_edit, 1)
+        ckpt_browse = QPushButton("浏览…")
+        ckpt_browse.setFocusPolicy(Qt.NoFocus)
+        ckpt_browse.clicked.connect(self._on_a2d_browse_ckpt)
+        ckpt_row.addWidget(ckpt_browse)
         model_l.addLayout(ckpt_row)
         mbtn_row = QHBoxLayout()
         mbtn_row.setSpacing(6)
-        self.a2d_infer_server_btn = QPushButton("启动 inference server")
-        self.a2d_infer_server_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_infer_server_btn.setToolTip(
-            "ros2 run model_inference run_inference_server（容器内）"
+        infer_btn = QPushButton("启动 inference server")
+        infer_btn.setFocusPolicy(Qt.NoFocus)
+        infer_btn.setToolTip(
+            "ros2 run model_inference run_inference_server"
+            + ("（本机）" if is_local else "（容器内 / docker exec）")
         )
-        self.a2d_infer_server_btn.clicked.connect(self._on_a2d_infer_server)
-        mbtn_row.addWidget(self.a2d_infer_server_btn)
-        self.a2d_policy_infer_btn = QPushButton("模型推理模式")
-        self.a2d_policy_infer_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_policy_infer_btn.setToolTip(
-            "source .venv && python run_policy_inference.py"
-        )
-        self.a2d_policy_infer_btn.clicked.connect(
+        infer_btn.clicked.connect(self._on_a2d_infer_server)
+        mbtn_row.addWidget(infer_btn)
+        policy_infer_btn = QPushButton("模型推理模式")
+        policy_infer_btn.setFocusPolicy(Qt.NoFocus)
+        policy_infer_btn.setToolTip("source .venv && python run_policy_inference.py")
+        policy_infer_btn.clicked.connect(
             lambda: self._on_a2d_policy_client(hil=False)
         )
-        mbtn_row.addWidget(self.a2d_policy_infer_btn)
-        self.a2d_hil_btn = QPushButton("HIL 模式")
-        self.a2d_hil_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_hil_btn.setToolTip(
+        mbtn_row.addWidget(policy_infer_btn)
+        hil_btn = QPushButton("HIL 模式")
+        hil_btn.setFocusPolicy(Qt.NoFocus)
+        hil_btn.setToolTip(
             "python run_policy_inference.py 2>&1 | tee hil_repro_act.log"
         )
-        self.a2d_hil_btn.clicked.connect(lambda: self._on_a2d_policy_client(hil=True))
-        mbtn_row.addWidget(self.a2d_hil_btn)
-        self.a2d_open_outputs_btn = QPushButton("打开 outputs")
-        self.a2d_open_outputs_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_open_outputs_btn.clicked.connect(self._on_a2d_open_outputs)
-        mbtn_row.addWidget(self.a2d_open_outputs_btn)
+        hil_btn.clicked.connect(lambda: self._on_a2d_policy_client(hil=True))
+        mbtn_row.addWidget(hil_btn)
+        outputs_btn = QPushButton("打开 outputs")
+        outputs_btn.setFocusPolicy(Qt.NoFocus)
+        outputs_btn.clicked.connect(self._on_a2d_open_outputs)
+        mbtn_row.addWidget(outputs_btn)
         mbtn_row.addStretch(1)
         model_l.addLayout(mbtn_row)
         root.addWidget(model_box)
+        if is_local:
+            self.a2d_local_policy_root_edit = policy_edit
+            self.a2d_local_ckpt_edit = ckpt_edit
+        else:
+            self.a2d_policy_root_edit = policy_edit
+            self.a2d_ckpt_edit = ckpt_edit
+            self.a2d_policy_browse_btn = policy_browse
+            self.a2d_ckpt_browse_btn = ckpt_browse
+            self.a2d_infer_server_btn = infer_btn
+            self.a2d_policy_infer_btn = policy_infer_btn
+            self.a2d_hil_btn = hil_btn
+            self.a2d_open_outputs_btn = outputs_btn
 
         # —— 常见问题 ——
         faq_box = QGroupBox("常见问题和解决办法")
@@ -36660,28 +38283,30 @@ class CameraTopicWindow(QMainWindow):
         faq_l.addWidget(faq_hint)
         fbtn_row = QHBoxLayout()
         fbtn_row.setSpacing(6)
-        self.a2d_xhost_btn = QPushButton("xhost +")
-        self.a2d_xhost_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_xhost_btn.setToolTip("宿主机: xhost +（GUI / Steam VR 打不开时）")
-        self.a2d_xhost_btn.clicked.connect(self._on_a2d_xhost)
-        fbtn_row.addWidget(self.a2d_xhost_btn)
-        self.a2d_steamvr_btn = QPushButton("重启 Steam VR")
-        self.a2d_steamvr_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_steamvr_btn.setToolTip(
-            "ros2 launch vr_tracker steamvr.launch.py"
-        )
-        self.a2d_steamvr_btn.clicked.connect(self._on_a2d_steamvr)
-        fbtn_row.addWidget(self.a2d_steamvr_btn)
-        self.a2d_rui_hand_btn = QPushButton("检查手 (rui-hand)")
-        self.a2d_rui_hand_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_rui_hand_btn.setToolTip(
+        xhost_btn = QPushButton("xhost +")
+        xhost_btn.setFocusPolicy(Qt.NoFocus)
+        xhost_btn.setToolTip("宿主机: xhost +（GUI / Steam VR 打不开时）")
+        xhost_btn.clicked.connect(self._on_a2d_xhost)
+        fbtn_row.addWidget(xhost_btn)
+        steamvr_btn = QPushButton("重启 Steam VR")
+        steamvr_btn.setFocusPolicy(Qt.NoFocus)
+        steamvr_btn.setToolTip("ros2 launch vr_tracker steamvr.launch.py")
+        steamvr_btn.clicked.connect(self._on_a2d_steamvr)
+        fbtn_row.addWidget(steamvr_btn)
+        rui_btn = QPushButton("检查手 (rui-hand)")
+        rui_btn.setFocusPolicy(Qt.NoFocus)
+        rui_btn.setToolTip(
             "sudo rui-hand → 设备连接 → RS485 → 波特率 460800 → 串口扫描打开端口"
         )
-        self.a2d_rui_hand_btn.clicked.connect(self._on_a2d_rui_hand)
-        fbtn_row.addWidget(self.a2d_rui_hand_btn)
+        rui_btn.clicked.connect(self._on_a2d_rui_hand)
+        fbtn_row.addWidget(rui_btn)
         fbtn_row.addStretch(1)
         faq_l.addLayout(fbtn_row)
         root.addWidget(faq_box)
+        if not is_local:
+            self.a2d_xhost_btn = xhost_btn
+            self.a2d_steamvr_btn = steamvr_btn
+            self.a2d_rui_hand_btn = rui_btn
 
         # —— 观看视频 ——
         video_box = QGroupBox("观看采集的视频")
@@ -36691,29 +38316,85 @@ class CameraTopicWindow(QMainWindow):
         video_l.setSpacing(6)
         rrd_row = QHBoxLayout()
         rrd_row.addWidget(QLabel("rrd_path"))
-        self.a2d_rrd_edit = QLineEdit(A2D_RRD_PATH_DEFAULT)
-        self.a2d_rrd_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.a2d_rrd_edit.setToolTip(
+        rrd_edit = QLineEdit(A2D_RRD_PATH_DEFAULT)
+        rrd_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        rrd_edit.setToolTip(
             "ros2 launch rrd_replay rrd_replay.launch.py rrd_path:=…"
         )
-        rrd_row.addWidget(self.a2d_rrd_edit, 1)
-        self.a2d_rrd_browse_btn = QPushButton("浏览…")
-        self.a2d_rrd_browse_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_rrd_browse_btn.clicked.connect(self._on_a2d_browse_rrd)
-        rrd_row.addWidget(self.a2d_rrd_browse_btn)
+        rrd_row.addWidget(rrd_edit, 1)
+        rrd_browse = QPushButton("浏览…")
+        rrd_browse.setFocusPolicy(Qt.NoFocus)
+        rrd_browse.clicked.connect(self._on_a2d_browse_rrd)
+        rrd_row.addWidget(rrd_browse)
         video_l.addLayout(rrd_row)
         vbtn_row = QHBoxLayout()
         vbtn_row.setSpacing(6)
-        self.a2d_rrd_play_btn = QPushButton("播放 RRD")
-        self.a2d_rrd_play_btn.setFocusPolicy(Qt.NoFocus)
-        self.a2d_rrd_play_btn.setToolTip("启动 rrd_replay 观看采集视频")
-        self.a2d_rrd_play_btn.clicked.connect(self._on_a2d_play_rrd)
-        vbtn_row.addWidget(self.a2d_rrd_play_btn)
+        rrd_play = QPushButton("播放 RRD")
+        rrd_play.setFocusPolicy(Qt.NoFocus)
+        rrd_play.setToolTip("启动 rrd_replay 观看采集视频")
+        rrd_play.clicked.connect(self._on_a2d_play_rrd)
+        vbtn_row.addWidget(rrd_play)
         vbtn_row.addStretch(1)
         video_l.addLayout(vbtn_row)
         root.addWidget(video_box)
+        if is_local:
+            self.a2d_local_rrd_edit = rrd_edit
+        else:
+            self.a2d_rrd_edit = rrd_edit
+            self.a2d_rrd_browse_btn = rrd_browse
+            self.a2d_rrd_play_btn = rrd_play
 
-        return panel
+        root.addStretch(1)
+        return page
+
+    def _a2d_ops_mode(self) -> str:
+        tabs = getattr(self, "a2d_ops_mode_tabs", None)
+        if tabs is not None and tabs.currentIndex() == 1:
+            return "local"
+        return "docker"
+
+    def _a2d_ops_is_local(self) -> bool:
+        return self._a2d_ops_mode() == "local"
+
+    def _a2d_policy_root_edit_widget(self) -> Optional[QLineEdit]:
+        if self._a2d_ops_is_local():
+            return getattr(self, "a2d_local_policy_root_edit", None)
+        return getattr(self, "a2d_policy_root_edit", None)
+
+    def _a2d_ckpt_edit_widget(self) -> Optional[QLineEdit]:
+        if self._a2d_ops_is_local():
+            return getattr(self, "a2d_local_ckpt_edit", None)
+        return getattr(self, "a2d_ckpt_edit", None)
+
+    def _a2d_rrd_edit_widget(self) -> Optional[QLineEdit]:
+        if self._a2d_ops_is_local():
+            return getattr(self, "a2d_local_rrd_edit", None)
+        return getattr(self, "a2d_rrd_edit", None)
+
+    def _a2d_local_workspace(self) -> str:
+        edit = getattr(self, "a2d_local_ws_edit", None)
+        if edit is not None:
+            raw = os.path.expanduser(edit.text().strip())
+            if raw:
+                return raw
+        return resolve_a2d_workspace_dir()
+
+    def _a2d_launch_ros(self, ros_cmd: str, **kwargs) -> Tuple[bool, str]:
+        force_local = self._a2d_ops_is_local()
+        container = "" if force_local else self._a2d_container_name()
+        if force_local and "cwd" not in kwargs:
+            kwargs["cwd"] = self._a2d_local_workspace()
+        ok, msg = launch_a2d_ros_detached(
+            ros_cmd,
+            force_local=force_local,
+            container=container,
+            **kwargs,
+        )
+        if not ok and force_local and (
+            "不存在" in msg or "缺少 a2d-tele" in msg or "install" in msg
+        ):
+            QMessageBox.warning(self, "A2D local 启动失败", msg)
+        return ok, msg
 
     def _a2d_container_name(self) -> str:
         edit = getattr(self, "a2d_docker_name_edit", None)
@@ -36721,13 +38402,62 @@ class CameraTopicWindow(QMainWindow):
         return a2d_docker_container_name(raw)
 
     def _log_a2d_ops(self, line: str) -> None:
-        self._append_real_eval_log(f"[A2D运维] {line}")
+        mode = self._a2d_ops_mode()
+        self._append_real_eval_log(f"[A2D运维/{mode}] {line}")
         if hasattr(self, "status_bar") and self.status_bar is not None:
             self.status_bar.showMessage(line[:120], 5000)
 
     def _on_a2d_open_doc(self) -> None:
         QDesktopServices.openUrl(QUrl(A2D_OPS_DOC_URL))
         self._log_a2d_ops(f"打开文档: {A2D_OPS_DOC_URL}")
+
+    def _on_a2d_local_check_env(self) -> None:
+        edit = getattr(self, "a2d_local_ws_edit", None)
+        ws = ""
+        if edit is not None:
+            ws = os.path.expanduser(edit.text().strip())
+        if not ws:
+            ws = resolve_a2d_workspace_dir()
+        setup = os.path.join(ws, "install", "setup.bash")
+        scripts = resolve_scripts_pack_dir()
+        lines = [
+            f"workspace={ws}",
+            f"install/setup.bash={'OK' if os.path.isfile(setup) else 'MISSING'}",
+            f"scripts_pack={scripts or 'MISSING'}",
+            f"ROS_DISTRO={os.environ.get('ROS_DISTRO', '?')}",
+            f"RMW={os.environ.get('RMW_IMPLEMENTATION', '?')}",
+            f"DOMAIN={os.environ.get('ROS_DOMAIN_ID', '?')}",
+        ]
+        ok = os.path.isfile(setup)
+        status = getattr(self, "a2d_local_env_status", None)
+        text = ("就绪 · " if ok else "未就绪 · ") + " | ".join(lines)
+        if status is not None:
+            status.setText(text)
+            status.setStyleSheet(
+                f"color: {'#6aab73' if ok else '#c97b7b'};"
+            )
+        self._log_a2d_ops(("环境OK\n" if ok else "环境缺失\n") + "\n".join(lines))
+
+    def _on_a2d_local_open_ws(self) -> None:
+        edit = getattr(self, "a2d_local_ws_edit", None)
+        ws = ""
+        if edit is not None:
+            ws = os.path.expanduser(edit.text().strip())
+        if not ws:
+            ws = resolve_a2d_workspace_dir()
+        if not os.path.isdir(ws):
+            self._log_a2d_ops(f"workspace 不存在: {ws}")
+            QMessageBox.warning(self, "本机环境", f"目录不存在:\n{ws}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.abspath(ws)))
+        self._log_a2d_ops(f"打开 workspace: {ws}")
+
+    def _on_a2d_local_refresh_ws(self) -> None:
+        edit = getattr(self, "a2d_local_ws_edit", None)
+        if edit is None:
+            return
+        edit.setText(resolve_a2d_workspace_dir())
+        self._on_a2d_local_check_env()
 
     def _on_a2d_docker_ps(self) -> None:
         ok, text = run_a2d_docker_action("ps", self._a2d_container_name(), capture=True)
@@ -36768,22 +38498,25 @@ class CameraTopicWindow(QMainWindow):
         self._log_a2d_ops(text if ok else f"FAIL: {text}")
 
     def _on_a2d_tracker_calib(self) -> None:
-        ok, msg = launch_a2d_ros_detached("ros2 run vr_calibration calibrate_node")
+        ok, msg = self._a2d_launch_ros("ros2 run vr_calibration calibrate_node")
         self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
 
     def _on_a2d_start_gui(self) -> None:
-        ok, msg = launch_a2d_ros_detached(
+        ok, msg = self._a2d_launch_ros(
             "ros2 launch scripts_pack start_gui.launch.py"
         )
         self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
 
     def _on_a2d_ros_and_pedal(self) -> None:
-        self._log_a2d_ops("启动 ROS 服务与脚踏（走 A2D 机器人栈）…")
-        self._append_real_eval_log("[栈] 后端=A2D，采集标定流程 → RobotStackLauncher")
+        mode = self._a2d_ops_mode()
+        self._log_a2d_ops(f"启动 ROS 服务与脚踏（A2D/{mode}）…")
+        self._append_real_eval_log(
+            f"[栈] 后端=A2D/{mode}，采集标定流程 → RobotStackLauncher"
+        )
         self._on_robot_stack_clicked()
 
     def _on_a2d_baseline_check(self) -> None:
-        ok, msg = launch_a2d_ros_detached(
+        ok, msg = self._a2d_launch_ros(
             "ros2 launch reset_baseline baseline_check.launch.py"
         )
         self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
@@ -36794,15 +38527,21 @@ class CameraTopicWindow(QMainWindow):
         QMessageBox.information(self, "HMI 标定检查", A2D_HMI_CALIB_TIP)
 
     def _on_a2d_browse_policy_root(self) -> None:
-        cur = self.a2d_policy_root_edit.text().strip() or A2D_PSI_POLICY_ROOT_DEFAULT
+        edit = self._a2d_policy_root_edit_widget()
+        if edit is None:
+            return
+        cur = edit.text().strip() or A2D_PSI_POLICY_ROOT_DEFAULT
         selected = QFileDialog.getExistingDirectory(
             self, "选择 psi-policy-v2 根目录", cur
         )
         if selected:
-            self.a2d_policy_root_edit.setText(selected)
+            edit.setText(selected)
 
     def _on_a2d_browse_ckpt(self) -> None:
-        cur = self.a2d_ckpt_edit.text().strip() or A2D_CKPT_PATH_DEFAULT
+        edit = self._a2d_ckpt_edit_widget()
+        if edit is None:
+            return
+        cur = edit.text().strip() or A2D_CKPT_PATH_DEFAULT
         start = os.path.dirname(cur) if cur else A2D_PSI_POLICY_ROOT_DEFAULT
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -36811,16 +38550,20 @@ class CameraTopicWindow(QMainWindow):
             "Checkpoint (*.ckpt *.pt *.pth);;All (*)",
         )
         if path:
-            self.a2d_ckpt_edit.setText(path)
+            edit.setText(path)
 
     def _on_a2d_infer_server(self) -> None:
-        ok, msg = launch_a2d_ros_detached(
+        ok, msg = self._a2d_launch_ros(
             "ros2 run model_inference run_inference_server"
         )
         self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
 
     def _on_a2d_policy_client(self, *, hil: bool) -> None:
-        root = os.path.expanduser(self.a2d_policy_root_edit.text().strip())
+        policy_edit = self._a2d_policy_root_edit_widget()
+        ckpt_edit = self._a2d_ckpt_edit_widget()
+        if policy_edit is None:
+            return
+        root = os.path.expanduser(policy_edit.text().strip())
         client_dir = os.path.join(root, "model_inference_client_cena")
         venv_act = os.path.join(root, ".venv", "bin", "activate")
         if not os.path.isdir(client_dir):
@@ -36840,7 +38583,7 @@ class CameraTopicWindow(QMainWindow):
                 "请先在该目录创建并激活虚拟环境。",
             )
             return
-        ckpt = self.a2d_ckpt_edit.text().strip()
+        ckpt = ckpt_edit.text().strip() if ckpt_edit is not None else ""
         env_bits = []
         if ckpt:
             env_bits.append(f"export CKPT_PATH={shlex.quote(ckpt)}")
@@ -36863,7 +38606,10 @@ class CameraTopicWindow(QMainWindow):
             self._log_a2d_ops(f"启动{label}失败")
 
     def _on_a2d_open_outputs(self) -> None:
-        root = os.path.expanduser(self.a2d_policy_root_edit.text().strip())
+        policy_edit = self._a2d_policy_root_edit_widget()
+        if policy_edit is None:
+            return
+        root = os.path.expanduser(policy_edit.text().strip())
         out_dir = os.path.join(root, "outputs")
         if not os.path.isdir(out_dir):
             self._log_a2d_ops(f"outputs 不存在: {out_dir}")
@@ -36889,7 +38635,7 @@ class CameraTopicWindow(QMainWindow):
             self._log_a2d_ops(f"xhost + 异常: {exc}")
 
     def _on_a2d_steamvr(self) -> None:
-        ok, msg = launch_a2d_ros_detached(
+        ok, msg = self._a2d_launch_ros(
             "ros2 launch vr_tracker steamvr.launch.py"
         )
         self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
@@ -36908,16 +38654,20 @@ class CameraTopicWindow(QMainWindow):
             self._log_a2d_ops("启动 rui-hand 失败（可能需要在终端手动 sudo）")
 
     def _on_a2d_browse_rrd(self) -> None:
-        cur = self.a2d_rrd_edit.text().strip() or A2D_RRD_PATH_DEFAULT
+        edit = self._a2d_rrd_edit_widget()
+        if edit is None:
+            return
+        cur = edit.text().strip() or A2D_RRD_PATH_DEFAULT
         start = os.path.dirname(cur) if cur else "/root/project/rerun_data"
         path, _ = QFileDialog.getOpenFileName(
             self, "选择采集 RRD", start, "Rerun (*.rrd);;All (*)"
         )
         if path:
-            self.a2d_rrd_edit.setText(path)
+            edit.setText(path)
 
     def _on_a2d_play_rrd(self) -> None:
-        path = self.a2d_rrd_edit.text().strip()
+        edit = self._a2d_rrd_edit_widget()
+        path = edit.text().strip() if edit is not None else ""
         if not path:
             QMessageBox.warning(self, "观看采集视频", "请填写 rrd_path")
             return
@@ -36929,7 +38679,7 @@ class CameraTopicWindow(QMainWindow):
                 return
             self._log_a2d_ops(f"内置回放启动未成功，改用 launch: {path}")
         quoted = path.replace("'", "'\\''")
-        ok, msg = launch_a2d_ros_detached(
+        ok, msg = self._a2d_launch_ros(
             f"ros2 launch rrd_replay rrd_replay.launch.py rrd_path:='{quoted}'"
         )
         self._log_a2d_ops(msg if ok else f"FAIL: {msg}")
@@ -37108,7 +38858,7 @@ class CameraTopicWindow(QMainWindow):
         scrollbar.setValue(scrollbar.maximum())
 
     def _on_local_cam_tab_help(self) -> None:
-        QMessageBox.information(self, "本地摄像头转发", LOCAL_WEBCAM_TAB_HELP)
+        QMessageBox.information(self, "本地摄像头", LOCAL_WEBCAM_TAB_HELP)
 
     def _on_local_cam_copy_mac_helper(self) -> None:
         cmd = f"cd {shlex.quote(EAI_DIR)} && python3 examples/local_webcam_forward_ui.py"
@@ -37127,6 +38877,83 @@ class CameraTopicWindow(QMainWindow):
         ):
             self.real_eval_cam_url_edit.setText(url)
 
+    def _refresh_local_cam_device_list(self, select: str = "") -> None:
+        if not hasattr(self, "local_cam_device_combo"):
+            return
+        want = (select or self.local_cam_device_edit.text().strip() or "").strip()
+        if want.startswith("/dev/video") and want[len("/dev/video") :].isdigit():
+            want = want[len("/dev/video") :]
+        devices = list_local_v4l_devices()
+        self._local_cam_device_combo_syncing = True
+        self.local_cam_device_combo.clear()
+        if not devices:
+            self.local_cam_device_combo.addItem("未发现 /dev/video*（macOS 请填 0）", "0")
+        else:
+            for idx, label in devices:
+                self.local_cam_device_combo.addItem(label, idx)
+        pick = -1
+        if want:
+            for i in range(self.local_cam_device_combo.count()):
+                if str(self.local_cam_device_combo.itemData(i)) == want:
+                    pick = i
+                    break
+        if pick < 0 and devices:
+            sug = suggest_local_webcam_device()
+            for i in range(self.local_cam_device_combo.count()):
+                if str(self.local_cam_device_combo.itemData(i)) == sug:
+                    pick = i
+                    break
+        if pick < 0:
+            pick = 0
+        self.local_cam_device_combo.setCurrentIndex(pick)
+        data = self.local_cam_device_combo.currentData()
+        if data is not None and hasattr(self, "local_cam_device_edit"):
+            self.local_cam_device_edit.setText(str(data))
+        self._local_cam_device_combo_syncing = False
+        n = len(devices)
+        self._append_local_cam_log(
+            f"[设备] 扫描到 {n} 个采集节点"
+            + (f"，当前 {self.local_cam_device_edit.text().strip()}" if n else "")
+        )
+
+    def _on_local_cam_refresh_devices(self) -> None:
+        self._refresh_local_cam_device_list()
+        self.status_bar.showMessage("已刷新本机摄像头设备列表", 3000)
+
+    def _on_local_cam_device_combo_changed(self, _index: int) -> None:
+        if getattr(self, "_local_cam_device_combo_syncing", False):
+            return
+        data = self.local_cam_device_combo.currentData()
+        if data is None or not hasattr(self, "local_cam_device_edit"):
+            return
+        self.local_cam_device_edit.setText(str(data))
+
+    def _on_local_cam_device_edit_finished(self) -> None:
+        if not hasattr(self, "local_cam_device_combo"):
+            return
+        want = self.local_cam_device_edit.text().strip()
+        if want.startswith("/dev/video") and want[len("/dev/video") :].isdigit():
+            want = want[len("/dev/video") :]
+            self.local_cam_device_edit.setText(want)
+        for i in range(self.local_cam_device_combo.count()):
+            if str(self.local_cam_device_combo.itemData(i)) == want:
+                self._local_cam_device_combo_syncing = True
+                self.local_cam_device_combo.setCurrentIndex(i)
+                self._local_cam_device_combo_syncing = False
+                return
+
+    def _set_local_cam_device_controls_enabled(self, enabled: bool) -> None:
+        if hasattr(self, "local_cam_device_edit"):
+            self.local_cam_device_edit.setEnabled(enabled)
+        if hasattr(self, "local_cam_device_combo"):
+            self.local_cam_device_combo.setEnabled(enabled)
+        if hasattr(self, "local_cam_refresh_dev_btn"):
+            # 推流占用设备时仍允许刷新列表查看，但监控中禁用改设备
+            if getattr(self, "_local_cam_preview_mode", "") == "device":
+                self.local_cam_refresh_dev_btn.setEnabled(enabled)
+            else:
+                self.local_cam_refresh_dev_btn.setEnabled(True)
+
     def _confirm_local_cam_on_remote_host(self, action: str) -> bool:
         """SSH 远端上点推流/隧道时提示；返回 False 表示取消。"""
         if not (os.environ.get("SSH_CONNECTION") or os.environ.get("SSH_CLIENT")):
@@ -37136,11 +38963,12 @@ class CameraTopicWindow(QMainWindow):
             "本地摄像头",
             (
                 "检测到界面运行在 SSH 远端。\n"
-                f"「{action}」应在有摄像头的 Mac 本机执行。\n\n"
-                "建议在 Mac 运行:\n"
+                f"「{action}」应在有摄像头的本机执行。\n\n"
+                "若摄像头已插在当前机器（如 RealSense），可选「是」继续。\n"
+                "若摄像头在 Mac，建议在 Mac 运行:\n"
                 "  python3 examples/local_webcam_forward_ui.py\n"
                 "（可用本页「复制 Mac 助手命令」）\n\n"
-                "仍要在当前机器尝试启动吗？"
+                "仍要在当前机器尝试吗？"
             ),
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
@@ -37172,12 +39000,13 @@ class CameraTopicWindow(QMainWindow):
         if running:
             self.local_cam_mjpeg_status.setText(f"推流: 运行中 :{port}")
             self.local_cam_mjpeg_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
-            self.local_cam_device_edit.setEnabled(False)
+            self._set_local_cam_device_controls_enabled(False)
             self.local_cam_port_spin.setEnabled(False)
         else:
             self.local_cam_mjpeg_status.setText("推流: 未启动")
             self.local_cam_mjpeg_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-            self.local_cam_device_edit.setEnabled(True)
+            if getattr(self, "_local_cam_preview_mode", "") != "device":
+                self._set_local_cam_device_controls_enabled(True)
             self.local_cam_port_spin.setEnabled(True)
 
     def _on_local_cam_tunnel_toggled(self) -> None:
@@ -37238,43 +39067,83 @@ class CameraTopicWindow(QMainWindow):
             pass
 
     def _stop_local_cam_preview(self) -> None:
+        was_mode = getattr(self, "_local_cam_preview_mode", "")
         self._local_cam_preview_active = False
         self._local_cam_preview_busy = False
+        self._local_cam_preview_mode = ""
         if hasattr(self, "_local_cam_preview_timer"):
             self._local_cam_preview_timer.stop()
         self._close_local_cam_preview()
         if hasattr(self, "local_cam_preview_btn"):
             self.local_cam_preview_btn.setText("打开预览")
+        if hasattr(self, "local_cam_monitor_btn"):
+            self.local_cam_monitor_btn.setText("打开本机监控")
         if hasattr(self, "local_cam_preview_status"):
             self.local_cam_preview_status.setText("预览: 未开启")
             self.local_cam_preview_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        if hasattr(self, "local_cam_monitor_status"):
+            self.local_cam_monitor_status.setText("监控: 未开启")
+            self.local_cam_monitor_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         if hasattr(self, "local_cam_preview_label"):
             self.local_cam_preview_label.setPixmap(QPixmap())
-            self.local_cam_preview_label.setText("启动推流与隧道后，点「打开预览」")
+            self.local_cam_preview_label.setText(
+                "点「打开本机监控」直接看本机摄像头，或推流后点「打开预览」"
+            )
         if hasattr(self, "local_cam_url_edit"):
             self.local_cam_url_edit.setEnabled(True)
+        mjpeg_running = False
+        launcher = getattr(self, "_local_cam_mjpeg_launcher", None)
+        if launcher is not None:
+            mjpeg_running = launcher.is_running()
+        if was_mode == "device" and not mjpeg_running:
+            self._set_local_cam_device_controls_enabled(True)
 
-    def _open_local_cam_preview_source(self, url: str) -> Tuple[bool, str]:
-        url = (url or "").strip()
-        if not url:
-            return False, "请填写预览 URL（例如 http://127.0.0.1:8090/cam.mjpg）"
+    def _open_local_cam_preview_source(self, url_or_dev: str) -> Tuple[bool, str]:
+        """打开网络流 URL，或本机 /dev/video* / 数字 index。"""
+        src = (url_or_dev or "").strip()
+        if not src:
+            return False, "请填写预览 URL 或本机设备（例如 4 或 /dev/video4）"
         self._close_local_cam_preview()
         cap = None
         try:
-            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+            is_url = "://" in src or src.lower().endswith((".mjpg", ".mjpeg"))
+            if is_url:
+                cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+                if not cap.isOpened():
+                    if cap is not None:
+                        cap.release()
+                    cap = cv2.VideoCapture(src)
+            else:
+                index: object = src
+                if src.isdigit():
+                    index = int(src)
+                elif src.startswith("/dev/video") and src[len("/dev/video") :].isdigit():
+                    index = int(src[len("/dev/video") :])
+                if isinstance(index, int):
+                    cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+                    if not cap.isOpened():
+                        cap.release()
+                        cap = cv2.VideoCapture(index)
+                else:
+                    cap = cv2.VideoCapture(src)
             if not cap.isOpened():
-                cap.release()
-                cap = cv2.VideoCapture(url)
-            if not cap.isOpened():
-                return (
-                    False,
-                    f"无法打开:\n{url}\n\n请先启动推流与 SSH 反向隧道（或在 Mac 运行助手）。",
-                )
+                if is_url:
+                    hint = (
+                        f"无法打开:\n{src}\n\n"
+                        "请先「启动推流」与隧道，或改用上方「打开本机监控」。"
+                    )
+                else:
+                    hint = (
+                        f"无法打开本机设备:\n{src}\n\n"
+                        "可点「刷新设备」查看 /dev/video*；"
+                        "RealSense 彩色节点通常是 video4。"
+                    )
+                return False, hint
             try:
                 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             except Exception:
                 pass
-            deadline = time.time() + 8.0
+            deadline = time.time() + (8.0 if is_url else 2.0)
             ok = False
             frame = None
             while time.time() < deadline:
@@ -37284,9 +39153,9 @@ class CameraTopicWindow(QMainWindow):
                 time.sleep(0.05)
             if not ok or frame is None or getattr(frame, "size", 0) == 0:
                 cap.release()
-                return False, f"已连接但读不到画面:\n{url}"
+                return False, f"已连接但读不到画面:\n{src}"
             self._local_cam_preview_cap = cap
-            return True, url
+            return True, src
         except Exception as exc:
             if cap is not None:
                 try:
@@ -37295,30 +39164,136 @@ class CameraTopicWindow(QMainWindow):
                     pass
             return False, f"打开预览失败: {exc}"
 
-    def _on_local_cam_preview_toggled(self) -> None:
+    def _start_local_cam_preview_ui(self, source: str, mode: str) -> None:
+        self._local_cam_preview_active = True
+        self._local_cam_preview_mode = mode
+        short = source if len(source) <= 56 else source[:53] + "..."
+        if mode == "device":
+            if hasattr(self, "local_cam_monitor_btn"):
+                self.local_cam_monitor_btn.setText("停止本机监控")
+            if hasattr(self, "local_cam_monitor_status"):
+                self.local_cam_monitor_status.setText(f"监控: 播放中 @ {short}")
+                self.local_cam_monitor_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            if hasattr(self, "local_cam_preview_status"):
+                self.local_cam_preview_status.setText(f"预览: 本机设备 {short}")
+                self.local_cam_preview_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            self._set_local_cam_device_controls_enabled(False)
+            if hasattr(self, "local_cam_url_edit"):
+                self.local_cam_url_edit.setEnabled(True)
+            if hasattr(self, "local_cam_preview_btn"):
+                self.local_cam_preview_btn.setText("打开预览")
+        else:
+            if hasattr(self, "local_cam_url_edit"):
+                self.local_cam_url_edit.setEnabled(False)
+            if hasattr(self, "local_cam_preview_btn"):
+                self.local_cam_preview_btn.setText("停止预览")
+            if hasattr(self, "local_cam_preview_status"):
+                self.local_cam_preview_status.setText(f"预览: 播放中 @ {short}")
+                self.local_cam_preview_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            if hasattr(self, "local_cam_monitor_btn"):
+                self.local_cam_monitor_btn.setText("打开本机监控")
+            if hasattr(self, "local_cam_monitor_status"):
+                self.local_cam_monitor_status.setText("监控: 未开启（当前为网络预览）")
+                self.local_cam_monitor_status.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        if hasattr(self, "local_cam_preview_label"):
+            self.local_cam_preview_label.setText("")
+        self._local_cam_preview_timer.start()
+
+    def _on_control_tab_changed_local_cam(self, *_args) -> None:
+        """保留空实现：切 tab 不再自动打开本机摄像头。"""
+        return
+
+    def _auto_open_local_cam_monitor(self) -> None:
+        """已禁用自动打开（避免启动卡在 VideoCapture）。"""
+        return
+
+    def _ensure_local_cam_monitor_open(self, *, silent: bool = False) -> bool:
+        """打开本机直连监控；已在 device 模式则直接成功。silent 时失败不弹窗。"""
+        if self._local_cam_preview_active and getattr(
+            self, "_local_cam_preview_mode", ""
+        ) == "device":
+            return True
         if self._local_cam_preview_active:
+            self._stop_local_cam_preview()
+        device = self.local_cam_device_edit.text().strip() or "0"
+        self.local_cam_device_edit.setText(device)
+        if hasattr(self, "local_cam_monitor_status"):
+            self.local_cam_monitor_status.setText(f"监控: 连接中… {device}")
+            self.local_cam_monitor_status.setStyleSheet(f"color: {UI_TEXT_SECONDARY};")
+        self.status_bar.showMessage(f"正在打开本机摄像头: {device}")
+        QApplication.processEvents()
+        ok, msg = self._open_local_cam_preview_source(device)
+        if not ok:
+            # 不再自动扫其它 /dev/video*（OpenCV 探测会卡数秒～假死）
+            if not silent:
+                QMessageBox.warning(self, "本机摄像头监控", msg)
+            else:
+                self._append_local_cam_log(f"[监控] 打开失败: {msg}")
+            if hasattr(self, "local_cam_monitor_status"):
+                self.local_cam_monitor_status.setText("监控: 连接失败")
+                self.local_cam_monitor_status.setStyleSheet(f"color: {UI_ACCENT_RED};")
+            return False
+        self._start_local_cam_preview_ui(msg, "device")
+        self._append_local_cam_log(f"[监控] 已开启: {msg}")
+        self.status_bar.showMessage(f"本机摄像头监控已开启: {msg}", 4000)
+        return True
+
+    def _on_local_cam_monitor_toggled(self) -> None:
+        if self._local_cam_preview_active and getattr(
+            self, "_local_cam_preview_mode", ""
+        ) == "device":
+            self._stop_local_cam_preview()
+            self._append_local_cam_log("[监控] 已停止")
+            self.status_bar.showMessage("本机摄像头监控已停止", 3000)
+            return
+        self._ensure_local_cam_monitor_open(silent=False)
+
+    def _on_local_cam_preview_toggled(self) -> None:
+        if self._local_cam_preview_active and getattr(
+            self, "_local_cam_preview_mode", ""
+        ) == "url":
             self._stop_local_cam_preview()
             self._append_local_cam_log("[预览] 已停止")
             return
+        if self._local_cam_preview_active:
+            self._stop_local_cam_preview()
         url = self.local_cam_url_edit.text().strip() or SKELETON_NETWORK_URL_DEFAULT
         self.local_cam_url_edit.setText(url)
         self.local_cam_preview_status.setText(f"预览: 连接中… {url}")
         QApplication.processEvents()
         ok, msg = self._open_local_cam_preview_source(url)
         if not ok:
+            # 不再自动回退打开本机摄像头；仅手动点「打开本机监控」
             QMessageBox.warning(self, "本地摄像头预览", msg)
             self.local_cam_preview_status.setText("预览: 连接失败")
             self.local_cam_preview_status.setStyleSheet(f"color: {UI_ACCENT_RED};")
             return
-        self._local_cam_preview_active = True
-        self.local_cam_url_edit.setEnabled(False)
-        self.local_cam_preview_btn.setText("停止预览")
-        short = msg if len(msg) <= 56 else msg[:53] + "..."
-        self.local_cam_preview_status.setText(f"预览: 播放中 @ {short}")
-        self.local_cam_preview_status.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
-        self.local_cam_preview_label.setText("")
-        self._local_cam_preview_timer.start()
+        self._start_local_cam_preview_ui(msg, "url")
         self._append_local_cam_log(f"[预览] 已开启: {msg}")
+
+    def _apply_local_cam_rotation(self, frame: np.ndarray) -> np.ndarray:
+        deg = int(getattr(self, "_local_cam_rotate_deg", 0) or 0) % 360
+        if deg == 90:
+            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        if deg == 180:
+            return cv2.rotate(frame, cv2.ROTATE_180)
+        if deg == 270:
+            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return frame
+
+    def _update_local_cam_rotate_btn(self) -> None:
+        if not hasattr(self, "local_cam_rotate_btn"):
+            return
+        deg = int(getattr(self, "_local_cam_rotate_deg", 0) or 0) % 360
+        self.local_cam_rotate_btn.setText(f"旋转 {deg}°")
+
+    def _on_local_cam_rotate_clicked(self) -> None:
+        cur = int(getattr(self, "_local_cam_rotate_deg", 0) or 0) % 360
+        self._local_cam_rotate_deg = (cur + 90) % 360
+        self._update_local_cam_rotate_btn()
+        deg = self._local_cam_rotate_deg
+        self._append_local_cam_log(f"[预览] 旋转 → {deg}°")
+        self.status_bar.showMessage(f"本地摄像头画面旋转 {deg}°", 2500)
 
     def _on_local_cam_preview_tick(self) -> None:
         if not self._local_cam_preview_active or self._local_cam_preview_busy:
@@ -37332,6 +39307,7 @@ class CameraTopicWindow(QMainWindow):
             if not ok or frame is None or getattr(frame, "size", 0) == 0:
                 self.local_cam_preview_status.setText("预览: 等待画面…")
                 return
+            frame = self._apply_local_cam_rotation(frame)
             max_w = max(320, self.local_cam_preview_label.width() - 8)
             h, w = frame.shape[:2]
             if w > max_w:
@@ -38726,11 +40702,23 @@ class CameraTopicWindow(QMainWindow):
         for panel in self.panels.values():
             if isinstance(panel, DepthPanel3D):
                 panel.stop_robot_timer()
+        try:
+            self._stop_robot_tcp_bridge()
+        except Exception:
+            pass
         self.node.prepare_shutdown()
         super().closeEvent(event)
 
     def _on_robot_stack_clicked(self) -> None:
+        self._ensure_host_camera_forwarder()
         self._stack_launcher.start_stack()
+        # 栈起来后延迟订阅头/腕（forwarder + graph 需要一点时间）
+        QTimer.singleShot(
+            3000, lambda: self._ensure_essential_robot_cameras(reason="启动机器人栈")
+        )
+        QTimer.singleShot(
+            15000, lambda: self._ensure_essential_robot_cameras(reason="启动机器人栈")
+        )
 
     def _on_replay_select_clicked(self) -> None:
         if self._replay_launcher.is_running():
@@ -39129,6 +41117,51 @@ class CameraTopicWindow(QMainWindow):
                 return child
         return title
 
+
+    def _control_tab_title_is_current(self, title: str) -> bool:
+        tabs = getattr(self, "control_tabs", None)
+        if tabs is None:
+            return False
+        cur = tabs.currentIndex()
+        if cur < 0:
+            return False
+        cur_title = str(tabs.tabText(cur) or "").strip()
+        if cur_title == title:
+            return True
+        if cur_title == CONTROL_MISC_TAB_TITLE:
+            inner = getattr(self, "misc_inner_tabs", None)
+            if inner is not None and inner.currentIndex() >= 0:
+                return str(inner.tabText(inner.currentIndex()) or "").strip() == title
+        return False
+
+    def _pause_ui_frames_for_interaction(self, seconds: float = 1.5) -> None:
+        """切 tab / 点击时暂停刷图，把主线程让给 Qt 事件。"""
+        until = time.time() + float(seconds)
+        self._ui_frame_paused_until = until
+        try:
+            self.ros_bridge._ui_frame_paused_until = until
+        except Exception:
+            pass
+        try:
+            self.node.take_pending_ui_frames()
+        except Exception:
+            pass
+
+    def _on_control_tab_bar_clicked(self, *_args) -> None:
+        # 在 currentChanged 之前就暂停，避免点击瞬间仍在刷图
+        self._pause_ui_frames_for_interaction(2.0)
+
+    def _on_control_tabs_current_changed(self, *_args) -> None:
+        """切 tab 时暂停图像刷屏，避免「无响应」。"""
+        self._pause_ui_frames_for_interaction(2.0)
+        grid = getattr(self, "grid_host", None) or getattr(self, "grid_widget", None)
+        if grid is not None:
+            try:
+                grid.setUpdatesEnabled(False)
+                QTimer.singleShot(200, lambda g=grid: g.setUpdatesEnabled(True))
+            except Exception:
+                pass
+
     def _select_control_tab_by_title(self, title: str) -> bool:
         title = (title or "").strip()
         if not title:
@@ -39452,6 +41485,16 @@ class CameraTopicWindow(QMainWindow):
                 if not applied:
                     pending_combo[key] = payload
         self._pending_combo_state = pending_combo
+        # 相对偏移旋钮已从 m 改为 cm：旧存档里 |v|≤0.5 的按米换算
+        for name in ("offset_x_spin", "offset_y_spin", "offset_z_spin"):
+            spin = getattr(self, name, None)
+            if not isinstance(spin, QDoubleSpinBox):
+                continue
+            v = float(spin.value())
+            if 0.0 < abs(v) <= MANUAL_OFFSET_MAX_M:
+                spin.blockSignals(True)
+                spin.setValue(v * 100.0)
+                spin.blockSignals(False)
 
         geo = state.get("geometry")
         if isinstance(geo, list) and len(geo) == 4:
@@ -39484,9 +41527,19 @@ class CameraTopicWindow(QMainWindow):
 
         topic_checks = state.get("topic_checks")
         if isinstance(topic_checks, dict):
-            self._pending_topic_checks = {
-                str(k): bool(v) for k, v in topic_checks.items()
-            }
+            # 深度/腕部太多路会卡死：恢复时默认关掉 depth，彩色也只保留常用几路
+            pending: Dict[str, bool] = {}
+            for k, v in topic_checks.items():
+                topic = str(k)
+                want = bool(v)
+                if is_depth_topic(topic):
+                    want = False
+                elif want and topic not in UI_DEFAULT_COLOR_TOPIC_SUFFIXES:
+                    # 腕部等非默认彩色：恢复时不自动开，避免 10 路齐开
+                    if "wrist" in topic.lower():
+                        want = False
+                pending[topic] = want
+            self._pending_topic_checks = pending
         unchecked = state.get("topic_user_unchecked")
         if isinstance(unchecked, list):
             self._topic_user_unchecked = {str(t) for t in unchecked if str(t).strip()}
@@ -39669,6 +41722,71 @@ class CameraTopicWindow(QMainWindow):
         finally:
             self._arm_panel_tabs_guard = False
 
+    def _wrist_color_topics(self, side: str) -> Tuple[str, ...]:
+        return WRIST_COLOR_TOPIC_ALIASES.get(side, ())
+
+    def _wrist_depth_topics(self, side: str) -> Tuple[str, ...]:
+        return WRIST_DEPTH_TOPIC_ALIASES.get(side, ())
+
+    def _resolve_wrist_color_topic(self, side: str) -> str:
+        """优先选当前已有帧 / 已发现的腕部彩色 topic（hand_* 或 left_wrist_*）。"""
+        aliases = self._wrist_color_topics(side)
+        if not aliases:
+            return "/camera/left_wrist_color" if side == "left" else "/camera/right_wrist_color"
+        known = set(self._cached_topic_names())
+        for t in aliases:
+            if self._frame_cache.get(t) is not None:
+                return t
+            panel = self.panels.get(t)
+            if isinstance(panel, CameraPanel) and getattr(panel, "_latest_image", None) is not None:
+                return t
+        for t in aliases:
+            if t in known or t in self.topic_checks:
+                return t
+        return aliases[0]
+
+    def _ensure_mv6d_camera_feeds(self) -> None:
+        """多视角 6D：仅确保头/手彩色在列表中；不强制勾选 depth/腕部（会卡死 UI）。"""
+        img_types = ["sensor_msgs/msg/Image"]
+        base = dict(getattr(self, "_topic_types", {}) or {})
+        seed_colors = [
+            "/camera/head_color",
+            "/camera/hand_left_color",
+            "/camera/hand_right_color",
+        ]
+        for topic in seed_colors:
+            base.setdefault(topic, list(img_types))
+        # 只补列表项，不整表重建 / 不强制勾选
+        for topic in seed_colors:
+            if topic in self.topic_checks:
+                continue
+            cb = QCheckBox(f"{topic}  [Image]")
+            cb.setChecked(topic not in self._topic_user_unchecked)
+            cb.stateChanged.connect(self._on_selection_changed)
+            self.topic_checks[topic] = cb
+            if hasattr(self, "topic_list_layout"):
+                # 插在 stretch 前
+                stretch_at = self.topic_list_layout.count() - 1
+                if stretch_at < 0:
+                    self.topic_list_layout.addWidget(cb)
+                else:
+                    self.topic_list_layout.insertWidget(max(0, stretch_at), cb)
+            self._topic_types[topic] = list(img_types)
+
+        enabled = {t for t, cb in self.topic_checks.items() if cb.isChecked()}
+        for topic in seed_colors:
+            if topic in self._topic_user_unchecked:
+                continue
+            cb = self.topic_checks.get(topic)
+            if cb is None:
+                continue
+            if not cb.isChecked():
+                cb.blockSignals(True)
+                cb.setChecked(True)
+                cb.blockSignals(False)
+            enabled.add(topic)
+        self._apply_selection(enabled)
+
     def _apply_arm_panel_stack(self) -> None:
         stack = getattr(self, "_arm_panel_stack", None)
         pages = getattr(self, "_arm_panel_page_by_key", None) or {}
@@ -39682,6 +41800,8 @@ class CameraTopicWindow(QMainWindow):
         if idx >= 0 and idx != stack.currentIndex():
             stack.setCurrentIndex(idx)
         if key == "mv6d":
+            # 不再自动强制订阅全部 RGB-D（切 tab / 启动会卡死）。
+            # 仅轻量刷预览；真正要深度时在「估计一次/实时估计」里再 ensure。
             QTimer.singleShot(0, self._refresh_mv6d_live_previews_for_pick)
 
     def _on_arm_panel_changed(self, checked: bool = False) -> None:
@@ -48666,6 +50786,11 @@ class CameraTopicWindow(QMainWindow):
         self._update_robot_stack_ui(robot, base)
         self._update_robot_enable_status_ui()
         self._update_prereq_gated_buttons()
+        if base == "运行中":
+            QTimer.singleShot(
+                1000,
+                lambda: self._ensure_essential_robot_cameras(reason="机器人栈就绪"),
+            )
 
     def _update_robot_stack_ui(
         self,
@@ -48708,13 +50833,394 @@ class CameraTopicWindow(QMainWindow):
             elif not self._real_eval_active:
                 self.real_eval_stack_btn.setText(f"启动{label}栈")
 
+    def _refresh_host_min_node_status(self) -> None:
+        """刷新最小栈各 node 运行状态（回放页详表 + 手臂页单行摘要）。"""
+        try:
+            rows = probe_host_min_node_status()
+            detail = format_host_min_node_status_text(rows, compact=False)
+            compact = format_host_min_node_status_text(rows, compact=True)
+        except Exception as exc:
+            detail = f"节点状态查询失败: {exc}"
+            compact = detail
+            rows = []
+        n_ok = sum(1 for _n, ok, _note in rows if ok)
+        n_all = len(rows) if rows else 0
+        header = f"节点 ({n_ok}/{n_all} 运行):\n" if n_all else "节点:\n"
+        detail_full = header + detail
+        color = (
+            UI_ACCENT_GREEN
+            if n_ok == n_all and n_all > 0
+            else (UI_ACCENT_ORANGE if n_ok > 0 else UI_TEXT_MUTED)
+        )
+        robot_lab = getattr(self, "robot_nodes_status_label", None)
+        if robot_lab is not None:
+            robot_lab.setText(detail_full)
+            robot_lab.setStyleSheet(f"color: {color};")
+        arm_lab = getattr(self, "arm_nodes_status_label", None)
+        if arm_lab is not None:
+            arm_lab.setText(compact)
+            arm_lab.setStyleSheet(f"color: {color};")
+            arm_lab.setToolTip(detail_full)
+
+    def _host_script_path(self, name: str) -> str:
+        return os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "scripts", name
+        )
+
+    def _run_host_script_async(self, script_name: str, action: str) -> None:
+        script = self._host_script_path(script_name)
+        if not os.path.isfile(script):
+            return
+        try:
+            subprocess.Popen(
+                ["bash", script, action],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+    def _start_host_robot_min_stack(self) -> None:
+        """连接机器人：启动看图 + 控手 + 控臂所需宿主机节点。"""
+        self._run_host_script_async("start_host_robot_min.sh", "start")
+
+    def _stop_host_robot_min_stack(self) -> None:
+        """取消连接：停止最小宿主机节点（不关机器人本体）。"""
+        self._run_host_script_async("start_host_robot_min.sh", "stop")
+
+    def _on_connect_robot_state_clicked(self) -> None:
+        if getattr(self, "_robot_connect_busy", False):
+            return
+        # 已连接 → 取消连接：停节点 + 清订阅
+        if self.node.robot_subscriptions_ready():
+            self._robot_connect_busy = True
+            try:
+                try:
+                    if self.node.is_slow_motion_busy():
+                        self.node.cancel_slow_motion()
+                except Exception:
+                    pass
+                self._pending_arm_move_goal = None
+                self._stop_robot_tcp_bridge()
+                self._stop_host_robot_min_stack()
+                self.node.clear_robot_subscriptions()
+                self._apply_robot_connect_ui("未连接", ok=False)
+                self.status_bar.showMessage(
+                    "已取消连接：已停止相机/手/臂最小节点", 5000
+                )
+                self._update_arm_move_btns_ui()
+                QTimer.singleShot(400, self._refresh_host_min_node_status)
+                QTimer.singleShot(2000, self._refresh_host_min_node_status)
+            finally:
+                self._robot_connect_busy = False
+            return
+        self._robot_connect_busy = True
+        try:
+            # 标连接 → 后台起最小栈 → TCP bridge → 稍后勾选头/腕图
+            self.node.begin_robot_subscription_steps()
+            self._apply_robot_connect_ui("已连接", ok=True)
+            self.status_bar.showMessage(
+                "正在启动：相机 + 手 + 手臂（最小栈）…", 5000
+            )
+            self._start_host_robot_min_stack()
+            QTimer.singleShot(80, self._ensure_robot_tcp_bridge)
+            QTimer.singleShot(200, self._ensure_enable_state_subscriptions)
+            # 等 forwarder 起来后再勾选头/腕彩色（避免点连接瞬间卡死）
+            QTimer.singleShot(
+                1500,
+                lambda: self._ensure_essential_robot_cameras(reason="连接机器人"),
+            )
+            QTimer.singleShot(400, self._update_arm_move_btns_ui)
+            QTimer.singleShot(2500, self._update_arm_move_btns_ui)
+            QTimer.singleShot(500, self._refresh_host_min_node_status)
+            QTimer.singleShot(2000, self._refresh_host_min_node_status)
+            QTimer.singleShot(5000, self._refresh_host_min_node_status)
+        finally:
+            self._robot_connect_busy = False
+
+    def _robot_tcp_state_path(self) -> str:
+        return os.environ.get(
+            "EAI_ROBOT_TCP_STATE",
+            os.path.join(tempfile.gettempdir(), "eai_robot_tcp_state.json"),
+        )
+
+    def _tcp_bridge_json_age_s(self) -> float:
+        path = self._robot_tcp_state_path()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            updated = float(data.get("updated_at") or 0.0)
+            if updated <= 0:
+                return 1e9
+            return max(0.0, time.time() - updated)
+        except Exception:
+            return 1e9
+
+    def _ensure_robot_tcp_bridge(self, *, force_restart: bool = False) -> None:
+        stale = self._tcp_bridge_json_age_s() > 3.0
+        proc = getattr(self, "_robot_tcp_bridge_proc", None)
+        alive = proc is not None and proc.poll() is None
+        if alive and not force_restart and not stale:
+            self._ensure_robot_tcp_poll_timer()
+            return
+        # 残留/过期 bridge：杀掉后用与 host_fk 相同的 shm+udp DDS 重启
+        if force_restart or stale or alive:
+            self._stop_robot_tcp_bridge()
+        else:
+            try:
+                if (
+                    subprocess.run(
+                        ["pgrep", "-f", r"/usr/bin/python3\.10 .*robot_tcp_bridge\.py"],
+                        capture_output=True,
+                        check=False,
+                    ).returncode
+                    == 0
+                ):
+                    if not stale:
+                        self._ensure_robot_tcp_poll_timer()
+                        return
+                    self._stop_robot_tcp_bridge()
+            except Exception:
+                pass
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "robot_tcp_bridge.py"
+        )
+        if not os.path.isfile(script):
+            self.status_bar.showMessage("缺少 robot_tcp_bridge.py")
+            return
+        env = os.environ.copy()
+        env["EAI_ROBOT_TCP_STATE"] = self._robot_tcp_state_path()
+        # 必须与 host_fk 同 profile，否则订不到 /mink_fk/*（udp_only 易断发现）
+        dds_xml = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "dds",
+            "fastdds_profiles_shm_udp.xml",
+        )
+        if not os.path.isfile(dds_xml):
+            dds_xml = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "dds",
+                "fastdds_profiles_udp_only.xml",
+            )
+        if os.path.isfile(dds_xml):
+            env["FASTRTPS_DEFAULT_PROFILES_FILE"] = dds_xml
+        env.setdefault("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp")
+        env.setdefault("ROS_DOMAIN_ID", "0")
+        env.setdefault("ROS_LOCALHOST_ONLY", "1")
+        # 保证能找到 librcl_*（未完整 source 时 import rclpy 会挂）
+        ros_lib = "/opt/ros/humble/lib"
+        if os.path.isdir(ros_lib):
+            env["LD_LIBRARY_PATH"] = ros_lib + ":" + env.get("LD_LIBRARY_PATH", "")
+        py_exec = "/usr/bin/python3.10" if os.path.isfile("/usr/bin/python3.10") else sys.executable
+        try:
+            self._robot_tcp_bridge_proc = subprocess.Popen(
+                [py_exec, script],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as exc:
+            self.status_bar.showMessage(f"启动 TCP bridge 失败: {exc}")
+            return
+        self._ensure_robot_tcp_poll_timer()
+
+    def _ensure_robot_tcp_poll_timer(self) -> None:
+        timer = getattr(self, "_robot_tcp_poll_timer", None)
+        if timer is not None:
+            return
+        timer = QTimer(self)
+        timer.setInterval(200)
+        timer.timeout.connect(self._poll_robot_tcp_bridge)
+        timer.start()
+        self._robot_tcp_poll_timer = timer
+
+    def _poll_robot_tcp_bridge(self) -> None:
+        path = self._robot_tcp_state_path()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            # JSON 长时间缺失：尝试拉起 bridge
+            last = float(getattr(self, "_tcp_bridge_restart_at", 0.0) or 0.0)
+            if time.time() - last > 5.0:
+                self._tcp_bridge_restart_at = time.time()
+                self._ensure_host_fk()
+                self._ensure_robot_tcp_bridge(force_restart=True)
+            return
+        if not isinstance(data, dict):
+            return
+        updated = float(data.get("updated_at") or 0.0)
+        if updated > 0 and time.time() - updated > 5.0:
+            last = float(getattr(self, "_tcp_bridge_restart_at", 0.0) or 0.0)
+            if time.time() - last > 5.0:
+                self._tcp_bridge_restart_at = time.time()
+                self._ensure_host_fk()
+                self._ensure_robot_tcp_bridge(force_restart=True)
+            return
+        had_tcp = False
+        try:
+            st = self.node.get_robot_state()
+            had_tcp = bool(
+                (st.left_tcp and st.left_tcp.valid)
+                or (st.right_tcp and st.right_tcp.valid)
+            )
+        except Exception:
+            pass
+        try:
+            self.node.apply_bridged_tcp_state(data)
+        except Exception:
+            pass
+        # TCP 从无到有时刷新一次按钮（避免每 200ms 刷 UI）
+        if not had_tcp:
+            try:
+                self._update_arm_move_btns_ui()
+            except Exception:
+                pass
+
+    def _stop_robot_tcp_bridge(self) -> None:
+        timer = getattr(self, "_robot_tcp_poll_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except Exception:
+                pass
+            self._robot_tcp_poll_timer = None
+        proc = getattr(self, "_robot_tcp_bridge_proc", None)
+        self._robot_tcp_bridge_proc = None
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1.0)
+                    except Exception:
+                        proc.kill()
+            except Exception:
+                pass
+        # 清掉残留 bridge（多次连接可能留下孤儿进程）
+        try:
+            subprocess.run(
+                ["pkill", "-f", r"/usr/bin/python3\.10 .*robot_tcp_bridge\.py"],
+                capture_output=True,
+                check=False,
+                timeout=2.0,
+            )
+        except Exception:
+            pass
+
+    def _lazy_attach_head_camera_tf(self) -> None:
+        try:
+            self.node.ensure_head_camera_tf_lazy()
+        except Exception:
+            pass
+
+    def _apply_robot_connect_ui(self, msg: str, *, ok: bool) -> None:
+        for lab in (
+            getattr(self, "robot_state_connect_label", None),
+            getattr(self, "arm_robot_state_connect_label", None),
+        ):
+            if lab is None:
+                continue
+            if ok:
+                lab.setText("状态: 已连接")
+                lab.setStyleSheet(f"color: {UI_ACCENT_GREEN};")
+            elif msg in ("未连接", ""):
+                lab.setText("状态: 未连接")
+                lab.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+            else:
+                lab.setText(f"状态: {msg}")
+                lab.setStyleSheet(f"color: {UI_ACCENT_RED};")
+        for btn in (
+            getattr(self, "robot_state_connect_btn", None),
+            getattr(self, "arm_robot_state_connect_btn", None),
+        ):
+            if btn is None:
+                continue
+            if ok:
+                btn.setText("取消连接")
+                btn.setEnabled(True)
+            else:
+                btn.setText("连接机器人")
+                btn.setEnabled(True)
+        if msg:
+            self.status_bar.showMessage(msg, 5000)
+
+    def _ensure_host_camera_forwarder(self) -> None:
+        """宿主机 a2d_sdk forwarder：无 Docker 时桥接机器人头/腕相机。"""
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "scripts",
+            "start_cameras_minimal.sh",
+        )
+        if not os.path.isfile(script):
+            return
+        try:
+            subprocess.Popen(
+                ["bash", script, "start"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+    def _ensure_essential_robot_cameras(self, *, reason: str = "") -> None:
+        """扫描并强制勾选头/腕彩色（启用机器人后常见漏订）。"""
+        self._ensure_host_camera_forwarder()
+        edit = getattr(self, "prefix_edit", None)
+        prefix = edit.text().strip() if edit is not None else ""
+        prefix = prefix or "/camera"
+        try:
+            self.node.set_prefix(prefix)
+            self.node.ensure_topic_scan()
+        except Exception as exc:
+            self.status_bar.showMessage(f"相机扫描失败: {exc}", 5000)
+            return
+        # 等 graph 刷新后再勾选
+        QTimer.singleShot(800, lambda: self._force_check_essential_cameras(reason))
+        QTimer.singleShot(2500, lambda: self._force_check_essential_cameras(reason))
+
+    def _force_check_essential_cameras(self, reason: str = "") -> None:
+        topic_checks = getattr(self, "topic_checks", None) or {}
+        if not topic_checks:
+            self.status_bar.showMessage(
+                "未发现相机 topic：请确认 forwarder 已启动"
+                "（scripts/start_cameras_minimal.sh start）",
+                6000,
+            )
+            return
+        enabled = {t for t, cb in topic_checks.items() if cb.isChecked()}
+        added: List[str] = []
+        for topic in ESSENTIAL_A2D_CAMERA_COLOR_TOPICS:
+            cb = topic_checks.get(topic)
+            if cb is None:
+                continue
+            self._topic_user_unchecked.discard(topic)
+            if not cb.isChecked():
+                cb.blockSignals(True)
+                cb.setChecked(True)
+                cb.blockSignals(False)
+                added.append(topic)
+            enabled.add(topic)
+        self._apply_selection(enabled)
+        self._refresh_skeleton_camera_list()
+        msg = "已订阅头/腕彩色" + (f"（{reason}）" if reason else "")
+        if added:
+            msg += f"：{', '.join(added)}"
+        self.status_bar.showMessage(msg, 5000)
+        btn = getattr(self, "camera_connect_btn", None)
+        if btn is not None:
+            btn.setText("刷新 Topic")
+
     def _on_refresh_clicked(self) -> None:
         prefix = self.prefix_edit.text().strip() or "/camera"
         if prefix == "/":
             self.status_bar.showMessage("前缀不能为 /，已重置为 /camera")
             prefix = "/camera"
             self.prefix_edit.setText(prefix)
-        self.node.set_prefix(prefix)
+        self._ensure_essential_robot_cameras(reason="刷新 Topic")
 
     def _sim_bridge_dir(self) -> str:
         edit = getattr(self, "sim_bridge_dir_edit", None)
@@ -49202,16 +51708,22 @@ class CameraTopicWindow(QMainWindow):
         return False, note
 
     def _on_left_hand_sliders_changed(self, _value: int = 0) -> None:
-        self.left_hand_label_a.setText(format_hand_angle_label(self.left_hand_slider_a.value()))
-        self.left_hand_label_b.setText(format_hand_angle_label(self.left_hand_slider_b.value()))
+        self.left_hand_label_a.setText(
+            format_hand_gap_label(self.left_hand_gap_slider_a.value())
+        )
+        self.left_hand_label_b.setText(
+            format_hand_gap_label(self.left_hand_gap_slider_b.value())
+        )
         self._update_left_hand_toggle_ui(self.node.is_left_hand_at_a())
 
     def _update_left_hand_toggle_ui(self, at_a: bool) -> None:
-        pos_a = slider_to_hand_position(self.left_hand_slider_a.value())
-        pos_b = slider_to_hand_position(self.left_hand_slider_b.value())
+        gap_a = slider_to_hand_gap_cm(self.left_hand_gap_slider_a.value())
+        gap_b = slider_to_hand_gap_cm(self.left_hand_gap_slider_b.value())
         next_preset = "B" if at_a else "A"
-        next_pos = pos_b if at_a else pos_a
-        self.left_hand_toggle_btn.setText(f"左手: 切到{next_preset} ({next_pos:.2f})")
+        next_gap = gap_b if at_a else gap_a
+        self.left_hand_toggle_btn.setText(
+            f"左手: 切到{next_preset} ({next_gap:.1f}cm)"
+        )
         active_style = f"font-weight: bold; color: {UI_ACCENT_BLUE};"
         idle_style = f"color: {UI_TEXT_MUTED};"
         self.left_hand_label_a.setStyleSheet(active_style if at_a else idle_style)
@@ -49222,41 +51734,52 @@ class CameraTopicWindow(QMainWindow):
             self.node._left_hand_at_a = not self.node._left_hand_at_a
             at_a = self.node._left_hand_at_a
             slider = (
-                self.left_hand_slider_a.value()
+                self.left_hand_gap_slider_a.value()
                 if at_a
-                else self.left_hand_slider_b.value()
+                else self.left_hand_gap_slider_b.value()
             )
+            gap_cm = slider_to_hand_gap_cm(slider)
             pos = slider_to_hand_position(slider)
             ok = self._apply_sim_gripper("left", pos)
             self._update_left_hand_toggle_ui(at_a)
             self.node.ros_bridge.left_hand_preset_changed.emit(at_a)
             preset = "A" if at_a else "B"
             self.status_bar.showMessage(
-                f"仿真左手 → 状态{preset} gripper={pos:.3f}"
+                f"仿真左手 → 状态{preset} {gap_cm:.1f}cm"
                 + ("" if ok else "（写入失败）")
             )
             return
-        at_a, sent_pos = self.node.toggle_left_hand_between(
-            self.left_hand_slider_a.value(),
-            self.left_hand_slider_b.value(),
-        )
+        if not self.node.is_hand_enabled():
+            self.status_bar.showMessage("手未使能：请先点「启用手」", 4000)
+            return
+        slider_a = self.left_hand_gap_slider_a.value()
+        slider_b = self.left_hand_gap_slider_b.value()
+        at_a, sent_pos = self.node.toggle_left_hand_between(slider_a, slider_b)
         self._update_left_hand_toggle_ui(at_a)
         preset = "A" if at_a else "B"
+        gap_cm = slider_to_hand_gap_cm(slider_a if at_a else slider_b)
         self.status_bar.showMessage(
-            f"左手已切到状态{preset} position={sent_pos:.3f} -> {ROBOT_LEFT_HAND_CMD_TOPIC}"
+            f"左手已切到状态{preset} {gap_cm:.1f}cm (pos={sent_pos:.3f}) "
+            f"-> {ROBOT_LEFT_HAND_CMD_TOPIC}"
         )
 
     def _on_right_hand_sliders_changed(self, _value: int = 0) -> None:
-        self.right_hand_label_a.setText(format_hand_angle_label(self.right_hand_slider_a.value()))
-        self.right_hand_label_b.setText(format_hand_angle_label(self.right_hand_slider_b.value()))
+        self.right_hand_label_a.setText(
+            format_hand_gap_label(self.right_hand_gap_slider_a.value())
+        )
+        self.right_hand_label_b.setText(
+            format_hand_gap_label(self.right_hand_gap_slider_b.value())
+        )
         self._update_right_hand_toggle_ui(self.node.is_right_hand_at_a())
 
     def _update_right_hand_toggle_ui(self, at_a: bool) -> None:
-        pos_a = slider_to_hand_position(self.right_hand_slider_a.value())
-        pos_b = slider_to_hand_position(self.right_hand_slider_b.value())
+        gap_a = slider_to_hand_gap_cm(self.right_hand_gap_slider_a.value())
+        gap_b = slider_to_hand_gap_cm(self.right_hand_gap_slider_b.value())
         next_preset = "B" if at_a else "A"
-        next_pos = pos_b if at_a else pos_a
-        self.right_hand_toggle_btn.setText(f"右手: 切到{next_preset} ({next_pos:.2f})")
+        next_gap = gap_b if at_a else gap_a
+        self.right_hand_toggle_btn.setText(
+            f"右手: 切到{next_preset} ({next_gap:.1f}cm)"
+        )
         active_style = f"font-weight: bold; color: {UI_ACCENT_BLUE};"
         idle_style = f"color: {UI_TEXT_MUTED};"
         self.right_hand_label_a.setStyleSheet(active_style if at_a else idle_style)
@@ -49267,43 +51790,205 @@ class CameraTopicWindow(QMainWindow):
             self.node._right_hand_at_a = not self.node._right_hand_at_a
             at_a = self.node._right_hand_at_a
             slider = (
-                self.right_hand_slider_a.value()
+                self.right_hand_gap_slider_a.value()
                 if at_a
-                else self.right_hand_slider_b.value()
+                else self.right_hand_gap_slider_b.value()
             )
+            gap_cm = slider_to_hand_gap_cm(slider)
             pos = slider_to_hand_position(slider)
             ok = self._apply_sim_gripper("right", pos)
             self._update_right_hand_toggle_ui(at_a)
             self.node.ros_bridge.right_hand_preset_changed.emit(at_a)
             preset = "A" if at_a else "B"
             self.status_bar.showMessage(
-                f"仿真右手 → 状态{preset} gripper={pos:.3f}"
+                f"仿真右手 → 状态{preset} {gap_cm:.1f}cm"
                 + ("" if ok else "（写入失败）")
             )
             return
-        at_a, sent_pos = self.node.toggle_right_hand_between(
-            self.right_hand_slider_a.value(),
-            self.right_hand_slider_b.value(),
-        )
+        if not self.node.is_hand_enabled():
+            self.status_bar.showMessage("手未使能：请先点「启用手」", 4000)
+            return
+        slider_a = self.right_hand_gap_slider_a.value()
+        slider_b = self.right_hand_gap_slider_b.value()
+        at_a, sent_pos = self.node.toggle_right_hand_between(slider_a, slider_b)
         self._update_right_hand_toggle_ui(at_a)
         preset = "A" if at_a else "B"
+        gap_cm = slider_to_hand_gap_cm(slider_a if at_a else slider_b)
         self.status_bar.showMessage(
-            f"右手已切到状态{preset} position={sent_pos:.3f} -> {ROBOT_RIGHT_HAND_CMD_TOPIC}"
+            f"右手已切到状态{preset} {gap_cm:.1f}cm (pos={sent_pos:.3f}) "
+            f"-> {ROBOT_RIGHT_HAND_CMD_TOPIC}"
         )
 
     def _update_move_offset_ui_visibility(self) -> None:
-        """「分割位姿」时隐藏相对 ΔXYZ；仅「相对当前」显示偏移控件。"""
+        """「分割位姿」时隐藏六向输入；仅「相对当前」显示。"""
         show_offset = self.move_target_relative_radio.isChecked()
-        for widget in (
-            self.offset_x_label,
-            self.offset_x_spin,
-            self.offset_y_label,
-            self.offset_y_spin,
-            self.offset_z_label,
-            self.offset_z_spin,
+        for side in ("left", "right"):
+            title = getattr(self, "_arm_dir_row_titles", {}).get(side)
+            if title is not None:
+                title.setVisible(show_offset)
+            for direction in ARM_DIR_ORDER:
+                for bag in (
+                    getattr(self, "_arm_dir_labels", {}),
+                    getattr(self, "_arm_dir_spins", {}),
+                    getattr(self, "_arm_dir_btns", {}),
+                ):
+                    w = bag.get(side, {}).get(direction)
+                    if w is not None:
+                        w.setVisible(show_offset)
+                        if isinstance(w, QDoubleSpinBox):
+                            w.setEnabled(show_offset)
+        for w in getattr(self, "_arm_dir_extra_widgets", []):
+            w.setVisible(show_offset)
+        if show_offset:
+            self._update_arm_dir_btns_ui()
+
+    def _on_arm_dir_spin_changed(self, *_args) -> None:
+        """六向输入变化 → 同步隐藏 ΔXYZ，并刷新目标显示。"""
+        # 以当前编辑侧为准困难；左右都同步各自净偏移到展示用 spin（用左臂写旧三旋钮供兼容）
+        self._sync_offset_spins_from_dir("left")
+        self._on_move_target_params_changed()
+
+    def _arm_dir_spin_cm(self, arm_side: str, direction: str) -> float:
+        spins = getattr(self, "_arm_dir_spins", {}).get(arm_side) or {}
+        spin = spins.get(direction)
+        if spin is None:
+            return 0.0
+        return max(0.0, float(spin.value()))
+
+    def _arm_combined_offset_m(self, arm_side: str) -> Tuple[float, float, float]:
+        """六向净合成：前-后 → X，左-右 → Y，上-下 → Z（米）。"""
+        f = self._arm_dir_spin_cm(arm_side, "forward")
+        b = self._arm_dir_spin_cm(arm_side, "back")
+        l = self._arm_dir_spin_cm(arm_side, "left")
+        r = self._arm_dir_spin_cm(arm_side, "right")
+        u = self._arm_dir_spin_cm(arm_side, "up")
+        d = self._arm_dir_spin_cm(arm_side, "down")
+        return ((f - b) * 0.01, (l - r) * 0.01, (u - d) * 0.01)
+
+    def _sync_offset_spins_from_dir(self, arm_side: str) -> None:
+        """把指定臂六向净偏移写回隐藏的 offset_*_spin（兼容旧存档/文本指令路径）。"""
+        if not hasattr(self, "offset_x_spin"):
+            return
+        dx, dy, dz = self._arm_combined_offset_m(arm_side)
+        for spin, meters in (
+            (self.offset_x_spin, dx),
+            (self.offset_y_spin, dy),
+            (self.offset_z_spin, dz),
         ):
-            widget.setVisible(show_offset)
-            widget.setEnabled(show_offset)
+            spin.blockSignals(True)
+            set_manual_offset_spin_m(spin, meters)
+            spin.blockSignals(False)
+
+    def _set_arm_dir_from_xyz_m(
+        self, arm_side: str, dx: float, dy: float, dz: float
+    ) -> None:
+        """按有符号米偏移填入六向输入（对侧清零）。"""
+        spins = getattr(self, "_arm_dir_spins", {}).get(arm_side) or {}
+        if not spins:
+            if hasattr(self, "offset_x_spin"):
+                set_manual_offset_spin_m(self.offset_x_spin, dx)
+                set_manual_offset_spin_m(self.offset_y_spin, dy)
+                set_manual_offset_spin_m(self.offset_z_spin, dz)
+            return
+
+        def _set(name: str, cm: float) -> None:
+            sp = spins.get(name)
+            if sp is None:
+                return
+            sp.blockSignals(True)
+            sp.setValue(max(0.0, min(MANUAL_OFFSET_MAX_CM, float(cm))))
+            sp.blockSignals(False)
+
+        _set("forward", dx * 100.0 if dx > 0 else 0.0)
+        _set("back", -dx * 100.0 if dx < 0 else 0.0)
+        _set("left", dy * 100.0 if dy > 0 else 0.0)
+        _set("right", -dy * 100.0 if dy < 0 else 0.0)
+        _set("up", dz * 100.0 if dz > 0 else 0.0)
+        _set("down", -dz * 100.0 if dz < 0 else 0.0)
+        self._sync_offset_spins_from_dir(arm_side)
+
+    def _resolve_direction_move_goal(
+        self, arm_side: str, direction: str
+    ) -> Optional[ResolvedArmMoveGoal]:
+        """仅沿单一 base_link 轴生成相对目标（步长取该方向输入框）。"""
+        cm = self._arm_dir_spin_cm(arm_side, direction)
+        if cm < 1e-6:
+            return None
+        step = cm * 0.01
+        mapping = {
+            "forward": (step, 0.0, 0.0),
+            "back": (-step, 0.0, 0.0),
+            "left": (0.0, step, 0.0),
+            "right": (0.0, -step, 0.0),
+            "up": (0.0, 0.0, step),
+            "down": (0.0, 0.0, -step),
+        }
+        delta = mapping.get(direction)
+        if delta is None:
+            return None
+        tcp = self._tcp_for_relative_goal(arm_side)
+        if tcp is None:
+            return None
+        xyz, quat = tcp
+        return compute_relative_move_goal(
+            xyz, quat, delta[0], delta[1], delta[2], arm_side=arm_side
+        )
+
+    def _on_arm_direction_move(self, arm_side: str, direction: str) -> None:
+        """前/后/左/右/上/下：只做对应方向单轴移动。"""
+        side_name = arm_side_label(arm_side)
+        dir_cn = ARM_DIR_LABEL_CN.get(direction, direction)
+        if self.node.is_slow_motion_busy() or self._is_sim_arm_moving():
+            self.status_bar.showMessage("已有移动进行中，请等待或先取消")
+            return
+        if not self._sim_teleop_active() and not self.node.is_arm_enabled():
+            self.status_bar.showMessage("手臂未使能：请先点「启用手臂」")
+            self._update_arm_dir_btns_ui()
+            return
+        if hasattr(self, "move_target_relative_radio"):
+            self.move_target_relative_radio.setChecked(True)
+        if self._arm_dir_spin_cm(arm_side, direction) < 1e-6:
+            self.status_bar.showMessage(
+                f"请先填写{side_name}「{dir_cn}」方向的步长（cm）"
+            )
+            return
+        goal = self._resolve_direction_move_goal(arm_side, direction)
+        if goal is None:
+            self.status_bar.showMessage(
+                f"无法{side_name}向{dir_cn}移动：无 TCP 或步长无效"
+            )
+            return
+        if self._sim_teleop_active():
+            msg = self._start_sim_arm_move(arm_side, goal)
+            self.status_bar.showMessage(msg)
+            self._update_arm_move_btns_ui()
+            return
+        msg = self.node.request_slow_move_to_goal(goal)
+        self.status_bar.showMessage(msg)
+        self._update_arm_move_btns_ui()
+
+    def _update_arm_dir_btns_ui(self) -> None:
+        """六向「移动」按钮使能：相对模式 + TCP 就绪（真机需使能）。"""
+        btns_map = getattr(self, "_arm_dir_btns", None)
+        if not btns_map:
+            return
+        show_offset = True
+        if hasattr(self, "move_target_relative_radio"):
+            show_offset = bool(self.move_target_relative_radio.isChecked())
+        busy = self.node.is_slow_motion_busy() or self._is_sim_arm_moving()
+        for side, btn_by_dir in btns_map.items():
+            if not show_offset or busy:
+                can = False
+            elif self._sim_teleop_active():
+                can = self._sim_tcp_pose(side) is not None
+            else:
+                can = bool(
+                    self.node.is_arm_enabled()
+                    and self._tcp_for_relative_goal(side) is not None
+                )
+            for btn in btn_by_dir.values():
+                btn.setEnabled(bool(can))
+                btn.setVisible(show_offset)
 
     def _on_move_target_params_changed(self, *_args) -> None:
         if self._last_segment_target is None and self.move_target_segment_radio.isChecked():
@@ -49492,12 +52177,13 @@ class CameraTopicWindow(QMainWindow):
         if tcp is None:
             return None
         xyz, quat = tcp
+        dx, dy, dz = self._arm_combined_offset_m(arm_side)
         return compute_relative_move_goal(
             xyz,
             quat,
-            self.offset_x_spin.value(),
-            self.offset_y_spin.value(),
-            self.offset_z_spin.value(),
+            dx,
+            dy,
+            dz,
             arm_side=arm_side,
         )
 
@@ -49508,27 +52194,156 @@ class CameraTopicWindow(QMainWindow):
         if not self.node.is_slow_motion_busy():
             self._update_arm_move_btns_ui()
 
+    def _ensure_host_ruiyan(self) -> None:
+        """确保宿主机 Ruiyan hand_node 在订 /ry_hand/*/set_angles（无 Docker）。"""
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "scripts",
+            "start_host_ruiyan.sh",
+        )
+        if not os.path.isfile(script):
+            return
+        try:
+            subprocess.Popen(
+                ["bash", script, "start"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+    def _ensure_host_fk(self) -> None:
+        """确保宿主机 FK 发布 /mink_fk/*_tcp_pose（无 Docker；替代缺失的 fk_node）。"""
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "scripts",
+            "start_host_fk.sh",
+        )
+        if not os.path.isfile(script):
+            return
+        try:
+            subprocess.Popen(
+                ["bash", script, "start"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+    def _ensure_host_arm_hand_bridge(self) -> None:
+        """确保宿主机使能桥 + Ruiyan 在跑（无 Docker）。"""
+        self._ensure_host_ruiyan()
+        self._ensure_host_fk()
+        if _is_stack_services_running():
+            return
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "scripts",
+            "start_host_arm_hand.sh",
+        )
+        if not os.path.isfile(script):
+            return
+        try:
+            subprocess.Popen(
+                ["bash", script, "start"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            pass
+
+    def _ensure_enable_state_subscriptions(self) -> None:
+        try:
+            self.node.ensure_enable_state_subscriptions()
+        except Exception:
+            pass
+
     def _on_arm_enable_clicked(self) -> None:
+        """开关手臂：打开/关闭对机器人手臂的控制（不扫相机，避免卡 UI）。"""
+        self._ensure_host_arm_hand_bridge()
+        self._ensure_enable_state_subscriptions()
         enable = not self.node.is_arm_enabled()
-        msg = self.node.request_arm_enable(enable=enable)
-        self.status_bar.showMessage(msg)
+        if not enable:
+            # 关闭时立刻停掉本进程轨迹，避免关使能后仍在发关节目标
+            try:
+                if self.node.is_slow_motion_busy():
+                    self.status_bar.showMessage(self.node.cancel_slow_motion())
+            except Exception:
+                pass
+            try:
+                self._pending_arm_move_goal = None
+                self._arm_enable_wait_timer.stop()
+            except Exception:
+                pass
+            try:
+                self._cancel_sim_arm_move("")
+            except Exception:
+                pass
+
+        def _do_enable(e: bool = enable) -> None:
+            msg = self.node.request_arm_enable(enable=e)
+            self.status_bar.showMessage(
+                ("已打开手臂控制" if e else "已关闭手臂控制") + f"：{msg}",
+                5000,
+            )
+            self._update_enable_status_ui()
+            self._update_arm_move_btns_ui()
+
+        # 关使能：本地立即门控（request 内乐观更新），再异步确认桥
+        # 开使能：桥已在跑则立即；否则稍等 UDP 监听就绪
+        if (not enable) or _pgrep_pattern("host_arm_hand_bridge.py") or _is_stack_services_running():
+            _do_enable()
+        else:
+            self.status_bar.showMessage("正在拉起宿主机使能桥…")
+            QTimer.singleShot(600, _do_enable)
 
     def _on_model_mode_clicked(self) -> None:
+        self._ensure_host_arm_hand_bridge()
         msg = self.node.request_model_control_mode()
         self.status_bar.showMessage(msg)
         self._update_enable_status_ui()
         self._update_prereq_gated_buttons()
 
     def _on_hand_enable_clicked(self) -> None:
+        self._ensure_host_arm_hand_bridge()
+        self._ensure_enable_state_subscriptions()
         enable = not self.node.is_hand_enabled()
-        msg = self.node.request_hand_enable(enable=enable)
-        self.status_bar.showMessage(msg)
+
+        def _do_hand(e: bool = enable) -> None:
+            msg = self.node.request_hand_enable(enable=e)
+            self.status_bar.showMessage(
+                ("已打开手控制" if e else "已关闭手控制") + f"：{msg}",
+                5000,
+            )
+            self._update_enable_status_ui()
+
+        if _pgrep_pattern("host_arm_hand_bridge.py") or _is_stack_services_running():
+            _do_hand()
+        else:
+            self.status_bar.showMessage("正在拉起宿主机使能桥…")
+            QTimer.singleShot(600, _do_hand)
 
     def _on_arm_enable_ui_changed(self, enabled: bool) -> None:
         self._update_enable_status_ui()
         self._update_prereq_gated_buttons()
         if enabled:
+            # 使能后确保 FK/TCP 在更新，否则移动按钮一直灰
+            self._ensure_host_fk()
+            self._ensure_robot_tcp_bridge()
+            QTimer.singleShot(300, self._update_arm_move_btns_ui)
+            QTimer.singleShot(1200, self._update_arm_move_btns_ui)
             self._try_finish_pending_arm_move()
+        else:
+            try:
+                if self.node.is_slow_motion_busy():
+                    self.node.cancel_slow_motion()
+            except Exception:
+                pass
+            self._pending_arm_move_goal = None
+        self._update_arm_move_btns_ui()
 
     def _on_hand_enable_ui_changed(self, _enabled: bool) -> None:
         self._update_enable_status_ui()
@@ -49590,13 +52405,21 @@ class CameraTopicWindow(QMainWindow):
         """按服务栈就绪状态控制「启用手臂/手」「切 mode=0」「手部应用」。"""
         sim = self._sim_teleop_active()
         stack_ok = self._stack_ready_for_enable_services()
+        host_bridge = os.path.isfile(
+            os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "scripts",
+                "start_host_arm_hand.sh",
+            )
+        )
         arm_on = self.node.is_arm_enabled()
         hand_on = self.node.is_hand_enabled()
-        can_arm = sim or stack_ok or arm_on
-        can_hand = sim or stack_ok or hand_on
-        can_mode = (not sim) and stack_ok
+        # 有宿主机桥脚本即可点：点击时自动拉起（无 Docker）
+        can_arm = sim or stack_ok or arm_on or host_bridge
+        can_hand = sim or stack_ok or hand_on or host_bridge
+        can_mode = (not sim) and (stack_ok or host_bridge)
         can_apply = sim or hand_on
-        stack_hint = "请先点「启动机器人栈」并等待 stack: 运行中"
+        stack_hint = "将自动启动宿主机使能桥（无 Docker）"
         arm_tip = (
             "仿真遥控中无需真机使能"
             if sim
@@ -49825,17 +52648,19 @@ class CameraTopicWindow(QMainWindow):
     def _can_start_arm_move(self, arm_side: str = "left") -> bool:
         if self._is_sim_arm_moving() or self.node.is_slow_motion_busy():
             return True
-        # 分割位姿 / 相对偏移均需能解析出目标（零偏移时相对模式不可点）
-        if self._resolve_move_goal(arm_side) is None:
-            return False
+        # 有 TCP 且能解析出目标即可点（相对模式需非零偏移；默认 ΔX=5cm）
         if self._sim_teleop_active():
-            left_ok = self._sim_tcp_pose("left") is not None
-            right_ok = self._sim_tcp_pose("right") is not None
-            return left_ok and right_ok
+            if self._sim_tcp_pose(arm_side) is None:
+                return False
+            return self._resolve_move_goal(arm_side) is not None
+        # 真机：必须先使能，关闭后按钮灰掉且不可自动再开
+        if not self.node.is_arm_enabled():
+            return False
         state = self.node.get_robot_state()
-        left_ok = state.left_tcp is not None and state.left_tcp.valid
-        right_ok = state.right_tcp is not None and state.right_tcp.valid
-        return left_ok and right_ok
+        tcp = state.left_tcp if arm_side == "left" else state.right_tcp
+        if tcp is None or not tcp.valid:
+            return False
+        return self._resolve_move_goal(arm_side) is not None
 
     def _disabled_move_btn_tooltip(self, arm_side: str = "left") -> str:
         hints: List[str] = []
@@ -49854,7 +52679,7 @@ class CameraTopicWindow(QMainWindow):
                     frame = self._last_segment_target.camera_frame or "未知"
                     hints.append(f"分割 TF 不可用 ({frame} -> {IK_TARGET_FRAME})")
             elif self._resolve_move_goal(arm_side) is None:
-                hints.append(f"相对当前模式：请为{side_name}设置非零偏移（如 ΔX=0.05 m）")
+                hints.append(f"相对当前模式：请为{side_name}设置非零偏移（如 ΔX=5 cm）")
             if not hints:
                 hints.append("仿真遥控就绪：设置偏移后点「移动」")
             return "\n".join(hints)
@@ -49863,11 +52688,12 @@ class CameraTopicWindow(QMainWindow):
             hints.append("点击后可能无法移动:")
             hints.extend(blockers)
         state = self.node.get_robot_state()
-        left_ok = state.left_tcp is not None and state.left_tcp.valid
-        right_ok = state.right_tcp is not None and state.right_tcp.valid
-        if not left_ok or not right_ok:
-            hints.append("等待双臂 TCP（/mink_fk/* 或 /tele/fk/*）")
+        tcp = state.left_tcp if arm_side == "left" else state.right_tcp
         side_name = arm_side_label(arm_side)
+        if tcp is None or not tcp.valid:
+            hints.append(
+                f"等待{side_name} TCP（需 host_fk / fk_node 发布 /mink_fk/*；点「连接机器人状态」或启用手臂会自动拉起）"
+            )
         if self.move_target_segment_radio.isChecked():
             if self._last_segment_target is None:
                 hints.append("请先点击图像选点，再点「调用分割」")
@@ -49875,9 +52701,11 @@ class CameraTopicWindow(QMainWindow):
                 frame = self._last_segment_target.camera_frame or "未知"
                 hints.append(f"分割 TF 不可用 ({frame} -> {IK_TARGET_FRAME})")
         elif self._resolve_move_goal(arm_side) is None:
-            hints.append(f"相对当前模式：请为{side_name}设置非零偏移（如 ΔX=0.05 m）")
+            hints.append(f"相对当前模式：请为{side_name}设置非零偏移（如 ΔX=5 cm）")
+        if not self.node.is_arm_enabled():
+            hints.insert(0, "请先点「启用手臂」")
         if not hints:
-            hints.append("未使能时点击「移动」将自动启用手臂")
+            hints.append("暂不可移动")
         return "\n".join(hints)
 
     def _update_arm_pose_display(self) -> None:
@@ -50042,7 +52870,7 @@ class CameraTopicWindow(QMainWindow):
                 btn.setToolTip(
                     f"将{side_name} TCP 移动到目标位姿（时长随距离与「移动速度」滑块自适应）。\n"
                     f"目标可为分割位姿，或相对当前位置的手动偏移。\n"
-                    f"未使能时将自动启用手臂；同时发布左右臂 IK 目标。{extra}"
+                    f"须先「启用手臂」。{extra}"
                 )
         else:
             btn.setToolTip(self._disabled_move_btn_tooltip(arm_side))
@@ -50059,6 +52887,7 @@ class CameraTopicWindow(QMainWindow):
         self.arm_move_speed_slider.setEnabled(not speed_busy)
         self._update_one_arm_move_btn_ui("left", force=force)
         self._update_one_arm_move_btn_ui("right", force=force)
+        self._update_arm_dir_btns_ui()
         self._update_arm_pose_display()
 
     def _update_left_arm_move_btn_ui(self, force: bool = False) -> None:
@@ -50069,11 +52898,9 @@ class CameraTopicWindow(QMainWindow):
         self._last_segment_target = target
         self.move_target_segment_radio.setEnabled(True)
         self.move_target_segment_radio.setChecked(True)
-        # 选中绝对位姿目标时，偏移量不参与目标计算；清零并隐藏 ΔXYZ
-        for spin in (self.offset_x_spin, self.offset_y_spin, self.offset_z_spin):
-            spin.blockSignals(True)
-            spin.setValue(0.0)
-            spin.blockSignals(False)
+        # 选中绝对位姿目标时，偏移量不参与目标计算；清零并隐藏六向
+        for side in ("left", "right"):
+            self._set_arm_dir_from_xyz_m(side, 0.0, 0.0, 0.0)
         self._update_move_offset_ui_visibility()
         self._update_arm_move_btns_ui()
         self._update_arm_pose_display()
@@ -50105,11 +52932,7 @@ class CameraTopicWindow(QMainWindow):
             self._update_arm_move_btns_ui()
             return
         if not self.node.is_arm_enabled():
-            self._pending_arm_move_goal = goal
-            msg = self.node.request_arm_enable(True)
-            self._arm_enable_wait_deadline = time.time() + 15.0
-            self._arm_enable_wait_timer.start()
-            self.status_bar.showMessage(f"{msg}，使能后将自动移向绝对目标…")
+            self.status_bar.showMessage("绝对位姿已记录：请先点「启用手臂」后再移动")
             self._update_arm_move_btns_ui()
             return
         msg = self.node.request_slow_move_to_goal(goal)
@@ -50204,15 +53027,35 @@ class CameraTopicWindow(QMainWindow):
         cv2.circle(out, (uu, vv), 10, (0, 180, 255), 2, lineType=cv2.LINE_AA)
         return out
 
+    def _mv6d_downscale_preview_bgr(self, bgr: np.ndarray, max_edge: int = 320) -> np.ndarray:
+        img = np.asarray(bgr)
+        if img.size == 0:
+            return img
+        h, w = img.shape[:2]
+        edge = max(h, w)
+        if edge <= max_edge or max_edge <= 0:
+            return img
+        scale = float(max_edge) / float(edge)
+        return cv2.resize(
+            img,
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
     def _refresh_mv6d_live_previews_for_pick(self) -> None:
-        """刷头部/双腕实时画面，便于点选物体（未估计时也显示）。"""
+        """刷头部/双腕实时画面，便于点选物体（未估计时也显示；无帧保留占位）。"""
         if getattr(self, "mv6d_head_preview", None) is None:
             return
+        if self._arm_panel_selector_key() != "mv6d":
+            return
+        if not self._control_tab_title_is_current("手臂/手"):
+            return
+        self.mv6d_head_preview.setVisible(True)
         head_src = self._pick_mv6d_color_frame("/camera/head_color")
         if head_src is not None:
-            self.mv6d_head_preview.setVisible(True)
             _, head_bgr = head_src
             head_bgr = np.asarray(head_bgr)
+            # 点选坐标按原图；显示用缩略图
             self._mv6d_live_head_bgr = np.ascontiguousarray(head_bgr)
             show = head_bgr
             if self._mv6d_object_picked:
@@ -50226,34 +53069,44 @@ class CameraTopicWindow(QMainWindow):
                 show,
                 "头部 · 点击选择物体（无帧）",
                 cache_attr="_mv6d_head_pix",
+                source_wh=(int(head_bgr.shape[1]), int(head_bgr.shape[0])),
             )
         else:
-            self.mv6d_head_preview.setVisible(False)
-            self._mv6d_head_pix = None
+            self._mv6d_live_head_bgr = None
+            self._set_mv6d_preview_label(
+                self.mv6d_head_preview,
+                None,
+                "头部 · 等待画面\n勾选 /camera/head_color，或仿真「只开界面」后重进本页",
+                cache_attr="_mv6d_head_pix",
+            )
 
-        # 尚无估计结果时同步刷双腕实况；无该相机帧则隐藏
-        for topic, lab, cache, empty in (
+        # 尚无估计结果时同步刷双腕实况；无帧显示占位（不隐藏）
+        for side, lab, cache, empty in (
             (
-                "/camera/left_wrist_color",
+                "left",
                 self.mv6d_left_wrist_preview,
                 "_mv6d_left_wrist_pix",
-                "左腕 · 点击放大（无帧）",
+                "左腕 · 等待画面\n勾选 /camera/hand_left_color 或 left_wrist_color",
             ),
             (
-                "/camera/right_wrist_color",
+                "right",
                 self.mv6d_right_wrist_preview,
                 "_mv6d_right_wrist_pix",
-                "右腕 · 点击放大（无帧）",
+                "右腕 · 等待画面\n勾选 /camera/hand_right_color 或 right_wrist_color",
             ),
         ):
-            src = self._pick_mv6d_color_frame(topic)
-            if src is None:
-                lab.setVisible(False)
-                setattr(self, cache, None)
-                continue
             lab.setVisible(True)
+            src = self._pick_mv6d_color_frame(side)
+            if src is None:
+                self._set_mv6d_preview_label(lab, None, empty, cache_attr=cache)
+                continue
             if self._mv6d_last_snap is None:
-                self._set_mv6d_preview_label(lab, src[1], empty, cache_attr=cache)
+                self._set_mv6d_preview_label(
+                    lab,
+                    src[1],
+                    empty.replace("等待画面", "点击放大"),
+                    cache_attr=cache,
+                )
 
     def _mv6d_ensure_object_selected(self, *, silent: bool = False) -> bool:
         if getattr(self, "_mv6d_object_picked", False):
@@ -50403,24 +53256,52 @@ class CameraTopicWindow(QMainWindow):
         except Exception as exc:
             self.status_bar.showMessage(f"加载 GT 失败: {exc}")
 
+    def _mv6d_color_topic_candidates(self, preferred: str) -> List[str]:
+        """展开腕部 topic 别名（left_wrist ↔ hand_left 等）。"""
+        preferred = str(preferred or "").strip()
+        candidates: List[str] = []
+        if preferred in ("left", "right"):
+            candidates.extend(self._wrist_color_topics(preferred))
+        else:
+            candidates.append(preferred)
+            for side, aliases in WRIST_COLOR_TOPIC_ALIASES.items():
+                if preferred in aliases:
+                    for t in aliases:
+                        if t not in candidates:
+                            candidates.append(t)
+                    break
+            # 逻辑侧名夹在路径里时也展开
+            low = preferred.lower()
+            if "hand_left" in low or "left_wrist" in low:
+                for t in self._wrist_color_topics("left"):
+                    if t not in candidates:
+                        candidates.append(t)
+            if "hand_right" in low or "right_wrist" in low:
+                for t in self._wrist_color_topics("right"):
+                    if t not in candidates:
+                        candidates.append(t)
+        known = self._cached_topic_names()
+        for t in list(candidates):
+            stem = t.rstrip("/").split("/")[-1]
+            for k in known:
+                if k not in candidates and stem and stem in k:
+                    candidates.append(k)
+        return [c for c in candidates if c]
+
     def _pick_mv6d_color_frame(
         self, preferred: str
     ) -> Optional[Tuple[str, np.ndarray]]:
-        known = self._cached_topic_names()
-        candidates = [preferred]
-        # 仿真预览可能只用 npy，topic 名仍按约定
-        for t in known:
-            if t not in candidates and preferred.split("/")[-1] in t:
-                candidates.append(t)
+        candidates = self._mv6d_color_topic_candidates(preferred)
         for topic in candidates:
             frame = self._frame_cache.get(topic)
             if frame is None:
                 panel = self.panels.get(topic)
                 if isinstance(panel, CameraPanel) and panel._latest_image is not None:
                     frame = panel._latest_image
-            if frame is None and topic == preferred:
-                # 尝试从仿真共享目录读 color npy / png
-                frame = self._load_sim_bridge_color_bgr(topic)
+            if frame is None:
+                # 尝试从仿真共享目录读 color npy / png（未跑仿真时放宽过期，便于手臂页仍能看到画面）
+                age = 120.0 if self._any_sim_process_running() else 900.0
+                frame = self._load_sim_bridge_color_bgr(topic, max_age_s=age)
             if frame is not None and np.asarray(frame).ndim >= 2:
                 return topic, np.asarray(frame)
         return None
@@ -50601,23 +53482,34 @@ class CameraTopicWindow(QMainWindow):
         return np.ascontiguousarray(depth_m.astype(np.float32))
 
     def _start_mv6d_estimate(self, *, silent: bool = False) -> None:
+        try:
+            self._ensure_mv6d_camera_feeds()
+        except Exception:
+            pass
         if self._mv6d_busy:
             if not silent:
                 self.status_bar.showMessage("多视角 6D：正在估计中…")
             return
         head_src = self._pick_mv6d_color_frame("/camera/head_color")
-        preferred_wrist = str(
-            self.mv6d_wrist_combo.currentData() or "/camera/left_wrist_color"
-        )
-        left_topic = "/camera/left_wrist_color"
-        right_topic = "/camera/right_wrist_color"
-        left_src = self._pick_mv6d_color_frame(left_topic)
-        right_src = self._pick_mv6d_color_frame(right_topic)
+        preferred_side = str(self.mv6d_wrist_combo.currentData() or "left").strip().lower()
+        if preferred_side not in ("left", "right"):
+            preferred_side = (
+                "right"
+                if "right" in preferred_side
+                else "left"
+            )
+        preferred_wrist = self._resolve_wrist_color_topic(preferred_side)
+        left_topic = self._resolve_wrist_color_topic("left")
+        right_topic = self._resolve_wrist_color_topic("right")
+        left_src = self._pick_mv6d_color_frame("left")
+        right_src = self._pick_mv6d_color_frame("right")
         if head_src is None and left_src is None and right_src is None:
             if not silent:
                 self.mv6d_result_edit.setPlainText(
                     "错误: 未拿到头部或腕部彩色图。\n"
-                    "请勾选 /camera/head_color 与腕部 color，或启动带相机输出的仿真。"
+                    "请勾选 /camera/head_color 与 "
+                    "/camera/hand_left_color|/camera/hand_right_color"
+                    "（或 left_wrist/right_wrist），或启动带相机输出的仿真。"
                 )
                 self.status_bar.showMessage("多视角 6D：缺少彩色图")
             return
@@ -51513,10 +54405,16 @@ class CameraTopicWindow(QMainWindow):
         placeholder: str,
         *,
         cache_attr: str = "",
+        source_wh: Optional[Tuple[int, int]] = None,
     ) -> None:
         pix: Optional[QPixmap] = None
+        orig_wh = source_wh
         if bgr is not None and isinstance(bgr, np.ndarray) and bgr.size > 0:
-            cand = cv2_to_qpixmap(bgr)
+            h0, w0 = int(bgr.shape[0]), int(bgr.shape[1])
+            if orig_wh is None:
+                orig_wh = (w0, h0)
+            small = self._mv6d_downscale_preview_bgr(bgr, 320)
+            cand = cv2_to_qpixmap(small, max_edge=320)
             if not cand.isNull():
                 pix = cand
         if cache_attr:
@@ -51526,7 +54424,8 @@ class CameraTopicWindow(QMainWindow):
                 label.set_source_pixmap(None)
                 label.setText(placeholder)
             else:
-                label.set_source_pixmap(pix)
+                # source_wh=原图像素，点选坐标映射回全分辨率
+                label.set_source_pixmap(pix, source_wh=orig_wh)
             return
         if pix is None:
             label.setPixmap(QPixmap())
@@ -51537,7 +54436,7 @@ class CameraTopicWindow(QMainWindow):
             pix.scaled(
                 label.size() if label.width() > 8 else QSize(320, 180),
                 Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
+                Qt.FastTransformation,
             )
         )
 
@@ -51643,7 +54542,7 @@ class CameraTopicWindow(QMainWindow):
         )
 
     def _apply_mv6d_overlays(self, snap: MultiView6DPoseSnapshot) -> None:
-        """把 6D 坐标轴/OBB/数字渲染到仿真相机预览 + 手臂页预览。"""
+        """把 6D 坐标轴/OBB/数字渲染到手臂页预览（不写主相机面板）。"""
         err_t, err_r = self._mv6d_error_pair(snap)
         self._mv6d_last_snap = snap
 
@@ -51717,49 +54616,12 @@ class CameraTopicWindow(QMainWindow):
                 centroid_uv=centroid,
             )
 
-            if self.mv6d_overlay_check.isChecked() and isinstance(panel, CameraPanel):
-                # 持久叠加：随仿真 npy / ROS 视频流每帧重绘轴 + OBB + 数字条
-                panel.image_label.set_source_image(src)
-                panel.image_label.set_segment_overlay(
-                    mask,
-                    centroid,
-                    obb_corners=corners,
-                    intrinsics=intr,
-                    contact_uv=centroid,
-                    seed_uv=centroid,
-                    pose_position=np.asarray(xyz_c, dtype=np.float32),
-                    pose_rotation=np.asarray(R_c, dtype=np.float32),
-                    pose_axis_len=axis_len,
-                    pose_hud=hud,
-                )
-
-                depth_panel = self.panels.get(depth_topic)
-                if isinstance(depth_panel, DepthPanel3D) and depth_panel._preview_shape[0] > 0:
-                    ph, pw = depth_panel._preview_shape
-                    mask_p = (
-                        resize_mask_to_shape(view_result.mask, (ph, pw))
-                        if view_result is not None
-                        else None
-                    )
-                    pu = pv = 0.0
-                    if centroid is not None:
-                        pu, pv = scale_uv_to_shape(
-                            int(centroid[0]), int(centroid[1]), (ch, cw), (ph, pw)
-                        )
-                    depth_panel.depth_preview.set_segment_overlay(
-                        mask_p,
-                        (float(pu), float(pv)),
-                        obb_corners=corners,
-                        intrinsics=intr,
-                        pose_position=np.asarray(xyz_c, dtype=np.float32),
-                        pose_rotation=np.asarray(R_c, dtype=np.float32),
-                        pose_axis_len=axis_len,
-                        pose_hud=hud,
-                    )
+            # 不写回主相机面板的 segment_overlay：一旦挂上会每帧 compose，主线程必卡。
+            # 6D 结果只画在手臂页三个预览框（及 lightbox）。
             return rendered
 
-        left_topic = "/camera/left_wrist_color"
-        right_topic = "/camera/right_wrist_color"
+        left_topic = self._resolve_wrist_color_topic("left")
+        right_topic = self._resolve_wrist_color_topic("right")
         wrist_topic = str(snap.wrist_topic or "")
         # 仅「可见且参与融合」的腕画 mask/轴；不可见腕不参考其分割结果
         left_result = getattr(snap, "left_wrist_result", None)
@@ -51835,24 +54697,25 @@ class CameraTopicWindow(QMainWindow):
         self._set_mv6d_preview_label(
             self.mv6d_head_preview,
             rendered_head,
-            "头部 · 点击选择物体（无帧）",
+            "头部 · 等待画面\n勾选 /camera/head_color 或开仿真预览",
             cache_attr="_mv6d_head_pix",
         )
         self._set_mv6d_preview_label(
             self.mv6d_left_wrist_preview,
             rendered_left,
-            "左腕 · 点击放大（无帧）",
+            "左腕 · 等待画面",
             cache_attr="_mv6d_left_wrist_pix",
         )
         self._set_mv6d_preview_label(
             self.mv6d_right_wrist_preview,
             rendered_right,
-            "右腕 · 点击放大（无帧）",
+            "右腕 · 等待画面",
             cache_attr="_mv6d_right_wrist_pix",
         )
-        self.mv6d_head_preview.setVisible(rendered_head is not None)
-        self.mv6d_left_wrist_preview.setVisible(rendered_left is not None)
-        self.mv6d_right_wrist_preview.setVisible(rendered_right is not None)
+        # 始终保留三格预览，避免无帧时整行消失
+        self.mv6d_head_preview.setVisible(True)
+        self.mv6d_left_wrist_preview.setVisible(True)
+        self.mv6d_right_wrist_preview.setVisible(True)
         self._mv6d_wrist_pix = self._mv6d_left_wrist_pix
         self._sync_mv6d_lightbox()
 
@@ -52749,16 +55612,8 @@ class CameraTopicWindow(QMainWindow):
             if hasattr(self, "move_target_segment_radio"):
                 self.move_target_segment_radio.setEnabled(True)
                 self.move_target_segment_radio.setChecked(True)
-            for spin in (
-                getattr(self, "offset_x_spin", None),
-                getattr(self, "offset_y_spin", None),
-                getattr(self, "offset_z_spin", None),
-            ):
-                if spin is None:
-                    continue
-                spin.blockSignals(True)
-                spin.setValue(0.0)
-                spin.blockSignals(False)
+            for clear_side in ("left", "right"):
+                self._set_arm_dir_from_xyz_m(clear_side, 0.0, 0.0, 0.0)
             self._update_move_offset_ui_visibility()
             self._update_arm_pose_display()
         else:
@@ -52777,16 +55632,9 @@ class CameraTopicWindow(QMainWindow):
                 arm_side=side,
             )
             self.move_target_relative_radio.setChecked(True)
-            for spin, val in (
-                (self.offset_x_spin, action.dx),
-                (self.offset_y_spin, action.dy),
-                (self.offset_z_spin, action.dz),
-            ):
-                spin.blockSignals(True)
-                spin.setValue(
-                    max(-MANUAL_OFFSET_MAX_M, min(MANUAL_OFFSET_MAX_M, float(val)))
-                )
-                spin.blockSignals(False)
+            self._set_arm_dir_from_xyz_m(
+                side, float(action.dx), float(action.dy), float(action.dz)
+            )
             self._update_move_offset_ui_visibility()
             self._update_arm_pose_display()
         if sim_cmd or self._sim_teleop_active():
@@ -52798,12 +55646,8 @@ class CameraTopicWindow(QMainWindow):
         if self.node.is_slow_motion_busy() or self._pending_arm_move_goal is not None:
             return "busy", "已有移动进行中"
         if not self.node.is_arm_enabled():
-            self._pending_arm_move_goal = goal
-            msg = self.node.request_arm_enable(True)
-            self._arm_enable_wait_deadline = time.time() + 15.0
-            self._arm_enable_wait_timer.start()
             self._update_arm_move_btns_ui()
-            return "ok", f"{msg}，使能后将执行：{goal.label}"
+            return "fail", "手臂未使能（请先点「启用手臂」）"
         msg = self.node.request_slow_move_to_goal(goal)
         self._update_arm_move_btns_ui()
         if str(msg).startswith("已有移动"):
@@ -52856,11 +55700,7 @@ class CameraTopicWindow(QMainWindow):
             self._update_arm_move_btns_ui()
             return
         if not self.node.is_arm_enabled():
-            self._pending_arm_move_goal = goal
-            msg = self.node.request_arm_enable(True)
-            self._arm_enable_wait_deadline = time.time() + 15.0
-            self._arm_enable_wait_timer.start()
-            self.status_bar.showMessage(f"{msg}，使能后将自动开始移动…")
+            self.status_bar.showMessage("手臂未使能：请先点「启用手臂」")
             self._update_arm_move_btns_ui()
             return
         msg = self.node.request_slow_move_to_goal(goal)
@@ -52893,38 +55733,56 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_left_hand_apply_active(self) -> None:
         at_a = self.node.is_left_hand_at_a()
-        slider = self.left_hand_slider_a.value() if at_a else self.left_hand_slider_b.value()
+        slider = (
+            self.left_hand_gap_slider_a.value()
+            if at_a
+            else self.left_hand_gap_slider_b.value()
+        )
+        gap_cm = slider_to_hand_gap_cm(slider)
         if self._sim_teleop_active():
             pos = slider_to_hand_position(slider)
             ok = self._apply_sim_gripper("left", pos)
             preset = "A" if at_a else "B"
             self.status_bar.showMessage(
-                f"仿真左手状态{preset} gripper={pos:.3f}"
+                f"仿真左手状态{preset} {gap_cm:.1f}cm"
                 + ("" if ok else "（写入失败）")
             )
+            return
+        if not self.node.is_hand_enabled():
+            self.status_bar.showMessage("手未使能：请先点「启用手」", 4000)
             return
         sent_pos = self.node.apply_left_hand_angle(slider)
         preset = "A" if at_a else "B"
         self.status_bar.showMessage(
-            f"左手状态{preset} 已应用 position={sent_pos:.3f} -> {ROBOT_LEFT_HAND_CMD_TOPIC}"
+            f"左手状态{preset} 已应用 {gap_cm:.1f}cm (pos={sent_pos:.3f}) "
+            f"-> {ROBOT_LEFT_HAND_CMD_TOPIC}"
         )
 
     def _on_right_hand_apply_active(self) -> None:
         at_a = self.node.is_right_hand_at_a()
-        slider = self.right_hand_slider_a.value() if at_a else self.right_hand_slider_b.value()
+        slider = (
+            self.right_hand_gap_slider_a.value()
+            if at_a
+            else self.right_hand_gap_slider_b.value()
+        )
+        gap_cm = slider_to_hand_gap_cm(slider)
         if self._sim_teleop_active():
             pos = slider_to_hand_position(slider)
             ok = self._apply_sim_gripper("right", pos)
             preset = "A" if at_a else "B"
             self.status_bar.showMessage(
-                f"仿真右手状态{preset} gripper={pos:.3f}"
+                f"仿真右手状态{preset} {gap_cm:.1f}cm"
                 + ("" if ok else "（写入失败）")
             )
+            return
+        if not self.node.is_hand_enabled():
+            self.status_bar.showMessage("手未使能：请先点「启用手」", 4000)
             return
         sent_pos = self.node.apply_right_hand_angle(slider)
         preset = "A" if at_a else "B"
         self.status_bar.showMessage(
-            f"右手状态{preset} 已应用 position={sent_pos:.3f} -> {ROBOT_RIGHT_HAND_CMD_TOPIC}"
+            f"右手状态{preset} 已应用 {gap_cm:.1f}cm (pos={sent_pos:.3f}) "
+            f"-> {ROBOT_RIGHT_HAND_CMD_TOPIC}"
         )
 
     def _refresh_skeleton_camera_list(self) -> None:
@@ -53676,11 +56534,7 @@ class CameraTopicWindow(QMainWindow):
             return 0
 
     def _discover_local_webcam_indices(self, max_index: int = 5) -> List[int]:
-        """探测本机可用摄像头。
-
-        无 ``/dev/video*`` 时绝不调用 ``VideoCapture(i)``：OpenCV 的 V4L2/obsensor
-        回退探测在部分环境会直接 SIGSEGV（本机远程桌面常见）。
-        """
+        """列出本机 /dev/video* 索引，不做 VideoCapture 探测（会卡 UI / 甚至 SIGSEGV）。"""
         if self._skeleton_tracking and self._skeleton_local_cap is not None:
             cur = self.skeleton_cam_combo.currentData()
             if self._skeleton_source_is_local(cur):
@@ -53691,35 +56545,7 @@ class CameraTopicWindow(QMainWindow):
         for i in range(max_index + 1):
             if os.path.exists(f"/dev/video{i}"):
                 candidates.append(i)
-        if not candidates:
-            return []
-
-        found: List[int] = []
-        for i in candidates:
-            cap = None
-            try:
-                cap = cv2.VideoCapture(i, cv2.CAP_V4L2)
-                if not cap.isOpened():
-                    try:
-                        cap.release()
-                    except Exception:
-                        pass
-                    cap = cv2.VideoCapture(i)
-                if not cap.isOpened():
-                    continue
-                ok, frame = cap.read()
-                if ok and frame is not None and getattr(frame, "size", 0) > 0:
-                    found.append(i)
-            except Exception:
-                continue
-            finally:
-                if cap is not None:
-                    try:
-                        cap.release()
-                    except Exception:
-                        pass
-        # Device nodes exist but none readable — still list them so user can try.
-        return found if found else candidates
+        return candidates
 
     def _close_skeleton_local_cam(self) -> None:
         cap = self._skeleton_local_cap
@@ -54031,28 +56857,39 @@ class CameraTopicWindow(QMainWindow):
         return bool(eval_on or bridge_on or mj_on)
 
     def _maybe_refresh_mv6d_previews_for_topics(self, topics: Sequence[str]) -> None:
-        """仿真帧更新时，若多视角 6D 叠加开启则重绘手臂页头/腕预览。"""
-        snap = getattr(self, "_mv6d_last_snap", None)
-        if snap is None:
+        """ROS2 / 仿真帧更新时，刷新手臂页「多视角6D」头/腕预览。"""
+        if self._arm_panel_selector_key() != "mv6d":
             return
-        overlay = getattr(self, "mv6d_overlay_check", None)
-        if overlay is not None and not overlay.isChecked():
+        # 不在「手臂/手」页时别刷预览（切到其它 tab 仍刷会卡点击）
+        if not self._control_tab_title_is_current("手臂/手"):
             return
-        wanted = {
-            str(getattr(snap, "head_topic", "") or ""),
-            str(getattr(snap, "wrist_topic", "") or ""),
-            "/camera/head_color",
-        }
-        if not any(t in wanted for t in topics if t):
+        topic_list = [str(t) for t in topics if t]
+        if not topic_list:
             return
-        # 节流：避免 20Hz npy 轮询把 UI 打满
+        color_keys = (
+            "head_color",
+            "left_wrist_color",
+            "right_wrist_color",
+            "hand_left_color",
+            "hand_right_color",
+        )
+        if not any(
+            any(k in t.lower() for k in color_keys) for t in topic_list
+        ):
+            return
+        # 节流：实况预览最多 ~2Hz；绝不在这里跑 _apply_mv6d_overlays（会卡死主线程）
         now = time.time()
         last = float(getattr(self, "_mv6d_preview_refresh_at", 0.0) or 0.0)
-        if now - last < 0.2:
+        if now - last < 0.5:
             return
         self._mv6d_preview_refresh_at = now
+        # 已有估计结果且开了叠加：实况刷新交给估计完成回调；此处只刷无叠加的轻量实况
+        snap = getattr(self, "_mv6d_last_snap", None)
+        overlay = getattr(self, "mv6d_overlay_check", None)
+        if snap is not None and overlay is not None and overlay.isChecked():
+            return
         try:
-            self._apply_mv6d_overlays(snap)
+            self._refresh_mv6d_live_previews_for_pick()
         except Exception:
             pass
 
@@ -54108,6 +56945,12 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_topics_updated(self, topics: Dict[str, List[str]]) -> None:
         topics = self._merge_sim_preview_topics(topics)
+        # 发现结果未变时不要整表重建 checkbox/panel（会卡死点击）
+        sig = tuple(sorted((k, tuple(v)) for k, v in topics.items()))
+        if sig == getattr(self, "_topics_updated_sig", None) and self.topic_checks:
+            self._topic_types = topics
+            return
+        self._topics_updated_sig = sig
         self._topic_types = topics
         prev_checked = {
             topic: checkbox.isChecked()
@@ -54149,7 +56992,8 @@ class CameraTopicWindow(QMainWindow):
         default_enabled: set[str] = set()
         for topic, types in topics.items():
             type_str = ", ".join(t.split("/")[-1] for t in types)
-            is_default = is_color_image_topic(topic, types)
+            # 默认全部不勾选；用户手动勾选需要的 topic
+            is_default = False
             if topic in prev_checked:
                 checked = prev_checked[topic]
             elif topic in self._topic_user_unchecked:
@@ -54162,6 +57006,9 @@ class CameraTopicWindow(QMainWindow):
                 checked = True
             elif topic in (LIBERO_PREVIEW_TOPIC, RYNNVALUE_LIVE_HUD_TOPIC):
                 # File-backed LIBERO / Live HUD preview — keep visible by default.
+                checked = True
+            elif topic in ESSENTIAL_A2D_CAMERA_COLOR_TOPICS:
+                # 头/腕彩色默认勾选（用户明确取消过的除外，见 _topic_user_unchecked）
                 checked = True
             else:
                 checked = is_default
@@ -54196,6 +57043,11 @@ class CameraTopicWindow(QMainWindow):
             for t in enabled
             if t not in (LIBERO_PREVIEW_TOPIC, RYNNVALUE_LIVE_HUD_TOPIC)
         }
+        if ros_enabled:
+            try:
+                self.node.ensure_topic_scan()
+            except Exception:
+                pass
         self.node.set_enabled_topics(ros_enabled)
         self._rebuild_panels(enabled)
 
@@ -54403,7 +57255,28 @@ class CameraTopicWindow(QMainWindow):
             return None
         return frame
 
+    def _on_frame_tick(self) -> None:
+        """合并投递的帧：一次事件处理所有 topic 最新帧，避免队列堆积。"""
+        if time.time() < float(getattr(self, "_ui_frame_paused_until", 0.0) or 0.0):
+            # 切 tab 窗口：丢掉积压帧，优先响应点击
+            try:
+                self.node.take_pending_ui_frames()
+            except Exception:
+                pass
+            return
+        try:
+            frames, stats = self.node.take_pending_ui_frames()
+        except Exception:
+            return
+        for topic, cv_image in frames.items():
+            self._on_frame_updated(topic, cv_image)
+            st = stats.get(topic)
+            if st is not None:
+                self._on_frame_stats(topic, int(st[0]), float(st[1]))
+
     def _on_frame_updated(self, topic: str, cv_image: object) -> None:
+        if time.time() < float(getattr(self, "_ui_frame_paused_until", 0.0) or 0.0):
+            return
         # 仿真评测预览期间：同名 /camera/* 可能来自真机，优先用共享 .npy
         if (
             topic in SIM_PREVIEW_ALL_TOPICS
@@ -54414,8 +57287,15 @@ class CameraTopicWindow(QMainWindow):
             return
         image = np.asarray(cv_image)
         self._frame_cache[topic] = image
+        # 手臂页多视角预览：直接跟 ROS2 帧刷新（不依赖工作区 panel 是否创建）
+        try:
+            self._maybe_refresh_mv6d_previews_for_topics([topic])
+        except Exception:
+            pass
         panel = self.panels.get(topic)
         if panel is None:
+            return
+        if not panel.isVisible():
             return
         if isinstance(panel, DepthPanel3D):
             if image.ndim == 3:
@@ -55042,8 +57922,9 @@ def main(
     shutdown_flag = {"value": False}
     cleaned_up = {"value": False}
 
-    from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
-    executor = MultiThreadedExecutor(num_threads=4)
+    from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
+    # 单线程 executor：少和 Qt 抢 GIL（关节 topic 高频时 4 线程更卡）
+    executor = SingleThreadedExecutor()
     executor.add_node(node)
 
     def cleanup() -> None:
@@ -55074,6 +57955,14 @@ def main(
     def ros_spin_wrapper() -> None:
         while rclpy.ok() and not shutdown_flag["value"]:
             try:
+                try:
+                    node.drain_ros_ops(max_ops=1)
+                except Exception:
+                    pass
+                try:
+                    node.maybe_pump_robot_extras()
+                except Exception:
+                    pass
                 executor.spin_once(timeout_sec=0.05)
             except ExternalShutdownException:
                 break

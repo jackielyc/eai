@@ -11,7 +11,34 @@ import sys
 import time
 
 
+def _align_host_camera_ros_env() -> None:
+    """与宿主机 a2d_sdk forwarder 对齐；忽略 Cursor/shell 残留的 cyclone/domain161。"""
+    if sys.platform == "darwin":
+        return
+    if os.environ.get("EAI_KEEP_ROS_ENV", "").strip() == "1":
+        return
+    rmw = os.environ.get("RMW_IMPLEMENTATION", "")
+    domain = os.environ.get("ROS_DOMAIN_ID", "")
+    if rmw == "rmw_fastrtps_cpp" and domain == "0":
+        os.environ.setdefault("ROS_LOCALHOST_ONLY", "1")
+        return
+    os.environ["RMW_IMPLEMENTATION"] = "rmw_fastrtps_cpp"
+    os.environ["ROS_DOMAIN_ID"] = "0"
+    os.environ["ROS_LOCALHOST_ONLY"] = "1"
+    os.environ.pop("ROS_AUTOMATIC_DISCOVERY_RANGE", None)
+    eai = os.path.dirname(os.path.abspath(__file__))
+    for name in (
+        "dds/fastdds_profiles_shm_udp.xml",
+        "dds/fastdds_profiles_tele.xml",
+    ):
+        path = os.path.join(eai, name)
+        if os.path.isfile(path):
+            os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = path
+            break
+
+
 def _prepare_qt_env() -> None:
+    _align_host_camera_ros_env()
     os.environ.pop("QT_PLUGIN_PATH", None)
     for key in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_PLUGIN_PATH"):
         val = os.environ.get(key, "")

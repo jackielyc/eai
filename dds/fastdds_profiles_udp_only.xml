@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <!--
+      纯 UDPv4（关闭内置传输，否则仍会带 SHM）。
+      注意：与容器内「仅 SHM」相机栈混跑同一 Domain 时，发现包易出现
+      sequence size exceeds remaining buffer，手订阅可能不可见。
+      宿主机 run_local 收相机请用 fastdds_profiles_shm_udp.xml / tele.xml。
+    -->
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>udp_transport</transport_id>
+            <type>UDPv4</type>
+        </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="udp_only_participant" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>udp_transport</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+        </rtps>
+    </participant>
+</profiles>

@@ -1,22 +1,19 @@
 #!/usr/bin/env bash
-# 在宿主机本地运行 viewer（不进 Docker）
+# 在宿主机本地启动 viewer 界面（不进 Docker）。
 #
-# 默认：不做依赖/hostctl/topic 等校验，直接启动界面（尽快）。
-# 对照: run_in_docker.sh（ROS/camera 在容器内时用 Docker 版）
-# 支持: Linux（默认 RoboStack share_data 快路径）与 macOS（自动探测本机 conda ROS）
+# 本脚本只负责：配好 ROS/Qt 环境 → 启动 show_camera_boot.py。
+# 不自动启手驱动、中继、SHM chmod、hostctl 等；那些请自行跑对应 scripts。
 #
 # 用法:
 #   bash run_local.sh
-#   RUN_CHECKS=1 bash run_local.sh   # 启用探测/安装/hostctl 等完整校验
+#   RUN_CHECKS=1 bash run_local.sh   # 可选：依赖/hostctl 等校验
 #
 # 环境变量（可选）:
 #   PSIBOT_HOME / ROS_HUMBLE_CONDA / ROS_SETUP_BASH / PYTHON
 #   A2D_SCRIPTS_DIR / A2D_SDK_HOME
-#   FORCE_ROS_SOURCE=1   conda 也强制 source setup.bash
-#   RUN_CHECKS=1         启用校验与 hostctl
-#   SKIP_HOSTCTL=1       RUN_CHECKS 时仍跳过 hostctl
-#   FORCE_DEPS_CHECK=1 / FORCE_PIP=1 / PREFLIGHT=1 / PREFLIGHT_HZ=1
-#   ROS_RESTART_DAEMON=1
+#   FORCE_ROS_SOURCE=1 / RUN_CHECKS=1 / SKIP_HOSTCTL=1
+#   FORCE_DEPS_CHECK=1 / FORCE_PIP=1 / PREFLIGHT=1 / ROS_RESTART_DAEMON=1
+#   ALIGN_DOCKER_CAMERA=0  不因 Docker 相机改 Domain/RMW（默认仍对齐 env，但不跑副作用脚本）
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,6 +35,7 @@ A2D_SDK_HOME="${A2D_SDK_HOME:-${PSIBOT_HOME}/a2d_sdk}"
 HOST_DDS_XML="${SCRIPT_DIR}/dds/fastdds_profiles_host.xml"
 MAC_DDS_XML="${SCRIPT_DIR}/dds/fastdds_profiles_mac.xml"
 A2D_DDS_XML="${A2D_SDK_HOME}/dds/fastdds_profiles_a2d.xml"
+EAI_A2D_DDS_XML="${SCRIPT_DIR}/dds/fastdds_profiles_a2d.xml"
 # Linux 默认保持原 share_data 路径（不做存在性探测，避免拖慢启动）
 _LINUX_ROS_CONDA_DEFAULT="/share_data/projects/mahjong/share/personal/liyichao/envs/ros-humble"
 USER_PYTHON="${PYTHON:-}"
@@ -203,8 +201,72 @@ _resolve_conda_pyqt_root() {
     return 1
 }
 
+_apply_qt_from_python() {
+    # 系统 / 非 conda PyQt：用当前 PYTHON 找 platforms；清掉 cv2 插件劫持
+    local qt_plat qt_lib
+    unset QT_PLUGIN_PATH
+    if [[ -n "${QT_QPA_PLATFORM_PLUGIN_PATH:-}" && "${QT_QPA_PLATFORM_PLUGIN_PATH}" == *"/cv2/"* ]]; then
+        unset QT_QPA_PLATFORM_PLUGIN_PATH
+    fi
+    [[ -z "${QT_QPA_PLATFORM_PLUGIN_PATH:-}" ]] || return 0
+    qt_plat="$("${PYTHON}" - <<'PY' 2>/dev/null || true
+import glob
+import os
+
+try:
+    import PyQt5
+    root = os.path.dirname(PyQt5.__file__)
+    for rel in ("Qt5/plugins/platforms", "Qt/plugins/platforms"):
+        p = os.path.join(root, rel)
+        if os.path.isdir(p):
+            print(p)
+            raise SystemExit
+except SystemExit:
+    raise
+except Exception:
+    pass
+# Debian/Ubuntu 系统包：插件在 /usr/lib/<triplet>/qt5/plugins
+for p in glob.glob("/usr/lib/*/qt5/plugins/platforms"):
+    if os.path.isdir(p):
+        print(p)
+        break
+PY
+)"
+    if [[ -n "${qt_plat}" ]]; then
+        export QT_QPA_PLATFORM_PLUGIN_PATH="${qt_plat}"
+        qt_lib="$(dirname "$(dirname "${qt_plat}")")/lib"
+        if [[ -d "${qt_lib}" && "${qt_lib}" == *"/PyQt5/"* ]]; then
+            _prepend_lib_path "${qt_lib}"
+        fi
+    fi
+}
+
+_pick_linux_ros_conda() {
+    # 显式 ROS_HUMBLE_CONDA → 当前 CONDA_PREFIX → share_data 默认 → 常见本机 env
+    local c
+    for c in \
+        "${ROS_HUMBLE_CONDA:-}" \
+        "${CONDA_PREFIX:-}" \
+        "${_LINUX_ROS_CONDA_DEFAULT}" \
+        "${HOME}/miniconda3/envs/ros-humble" \
+        "${HOME}/mambaforge/envs/ros-humble" \
+        "${HOME}/anaconda3/envs/ros-humble"
+    do
+        [[ -n "${c}" && -x "${c}/bin/python" ]] || continue
+        printf '%s\n' "${c}"
+        return 0
+    done
+    # 默认路径不做存在性探测（share_data 冷启动要快）；交给后续报错
+    if [[ -n "${ROS_HUMBLE_CONDA:-}" ]]; then
+        printf '%s\n' "${ROS_HUMBLE_CONDA}"
+        return 0
+    fi
+    printf '%s\n' "${_LINUX_ROS_CONDA_DEFAULT}"
+    return 0
+}
+
 # ---------------------------------------------------------------------------
-# ROS：Linux 默认假定 RoboStack conda（不 stat，加快 share_data）；
+# ROS：Linux 优先系统 humble，否则 RoboStack conda；
 #      macOS 自动探测本机 conda ROS（jazzy/humble）
 # ---------------------------------------------------------------------------
 if [[ -n "${ROS_SETUP_BASH:-}" ]]; then
@@ -232,10 +294,21 @@ elif [[ "${IS_DARWIN}" -eq 1 ]]; then
         ROS_MODE="conda_humble"
     fi
 else
-    ROS_HUMBLE_CONDA="${ROS_HUMBLE_CONDA:-${_LINUX_ROS_CONDA_DEFAULT}}"
-    export CONDA_PREFIX="${ROS_HUMBLE_CONDA}"
-    ROS_SETUP="${CONDA_PREFIX}/setup.bash"
-    ROS_MODE="conda_humble"
+    # Linux：显式 ROS_HUMBLE_CONDA 走 conda；否则优先 /opt/ros/humble + python3.10
+    if [[ -n "${ROS_HUMBLE_CONDA:-}" ]]; then
+        export CONDA_PREFIX="${ROS_HUMBLE_CONDA}"
+        ROS_SETUP="${CONDA_PREFIX}/setup.bash"
+        ROS_MODE="conda_humble"
+    elif [[ -f /opt/ros/humble/setup.bash && -x /usr/bin/python3.10 ]]; then
+        ROS_SETUP="/opt/ros/humble/setup.bash"
+        ROS_MODE="system_humble"
+        USER_PYTHON="${USER_PYTHON:-/usr/bin/python3.10}"
+    else
+        ROS_HUMBLE_CONDA="$(_pick_linux_ros_conda)"
+        export CONDA_PREFIX="${ROS_HUMBLE_CONDA}"
+        ROS_SETUP="${CONDA_PREFIX}/setup.bash"
+        ROS_MODE="conda_humble"
+    fi
 fi
 
 set +u
@@ -282,18 +355,37 @@ fi
 
 # Linux 默认 FastDDS；macOS 默认 CycloneDDS —
 # RoboStack FastDDS 在 macOS 上 destroy_subscription 会永久卡住，Qt 主线程抢不到 GIL → 界面假死
+#
+# 相机在 Docker（a2d-tele）时：仅对齐 Domain/RMW/DDS XML 环境变量，方便 UI 收图。
+# 不在此 chmod SHM、不启驱动（见 scripts/enable_host_ros2_camera.sh / start_robot_hand_drivers.sh）。
+_DOCKER_CAM_CONTAINER="${A2D_DOCKER_CONTAINER:-a2d-tele-release-2-1-0rc3-latest}"
+_TELE_DDS_XML="${SCRIPT_DIR}/dds/fastdds_profiles_tele.xml"
+_SHM_UDP_DDS_XML="${SCRIPT_DIR}/dds/fastdds_profiles_shm_udp.xml"
+_ALIGN_DOCKER_CAM=0
+# 永远不用 Docker：宿主机 forwarder（相机）+ host_arm_hand_bridge（使能）
 if [[ "${IS_DARWIN}" -eq 1 ]]; then
     export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
-else
-    export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
-fi
-export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
-# Linux：默认 0（可见跨机 topic）。macOS：默认本机发现，避免 Wi‑Fi/VPN 子网扫描拖慢 DDS
-if [[ "${IS_DARWIN}" -eq 1 ]]; then
+    export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
     export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-1}"
     export ROS_AUTOMATIC_DISCOVERY_RANGE="${ROS_AUTOMATIC_DISCOVERY_RANGE:-LOCALHOST}"
 else
-    export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-0}"
+    # 强制对齐宿主机 forwarder。Cursor/shell 若残留 cyclone+domain161，
+    # ${VAR:-default} 会原样继承 → UI 收不到 /camera/*。
+    # 需要保留外层 ROS 环境时：EAI_KEEP_ROS_ENV=1 bash run_local.sh
+    if [[ "${EAI_KEEP_ROS_ENV:-0}" != "1" ]]; then
+        if [[ "${RMW_IMPLEMENTATION:-}" != "rmw_fastrtps_cpp" \
+           || "${ROS_DOMAIN_ID:-}" != "0" ]]; then
+            echo ">>> 覆盖继承的 ROS 环境 → FastDDS domain0（与相机 forwarder 一致；原 RMW=${RMW_IMPLEMENTATION:-?} domain=${ROS_DOMAIN_ID:-?}）" >&2
+        fi
+        export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+        export ROS_DOMAIN_ID=0
+        export ROS_LOCALHOST_ONLY=1
+        unset ROS_AUTOMATIC_DISCOVERY_RANGE 2>/dev/null || true
+    else
+        export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+        export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
+        export ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-1}"
+    fi
 fi
 export A2D_SCRIPTS_DIR
 export PSIBOT_HOME
@@ -313,16 +405,28 @@ if [[ -z "${PYTHONPYCACHEPREFIX:-}" ]]; then
 fi
 
 # DDS XML：仅 FastDDS 需要。macOS 默认 Cyclone，不挂 Linux SHM host 配置
+# 失效路径会触发 [XMLPARSER Error] realpath failed → loadDefaultXMLFile
+if [[ -n "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" && ! -f "${FASTRTPS_DEFAULT_PROFILES_FILE}" ]]; then
+    echo "警告: FASTRTPS_DEFAULT_PROFILES_FILE 无效 (${FASTRTPS_DEFAULT_PROFILES_FILE})，已 unset" >&2
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+fi
 if [[ "${RMW_IMPLEMENTATION}" == *fastrtps* ]]; then
     if [[ -z "${FASTRTPS_DEFAULT_PROFILES_FILE:-}" ]]; then
         if [[ "${IS_DARWIN}" -eq 1 ]]; then
             if [[ -f "${MAC_DDS_XML}" ]]; then
                 export FASTRTPS_DEFAULT_PROFILES_FILE="${MAC_DDS_XML}"
             fi
-        elif [[ -f "${HOST_DDS_XML}" ]]; then
-            export FASTRTPS_DEFAULT_PROFILES_FILE="${HOST_DDS_XML}"
-        elif [[ -f "${A2D_DDS_XML}" ]]; then
-            export FASTRTPS_DEFAULT_PROFILES_FILE="${A2D_DDS_XML}"
+        else
+            # 无 Docker：shm+UDP（与宿主机 forwarder / 使能桥一致）
+            if [[ -f "${_SHM_UDP_DDS_XML}" ]]; then
+                export FASTRTPS_DEFAULT_PROFILES_FILE="${_SHM_UDP_DDS_XML}"
+            elif [[ -f "${_TELE_DDS_XML}" ]]; then
+                export FASTRTPS_DEFAULT_PROFILES_FILE="${_TELE_DDS_XML}"
+            elif [[ -f "${EAI_A2D_DDS_XML}" ]]; then
+                export FASTRTPS_DEFAULT_PROFILES_FILE="${EAI_A2D_DDS_XML}"
+            elif [[ -f "${HOST_DDS_XML}" ]]; then
+                export FASTRTPS_DEFAULT_PROFILES_FILE="${HOST_DDS_XML}"
+            fi
         fi
     fi
 fi
@@ -332,7 +436,7 @@ if [[ "${IS_DARWIN}" -eq 1 ]]; then
     export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-cocoa}"
 fi
 
-# Qt：Linux conda humble 快路径直接拼；其余环境按实际 PyQt 布局探测
+# Qt：Linux conda humble 快路径直接拼；其余 conda 探测；系统 ROS 用当前 Python/系统包
 if [[ "${ROS_MODE}" == "conda_humble" && "${IS_DARWIN}" -eq 0 ]]; then
     _conda_pyqt_root="${CONDA_PREFIX}/lib/python3.11/site-packages/PyQt5/Qt5"
     _apply_qt_paths "${_conda_pyqt_root}/lib" "${_conda_pyqt_root}/plugins/platforms"
@@ -340,9 +444,12 @@ elif [[ "${ROS_MODE}" == "conda_humble" || "${ROS_MODE}" == "conda_jazzy" ]]; th
     if _conda_pyqt_root="$(_resolve_conda_pyqt_root "${CONDA_PREFIX}")"; then
         _apply_qt_paths "${_conda_pyqt_root}/lib" "${_conda_pyqt_root}/plugins/platforms"
     fi
+else
+    _apply_qt_from_python
 fi
 
-echo ">>> 本地模式 DISPLAY=${DISPLAY:-:0} Python=${PYTHON} ROS=${ROS_DISTRO:-?} (${ROS_MODE}) RMW=${RMW_IMPLEMENTATION} localhost_only=${ROS_LOCALHOST_ONLY}"
+echo ">>> 本地模式 DISPLAY=${DISPLAY:-:0} Python=${PYTHON} ROS=${ROS_DISTRO:-?} (${ROS_MODE}) RMW=${RMW_IMPLEMENTATION} domain=${ROS_DOMAIN_ID} localhost_only=${ROS_LOCALHOST_ONLY}"
+# 注意：不在此启动手驱动 / relay / SHM chmod；只拉 UI。
 
 # ---------------------------------------------------------------------------
 # 可选校验（默认关闭）
@@ -428,6 +535,8 @@ elif [[ "${ROS_MODE}" == "conda_humble" || "${ROS_MODE}" == "conda_jazzy" ]]; th
     if _conda_pyqt_root="$(_resolve_conda_pyqt_root "${CONDA_PREFIX}")"; then
         _apply_qt_paths "${_conda_pyqt_root}/lib" "${_conda_pyqt_root}/plugins/platforms"
     fi
+else
+    _apply_qt_from_python
 fi
 # WebEngine：关 GPU 合成，减少无加速/远程 X 刷屏。勿默认 QT_XCB_GL_INTEGRATION=none
 # （会与 AA_ShareOpenGLContexts 冲突，启动时 SIP segfault）。无 GLX 时再显式：

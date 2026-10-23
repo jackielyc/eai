@@ -1,0 +1,21 @@
+# 本机两只睿研手串口均响应关节 ID 1-6（官方 right 映射 17-22 会 Serial timeout）。
+# 左右手仍用不同 ROS topic；仅统一底层电机 ID。
+left_hand:
+  frame_id: "left_hand"
+  joints:
+    - {id: 1, type: thumb_rotate, name: thumb_rotation, velocity: 2000.0, effort: 800.0}
+    - {id: 2, type: thumb_back, name: thumb_bend, velocity: 2000.0, effort: 1200.0}
+    - {id: 3, type: index, name: index, velocity: 2000.0, effort: 1200.0}
+    - {id: 4, type: middle, name: middle, velocity: 2000.0, effort: 1200.0}
+    - {id: 5, type: ring, name: ring, velocity: 2000.0, effort: 1200.0}
+    - {id: 6, type: pinky, name: pinky, velocity: 2000.0, effort: 1200.0}
+
+right_hand:
+  frame_id: "right_hand"
+  joints:
+    - {id: 1, type: thumb_rotate, name: thumb_rotation, velocity: 2000.0, effort: 800.0}
+    - {id: 2, type: thumb_back, name: thumb_bend, velocity: 2000.0, effort: 1200.0}
+    - {id: 3, type: index, name: index, velocity: 2000.0, effort: 1200.0}
+    - {id: 4, type: middle, name: middle, velocity: 2000.0, effort: 1200.0}
+    - {id: 5, type: ring, name: ring, velocity: 2000.0, effort: 1200.0}
+    - {id: 6, type: pinky, name: pinky, velocity: 2000.0, effort: 1200.0}
