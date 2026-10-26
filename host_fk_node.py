@@ -7,12 +7,21 @@ frame_id 标为 map（与 mink_fk 一致）。
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import signal
 import sys
 import tempfile
 import time
 from typing import Dict, List, Optional
+
+# ROS overlays may contain an older Pinocchio ABI. Prefer the explicitly
+# selected virtual environment's cmeel package when one is installed.
+import sys as _ik_sys
+from pathlib import Path as _IKPath
+_ik_prefix = _IKPath(_ik_sys.prefix) / "lib" / f"python{_ik_sys.version_info.major}.{_ik_sys.version_info.minor}" / "site-packages" / "cmeel.prefix" / "lib" / f"python{_ik_sys.version_info.major}.{_ik_sys.version_info.minor}" / "site-packages"
+if (_ik_prefix / "pinocchio").is_dir():
+    _ik_sys.path.insert(0, str(_ik_prefix))
 
 import numpy as np
 
@@ -71,6 +80,7 @@ LEFT_TCP_TOPIC = "/mink_fk/left_tcp_pose"
 RIGHT_TCP_TOPIC = "/mink_fk/right_tcp_pose"
 LEFT_Z_UP_TOPIC = "/mink_fk/left_tcp_pose_z_up"
 RIGHT_Z_UP_TOPIC = "/mink_fk/right_tcp_pose_z_up"
+JOINT_STATES_TOPIC = "/joint_states"
 
 # [x,y,z, qx,qy,qz,qw] — 与 a2d_tele.wbc.yaml fk_solver 一致
 LEFT_TCP_OFFSET = (0.0, 0.0, 0.0, 0.5, -0.5, 0.5, 0.5)
@@ -193,6 +203,9 @@ def main() -> int:
 
     urdf = _resolve_urdf()
     fk = HostFK(urdf)
+    with open(urdf, "rb") as stream:
+        urdf_sha256 = hashlib.sha256(stream.read()).hexdigest()
+    received = {"arm": 0.0, "waist": 0.0}
 
     stop = {"v": False}
 
@@ -222,6 +235,7 @@ def main() -> int:
     right_pub = node.create_publisher(PoseStamped, RIGHT_TCP_TOPIC, 100)
     left_z_pub = node.create_publisher(PoseStamped, LEFT_Z_UP_TOPIC, 100)
     right_z_pub = node.create_publisher(PoseStamped, RIGHT_Z_UP_TOPIC, 100)
+    joint_pub = node.create_publisher(JointState, JOINT_STATES_TOPIC, 100)
 
     pub_count = {"n": 0}
     last_warn = {"t": 0.0}
@@ -246,6 +260,13 @@ def main() -> int:
             if now - last_warn["t"] > 2.0:
                 last_warn["t"] = now
                 node.get_logger().warn("waiting /hal/waist_state; publishing with waist=0/last")
+        stamp = node.get_clock().now().to_msg()
+        js = JointState()
+        js.header.stamp = stamp
+        js.header.frame_id = BASE_FRAME
+        js.name = list(JOINT_NAMES)
+        js.position = fk.q16()
+        joint_pub.publish(js)
         (l_xyz, l_q), (r_xyz, r_q) = fk.solve()
         left_msg = PoseStamped()
         right_msg = PoseStamped()
@@ -266,6 +287,9 @@ def main() -> int:
         try:
             state = {
                 "q16": fk.q16(),
+                "arm_received_at": received["arm"],
+                "waist_received_at": received["waist"],
+                "urdf_sha256": urdf_sha256,
                 "left": {"xyz": l_xyz, "xyzw": list(l_q)},
                 "right": {"xyz": r_xyz, "xyzw": list(r_q)},
                 "t": time.time(),
@@ -288,12 +312,16 @@ def main() -> int:
         n = min(len(msg.name), len(msg.motor_states))
         for i in range(n):
             name_to_pos[str(msg.name[i])] = float(msg.motor_states[i].position)
-        fk.set_waist(name_to_pos)
+        if all(name in name_to_pos and np.isfinite(name_to_pos[name])
+               for name in ("joint_lift_body", "joint_body_pitch")):
+            fk.set_waist(name_to_pos)
+            received["waist"] = time.time()
 
     def _on_arm(msg: JointState) -> None:
-        if not msg.position:
+        if len(msg.position) < 14 or not np.isfinite(msg.position[:14]).all():
             return
         fk.set_arm_positions(list(msg.position))
+        received["arm"] = time.time()
         _publish()
 
     node.create_subscription(WaistState, WAIST_TOPIC, _on_waist, qos_rel)

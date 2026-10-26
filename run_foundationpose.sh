@@ -112,12 +112,26 @@ pick_python() {
         echo "${FP_PYTHON}"
         return
     fi
-    init_conda
+    local candidates=(
+        "/opt/miniconda3/envs/${FP_CONDA_ENV}/bin/python"
+        "${HOME}/miniconda3/envs/${FP_CONDA_ENV}/bin/python"
+        "${HOME}/anaconda3/envs/${FP_CONDA_ENV}/bin/python"
+        "/home/psibot/miniconda3/envs/${FP_CONDA_ENV}/bin/python"
+    )
     local py
-    py="$(conda_env_python)"
-    if [[ -x "${py}" ]]; then
-        echo "${py}"
-        return
+    for py in "${candidates[@]}"; do
+        if [[ -x "${py}" ]]; then
+            echo "${py}"
+            return
+        fi
+    done
+    if command -v conda >/dev/null 2>&1 || [[ -f /opt/miniconda3/etc/profile.d/conda.sh ]]; then
+        init_conda || true
+        py="$(conda_env_python 2>/dev/null || true)"
+        if [[ -n "${py}" && -x "${py}" ]]; then
+            echo "${py}"
+            return
+        fi
     fi
     echo "错误: Conda 环境 ${FP_CONDA_ENV} 不存在，请先: bash run_foundationpose.sh --install" >&2
     exit 1

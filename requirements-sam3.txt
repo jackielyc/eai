@@ -16,5 +16,6 @@
 #   # 或: python sam3_segment_worker.py --serve --port 8765 --model sam3.pt
 
 ultralytics>=8.3.237
+timm>=1.0.3
 opencv-python-headless>=4.8.0
 numpy>=1.23.5,<2.0.0

@@ -21,12 +21,16 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import sys
 import tempfile
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+
+# 缺依赖时不要让 Ultralytics 往 stdout 里 pip install，否则界面无法解析 JSON。
+os.environ.setdefault("YOLO_AUTOINSTALL", "false")
 
 import cv2
 import numpy as np
@@ -256,18 +260,25 @@ def segment_request(payload: Dict[str, Any], *, tag: str = "segment") -> Dict[st
 
 
 def run_once() -> int:
-    raw = sys.stdin.read()
-    if not raw.strip():
-        print(json.dumps({"ok": False, "error": "stdin 为空"}), flush=True)
-        return 1
+    """Ultralytics 的 WARNING 和依赖检查会写 stdout。推理期间把 stdout 接到 stderr，最后只输出一行 JSON。"""
+    real_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    code = 1
+    result: Dict[str, Any] = {"ok": False, "error": "stdin 为空"}
     try:
-        payload = json.loads(raw)
-        result = segment_request(payload, tag="once")
-        print(json.dumps(result), flush=True)
-        return 0
+        raw = sys.stdin.read()
+        if raw.strip():
+            payload = json.loads(raw)
+            result = segment_request(payload, tag="once")
+            code = 0
     except Exception as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}), flush=True)
-        return 1
+        result = {"ok": False, "error": str(exc)}
+        code = 1
+    finally:
+        sys.stdout = real_stdout
+    real_stdout.write(json.dumps(result) + "\n")
+    real_stdout.flush()
+    return code
 
 
 class _Handler(BaseHTTPRequestHandler):

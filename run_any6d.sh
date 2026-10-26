@@ -66,10 +66,14 @@ resolve_python() {
     return
   fi
   local candidates=(
+    "/opt/miniconda3/envs/any6d/bin/python"
+    "/opt/miniconda3/envs/Any6D/bin/python"
+    "/opt/miniconda3/envs/${ANY6D_CONDA_ENV}/bin/python"
     "${HOME}/miniconda3/envs/${ANY6D_CONDA_ENV}/bin/python"
     "${HOME}/anaconda3/envs/${ANY6D_CONDA_ENV}/bin/python"
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/${ANY6D_CONDA_ENV}/bin/python"
     "${HOME}/miniconda3/envs/foundationpose/bin/python"
+    "/opt/miniconda3/envs/foundationpose/bin/python"
     "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/foundationpose/bin/python"
   )
   for p in "${candidates[@]}"; do

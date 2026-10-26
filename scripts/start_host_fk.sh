@@ -60,7 +60,7 @@ _running() {
             return 0
         fi
     fi
-    pgrep -f '/usr/bin/python3\.10 .*host_fk_node\.py' >/dev/null 2>&1
+    pgrep -f '[h]ost_fk_node\.py' >/dev/null 2>&1
 }
 
 _other_fk_publisher() {
@@ -74,7 +74,7 @@ _other_fk_publisher() {
 cmd_status() {
     if _running; then
         echo "host_fk: running"
-        pgrep -af '/usr/bin/python3\.10 .*host_fk_node\.py' | head -3
+        pgrep -af '[h]ost_fk_node\.py' | head -3
     else
         echo "host_fk: stopped"
     fi
@@ -82,6 +82,15 @@ cmd_status() {
         _setup_ros
         echo "  /mink_fk/left_tcp_pose:"
         ros2 topic info /mink_fk/left_tcp_pose 2>/dev/null | sed 's/^/    /' || echo "    (n/a)"
+    fi
+}
+
+_fk_python() {
+    local candidate="${EAI_HOST_FK_PYTHON:-${EAI_DIR}/.cache/grasp_ik_env/bin/python}"
+    if [[ -x "${candidate}" ]]; then
+        echo "${candidate}"
+    else
+        echo /usr/bin/python3.10
     fi
 }
 
@@ -101,17 +110,26 @@ cmd_start() {
         return 0
     fi
     _setup_ros
-    if ! /usr/bin/python3.10 -c 'from genie_msgs.msg import WaistState' 2>/dev/null; then
+    local fk_python
+    fk_python="$(_fk_python)"
+    local fk_prefix fk_cmeel
+    fk_prefix="$(dirname "$(dirname "${fk_python}")")"
+    fk_cmeel="${fk_prefix}/lib/python3.10/site-packages/cmeel.prefix"
+    if [[ -d "${fk_cmeel}" ]]; then
+        export LD_LIBRARY_PATH="${fk_cmeel}/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        export PYTHONPATH="${fk_cmeel}/lib/python3.10/site-packages${PYTHONPATH:+:${PYTHONPATH}}"
+    fi
+    if ! "${fk_python}" -c 'from genie_msgs.msg import WaistState' 2>/dev/null; then
         echo "错误: 无法 import genie_msgs.WaistState；请设置 EAI_GENIE_SETUP=.../install/setup.bash" >&2
         exit 1
     fi
-    if ! /usr/bin/python3.10 -c 'import pinocchio' 2>/dev/null; then
+    if ! "${fk_python}" -c 'import pinocchio' 2>/dev/null; then
         echo "错误: 需要 pinocchio（python3.10 -c 'import pinocchio'）" >&2
         exit 1
     fi
     echo ">>> 启动宿主机 FK（pinocchio → /mink_fk/*，无 Docker）"
     : >"${LOG_FILE}"
-    setsid nohup /usr/bin/python3.10 "${FK_PY}" \
+    setsid nohup "${fk_python}" "${FK_PY}" \
         >>"${LOG_FILE}" 2>&1 < /dev/null &
     echo $! >"${PID_FILE}"
     sleep 1.5
@@ -130,7 +148,7 @@ cmd_stop() {
         kill "$(cat "${PID_FILE}")" 2>/dev/null || true
         rm -f "${PID_FILE}"
     fi
-    pkill -f '/usr/bin/python3\.10 .*host_fk_node\.py' 2>/dev/null || true
+    pkill -f '[h]ost_fk_node\.py' 2>/dev/null || true
     echo ">>> host_fk stopped"
 }
 

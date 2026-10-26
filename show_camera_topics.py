@@ -27,6 +27,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
 from __future__ import annotations
 
 import argparse
+import click_pose
 import base64
 import json
 import math
@@ -887,10 +888,27 @@ SAM3_SEGMENT_BACKENDS = (
 SAM3_WORKER_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "sam3_segment_worker.py"
 )
-SAM3_PYTHON_DEFAULT = os.environ.get(
-    "SAM3_PYTHON",
-    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/sam3/bin/python",
-)
+def resolve_sam3_python() -> str:
+    """找 sam3 这个 conda 环境的解释器。环境变量优先，其次本机 conda。"""
+    env = os.environ.get("SAM3_PYTHON", "").strip()
+    if env:
+        expanded = os.path.abspath(os.path.expanduser(env))
+        if os.path.isfile(expanded):
+            return expanded
+    candidates = [
+        "/opt/miniconda3/envs/sam3/bin/python",
+        os.path.expanduser("~/miniconda3/envs/sam3/bin/python"),
+        "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/sam3/bin/python",
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    return candidates[0]
+
+
+SAM3_PYTHON_DEFAULT = resolve_sam3_python()
 
 
 def resolve_sam3_model_path() -> str:
@@ -899,6 +917,7 @@ def resolve_sam3_model_path() -> str:
         return os.path.abspath(os.path.expanduser(env))
     here = os.path.dirname(os.path.abspath(__file__))
     candidates = [
+        os.path.join(here, "models", "sam3.pt"),
         os.path.join(here, "sam3.pt"),
         os.path.join(
             here,
@@ -914,7 +933,7 @@ def resolve_sam3_model_path() -> str:
     for path in candidates:
         if os.path.isfile(path):
             return os.path.abspath(path)
-    return os.path.abspath(os.path.expanduser(env or os.path.join(here, "sam3.pt")))
+    return os.path.abspath(os.path.expanduser(env or os.path.join(here, "models", "sam3.pt")))
 
 
 SAM3_MODEL_DEFAULT = resolve_sam3_model_path()
@@ -933,7 +952,28 @@ FP_WORKER_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "foundationpose_worker.py"
 )
 FP_RUN_SCRIPT_NAME = "run_foundationpose.sh"
-FP_PYTHON_DEFAULT = os.environ.get("FP_PYTHON", "python3")
+def resolve_fp_python() -> str:
+    """找 foundationpose 环境的解释器。环境变量优先，其次本机 conda/venv。"""
+    env = os.environ.get("FP_PYTHON", "").strip()
+    if env and env not in ("python3", "python"):
+        expanded = os.path.abspath(os.path.expanduser(env))
+        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return expanded
+    candidates = [
+        "/opt/miniconda3/envs/foundationpose/bin/python",
+        os.path.expanduser("~/miniconda3/envs/foundationpose/bin/python"),
+        "/home/psibot/miniconda3/envs/foundationpose/bin/python",
+        os.path.expanduser("~/anaconda3/envs/foundationpose/bin/python"),
+    ]
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    if env:
+        return env
+    return shutil.which("python3") or "python3"
+
+
+FP_PYTHON_DEFAULT = resolve_fp_python()
 FP_SERVER_URL_DEFAULT = os.environ.get("FP_SERVER_URL", "http://127.0.0.1:8766")
 FP_USE_HTTP_DEFAULT = os.environ.get("FP_USE_HTTP", "0").strip() in ("1", "true", "yes")
 FP_TIMEOUT_S = float(os.environ.get("FP_TIMEOUT_S", "180"))
@@ -942,7 +982,30 @@ ANY6D_WORKER_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "any6d_worker.py"
 )
 ANY6D_RUN_SCRIPT_NAME = "run_any6d.sh"
-ANY6D_PYTHON_DEFAULT = os.environ.get("ANY6D_PYTHON", FP_PYTHON_DEFAULT)
+def resolve_any6d_python() -> str:
+    """找 any6d 环境的解释器。环境变量优先，其次本机 conda/venv。"""
+    env = os.environ.get("ANY6D_PYTHON", "").strip()
+    if env and env not in ("python3", "python"):
+        expanded = os.path.abspath(os.path.expanduser(env))
+        if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+            return expanded
+    candidates = [
+        "/opt/miniconda3/envs/any6d/bin/python",
+        "/opt/miniconda3/envs/Any6D/bin/python",
+        os.path.expanduser("~/miniconda3/envs/any6d/bin/python"),
+        os.path.expanduser("~/miniconda3/envs/Any6D/bin/python"),
+        "/home/psibot/miniconda3/envs/any6d/bin/python",
+        "/home/psibot/miniconda3/envs/Any6D/bin/python",
+    ]
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    if env:
+        return env
+    return shutil.which("python3") or "python3"
+
+
+ANY6D_PYTHON_DEFAULT = resolve_any6d_python()
 ANY6D_SERVER_URL_DEFAULT = os.environ.get(
     "ANY6D_SERVER_URL", "http://127.0.0.1:8767"
 )
@@ -4108,6 +4171,7 @@ def resolve_cad_mesh_python() -> str:
     if env and os.path.isfile(env) and os.access(env, os.X_OK):
         return env
     candidates = [
+        "/opt/miniconda3/envs/foundationpose/bin/python",
         os.path.expanduser("~/miniconda3/envs/foundationpose/bin/python"),
         os.path.expanduser("~/anaconda3/envs/foundationpose/bin/python"),
         "/home/psibot/miniconda3/envs/foundationpose/bin/python",
@@ -6892,6 +6956,36 @@ def _sam3_segment_via_http(
     return _decode_sam3_mask_payload(mask_payload), str(body.get("method") or "sam3")
 
 
+def _json_object_from_worker_output(stdout: str) -> dict:
+    """Worker 有时会在 JSON 前打印 Ultralytics 警告。取最后一行完整 JSON。"""
+    text = (stdout or "").strip()
+    if not text:
+        raise json.JSONDecodeError("empty", "", 0)
+    try:
+        body = json.loads(text)
+    except json.JSONDecodeError:
+        body = None
+    if isinstance(body, dict):
+        return body
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{") or not line.endswith("}"):
+            continue
+        try:
+            body = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(body, dict):
+            return body
+    start = text.rfind("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        body = json.loads(text[start : end + 1])
+        if isinstance(body, dict):
+            return body
+    raise json.JSONDecodeError("no json object", text, 0)
+
+
 def _sam3_segment_via_subprocess(
     payload: Dict[str, object],
     python_exe: str,
@@ -6899,20 +6993,30 @@ def _sam3_segment_via_subprocess(
 ) -> Tuple[np.ndarray, str]:
     if not os.path.isfile(SAM3_WORKER_SCRIPT):
         raise RuntimeError(f"未找到 worker: {SAM3_WORKER_SCRIPT}")
+    if not python_exe or not os.path.isfile(python_exe):
+        raise RuntimeError(
+            f"找不到 SAM3 的 Python：{python_exe or '（空）'}。"
+            "请先创建 /opt/miniconda3/envs/sam3，并把 sam3.pt 放到 eai/models/ 或设置 SAM3_MODEL。"
+        )
+    worker_env = os.environ.copy()
+    worker_env.pop("PYTHONPATH", None)
+    worker_env.pop("PYTHONHOME", None)
     proc = subprocess.run(
         [python_exe, SAM3_WORKER_SCRIPT, "--once"],
         input=json.dumps(payload).encode("utf-8"),
         capture_output=True,
         timeout=timeout_s,
+        env=worker_env,
     )
     stdout = proc.stdout.decode("utf-8", errors="replace").strip()
-    if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(err or stdout or f"SAM3 worker 退出码 {proc.returncode}")
+    stderr = proc.stderr.decode("utf-8", errors="replace").strip()
+    if proc.returncode != 0 and not stdout:
+        raise RuntimeError(stderr or f"SAM3 worker 退出码 {proc.returncode}")
     try:
-        body = json.loads(stdout)
+        body = _json_object_from_worker_output(stdout)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"SAM3 worker 输出非 JSON: {stdout[:200]}") from exc
+        detail = stderr or stdout
+        raise RuntimeError(f"SAM3 worker 输出非 JSON: {detail[:400]}") from exc
     if not body.get("ok"):
         raise RuntimeError(str(body.get("error") or body))
     mask_payload = body.get("mask")
@@ -8689,7 +8793,7 @@ def make_manual_offset_spinbox() -> QDoubleSpinBox:
     return spin
 
 
-def make_positive_offset_spinbox(default_cm: float = 5.0) -> QDoubleSpinBox:
+def make_positive_offset_spinbox(default_cm: float = 0.0) -> QDoubleSpinBox:
     """单方向步长（cm，≥0），用于前/后/左/右/上/下各自输入框。"""
     spin = QDoubleSpinBox()
     spin.setRange(0.0, MANUAL_OFFSET_MAX_CM)
@@ -13948,6 +14052,11 @@ class Mv6dLightboxWindow(QWidget):
         self.error_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.error_label.setStyleSheet(f"color: {UI_ACCENT_BLUE};")
         self.error_label.setWordWrap(True)
+        self.error_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
+        self.error_label.setFocusPolicy(Qt.ClickFocus)
+        self.error_label.setCursor(Qt.IBeamCursor)
         top.addWidget(self.error_label, 1)
         close_btn = QPushButton("关闭")
         close_btn.setFocusPolicy(Qt.NoFocus)
@@ -15314,6 +15423,7 @@ class CameraTopicNode(Node):
         self.subscriptions_map: Dict[str, object] = {}
         self.camera_info_subs: Dict[str, object] = {}
         self._camera_intrinsics: Dict[str, Tuple[float, float, float, float]] = {}
+        self.click_frames = click_pose.FrameBuffer()
         self.enabled_topics: set[str] = set()
         self._state_lock = threading.Lock()
         self._pending_prefix: Optional[str] = None
@@ -15450,6 +15560,8 @@ class CameraTopicNode(Node):
             Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]
         ] = None
         self._slow_motion_final_joints: Optional[List[float]] = None
+        self._commanded_q16: Optional[List[float]] = None
+        self._motion_seed_override: Optional[List[float]] = None
         self._slow_motion_wbc_baseline: Optional[List[float]] = None
         self._slow_motion_wbc_changed = False
         self._last_wbc_joints: Optional[List[float]] = None
@@ -15553,6 +15665,8 @@ class CameraTopicNode(Node):
 
     def request_arm_reset_to_initial(self) -> str:
         """调用 /arm/reset_to_initial，把手臂（含腰/头）回到初始位姿。"""
+        if getattr(self, "_grasp_execution_reserved", False):
+            return "抓取占用控制通道，请先停止抓取再归位"
         relay_arm_reset_to_initial(True)
         if not self._arm_reset_client.service_is_ready():
             if not self._arm_reset_client.wait_for_service(timeout_sec=0.3):
@@ -15899,6 +16013,8 @@ class CameraTopicNode(Node):
         right_xyz: Tuple[float, float, float],
         right_quat: Tuple[float, float, float, float],
     ) -> None:
+        if getattr(self, "_grasp_execution_reserved", False):
+            return
         left_msg = self._make_pose_stamped_msg(left_xyz, left_quat)
         right_msg = self._make_pose_stamped_msg(right_xyz, right_quat)
         self._left_ik_pub.publish(left_msg)
@@ -15911,6 +16027,8 @@ class CameraTopicNode(Node):
         right_xyz: Tuple[float, float, float],
         right_quat: Tuple[float, float, float, float],
     ) -> None:
+        if getattr(self, "_grasp_execution_reserved", False):
+            return
         self._publish_ik_arm_targets(left_xyz, left_quat, right_xyz, right_quat)
         left_msg = self._make_pose_stamped_msg(left_xyz, left_quat)
         right_msg = self._make_pose_stamped_msg(right_xyz, right_quat)
@@ -15918,6 +16036,9 @@ class CameraTopicNode(Node):
         self._model_right_tcp_pub.publish(right_msg)
 
     def _publish_control_mode(self, mode: int) -> None:
+        if (getattr(self, "_grasp_execution_reserved", False) and mode != MODEL_CONTROL_MODE
+                and not getattr(self, "_grasp_mode_command_authorized", False)):
+            return
         msg = UInt32()
         msg.data = int(mode)
         self._control_mode_pub.publish(msg)
@@ -15997,6 +16118,8 @@ class CameraTopicNode(Node):
         return msg
 
     def _publish_wbc_joint_target(self, positions: List[float]) -> None:
+        if getattr(self, "_grasp_execution_reserved", False) and not getattr(self, "_grasp_joint_command_authorized", False):
+            return
         if not self._arm_enabled:
             self.get_logger().warn(
                 "跳过关节目标：手臂未使能（请先点「启用手臂」）"
@@ -16102,6 +16225,7 @@ class CameraTopicNode(Node):
         self._slow_motion_active = True
         self._slow_motion_phase = "move"
         self._slow_motion_hold_steps = 0
+        self._commanded_q16 = list(goal_joints)
         self._publish_wbc_joint_target(start_joints)
         self._slow_motion_step = 0
         if self._slow_motion_timer is not None:
@@ -16146,6 +16270,8 @@ class CameraTopicNode(Node):
         self.ros_bridge.slow_motion_finished.emit(False, message)
 
     def request_slow_move_to_goal(self, goal: ResolvedArmMoveGoal) -> str:
+        if getattr(self, "_grasp_execution_reserved", False):
+            return "无法移动: 分阶段抓取占用控制通道，请先停止抓取"
         if self.is_slow_motion_busy():
             return "已有移动进行中，请等待完成"
         blockers = self.get_arm_move_blockers()
@@ -16156,12 +16282,16 @@ class CameraTopicNode(Node):
         moving_side = goal.arm_side if goal.arm_side in ("left", "right") else "left"
         self._slow_motion_moving_side = moving_side
         self._slow_motion_preparing = True
+        override = getattr(self, "_motion_seed_override", None)
+        self._motion_seed_override = None
         self._slow_motion_prep = {
             "goal": goal,
             "phase": "validate",
             "warmup_step": 0,
             "moving_side": moving_side,
         }
+        if isinstance(override, list) and len(override) >= 16:
+            self._slow_motion_prep["seed_q16"] = [float(v) for v in override[:16]]
         self._slow_motion_poses = []
         self._slow_motion_joint_poses = []
         self._slow_motion_step = 0
@@ -16170,6 +16300,43 @@ class CameraTopicNode(Node):
         self._start_slow_motion_prep_timer()
         self.ros_bridge.slow_motion_progress.emit(0.0, "正在准备移动...")
         return "正在准备移动..."
+
+    def request_joint_space_move(
+        self,
+        start_q16: Sequence[float],
+        goal_q16: Sequence[float],
+        goal: ResolvedArmMoveGoal,
+    ) -> str:
+        """不重新求 IK，从上次下发的关节角插值回到给定关节角。"""
+        if getattr(self, "_grasp_execution_reserved", False):
+            return "无法移动: 分阶段抓取占用控制通道，请先停止抓取"
+        if self.is_slow_motion_busy():
+            return "已有移动进行中，请等待完成"
+        blockers = self.get_arm_move_blockers()
+        if blockers:
+            msg = "无法移动: " + "；".join(blockers)
+            self.get_logger().warn(msg)
+            return msg
+        start = [float(v) for v in list(start_q16)[:16]]
+        target = [float(v) for v in list(goal_q16)[:16]]
+        if len(start) < 16 or len(target) < 16:
+            return "无法移动: 关节角不足"
+        if max(abs(target[i] - start[i]) for i in range(16)) < 1e-4:
+            return "目标关节与当前几乎相同，无需移动"
+        moving_side = goal.arm_side if goal.arm_side in ("left", "right") else "left"
+        self._slow_motion_moving_side = moving_side
+        self._enter_model_mode_for_motion()
+        prep = {
+            "motion_start_joints": start,
+            "goal_joints": target,
+            "start_xyz": tuple(goal.position_xyz),
+            "goal_xyz": tuple(goal.position_xyz),
+            "saved_mode": self._control_mode,
+        }
+        self._start_joint_move_from_prep(prep, goal)
+        if not self._slow_motion_active:
+            return "目标关节与当前几乎相同，无需移动"
+        return f"关节回初始 [{goal.label}]"
 
     def _slow_motion_prep_tick(self) -> None:
         prep = self._slow_motion_prep
@@ -16250,7 +16417,12 @@ class CameraTopicNode(Node):
             goal_xyz = prep["goal_xyz"]  # type: ignore[assignment]
             goal_quat = prep["goal_quat"]  # type: ignore[assignment]
             self._slow_motion_final_moving_pose = (goal_xyz, goal_quat)  # type: ignore[arg-type]
-            seed = self._load_host_fk_q16()
+            seed = prep.get("seed_q16")
+            if not isinstance(seed, list) or len(seed) < 16:
+                seed = getattr(self, "_motion_seed_override", None)
+                self._motion_seed_override = None
+            if not isinstance(seed, list) or len(seed) < 16:
+                seed = self._load_host_fk_q16()
             if seed is None:
                 self._abort_slow_motion_prep(
                     "无法读取当前关节角（请确认 host_fk 已写 eai_host_fk_state.json，或 HAL 臂关节已就绪）"
@@ -16270,19 +16442,27 @@ class CameraTopicNode(Node):
                 self._abort_slow_motion_prep(f"宿主机 IK 失败: {exc}")
                 return
             if solved is None:
-                sx, sy, sz = prep["start_xyz"]  # type: ignore[misc]
-                gx, gy, gz = goal_xyz  # type: ignore[misc]
-                cart = ((gx - sx) ** 2 + (gy - sy) ** 2 + (gz - sz) ** 2) ** 0.5
+                info = getattr(ik, "last_info", {}) or {}
+                travel = float(info.get("travel_m") or 0.0)
+                pos_err = float(info.get("pos_err_m") or 0.0)
+                if travel <= 0.0:
+                    sx, sy, sz = prep["start_xyz"]  # type: ignore[misc]
+                    gx, gy, gz = goal_xyz  # type: ignore[misc]
+                    travel = ((gx - sx) ** 2 + (gy - sy) ** 2 + (gz - sz) ** 2) ** 0.5
                 self._abort_slow_motion_prep(
-                    f"宿主机 IK 未收敛（笛卡尔距离 {cart:.3f} m），目标可能不可达"
+                    f"宿主机 IK 未收敛：目标距当前 TCP {travel:.3f} m，"
+                    f"求解后位置残差 {pos_err * 1000:.0f} mm。"
+                    f"目标可能在工作空间外，或请改用「相对当前」小步靠近。"
                 )
                 return
             prep["motion_start_joints"] = list(seed)
             prep["goal_joints"] = list(solved)
             prep["start_joints"] = list(seed)
             max_d = max(abs(solved[i] - seed[i]) for i in range(16))
+            info = getattr(ik, "last_info", {}) or {}
             self.get_logger().info(
-                f"宿主机 IK 成功: max|Δq|={max_d:.4f} rad → 关节轨迹 "
+                f"宿主机 IK 成功: max|Δq|={max_d:.4f} rad，"
+                f"位置残差 {float(info.get('pos_err_m', 0.0)) * 1000:.1f} mm → 关节轨迹 "
                 f"(bridge 转发 /wbc/arm_command)"
             )
             self._start_joint_move_from_prep(prep, goal)
@@ -16511,6 +16691,9 @@ class CameraTopicNode(Node):
 
         未「启用手」时直接拒绝（UI 以前直发 set_angles，关使能仍能动）。
         """
+        if getattr(self, "_grasp_execution_reserved", False) and not getattr(self, "_grasp_hand_command_authorized", False):
+            self.get_logger().warn("抓取占用手部控制，忽略其他开合命令")
+            return False
         if not self._hand_enabled:
             self.get_logger().warn(
                 "跳过手部指令：手未使能（请先点「启用手」）"
@@ -17696,7 +17879,8 @@ class CameraTopicNode(Node):
             self._frame_tick_pending = False
             return frames, stats
 
-    def _publish_frame_to_ui(self, topic: str, cv_image: np.ndarray, now: float) -> None:
+    def _publish_frame_to_ui(self, topic: str, cv_image: np.ndarray, now: float, source_meta=None) -> None:
+        full_resolution_image = cv_image
         count = self._frame_counts.get(topic, 0) + 1
         self._frame_counts[topic] = count
         self._last_frame_time[topic] = now
@@ -17724,6 +17908,9 @@ class CameraTopicNode(Node):
             cv_image = img
         except Exception:
             pass
+        if source_meta is not None:
+            stamp, frame_id, encoding = source_meta
+            self.click_frames.add(topic, full_resolution_image, stamp, frame_id, encoding, displayed=cv_image)
         # 合并：同 topic 只保留最新一帧，避免 Qt 队列堆积拷贝
         with self._pending_ui_lock:
             self._pending_ui_frames[topic] = cv_image
@@ -17755,7 +17942,9 @@ class CameraTopicNode(Node):
                 self.get_logger().info(
                     f"首帧 {topic}: {msg.width}x{msg.height} encoding={msg.encoding}"
                 )
-            self._publish_frame_to_ui(topic, cv_image, now)
+            self._publish_frame_to_ui(topic, cv_image, now, (
+                msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+                msg.header.frame_id, msg.encoding))
         except Exception as exc:
             try:
                 from cv_bridge import CvBridgeError
@@ -17786,7 +17975,9 @@ class CameraTopicNode(Node):
             cv_image = self.cv_bridge.compressed_imgmsg_to_cv2(msg)
             if count == 0:
                 self.get_logger().info(f"首帧 {topic}: compressed {len(msg.data)} bytes")
-            self._publish_frame_to_ui(topic, cv_image, now)
+            self._publish_frame_to_ui(topic, cv_image, now, (
+                msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+                msg.header.frame_id, "bgr8"))
         except Exception as exc:
             try:
                 from cv_bridge import CvBridgeError
@@ -25814,6 +26005,9 @@ class CameraTopicWindow(QMainWindow):
         self._topic_types: Dict[str, List[str]] = {}
         self._frame_cache: Dict[str, np.ndarray] = {}
         self._last_segment_target: Optional[SegmentPoseTarget] = None
+        self._click_pose_busy = False
+        self._click_pose_bridge = Sam3CallBridge()
+        self._click_pose_bridge.finished.connect(self._on_click_pose_finished)
         self._last_sam3_topic = ""
         self._sam3_call_busy = False
         self._sam3_call_bridge = Sam3CallBridge()
@@ -25833,10 +26027,25 @@ class CameraTopicWindow(QMainWindow):
         self._sim_arm_move_timer = QTimer(self)
         self._sim_arm_move_timer.setInterval(SIM_ARM_MOVE_TICK_MS)
         self._sim_arm_move_timer.timeout.connect(self._on_sim_arm_move_tick)
-        # 首次读到的左右臂 EE，供「归位」回到初始位姿
+        # 首次读到的左右臂 EE 和当时的 16 关节，供「归位」和重复执行回到初始位姿
         self._arm_home_pose: Dict[
             str, Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]
         ] = {}
+        self._arm_home_q16: Optional[List[float]] = None
+        self._repeat_active = False
+        self._repeat_queue: List[ResolvedArmMoveGoal] = []
+        self._repeat_out_goals: List[ResolvedArmMoveGoal] = []
+        self._repeat_home_goals: List[ResolvedArmMoveGoal] = []
+        self._repeat_home_q16: Optional[List[float]] = None
+        self._repeat_commanded_q16: Optional[List[float]] = None
+        self._repeat_cycle = 0
+        self._repeat_busy_retries = 0
+        self._repeat_skip_retries = 0
+        self._repeat_last_goal: Optional[ResolvedArmMoveGoal] = None
+        self._repeat_advance_pending = False
+        self._repeat_wait_timer = QTimer(self)
+        self._repeat_wait_timer.setSingleShot(True)
+        self._repeat_wait_timer.timeout.connect(self._on_repeat_wait_timeout)
         self._psi_policy_dir_override: Optional[str] = None
         self._cad_capture_dir = ""
         self._cad_capture_saved = 0
@@ -25953,22 +26162,21 @@ class CameraTopicWindow(QMainWindow):
         self.robot_state_connect_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.robot_state_connect_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         robot_conn_row.addWidget(self.robot_state_connect_btn)
-        robot_conn_row.addWidget(self.robot_state_connect_label, 1)
+        robot_conn_row.addWidget(self.robot_state_connect_label)
+        self.robot_nodes_status_label = QLabel("节点: （连接后显示）")
+        self.robot_nodes_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
+        self.robot_nodes_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        self.robot_nodes_status_label.setWordWrap(False)
+        self.robot_nodes_status_label.setToolTip(
+            "最小栈节点（看图/控手/控臂）：\n"
+            "相机 forwarder · 灵巧手 hand_node · 臂/手使能桥 · FK · TCP bridge"
+        )
+        robot_conn_row.addWidget(self.robot_nodes_status_label, 1)
         self.robot_nodes_refresh_btn = QPushButton("刷新节点")
         self.robot_nodes_refresh_btn.setToolTip("刷新最小栈各 node 运行状态")
         self.robot_nodes_refresh_btn.clicked.connect(self._refresh_host_min_node_status)
         robot_conn_row.addWidget(self.robot_nodes_refresh_btn)
         robot_layout.addLayout(robot_conn_row)
-
-        self.robot_nodes_status_label = QLabel("节点: （连接后显示）")
-        self.robot_nodes_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
-        self.robot_nodes_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
-        self.robot_nodes_status_label.setWordWrap(True)
-        self.robot_nodes_status_label.setToolTip(
-            "最小栈节点（看图/控手/控臂）：\n"
-            "相机 forwarder · 灵巧手 hand_node · 臂/手使能桥 · FK · TCP bridge"
-        )
-        robot_layout.addWidget(self.robot_nodes_status_label)
         self._host_min_node_status_timer = QTimer(self)
         self._host_min_node_status_timer.setInterval(2000)
         self._host_min_node_status_timer.timeout.connect(self._refresh_host_min_node_status)
@@ -26175,7 +26383,7 @@ class CameraTopicWindow(QMainWindow):
         self.pose_backend_combo = ImeSafeComboBox()
         self.pose_backend_combo.addItem("PCA(点云)", POSE_BACKEND_PCA)
         self.pose_backend_combo.addItem("FoundationPose", POSE_BACKEND_FOUNDATIONPOSE)
-        self.pose_backend_combo.addItem("Any6D(任意物体)", POSE_BACKEND_ANY6D)
+        self.pose_backend_combo.addItem("Any6D（无模型时为凸包近似）", POSE_BACKEND_ANY6D)
         self.pose_backend_combo.setToolTip(
             "PCA：点云几何；FoundationPose：需 CAD mesh；\n"
             "Any6D：任意物体，mesh 可空（深度凸包），推荐 run_any6d.sh"
@@ -26236,6 +26444,21 @@ class CameraTopicWindow(QMainWindow):
             label="拖动调整 FP 结果高度",
         )
 
+        click_row = QHBoxLayout()
+        self.click_pose_check = QCheckBox("点击估计（仅展示）")
+        self.click_pose_check.setChecked(True)
+        self.click_pose_check.setToolTip("全分辨率同步 RGB-D；不会回填或自动执行机械臂目标")
+        click_row.addWidget(self.click_pose_check)
+        self.click_pose_calibration_edit = QLineEdit(os.environ.get(
+            "EAI_CLICK_CALIBRATION", os.path.join(EAI_DIR, "config", "click_pose_calibration.json")))
+        self.click_pose_calibration_edit.setPlaceholderText("真实相机标定 JSON 路径")
+        click_row.addWidget(self.click_pose_calibration_edit, 1)
+        segment_outer.addLayout(click_row)
+        self.click_pose_result_edit = QTextEdit()
+        self.click_pose_result_edit.setReadOnly(True)
+        self.click_pose_result_edit.setMaximumHeight(220)
+        self.click_pose_result_edit.setPlaceholderText("点击彩色图估计物体位姿；PCA 为几何预览，SAM3/FP/Any6D 使用上方配置。")
+        segment_outer.addWidget(self.click_pose_result_edit)
         control_tabs.addTab(segment_tab, "分割")
 
         vis_tab = QWidget()
@@ -30220,6 +30443,20 @@ class CameraTopicWindow(QMainWindow):
         text_cmd_row.addWidget(self.arm_home_btn)
         manual_layout.addLayout(text_cmd_row)
 
+        from grasp_execution_ui import GraspExecutionPanel
+        self.grasp_execution_panel = GraspExecutionPanel(
+            self.node,
+            busy=lambda: (self.node.is_slow_motion_busy() or self._is_sim_arm_moving()
+                          or self._sim_teleop_active() or bool(self._text_cmd_queue)),
+            parent=self,
+            preview_image=self._render_grasp_preview,
+            open_perception=self._open_visual_6d_for_grasp,
+            fill_extrinsic=self._fill_grasp_observation_extrinsic,
+            ensure_feedback=self._ensure_host_fk,
+            open_calibration=self._open_grasp_profile_calibration,
+        )
+
+
         _gap_tip = (
             f"手指间距离（cm）：0=全合，{HAND_FINGER_GAP_MAX_CM:.0f}=全张；"
             f"步进 {HAND_FINGER_GAP_STEP_CM} cm"
@@ -30324,18 +30561,16 @@ class CameraTopicWindow(QMainWindow):
         self.arm_robot_state_connect_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.arm_robot_state_connect_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         arm_conn_row.addWidget(self.arm_robot_state_connect_btn)
-        arm_conn_row.addWidget(self.arm_robot_state_connect_label, 1)
-        manual_layout.addLayout(arm_conn_row)
-
+        arm_conn_row.addWidget(self.arm_robot_state_connect_label)
         self.arm_nodes_status_label = QLabel("节点: —")
         self.arm_nodes_status_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.arm_nodes_status_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         self.arm_nodes_status_label.setWordWrap(False)
-        self.arm_nodes_status_label.setMaximumHeight(22)
         self.arm_nodes_status_label.setToolTip(
-            "最小栈摘要（详细列表见「回放」页节点状态）"
+            "最小栈摘要。鼠标悬停可看每个节点是否在运行。"
         )
-        manual_layout.addWidget(self.arm_nodes_status_label)
+        arm_conn_row.addWidget(self.arm_nodes_status_label, 1)
+        manual_layout.addLayout(arm_conn_row)
 
         enable_row = QHBoxLayout()
         enable_row.setSpacing(6)
@@ -30414,7 +30649,6 @@ class CameraTopicWindow(QMainWindow):
         self.left_arm_move_btn.clicked.connect(
             lambda: self._on_arm_move_clicked("left")
         )
-        arm_row1.addWidget(self.left_arm_move_btn)
 
         self.right_arm_move_btn = QPushButton("右臂移动")
         self.right_arm_move_btn.setEnabled(False)
@@ -30426,7 +30660,27 @@ class CameraTopicWindow(QMainWindow):
         self.right_arm_move_btn.clicked.connect(
             lambda: self._on_arm_move_clicked("right")
         )
-        arm_row1.addWidget(self.right_arm_move_btn)
+        arm_row1.addSpacing(8)
+        arm_row1.addWidget(QLabel("间隔"))
+        self.arm_repeat_interval_spin = QDoubleSpinBox()
+        self.arm_repeat_interval_spin.setRange(0.0, 600.0)
+        self.arm_repeat_interval_spin.setDecimals(1)
+        self.arm_repeat_interval_spin.setSingleStep(0.5)
+        self.arm_repeat_interval_spin.setValue(2.0)
+        self.arm_repeat_interval_spin.setSuffix(" s")
+        self.arm_repeat_interval_spin.setFixedWidth(88)
+        self.arm_repeat_interval_spin.setToolTip(
+            "每一轮两臂回到界面启动时记下的初始关节位置后，再等待的秒数，然后开始下一轮"
+        )
+        arm_row1.addWidget(self.arm_repeat_interval_spin)
+        self.arm_repeat_btn = QPushButton("重复执行")
+        self.arm_repeat_btn.setToolTip(
+            "左右臂按当前目标各移动一次，再回到界面启动时记下的初始关节位置，然后按间隔重复。\n"
+            "回初始按上次下发的关节角插值，不依赖尚未更新的关节反馈。\n"
+            "执行中再点一次取消。"
+        )
+        self.arm_repeat_btn.clicked.connect(self._on_arm_repeat_clicked)
+        arm_row1.addWidget(self.arm_repeat_btn)
         # Init early: sim eval running_changed may fire via processEvents mid-build.
         self._left_arm_move_btn_idle_style = ""
         self._left_arm_move_btn_cancel_style = f"color: {UI_ACCENT_RED};"
@@ -30462,8 +30716,8 @@ class CameraTopicWindow(QMainWindow):
             "目标 = 当前 TCP 位置 + 偏移（base_link：X前/后，Y左/右，Z上/下）"
         )
         self.move_target_segment_radio.setToolTip(
-            "使用分割/FoundationPose 得到的绝对位姿作为手臂目标（base_link），"
-            "不是相对当前 TCP 的偏移。FoundationPose 成功后会自动选中此项。"
+            "使用分割、FoundationPose 或多视角 6D 得到的绝对位置作为手臂目标（base_link）。"
+            "姿态保持当前 TCP。位姿还在相机系、变不到 base_link 时此项不可选。"
         )
         target_row.addWidget(self.move_target_relative_radio)
         target_row.addWidget(self.move_target_segment_radio)
@@ -30478,7 +30732,7 @@ class CameraTopicWindow(QMainWindow):
         self.offset_x_spin = make_manual_offset_spinbox()
         self.offset_y_spin = make_manual_offset_spinbox()
         self.offset_z_spin = make_manual_offset_spinbox()
-        self.offset_x_spin.setValue(5.0)
+        self.offset_x_spin.setValue(0.0)
         for w in (
             self.offset_x_label,
             self.offset_y_label,
@@ -30490,7 +30744,7 @@ class CameraTopicWindow(QMainWindow):
             w.setVisible(False)
             w.setMaximumHeight(0)
 
-        # 每臂六个输入框：前/后/左/右/上/下，每个后面跟控制按钮（只动该方向）
+        # 每臂单独一行：前/后/左/右/上/下 +「臂移动」；勿塞进手部滑条行（会横向挤没）
         self._arm_dir_spins: Dict[str, Dict[str, QDoubleSpinBox]] = {
             "left": {},
             "right": {},
@@ -30506,6 +30760,8 @@ class CameraTopicWindow(QMainWindow):
         self._arm_dir_row_titles: Dict[str, QLabel] = {}
         self._arm_dir_extra_widgets: List[QWidget] = []
         for arm_side, side_label in (("left", "左臂"), ("right", "右臂")):
+            dir_row = QHBoxLayout()
+            dir_row.setSpacing(4)
             title = QLabel(f"{side_label}")
             title.setMinimumWidth(36)
             title.setToolTip(
@@ -30513,54 +30769,45 @@ class CameraTopicWindow(QMainWindow):
                 f"「{side_label}移动」按六向净合成偏移。"
             )
             self._arm_dir_row_titles[arm_side] = title
-            # 两行各三个：前/后/左 ， 右/上/下
-            for row_i, row_dirs in enumerate(
-                (("forward", "back", "left"), ("right", "up", "down"))
-            ):
-                dir_row = QHBoxLayout()
-                dir_row.setSpacing(4)
-                if row_i == 0:
-                    dir_row.addWidget(title)
-                else:
-                    pad = QLabel("")
-                    pad.setMinimumWidth(36)
-                    dir_row.addWidget(pad)
-                    self._arm_dir_extra_widgets.append(pad)
-                for direction in row_dirs:
-                    cn = ARM_DIR_LABEL_CN[direction]
-                    lab = QLabel(cn)
-                    lab.setMinimumWidth(14)
-                    spin = make_positive_offset_spinbox(
-                        5.0 if direction == "forward" else 0.0
+            dir_row.addWidget(title)
+            for direction in ARM_DIR_ORDER:
+                cn = ARM_DIR_LABEL_CN[direction]
+                lab = QLabel(cn)
+                lab.setMinimumWidth(14)
+                spin = make_positive_offset_spinbox(0.0)
+                spin.setFixedWidth(72)
+                spin.setToolTip(
+                    f"{side_label}向「{cn}」的步长（cm，base_link）"
+                )
+                spin.valueChanged.connect(self._on_arm_dir_spin_changed)
+                btn = QPushButton("移动")
+                btn.setFixedWidth(40)
+                btn.setToolTip(
+                    f"{side_label}只向「{cn}」移动（使用左侧输入框步长）"
+                )
+                btn.clicked.connect(
+                    lambda _=False, s=arm_side, d=direction: self._on_arm_direction_move(
+                        s, d
                     )
-                    spin.setToolTip(
-                        f"{side_label}向「{cn}」的步长（cm，base_link）"
-                    )
-                    spin.valueChanged.connect(self._on_arm_dir_spin_changed)
-                    btn = QPushButton("移动")
-                    btn.setFixedWidth(40)
-                    btn.setToolTip(
-                        f"{side_label}只向「{cn}」移动（使用左侧输入框步长）"
-                    )
-                    btn.clicked.connect(
-                        lambda _=False, s=arm_side, d=direction: self._on_arm_direction_move(
-                            s, d
-                        )
-                    )
-                    dir_row.addWidget(lab)
-                    dir_row.addWidget(spin)
-                    dir_row.addWidget(btn)
-                    self._arm_dir_labels[arm_side][direction] = lab
-                    self._arm_dir_spins[arm_side][direction] = spin
-                    self._arm_dir_btns[arm_side][direction] = btn
-                dir_row.addStretch(1)
-                manual_layout.addLayout(dir_row)
+                )
+                dir_row.addWidget(lab)
+                dir_row.addWidget(spin)
+                dir_row.addWidget(btn)
+                self._arm_dir_labels[arm_side][direction] = lab
+                self._arm_dir_spins[arm_side][direction] = spin
+                self._arm_dir_btns[arm_side][direction] = btn
+            move_btn = (
+                self.left_arm_move_btn if arm_side == "left" else self.right_arm_move_btn
+            )
+            dir_row.addWidget(move_btn)
+            dir_row.addStretch(1)
+            manual_layout.addLayout(dir_row)
         self._sync_offset_spins_from_dir("left")
         self._update_move_offset_ui_visibility()
         manual_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         manual_group.setMinimumHeight(0)
         # 勿过矮：节点摘要 + 手/臂/六向输入需完整可见；高度由 splitter 分配
-        manual_group.setMaximumHeight(560)
+        manual_layout.setSizeConstraint(QLayout.SetMinimumSize)
 
         # —— 功能子面板选择条（类似仿真后端；顺序 → arm_panels_order.json）——
         arm_panel_row = QHBoxLayout()
@@ -30789,8 +31036,8 @@ class CameraTopicWindow(QMainWindow):
         mv6d_layout.setContentsMargins(8, 10, 8, 8)
         mv6d_layout.setSpacing(4)
         mv6d_hint = QLabel(
-            "先在「头部」预览图上点击要估计的物体，再点「估计一次」。"
-            "有深度时用 RGB-D 点云 PCA；无深度时默认 RGB-only，或勾选「LingBot-Depth 补深度」。"
+            "先在「头部」预览图上点击物体，再点「估计一次」。"
+            "PCA、FoundationPose、Any6D 都会先用这个点做 SAM3 分割。"
             "左/右腕预览可点击放大。"
         )
         mv6d_hint.setWordWrap(True)
@@ -30825,7 +31072,7 @@ class CameraTopicWindow(QMainWindow):
         self.mv6d_once_btn = QPushButton("估计一次")
         self.mv6d_once_btn.setFocusPolicy(Qt.NoFocus)
         self.mv6d_once_btn.setToolTip(
-            "请先在头部预览图上点击选择物体，再估计头+腕 6D"
+            "请先在头部预览图上点击选择物体。估计会先做 SAM3 分割，再按所选方法出 6D。"
         )
         self.mv6d_once_btn.clicked.connect(self._on_mv6d_estimate_once)
         mv6d_row1.addWidget(self.mv6d_once_btn)
@@ -30862,16 +31109,56 @@ class CameraTopicWindow(QMainWindow):
         )
         self.mv6d_overlay_check.toggled.connect(self._on_mv6d_overlay_toggled)
         mv6d_row1.addWidget(self.mv6d_overlay_check)
+        self.mv6d_hand_skel_check = QCheckBox("手骨架")
+        self.mv6d_hand_skel_check.setChecked(True)
+        self.mv6d_hand_skel_check.setToolTip(
+            "用左右手腕 TCP 和睿研手模型，把同一套骨架投到头部和两只腕相机。\n"
+            "能同时投到至少两个已标定相机时，才算联合显示。\n"
+            "末节角度用开合比例，不是实测关节角。"
+        )
+        self.mv6d_hand_skel_check.toggled.connect(
+            lambda _checked: self._refresh_mv6d_live_previews_for_pick()
+        )
+        mv6d_row1.addWidget(self.mv6d_hand_skel_check)
         self.mv6d_enlarge_btn = QPushButton("放大预览")
         self.mv6d_enlarge_btn.setFocusPolicy(Qt.NoFocus)
         self.mv6d_enlarge_btn.setToolTip("弹出头+腕双视角大图（估计后会随结果刷新）")
         self.mv6d_enlarge_btn.clicked.connect(self._open_mv6d_lightbox)
         mv6d_row1.addWidget(self.mv6d_enlarge_btn)
+        self.mv6d_rviz_btn = QPushButton("打开 RViz")
+        self.mv6d_rviz_btn.setFocusPolicy(Qt.NoFocus)
+        self.mv6d_rviz_btn.setToolTip(
+            "启动 rviz2，并拉起 robot_description、/joint_states→TF、map→A2D。\n"
+            "与本界面相同 ROS Domain / DDS；需要 host_fk 在发布关节角。"
+        )
+        self.mv6d_rviz_btn.clicked.connect(self._on_mv6d_open_rviz)
+        mv6d_row1.addWidget(self.mv6d_rviz_btn)
+        self.mv6d_robot_btn = QPushButton("显示机器人")
+        self.mv6d_robot_btn.setFocusPolicy(Qt.NoFocus)
+        self.mv6d_robot_btn.setToolTip(
+            "在「手臂/手」里打开机器人页，用 host_fk 的关节角画模型。\n"
+            "拖动旋转，右键平移，滚轮缩放。"
+        )
+        self.mv6d_robot_btn.clicked.connect(self._on_mv6d_show_robot)
+        mv6d_row1.addWidget(self.mv6d_robot_btn)
         mv6d_row1.addStretch(1)
         mv6d_layout.addLayout(mv6d_row1)
 
         mv6d_row2 = QHBoxLayout()
         mv6d_row2.setSpacing(6)
+        mv6d_row2.addWidget(QLabel("方法"))
+        self.mv6d_method_combo = ImeSafeComboBox()
+        self.mv6d_method_combo.addItem("PCA", POSE_BACKEND_PCA)
+        self.mv6d_method_combo.addItem("FoundationPose", POSE_BACKEND_FOUNDATIONPOSE)
+        self.mv6d_method_combo.addItem("Any6D", POSE_BACKEND_ANY6D)
+        self.mv6d_method_combo.setToolTip(
+            "三种方法都先用头部点击点做 SAM3 分割，并一起画到机器人页。\n"
+            "这里选中的方法写入结果文本和抓取目标。\n"
+            "PCA：分割区域的点云包围盒。\n"
+            "FoundPose：使用位姿设置里的物体 mesh。\n"
+            "Any6D：没有 mesh 时用深度凸包。"
+        )
+        mv6d_row2.addWidget(self.mv6d_method_combo)
         mv6d_row2.addWidget(QLabel("头提示点 u"))
         self.mv6d_head_u_spin = QSpinBox()
         self.mv6d_head_u_spin.setRange(0, 9999)
@@ -30893,13 +31180,30 @@ class CameraTopicWindow(QMainWindow):
             "必须先在头部预览图上点选目标物体，才会开始 6D 估计"
         )
         mv6d_row2.addWidget(self.mv6d_seed_status_label, 1)
+        self.mv6d_hand_skel_label = QLabel("手骨架：未投影")
+        self.mv6d_hand_skel_label.setWordWrap(True)
+        self.mv6d_hand_skel_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
+        mv6d_row2.addWidget(self.mv6d_hand_skel_label, 1)
         mv6d_layout.addLayout(mv6d_row2)
 
+        mv6d_error_row = QHBoxLayout()
+        mv6d_error_row.setSpacing(6)
         self.mv6d_error_label = QLabel("误差: --")
         self.mv6d_error_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.mv6d_error_label.setStyleSheet(f"color: {UI_ACCENT_BLUE};")
         self.mv6d_error_label.setWordWrap(True)
-        mv6d_layout.addWidget(self.mv6d_error_label)
+        self.mv6d_error_label.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
+        self.mv6d_error_label.setFocusPolicy(Qt.ClickFocus)
+        self.mv6d_error_label.setCursor(Qt.IBeamCursor)
+        mv6d_error_row.addWidget(self.mv6d_error_label, 1)
+        self.mv6d_copy_btn = QPushButton("复制结果")
+        self.mv6d_copy_btn.setFocusPolicy(Qt.NoFocus)
+        self.mv6d_copy_btn.setToolTip("把详情里的完整估计文本复制到剪贴板")
+        self.mv6d_copy_btn.clicked.connect(self._on_mv6d_copy_result)
+        mv6d_error_row.addWidget(self.mv6d_copy_btn)
+        mv6d_layout.addLayout(mv6d_error_row)
 
         mv6d_detail = QGroupBox("详情（真值 / 结果文本）")
         mv6d_detail.setCheckable(True)
@@ -30969,16 +31273,32 @@ class CameraTopicWindow(QMainWindow):
 
         self.mv6d_result_edit = QTextEdit()
         self.mv6d_result_edit.setReadOnly(True)
+        self.mv6d_result_edit.setTextInteractionFlags(
+            Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard
+        )
+        self.mv6d_result_edit.setFocusPolicy(Qt.StrongFocus)
+        self.mv6d_result_edit.setContextMenuPolicy(Qt.DefaultContextMenu)
         self.mv6d_result_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.mv6d_result_edit.setPlaceholderText(
             "头+腕 6D 估计结果、真值与误差将显示在这里…"
         )
         self.mv6d_result_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
-            f"border: 1px solid {UI_BORDER}; }}"
+            f"border: 1px solid {UI_BORDER}; padding-right: 2px; "
+            f"selection-background-color: #3d5a80; selection-color: #ffffff; }}"
+            f"QTextEdit QScrollBar:vertical {{ background: {UI_BG_WINDOW}; width: 14px; margin: 0; }}"
+            f"QTextEdit QScrollBar::handle:vertical {{ background: {UI_BORDER_STRONG}; "
+            f"border-radius: 4px; min-height: 28px; }}"
+            f"QTextEdit QScrollBar::handle:vertical:hover {{ background: {UI_ACCENT_BLUE}; }}"
+            f"QTextEdit QScrollBar::add-line:vertical, QTextEdit QScrollBar::sub-line:vertical {{ height: 0; }}"
+            f"QTextEdit QScrollBar::add-page:vertical, QTextEdit QScrollBar::sub-page:vertical {{ background: transparent; }}"
         )
         self.mv6d_result_edit.setMinimumHeight(72)
         self.mv6d_result_edit.setMaximumHeight(160)
+        self.mv6d_result_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        result_bar = self.mv6d_result_edit.verticalScrollBar()
+        result_bar.setEnabled(True)
+        result_bar.raise_()
         mv6d_detail_layout.addWidget(self.mv6d_result_edit)
         mv6d_layout.addWidget(mv6d_detail)
 
@@ -31040,20 +31360,54 @@ class CameraTopicWindow(QMainWindow):
             if page is not None:
                 self._arm_panel_stack.addWidget(page)
 
-        self._arm_hand_splitter = _always_visible_splitter(Qt.Vertical)
         arm_bottom = QWidget()
         arm_bottom_l = QVBoxLayout(arm_bottom)
-        arm_bottom_l.setContentsMargins(0, 0, 0, 0)
-        arm_bottom_l.setSpacing(4)
+        arm_bottom_l.setContentsMargins(8, 8, 8, 8)
+        arm_bottom_l.setSpacing(8)
         arm_bottom_l.addLayout(arm_panel_row)
         arm_bottom_l.addWidget(self._arm_panel_stack, 1)
-        self._arm_hand_splitter.addWidget(manual_group)
-        self._arm_hand_splitter.addWidget(arm_bottom)
-        self._arm_hand_splitter.setStretchFactor(0, 0)
-        self._arm_hand_splitter.setStretchFactor(1, 1)
-        # 上半手动区略加高，避免控件被 maxHeight/过小 splitter 裁切
-        self._arm_hand_splitter.setSizes([280, 400])
-        control_layout.addWidget(self._arm_hand_splitter, 1)
+        arm_bottom_l.setSizeConstraint(QLayout.SetMinimumSize)
+
+        # Independent, scrollable pages: never squeeze all controls into a
+        # fixed-height half of a splitter. Horizontal overflow remains reachable.
+        self.arm_workspace_tabs = QTabWidget()
+        self.arm_workspace_tabs.setObjectName("armWorkspaceTabs")
+        self.arm_workspace_tabs.setUsesScrollButtons(True)
+        manual_page = QWidget()
+        manual_page_l = QVBoxLayout(manual_page)
+        manual_page_l.setContentsMargins(0, 0, 0, 0)
+        manual_page_l.setSpacing(8)
+        manual_page_l.addWidget(manual_group)
+        manual_page_l.addWidget(arm_bottom, 1)
+        self.arm_workspace_tabs.addTab(_wrap_in_vscroll(manual_page), "手动控制")
+        self.grasp_execution_panel.layout().setSizeConstraint(QLayout.SetMinimumSize)
+        self.arm_workspace_tabs.addTab(_wrap_in_vscroll(self.grasp_execution_panel), "分阶段抓取")
+        from camera_extrinsic_calib_ui import CameraExtrinsicCalibPanel
+
+        self.camera_calib_panel = CameraExtrinsicCalibPanel(
+            self.node,
+            get_click=self._calib_last_click,
+            get_tcp=self._calib_tcp,
+            parent=self,
+        )
+        self.arm_workspace_tabs.addTab(_wrap_in_vscroll(self.camera_calib_panel), "手眼标定")
+        from grasp_profile_calib_ui import GraspProfileCalibrationPanel
+
+        self.grasp_profile_calib_panel = GraspProfileCalibrationPanel(
+            profile_path=self.grasp_execution_panel.profile_path.text(),
+            refresh_profile=self._on_grasp_profile_calibrated,
+            parent=self,
+        )
+        self.arm_workspace_tabs.addTab(
+            _wrap_in_vscroll(self.grasp_profile_calib_panel), "抓取标定"
+        )
+        self._robot_view_holder = QWidget()
+        robot_hold_layout = QVBoxLayout(self._robot_view_holder)
+        robot_hold_layout.setContentsMargins(8, 8, 8, 8)
+        self._robot_view = None
+        self.arm_workspace_tabs.addTab(self._robot_view_holder, "机器人")
+        self.arm_workspace_tabs.currentChanged.connect(self._on_arm_workspace_tab_changed)
+        control_layout.addWidget(self.arm_workspace_tabs, 1)
         self._apply_arm_panel_stack()
         control_tabs.addTab(control_tab, "手臂/手")
         _boot_tick("构建界面：仿真评测…")
@@ -40618,6 +40972,12 @@ class CameraTopicWindow(QMainWindow):
             self.status_bar.showMessage(f"SAM3 启动中，请稍候… ({url})")
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        grasp_panel = getattr(self, "grasp_execution_panel", None)
+        if grasp_panel is not None and (grasp_panel.reserved or grasp_panel.process is not None):
+            grasp_panel.stop()
+            self.status_bar.showMessage("正在停止抓取，请待停止反馈确认后再关闭窗口")
+            event.ignore()
+            return
         app = QApplication.instance()
         if app is not None:
             app.removeEventFilter(self)
@@ -42665,6 +43025,16 @@ class CameraTopicWindow(QMainWindow):
         )
         self.lingbot_depth_input_label.set_source_pixmap(None)
         self.lingbot_depth_refined_label.set_source_pixmap(None)
+        # 记住本次用的彩色相机，结果点云挂到对应外参上。
+        source = str(self.lingbot_depth_source_combo.currentData() or "camera")
+        color_topic = ""
+        if source == "camera":
+            color_topic = str(self.lingbot_depth_topic_combo.currentData() or "").strip()
+            if not color_topic:
+                picked = self._pick_lingbot_depth_color_source()
+                if picked is not None:
+                    color_topic = str(picked[0] or "")
+        self._lingbot_depth_last_color_topic = color_topic
 
         model_override = self.lingbot_depth_model_edit.text().strip()
         model = model_override or str(
@@ -42686,6 +43056,46 @@ class CameraTopicWindow(QMainWindow):
         self._lingbot_depth_launcher.stop()
         self._update_lingbot_depth_ui()
 
+    def _show_lingbot_depth_on_robot_view(
+        self, result: dict, *, silent: bool = False
+    ) -> None:
+        ply = str(result.get("point_cloud") or "").strip()
+        if not ply or not os.path.isfile(ply):
+            if not silent:
+                self.status_bar.showMessage(
+                    "LingBot-Depth 没有 point_cloud.ply，机器人页未更新。", 8000
+                )
+            return
+        color_topic = str(
+            getattr(self, "_lingbot_depth_last_color_topic", "") or ""
+        ).strip()
+        payload = {
+            "ply": ply,
+            "color_topic": color_topic,
+            "points": int(result.get("points") or 0),
+        }
+        self._robot_lingbot_depth = payload
+        view = getattr(self, "_robot_view", None)
+        if view is None or not hasattr(view, "set_lingbot_depth_from_ply"):
+            if not silent:
+                self.status_bar.showMessage(
+                    "LingBot-Depth 点云已缓存；打开「手臂/手」→「机器人」查看。",
+                    6000,
+                )
+            return
+        try:
+            view.set_lingbot_depth_from_ply(ply, color_topic=color_topic)
+        except Exception as exc:
+            if not silent:
+                self.status_bar.showMessage(
+                    f"机器人页未画出 LingBot-Depth：{exc}", 8000
+                )
+            return
+        if not silent:
+            self.status_bar.showMessage(
+                f"已在机器人页显示 LingBot-Depth（{payload['points']} 点）", 5000
+            )
+
     def _on_lingbot_depth_result(self, result: dict) -> None:
         if not result.get("ok"):
             return
@@ -42702,6 +43112,10 @@ class CameraTopicWindow(QMainWindow):
             f"load={result.get('load_s')}s infer={result.get('infer_s')}s "
             f"points={result.get('points')} device={result.get('device')}"
         )
+        try:
+            self._show_lingbot_depth_on_robot_view(result, silent=False)
+        except Exception as exc:
+            self._append_lingbot_depth_log(f"[WARN] 机器人页未更新: {exc}")
 
     def _append_reward_log(self, line: str) -> None:
         if not hasattr(self, "reward_log_edit"):
@@ -50105,7 +50519,243 @@ class CameraTopicWindow(QMainWindow):
         self.sam3_preview_label.setPixmap(cv2_to_qpixmap(overlay))
         self.sam3_preview_label.setText("")
 
+    def _run_click_pose(self, topic: str, u: int, v: int, displayed=None) -> None:
+        if self._click_pose_busy:
+            self.status_bar.showMessage("点击估计进行中，请等待完成后重新选点")
+            return
+        panel = self.panels.get(topic)
+        if not isinstance(panel, CameraPanel) or panel._latest_image is None:
+            return
+        try:
+            displayed = panel._latest_image if displayed is None else displayed
+            # Resolve calibration using full sensor resolution, not preview size.
+            with self.node.click_frames.lock:
+                frames = list(self.node.click_frames.frames.get(topic, ()))
+            selected = next((f for f in reversed(frames) if f.displayed is displayed), None)
+            if selected is None:
+                raise ValueError("没有点击图像对应的实时 ROS 原始帧")
+            entry, K = click_pose.load_calibration(self.click_pose_calibration_edit.text().strip(), topic, selected.image.shape)
+            if entry["depth_topic"] not in self.node.enabled_topics:
+                self.node.set_enabled_topics(set(self.node.enabled_topics) | {entry["depth_topic"]})
+                raise ValueError("已请求订阅标定指定的深度话题，请等待新帧后再次点击")
+            color, depth_frame, skew = self.node.click_frames.pair(topic, entry["depth_topic"], displayed)
+            if color.frame_id != entry["optical_frame"] or depth_frame.frame_id != entry["optical_frame"]:
+                raise ValueError("RGB-D frame_id 与标定 optical_frame 不一致，无法确认已注册到同一相机")
+            depth = click_pose.metric_depth(depth_frame, color.image.shape)
+            image = color.image.copy()
+            ph, pw = displayed.shape[:2]
+            h, w = image.shape[:2]
+            su = min(w - 1, max(0, int((u + 0.5) * w / pw)))
+            sv = min(h - 1, max(0, int((v + 0.5) * h / ph)))
+            segment_cfg, pose_cfg = get_segment_settings(), get_pose_settings()
+        except Exception as exc:
+            self.click_pose_result_edit.setPlainText(click_pose.format_report({"ok": False, "error": str(exc)}))
+            self.status_bar.showMessage("点击估计未开始：请查看分割页数据检查结果")
+            return
+        self._click_pose_busy = True
+        self.click_pose_result_edit.setPlainText("正在分割并估计物体位姿…（仅展示）")
+
+        def work():
+            try:
+                notes = []
+                if segment_cfg.backend == SAM3_BACKEND_GEOMETRY:
+                    mask, method = segment_object_at_click(su, sv, depth, color_bgr=image)
+                    notes.append("几何分割预览：精细目标边界建议选择 SAM3 点提示")
+                else:
+                    # Clicking selects one instance; no broad text-concept fallback.
+                    mask, method = run_sam3_segmentation(image, su, sv, settings=segment_cfg, tag="calibrated_click")
+                points, valid_mask, quality = click_pose.object_points(mask, depth, K, (su, sv))
+                intr = (K[0, 0], K[1, 1], K[0, 2], K[1, 2])
+                if pose_cfg.backend == POSE_BACKEND_PCA:
+                    pose = click_pose.geometric_preview(points)
+                    notes.append("可见表面 PCA：不是完整物体重建，轴方向存在符号/对称性歧义")
+                else:
+                    if pose_cfg.backend == POSE_BACKEND_FOUNDATIONPOSE:
+                        if not pose_cfg.fp_mesh.strip():
+                            raise ValueError("FoundationPose 需要目标自身的米制模型；不能复用其他物体 mesh")
+                        body = run_foundationpose_estimation(image, depth, valid_mask, *intr, settings=pose_cfg, tag="calibrated_click")
+                    else:
+                        body = run_any6d_estimation(image, depth, valid_mask, *intr, settings=pose_cfg, tag="calibrated_click")
+                    T = click_pose.validate_transform(body["pose_matrix"])
+                    pose = {"T_camera_object": T.tolist(), "method": str(body.get("method", pose_cfg.backend)),
+                            "pose_kind": "model_estimate", "orientation_ambiguous": None}
+                    if pose_cfg.backend == POSE_BACKEND_ANY6D and not pose_cfg.fp_mesh.strip():
+                        pose["pose_kind"] = "partial_hull_estimate"
+                        notes.append("Any6D 当前无 CAD 适配为可见点云凸包，未实现官方完整参考图重建流程")
+                result = {"ok": True, "topic": topic, "camera_frame": entry["optical_frame"],
+                          "stamp": color.stamp, "seed_uv": [su, sv], "skew_ms": skew * 1000,
+                          "captured_at": time.time() - (time.monotonic() - color.received),
+                          "observation_id": f"{topic}:{color.stamp:.9f}:{su}:{sv}",
+                          "quality": quality, "object_pose": pose, "notes": notes,
+                          "grasp_candidates": [], "execution_ready": False}
+                if entry.get("T_base_camera") is not None:
+                    result["T_base_camera"] = entry["T_base_camera"]
+                    result["T_base_object"] = (click_pose.validate_transform(entry["T_base_camera"]) @
+                                               click_pose.validate_transform(pose["T_camera_object"])).tolist()
+                    result["base_frame"] = entry["base_frame"]
+                if entry.get("graspgen"):
+                    try:
+                        result["grasps"] = click_pose.run_graspgen(points, entry["graspgen"])
+                    except Exception as exc:
+                        notes.append(f"抓取模型失败（保留物体估计）: {exc}")
+                # Persist actual full-resolution inputs for reproducible model evaluation.
+                directory = os.path.join(EAI_DIR, ".cache", "click_pose", str(time.time_ns()))
+                os.makedirs(directory, exist_ok=True)
+                cv2.imwrite(os.path.join(directory, "rgb.png"), image)
+                np.savez_compressed(os.path.join(directory, "inputs.npz"), depth_m=depth,
+                                    mask=mask, K=K, points_camera=points)
+                with open(os.path.join(directory, "result.json"), "w", encoding="utf-8") as stream:
+                    json.dump(result, stream, ensure_ascii=False, indent=2, allow_nan=False)
+                result["notes"].append("输入与结果已保存: " + directory)
+                result["mask"] = mask
+                result["image"] = image
+                result["K"] = K
+            except Exception as exc:
+                result = {"ok": False, "error": str(exc)}
+            self._click_pose_bridge.finished.emit(result)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _calib_last_click(self) -> dict:
+        topic = getattr(self, "_last_sam3_topic", "") or ""
+        panel = self.panels.get(topic) if hasattr(self, "panels") else None
+        shape = None
+        if isinstance(panel, CameraPanel) and getattr(panel, "_latest_image", None) is not None:
+            shape = panel._latest_image.shape[:2]
+        u = int(self.sam3_u_spin.value()) if hasattr(self, "sam3_u_spin") else -1
+        v = int(self.sam3_v_spin.value()) if hasattr(self, "sam3_v_spin") else -1
+        return {"topic": topic, "u": u, "v": v, "preview_hw": shape}
+
+    def _calib_tcp(self, side: str):
+        path = os.environ.get("EAI_HOST_FK_STATE", "/tmp/eai_host_fk_state.json")
+        try:
+            if os.path.isfile(path) and time.time() - os.path.getmtime(path) < 2.0:
+                with open(path, encoding="utf-8") as stream:
+                    state = json.load(stream)
+                arm = state.get(side) if isinstance(state, dict) else None
+                if isinstance(arm, dict) and arm.get("xyz") and arm.get("xyzw"):
+                    waist_at = float(state.get("waist_received_at") or 0)
+                    return {
+                        "xyz": tuple(float(v) for v in arm["xyz"]),
+                        "xyzw": tuple(float(v) for v in arm["xyzw"]),
+                        "waist_age_s": (time.time() - waist_at) if waist_at else None,
+                    }
+        except Exception:
+            pass
+        pose = self._tcp_for_relative_goal(side)
+        if pose is None:
+            return None
+        return {"xyz": pose[0], "xyzw": pose[1], "waist_age_s": None}
+
+    def _fill_grasp_observation_extrinsic(self, observation: dict) -> dict:
+        """把相机→base_link 写入观测。优先用 TF，没有时用「手眼标定」页保存的结果。"""
+        if not isinstance(observation, dict) or observation.get("T_base_camera") is not None:
+            return observation
+        frame = str(observation.get("camera_frame") or observation.get("input_frame") or "").lstrip("/")
+        if not frame or frame in ("camera", "unknown"):
+            observation["extrinsic_error"] = "观测没有相机 frame_id，无法查询手眼 TF"
+            return observation
+        if normalize_frame_id(frame) == normalize_frame_id(BASE_LINK_FRAME):
+            observation["T_base_camera"] = np.eye(4).tolist()
+            observation["base_frame"] = BASE_LINK_FRAME
+            observation["extrinsic_source"] = "already_base_link"
+            observation.pop("extrinsic_error", None)
+            return observation
+        T = lookup_transform_matrix(
+            self.node.get_tf_buffer(), BASE_LINK_FRAME, frame, timeout_s=0.4
+        )
+        if T is None:
+            from camera_extrinsic_calib import apply_saved_extrinsic
+
+            if apply_saved_extrinsic(observation, self._calib_tcp):
+                return observation
+            if not observation.get("extrinsic_error"):
+                observation["extrinsic_error"] = (
+                    f"TF 中没有 {frame} → {BASE_LINK_FRAME}。可在「手眼标定」页手工标定后重试"
+                )
+            return observation
+        try:
+            observation["T_base_camera"] = click_pose.validate_transform(T).tolist()
+        except Exception as exc:
+            observation["extrinsic_error"] = str(exc)
+            return observation
+        observation["base_frame"] = BASE_LINK_FRAME
+        observation["extrinsic_source"] = f"tf:{frame}"
+        observation.pop("extrinsic_error", None)
+        return observation
+
+    def _on_click_pose_finished(self, result: dict) -> None:
+        self._click_pose_busy = False
+        if result.get("ok"):
+            self._last_click_pose_snapshot = result
+        if result.get("ok") and hasattr(self, "grasp_execution_panel"):
+            self.grasp_execution_panel.set_observation(result)
+        self.click_pose_result_edit.setPlainText(click_pose.format_report(result))
+        if result.get("ok"):
+            panel = self.panels.get(result["topic"])
+            if isinstance(panel, CameraPanel):
+                # The report is a timestamped snapshot; no persistent overlay on moving video.
+                self.sam3_preview_label.setPixmap(cv2_to_qpixmap(
+                    self._click_pose_preview(result)))
+            self.status_bar.showMessage("点击估计完成：仅展示，结果未转换为机械臂运动目标")
+        else:
+            self.status_bar.showMessage("点击估计失败：" + str(result.get("error", ""))[:160])
+
+    def _open_visual_6d_for_grasp(self):
+        for index in range(self.arm_workspace_tabs.count()):
+            if self.arm_workspace_tabs.tabText(index) == "手动控制":
+                self.arm_workspace_tabs.setCurrentIndex(index)
+                break
+        self.arm_panel_mv6d_radio.setChecked(True)
+        self._apply_arm_panel_stack()
+
+    def _render_grasp_preview(self, preview):
+        result = getattr(self, "_last_click_pose_snapshot", None)
+        if preview["observation_id"].startswith("mv6d:"):
+            # No invented camera projection for an already-fused base-frame pose.
+            return QPixmap()
+        if result is None or result.get("observation_id") != preview["observation_id"]:
+            raise ValueError("预览图像与候选观测不一致，请重新点击")
+        canvas = result["image"].copy()
+        K = np.asarray(result["K"])
+        T_camera_base = np.linalg.inv(np.asarray(result["T_base_camera"]))
+        previous = None
+        for name, color in (("pregrasp", (220, 80, 220)), ("approach", (60, 220, 60)), ("lift", (0, 220, 255))):
+            T = T_camera_base @ np.asarray(preview["goals"][name])
+            points = np.vstack([T[:3, 3], T[:3, 3]+.04*T[:3, :3].T])
+            if np.any(points[:, 2] <= .01):
+                continue
+            projected = points @ K.T
+            uv = np.rint(projected[:, :2]/projected[:, 2:]).astype(int)
+            if previous is not None:
+                cv2.line(canvas, previous, tuple(uv[0]), color, 2)
+            previous = tuple(uv[0])
+            cv2.circle(canvas, previous, 5, color, -1)
+            cv2.putText(canvas, name, previous, cv2.FONT_HERSHEY_SIMPLEX, .6, color, 2)
+            for i, axis_color in enumerate(((0,0,255), (0,255,0), (255,0,0))):
+                cv2.line(canvas, previous, tuple(uv[i+1]), axis_color, 2)
+        cv2.putText(canvas, "TCP SNAPSHOT / NO COLLISION CHECK", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, .6, (0,200,255), 2)
+        h, w = canvas.shape[:2]
+        scale = min(480/w, 190/h)
+        return cv2_to_qpixmap(cv2.resize(canvas, (max(1,int(w*scale)), max(1,int(h*scale)))))
+
+    def _click_pose_preview(self, result: dict):
+        mask = np.asarray(result["mask"], dtype=bool)
+        canvas = result["image"].copy()
+        canvas[mask] = (canvas[mask] * 0.6 + np.array([30, 180, 30]) * 0.4).astype(np.uint8)
+        T = np.asarray(result["object_pose"]["T_camera_object"])
+        xyz = np.vstack([T[:3, 3], T[:3, 3] + 0.05 * T[:3, :3].T])
+        if np.all(xyz[:, 2] > 0.01):
+            projected = xyz @ np.asarray(result["K"]).T
+            uv = np.rint(projected[:, :2] / projected[:, 2:]).astype(int)
+            for i, color in enumerate(((0, 0, 255), (0, 255, 0), (255, 0, 0))):
+                cv2.line(canvas, tuple(uv[0]), tuple(uv[i + 1]), color, 3)
+        cv2.putText(canvas, "SNAPSHOT / object axes / NOT TCP", (10, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 220, 255), 2)
+        h, w = canvas.shape[:2]
+        return cv2.resize(canvas, (320, max(1, int(h * 320 / w))))
+
     def _on_sam3_click_uv(self, topic: str, u: int, v: int) -> None:
+        clicked_color = not is_depth_topic(topic)
         if is_depth_topic(topic):
             color_topic = find_paired_color_topic(topic, self._cached_topic_names())
             if color_topic:
@@ -50113,6 +50763,8 @@ class CameraTopicWindow(QMainWindow):
         self._last_sam3_topic = topic
         self.sam3_u_spin.setValue(max(0, int(u)))
         self.sam3_v_spin.setValue(max(0, int(v)))
+        if hasattr(self, "camera_calib_panel"):
+            self.camera_calib_panel.note_click(topic, int(u), int(v))
         panel = self.panels.get(topic)
         if isinstance(panel, CameraPanel) and panel._latest_image is not None:
             h, w = panel._latest_image.shape[:2]
@@ -50134,6 +50786,17 @@ class CameraTopicWindow(QMainWindow):
                 self.lingbot_world_topic_combo,
                 topic,
                 status_cb=self._on_lingbot_world_status,
+            )
+        if (
+            clicked_color
+            and getattr(self, "click_pose_check", None) is not None
+            and self.click_pose_check.isChecked()
+        ):
+            clicked_panel = self.panels.get(topic)
+            clicked_image = getattr(clicked_panel, "_latest_image", None)
+            QTimer.singleShot(
+                0,
+                lambda t=topic, x=u, y=v, img=clicked_image: self._run_click_pose(t, x, y, img),
             )
 
     def _on_stereo_invoke_clicked(self) -> None:
@@ -50854,8 +51517,9 @@ class CameraTopicWindow(QMainWindow):
         )
         robot_lab = getattr(self, "robot_nodes_status_label", None)
         if robot_lab is not None:
-            robot_lab.setText(detail_full)
+            robot_lab.setText(compact)
             robot_lab.setStyleSheet(f"color: {color};")
+            robot_lab.setToolTip(detail_full)
         arm_lab = getattr(self, "arm_nodes_status_label", None)
         if arm_lab is not None:
             arm_lab.setText(compact)
@@ -51167,7 +51831,7 @@ class CameraTopicWindow(QMainWindow):
             pass
 
     def _ensure_essential_robot_cameras(self, *, reason: str = "") -> None:
-        """扫描并强制勾选头/腕彩色（启用机器人后常见漏订）。"""
+        """扫描并勾选尚未被用户取消的头/腕彩色。"""
         self._ensure_host_camera_forwarder()
         edit = getattr(self, "prefix_edit", None)
         prefix = edit.text().strip() if edit is not None else ""
@@ -51195,20 +51859,20 @@ class CameraTopicWindow(QMainWindow):
         added: List[str] = []
         for topic in ESSENTIAL_A2D_CAMERA_COLOR_TOPICS:
             cb = topic_checks.get(topic)
-            if cb is None:
+            if cb is None or topic in self._topic_user_unchecked:
                 continue
-            self._topic_user_unchecked.discard(topic)
             if not cb.isChecked():
                 cb.blockSignals(True)
                 cb.setChecked(True)
                 cb.blockSignals(False)
                 added.append(topic)
             enabled.add(topic)
+        if not added:
+            return
         self._apply_selection(enabled)
         self._refresh_skeleton_camera_list()
         msg = "已订阅头/腕彩色" + (f"（{reason}）" if reason else "")
-        if added:
-            msg += f"：{', '.join(added)}"
+        msg += f"：{', '.join(added)}"
         self.status_bar.showMessage(msg, 5000)
         btn = getattr(self, "camera_connect_btn", None)
         if btn is not None:
@@ -51338,6 +52002,10 @@ class CameraTopicWindow(QMainWindow):
             (float(xyz[0]), float(xyz[1]), float(xyz[2])),
             (float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])),
         )
+        if getattr(self, "_arm_home_q16", None) is None:
+            q16 = self.node._load_host_fk_q16()
+            if q16 is not None and len(q16) >= 16:
+                self._arm_home_q16 = [float(v) for v in q16[:16]]
 
     def _sim_resolve_arm_side(self, prefer: str) -> str:
         """选实际有仿真 TCP 的手臂；右腕无状态时回落到左臂（RoboDojo 常见）。"""
@@ -51508,10 +52176,11 @@ class CameraTopicWindow(QMainWindow):
                 self._sim_arm_move_timer.stop()
                 label = str(move.get("label") or "双臂归位")
                 done_msg = f"仿真双臂移动完成 → {label}{settle_note}"
-                if not self._text_cmd_pumping:
-                    extra = self._pump_text_cmd_queue()
-                    if extra:
-                        done_msg = f"{done_msg}；{extra}"
+                if not self._after_arm_motion_settled(True, done_msg):
+                    if not self._text_cmd_pumping:
+                        extra = self._pump_text_cmd_queue()
+                        if extra:
+                            done_msg = f"{done_msg}；{extra}"
                 self.status_bar.showMessage(done_msg)
                 self._update_arm_move_btns_ui()
                 return
@@ -51584,10 +52253,11 @@ class CameraTopicWindow(QMainWindow):
                 + (f" → {label}" if label else "")
                 + settle_note
             )
-            if not self._text_cmd_pumping:
-                extra = self._pump_text_cmd_queue()
-                if extra:
-                    done_msg = f"{done_msg}；{extra}"
+            if not self._after_arm_motion_settled(True, done_msg):
+                if not self._text_cmd_pumping:
+                    extra = self._pump_text_cmd_queue()
+                    if extra:
+                        done_msg = f"{done_msg}；{extra}"
             self.status_bar.showMessage(done_msg)
             self._update_arm_move_btns_ui()
             return
@@ -52268,6 +52938,13 @@ class CameraTopicWindow(QMainWindow):
         enable = not self.node.is_arm_enabled()
         if not enable:
             # 关闭时立刻停掉本进程轨迹，避免关使能后仍在发关节目标
+            if getattr(self, "_repeat_active", False):
+                self._repeat_active = False
+                self._repeat_queue = []
+                wait_timer = getattr(self, "_repeat_wait_timer", None)
+                if wait_timer is not None:
+                    wait_timer.stop()
+                self._update_arm_repeat_btn()
             try:
                 if self.node.is_slow_motion_busy():
                     self.status_bar.showMessage(self.node.cancel_slow_motion())
@@ -52887,6 +53564,7 @@ class CameraTopicWindow(QMainWindow):
         self.arm_move_speed_slider.setEnabled(not speed_busy)
         self._update_one_arm_move_btn_ui("left", force=force)
         self._update_one_arm_move_btn_ui("right", force=force)
+        self._update_arm_repeat_btn()
         self._update_arm_dir_btns_ui()
         self._update_arm_pose_display()
 
@@ -52907,37 +53585,11 @@ class CameraTopicWindow(QMainWindow):
         self.status_bar.showMessage(
             f"已记录绝对位姿目标: {target.label or target.source_topic}"
         )
-        QTimer.singleShot(0, self._try_auto_move_to_segment_target)
+        # Perception only records a target; motion always requires an explicit button.
 
     def _try_auto_move_to_segment_target(self) -> None:
-        """分割/FP 完成后，按绝对位姿目标移动左臂（非相对当前）。"""
-        if self.node.is_slow_motion_busy() or self._is_sim_arm_moving():
-            return
-        if not self.move_target_segment_radio.isChecked():
-            return
-        goal = self._resolve_move_goal("left")
-        if goal is None:
-            if self._sim_teleop_active():
-                self.status_bar.showMessage("绝对位姿已记录，等待仿真 TCP 或 TF…")
-                return
-            blockers = self.node.get_arm_move_blockers(tf_timeout_s=UI_TF_LOOKUP_TIMEOUT_S)
-            if blockers:
-                self.status_bar.showMessage(
-                    "绝对位姿已记录，暂无法移动: " + "；".join(blockers)
-                )
-            return
-        if self._sim_teleop_active():
-            msg = self._start_sim_arm_move("left", goal)
-            self.status_bar.showMessage(msg)
-            self._update_arm_move_btns_ui()
-            return
-        if not self.node.is_arm_enabled():
-            self.status_bar.showMessage("绝对位姿已记录：请先点「启用手臂」后再移动")
-            self._update_arm_move_btns_ui()
-            return
-        msg = self.node.request_slow_move_to_goal(goal)
-        self.status_bar.showMessage(msg)
-        self._update_arm_move_btns_ui()
+        """Compatibility entry point: never execute motion from a pose callback."""
+        self.status_bar.showMessage("位姿已记录；请显式选择手臂并确认移动，不再自动移动左臂")
 
     def _on_mv6d_enable_toggled(self, checked: bool) -> None:
         if checked:
@@ -52971,6 +53623,108 @@ class CameraTopicWindow(QMainWindow):
         if not self._mv6d_ensure_object_selected(silent=False):
             return
         self._start_mv6d_estimate(silent=False)
+
+    def _on_mv6d_show_robot(self) -> None:
+        holder = getattr(self, "_robot_view_holder", None)
+        tabs = getattr(self, "arm_workspace_tabs", None)
+        if holder is None or tabs is None:
+            return
+        index = tabs.indexOf(holder)
+        if index >= 0:
+            tabs.setCurrentIndex(index)
+
+    def _on_arm_workspace_tab_changed(self, index: int) -> None:
+        holder = getattr(self, "_robot_view_holder", None)
+        tabs = getattr(self, "arm_workspace_tabs", None)
+        view = getattr(self, "_robot_view", None)
+        if holder is None or tabs is None:
+            return
+        active = tabs.widget(index) is holder
+        if active and view is None:
+            try:
+                from robot_view3d import RobotView3D
+
+                view = RobotView3D(holder, ros_node=getattr(self, "node", None))
+                holder.layout().addWidget(view, 1)
+                self._robot_view = view
+                cached = getattr(self, "_robot_method_poses", None) or {}
+                if not cached:
+                    old = getattr(self, "_robot_pose6d", None)
+                    if old is not None:
+                        view.set_method_pose("pca", *old)
+                for key, pose in cached.items():
+                    view.set_method_pose(key, *pose)
+                sam3_pts = getattr(self, "_robot_sam3_points", None)
+                if sam3_pts is not None:
+                    view.set_sam3_points(sam3_pts)
+                lingbot = getattr(self, "_robot_lingbot_depth", None) or {}
+                ply = str(lingbot.get("ply") or "")
+                if ply and os.path.isfile(ply) and hasattr(view, "set_lingbot_depth_from_ply"):
+                    try:
+                        view.set_lingbot_depth_from_ply(
+                            ply,
+                            color_topic=str(lingbot.get("color_topic") or ""),
+                        )
+                    except Exception:
+                        pass
+            except Exception as exc:
+                self.status_bar.showMessage(f"机器人视图加载失败: {exc}", 8000)
+                return
+        if view is not None:
+            view.set_running(active)
+
+    def _on_grasp_profile_calibrated(self, path: str) -> None:
+        """Refresh only the local execution profile after explicit calibration."""
+        panel = getattr(self, "grasp_execution_panel", None)
+        if panel is None:
+            return
+        panel.profile_path.setText(str(path))
+        panel.check_readiness()
+        self.status_bar.showMessage("抓取配置已更新；请重新检查准备状态并重新预览目标")
+
+    def _open_grasp_profile_calibration(self) -> None:
+        tabs = getattr(self, "arm_workspace_tabs", None)
+        panel = getattr(self, "grasp_profile_calib_panel", None)
+        if tabs is None or panel is None:
+            return
+        for index in range(tabs.count()):
+            candidate = tabs.widget(index)
+            if isinstance(candidate, QScrollArea) and candidate.widget() is panel:
+                tabs.setCurrentIndex(index)
+                return
+
+    def _on_mv6d_open_rviz(self) -> None:
+        """启动 RViz，并带上 robot_description / joint_states TF（宿主机脚本）。"""
+        script = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "scripts",
+            "start_host_rviz.sh",
+        )
+        if not os.path.isfile(script):
+            self.status_bar.showMessage(f"缺少脚本: {script}", 8000)
+            return
+        domain = os.environ.get("ROS_DOMAIN_ID", "0")
+        localhost = os.environ.get("ROS_LOCALHOST_ONLY", "0")
+        dds = os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE", "").strip()
+        discovery = os.environ.get("ROS_AUTOMATIC_DISCOVERY_RANGE", "LOCALHOST")
+        exports = [
+            f"export ROS_DOMAIN_ID={shlex.quote(str(domain))}",
+            f"export ROS_LOCALHOST_ONLY={shlex.quote(str(localhost))}",
+            f"export ROS_AUTOMATIC_DISCOVERY_RANGE={shlex.quote(str(discovery))}",
+            "export RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}",
+        ]
+        if dds and os.path.isfile(dds):
+            exports.append(
+                f"export FASTRTPS_DEFAULT_PROFILES_FILE={shlex.quote(dds)}"
+            )
+        cmd = " && ".join(exports + [f"exec bash {shlex.quote(script)} start"])
+        ok = QProcess.startDetached("bash", ["-lc", cmd])
+        if ok:
+            self.status_bar.showMessage(
+                "正在启动 RViz（robot_description + TF）…", 5000
+            )
+        else:
+            self.status_bar.showMessage("启动 RViz 失败", 8000)
 
     def _mv6d_update_seed_status_label(self) -> None:
         lab = getattr(self, "mv6d_seed_status_label", None)
@@ -53042,6 +53796,37 @@ class CameraTopicWindow(QMainWindow):
             interpolation=cv2.INTER_AREA,
         )
 
+    def _mv6d_overlay_hand_skeleton(self, images: dict) -> dict:
+        label = getattr(self, "mv6d_hand_skel_label", None)
+        check = getattr(self, "mv6d_hand_skel_check", None)
+        if not images or check is None or not check.isChecked():
+            if label is not None and check is not None and not check.isChecked():
+                label.setText("手骨架：已关闭")
+            return dict(images)
+        try:
+            from robot_hand_skeleton import overlay_views
+
+            state = self.node.get_robot_state()
+            tcp = {}
+            for side in ("left", "right"):
+                pose = self._calib_tcp(side)
+                if pose is not None:
+                    tcp[side] = pose
+            motors = {
+                "left": {name: value for name, value in state.left_hand},
+                "right": {name: value for name, value in state.right_hand},
+            }
+            drawn, summary = overlay_views(images, tcp, motors, self._calib_tcp)
+            if label is not None:
+                label.setText(summary)
+            merged = dict(images)
+            merged.update(drawn)
+            return merged
+        except Exception as exc:
+            if label is not None:
+                label.setText("手骨架失败：" + str(exc)[:120])
+            return dict(images)
+
     def _refresh_mv6d_live_previews_for_pick(self) -> None:
         """刷头部/双腕实时画面，便于点选物体（未估计时也显示；无帧保留占位）。"""
         if getattr(self, "mv6d_head_preview", None) is None:
@@ -53051,11 +53836,11 @@ class CameraTopicWindow(QMainWindow):
         if not self._control_tab_title_is_current("手臂/手"):
             return
         self.mv6d_head_preview.setVisible(True)
+        pending = {}
         head_src = self._pick_mv6d_color_frame("/camera/head_color")
+        head_bgr = None
         if head_src is not None:
-            _, head_bgr = head_src
-            head_bgr = np.asarray(head_bgr)
-            # 点选坐标按原图；显示用缩略图
+            head_bgr = np.asarray(head_src[1])
             self._mv6d_live_head_bgr = np.ascontiguousarray(head_bgr)
             show = head_bgr
             if self._mv6d_object_picked:
@@ -53064,49 +53849,55 @@ class CameraTopicWindow(QMainWindow):
                     int(self.mv6d_head_u_spin.value()),
                     int(self.mv6d_head_v_spin.value()),
                 )
+            pending["/camera/head_color"] = show
+        else:
+            self._mv6d_live_head_bgr = None
+        wrist_pending = []
+        if self._mv6d_last_snap is None:
+            for side, lab, cache, empty in (
+                (
+                    "left",
+                    self.mv6d_left_wrist_preview,
+                    "_mv6d_left_wrist_pix",
+                    "左腕 · 等待画面\n勾选 /camera/hand_left_color 或 left_wrist_color",
+                ),
+                (
+                    "right",
+                    self.mv6d_right_wrist_preview,
+                    "_mv6d_right_wrist_pix",
+                    "右腕 · 等待画面\n勾选 /camera/hand_right_color 或 right_wrist_color",
+                ),
+            ):
+                lab.setVisible(True)
+                src = self._pick_mv6d_color_frame(side)
+                if src is None:
+                    self._set_mv6d_preview_label(lab, None, empty, cache_attr=cache)
+                    continue
+                pending[src[0]] = src[1]
+                wrist_pending.append((lab, cache, empty, src[0]))
+        drawn = self._mv6d_overlay_hand_skeleton(pending)
+        if head_bgr is not None:
             self._set_mv6d_preview_label(
                 self.mv6d_head_preview,
-                show,
+                drawn.get("/camera/head_color", pending.get("/camera/head_color")),
                 "头部 · 点击选择物体（无帧）",
                 cache_attr="_mv6d_head_pix",
                 source_wh=(int(head_bgr.shape[1]), int(head_bgr.shape[0])),
             )
         else:
-            self._mv6d_live_head_bgr = None
             self._set_mv6d_preview_label(
                 self.mv6d_head_preview,
                 None,
                 "头部 · 等待画面\n勾选 /camera/head_color，或仿真「只开界面」后重进本页",
                 cache_attr="_mv6d_head_pix",
             )
-
-        # 尚无估计结果时同步刷双腕实况；无帧显示占位（不隐藏）
-        for side, lab, cache, empty in (
-            (
-                "left",
-                self.mv6d_left_wrist_preview,
-                "_mv6d_left_wrist_pix",
-                "左腕 · 等待画面\n勾选 /camera/hand_left_color 或 left_wrist_color",
-            ),
-            (
-                "right",
-                self.mv6d_right_wrist_preview,
-                "_mv6d_right_wrist_pix",
-                "右腕 · 等待画面\n勾选 /camera/hand_right_color 或 right_wrist_color",
-            ),
-        ):
-            lab.setVisible(True)
-            src = self._pick_mv6d_color_frame(side)
-            if src is None:
-                self._set_mv6d_preview_label(lab, None, empty, cache_attr=cache)
-                continue
-            if self._mv6d_last_snap is None:
-                self._set_mv6d_preview_label(
-                    lab,
-                    src[1],
-                    empty.replace("等待画面", "点击放大"),
-                    cache_attr=cache,
-                )
+        for lab, cache, empty, topic in wrist_pending:
+            self._set_mv6d_preview_label(
+                lab,
+                drawn.get(topic, pending.get(topic)),
+                empty.replace("等待画面", "点击放大"),
+                cache_attr=cache,
+            )
 
     def _mv6d_ensure_object_selected(self, *, silent: bool = False) -> bool:
         if getattr(self, "_mv6d_object_picked", False):
@@ -53566,6 +54357,9 @@ class CameraTopicWindow(QMainWindow):
 
         seed_u = int(self.mv6d_head_u_spin.value())
         seed_v = int(self.mv6d_head_v_spin.value())
+        pose_backend = str(
+            self.mv6d_method_combo.currentData() or POSE_BACKEND_PCA
+        )
         # 拷贝到线程，避免 UI 帧被覆盖
         head_bgr_c = None if head_bgr is None else np.ascontiguousarray(head_bgr)
         left_bgr_c = (
@@ -53612,9 +54406,14 @@ class CameraTopicWindow(QMainWindow):
         if not silent:
             self.mv6d_once_btn.setEnabled(False)
             self.mv6d_once_btn.setText("估计中…")
-            msg = "正在估计头+可见腕 6D 位姿…"
+            method_name = {
+                POSE_BACKEND_PCA: "PCA",
+                POSE_BACKEND_FOUNDATIONPOSE: "FoundPose",
+                POSE_BACKEND_ANY6D: "Any6D",
+            }.get(pose_backend, pose_backend)
+            msg = f"正在用 SAM3 分割，再计算 PCA、FoundPose、Any6D（结果文本用 {method_name}）…"
             if need_refine:
-                msg = "正在用 LingBot-Depth 补深度，随后估计 6D…"
+                msg = f"正在用 LingBot-Depth 补深度，随后 SAM3，并计算 PCA、FoundPose、Any6D…"
             self.mv6d_result_edit.setPlainText(msg)
 
         def _work() -> None:
@@ -53689,6 +54488,7 @@ class CameraTopicWindow(QMainWindow):
                     preferred_wrist_topic=preferred_wrist,
                     seed_u=seed_u,
                     seed_v=seed_v,
+                    pose_backend=pose_backend,
                     tf_buffer=tf_buffer,
                     get_intrinsics=node.get_intrinsics,
                     get_camera_frame=node.resolve_segment_camera_frame,
@@ -53699,9 +54499,35 @@ class CameraTopicWindow(QMainWindow):
                     snap.notes = (
                         f"{snap.notes}; {extra}" if snap.notes else extra
                     )
+                method_poses = {}
+                try:
+                    method_poses, pose_notes = self._collect_method_poses(
+                        snap,
+                        selected=pose_backend,
+                        head_bgr=head_bgr_c,
+                        head_depth=hd,
+                        head_topic=head_topic,
+                        head_depth_topic=head_depth_topic,
+                        seed_u=seed_u,
+                        seed_v=seed_v,
+                        get_intrinsics=node.get_intrinsics,
+                    )
+                    if pose_notes:
+                        extra = "; ".join(pose_notes)
+                        snap.notes = (
+                            f"{snap.notes}; {extra}" if snap.notes else extra
+                        )
+                except Exception as exc:
+                    snap.notes = (
+                        f"{snap.notes}; 其余方法未画出：{exc}"
+                        if snap.notes
+                        else f"其余方法未画出：{exc}"
+                    )
                 payload = {
                     "ok": True,
                     "snap": snap,
+                    "method_poses": method_poses,
+                    "captured_at": t0,
                     "elapsed_s": time.time() - t0,
                     "silent": silent,
                     "lingbot_notes": notes_extra,
@@ -53730,33 +54556,77 @@ class CameraTopicWindow(QMainWindow):
         *,
         method_tag: str,
         assumed_depth_m: float = 0.45,
+        pose_backend: str = POSE_BACKEND_PCA,
     ) -> Optional[Object6DPoseResult]:
-        # 无深度（LIBERO 默认未开 camera_depths）：走 RGB-only，不硬套残留 depth
+        """先用点击点做 SAM3，再按 PCA / FoundationPose / Any6D 出 6D。"""
+        if color_bgr is None:
+            return None
+        backend = str(pose_backend or POSE_BACKEND_PCA)
+        ch, cw = color_bgr.shape[:2]
+        su = max(0, min(cw - 1, int(seed_u)))
+        sv = max(0, min(ch - 1, int(seed_v)))
+        mask, seg_method = run_sam3_segmentation(
+            color_bgr, su, sv, text=None, tag=f"mv6d-{method_tag}"
+        )
+        if mask is None or not np.any(mask):
+            raise RuntimeError("SAM3 没有分出区域")
         if depth is None:
-            if color_bgr is None:
-                return None
-            return compute_rgb_only_6d_pose(
+            if backend != POSE_BACKEND_PCA:
+                raise RuntimeError(f"{backend} 需要深度图")
+            depth_use = np.full((ch, cw), float(assumed_depth_m), dtype=np.float32)
+            u_d, v_d = su, sv
+            seg_method = f"{seg_method}+plane"
+        else:
+            dh, dw = depth.shape[:2]
+            if mask.shape[:2] != (dh, dw):
+                mask = resize_mask_to_shape(mask, (dh, dw))
+            u_d, v_d = scale_uv_to_shape(su, sv, (ch, cw), (dh, dw))
+            depth_use = depth
+        return CameraTopicWindow._pose_on_mask(
+            color_bgr,
+            depth_use,
+            mask,
+            u_d,
+            v_d,
+            fx,
+            fy,
+            cx,
+            cy,
+            backend,
+            method_tag=method_tag,
+            seg_method=seg_method,
+        )
+
+    @staticmethod
+    def _pose_on_mask(
+        color_bgr,
+        depth,
+        mask,
+        u_d: int,
+        v_d: int,
+        fx: float,
+        fy: float,
+        cx: float,
+        cy: float,
+        backend: str,
+        *,
+        method_tag: str,
+        seg_method: str,
+    ) -> Optional[Object6DPoseResult]:
+        if backend == POSE_BACKEND_FOUNDATIONPOSE:
+            body = run_foundationpose_estimation(
                 color_bgr,
-                seed_u,
-                seed_v,
+                depth,
+                mask,
                 fx,
                 fy,
                 cx,
                 cy,
-                assumed_depth_m=assumed_depth_m,
-                method=f"{method_tag}/rgb-only",
+                settings=get_pose_settings(),
+                tag=f"mv6d-{method_tag}",
             )
-        dh, dw = depth.shape[:2]
-        if color_bgr is not None:
-            ch, cw = color_bgr.shape[:2]
-            u_d, v_d = scale_uv_to_shape(seed_u, seed_v, (ch, cw), (dh, dw))
-        else:
-            u_d = max(0, min(dw - 1, seed_u))
-            v_d = max(0, min(dh - 1, seed_v))
-        # 尊重全局位姿后端：FP / Any6D 时走对应估计器（单视角）
-        pcfg = get_pose_settings()
-        if pcfg.backend in (POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY6D):
-            result, _info = run_stereo_pose_pipeline(
+            return object6d_from_foundationpose(
+                mask,
                 depth,
                 u_d,
                 v_d,
@@ -53764,22 +54634,33 @@ class CameraTopicWindow(QMainWindow):
                 fy,
                 cx,
                 cy,
-                color_bgr=color_bgr,
-                pose_settings=pcfg,
+                body,
+                segment_method=f"sam3/{seg_method}",
             )
-            return result
-        mask, seg_method = segment_object_at_click(
-            u_d, v_d, depth, color_bgr=color_bgr
-        )
-        if not mask.any():
-            # 回退：以种子为中心的小窗
-            rad = 40
-            mask = np.zeros((dh, dw), dtype=bool)
-            mask[
-                max(0, v_d - rad) : min(dh, v_d + rad + 1),
-                max(0, u_d - rad) : min(dw, u_d + rad + 1),
-            ] = True
-            seg_method = "seed-box"
+        if backend == POSE_BACKEND_ANY6D:
+            body = run_any6d_estimation(
+                color_bgr,
+                depth,
+                mask,
+                fx,
+                fy,
+                cx,
+                cy,
+                settings=get_pose_settings(),
+                tag=f"mv6d-{method_tag}",
+            )
+            return object6d_from_foundationpose(
+                mask,
+                depth,
+                u_d,
+                v_d,
+                fx,
+                fy,
+                cx,
+                cy,
+                body,
+                segment_method=f"sam3/{seg_method}",
+            )
         return compute_stereo_segment_6d_pose(
             mask,
             depth,
@@ -53789,7 +54670,7 @@ class CameraTopicWindow(QMainWindow):
             fy,
             cx,
             cy,
-            method=f"{method_tag}/{seg_method}",
+            method=f"{method_tag}/sam3+pca/{seg_method}",
         )
 
     def _mv6d_try_wrist_view_if_visible(
@@ -53809,6 +54690,7 @@ class CameraTopicWindow(QMainWindow):
         assumed_depth_m: float,
         head_center_base: Optional[np.ndarray] = None,
         max_center_dist_m: float = 0.12,
+        pose_backend: str = POSE_BACKEND_PCA,
     ) -> Tuple[Optional[Object6DPoseResult], List[str]]:
         """仅当头部目标在该腕部视野内时才估计；否则跳过，不参考该腕图像。"""
         notes: List[str] = []
@@ -53892,18 +54774,23 @@ class CameraTopicWindow(QMainWindow):
                     return None, notes
 
         notes.append(f"{label}：可见，种子({wu},{wv})")
-        wrist_result = self._estimate_view_6d(
-            wrist_bgr,
-            wrist_depth,
-            int(wu),
-            int(wv),
-            fx,
-            fy,
-            cx,
-            cy,
-            method_tag=label,
-            assumed_depth_m=max(0.08, float(assumed_depth_m) * 0.7),
-        )
+        try:
+            wrist_result = self._estimate_view_6d(
+                wrist_bgr,
+                wrist_depth,
+                int(wu),
+                int(wv),
+                fx,
+                fy,
+                cx,
+                cy,
+                method_tag=label,
+                assumed_depth_m=max(0.08, float(assumed_depth_m) * 0.7),
+                pose_backend=pose_backend,
+            )
+        except Exception as exc:
+            notes.append(f"{label}：SAM3/位姿失败，不参考该腕图像（{exc}）")
+            return None, notes
         if wrist_result is None:
             notes.append(f"{label}：估计失败，跳过")
             return None, notes
@@ -53964,6 +54851,7 @@ class CameraTopicWindow(QMainWindow):
         tf_buffer,
         get_intrinsics,
         get_camera_frame,
+        pose_backend: str = POSE_BACKEND_PCA,
         assumed_depth_m: float = 0.45,
     ) -> MultiView6DPoseSnapshot:
         head_result = None
@@ -53994,20 +54882,24 @@ class CameraTopicWindow(QMainWindow):
             ch, cw = head_bgr.shape[:2]
             su = max(0, min(cw - 1, seed_u))
             sv = max(0, min(ch - 1, seed_v))
-            head_result = self._estimate_view_6d(
-                head_bgr,
-                head_depth,
-                su,
-                sv,
-                fx,
-                fy,
-                cx,
-                cy,
-                method_tag="head",
-                assumed_depth_m=assumed_depth_m,
-            )
+            try:
+                head_result = self._estimate_view_6d(
+                    head_bgr,
+                    head_depth,
+                    su,
+                    sv,
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    method_tag="head",
+                    assumed_depth_m=assumed_depth_m,
+                    pose_backend=pose_backend,
+                )
+            except Exception as exc:
+                raise RuntimeError(f"头部估计失败：{exc}") from exc
             if head_result is None:
-                notes.append("头部估计失败")
+                raise RuntimeError("头部估计失败：没有 SAM3 分割结果")
         else:
             notes.append("缺少头部 RGB")
 
@@ -54025,6 +54917,8 @@ class CameraTopicWindow(QMainWindow):
             T_h = self._mv6d_sim_extrinsic_matrix(
                 head_topic, head_depth_topic, hf
             )
+            if T_h is None:
+                T_h = self._mv6d_manual_extrinsic_matrix(head_topic, hf)
             if T_h is None and tf_buffer is not None and hf:
                 T_h = lookup_transform_matrix(tf_buffer, BASE_LINK_FRAME, hf)
             if T_h is not None:
@@ -54034,13 +54928,12 @@ class CameraTopicWindow(QMainWindow):
                 )[0]
 
         # FP / Any6D：用头部学习位姿变换到 base，不再跑腕部（昂贵且 PCA 融合会冲掉学习结果）
-        _pcfg_mv = get_pose_settings()
         if (
-            _pcfg_mv.backend in (POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY6D)
+            pose_backend in (POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY6D)
             and head_result is not None
         ):
             notes.append(
-                f"后端={_pcfg_mv.backend}：仅头部学习位姿，跳过腕部融合"
+                f"方法={pose_backend}，分割=SAM3：仅头部，跳过腕部融合"
             )
             frame_id = BASE_LINK_FRAME
             R_cam = np.asarray(head_result.rotation_matrix, dtype=np.float32)
@@ -54135,6 +55028,7 @@ class CameraTopicWindow(QMainWindow):
             get_camera_frame=get_camera_frame,
             assumed_depth_m=assumed_depth_m,
             head_center_base=head_center_base,
+            pose_backend=pose_backend,
         )
         notes.extend(n_l)
         right_wrist_result, n_r = self._mv6d_try_wrist_view_if_visible(
@@ -54153,6 +55047,7 @@ class CameraTopicWindow(QMainWindow):
             get_camera_frame=get_camera_frame,
             assumed_depth_m=assumed_depth_m,
             head_center_base=head_center_base,
+            pose_backend=pose_backend,
         )
         notes.extend(n_r)
 
@@ -54200,6 +55095,8 @@ class CameraTopicWindow(QMainWindow):
                 return None
             # 优先 Isaac 外参（与 TCP 同系）；避免 A2D 真机 TF 把桌面点抬到 Z≈1.8
             T = self._mv6d_sim_extrinsic_matrix(color_topic, depth_topic, frame)
+            if T is None:
+                T = self._mv6d_manual_extrinsic_matrix(color_topic, frame)
             if T is None:
                 if not frame:
                     return None
@@ -54257,7 +55154,7 @@ class CameraTopicWindow(QMainWindow):
                 raise RuntimeError("融合点云 PCA 失败")
             center, rotation, half_ext, rpy, quat = pose
             frame_id = target_frame
-            method = "pca-multiview-base+gravity+clean"
+            method = "sam3+pca-multiview-base+gravity+clean"
             corners = obb_corners(center, rotation, half_ext)
             extents = (
                 float(half_ext[0] * 2),
@@ -54280,7 +55177,7 @@ class CameraTopicWindow(QMainWindow):
             quat = primary.quaternion_xyzw
             corners = primary.obb_corners
             extents = primary.obb_extents
-            method = "pca-single-view"
+            method = "sam3+pca-single-view"
             fused_n = int(primary.point_count)
             notes.append("无 TF→base_link，使用单视角相机系结果（未几何融合）")
 
@@ -54351,6 +55248,17 @@ class CameraTopicWindow(QMainWindow):
             notes="; ".join(notes),
         )
 
+    def _on_mv6d_copy_result(self) -> None:
+        text = self.mv6d_result_edit.toPlainText().strip()
+        if not text:
+            text = self.mv6d_error_label.text().strip()
+        clip = QApplication.clipboard()
+        if clip is None or not text:
+            return
+        clip.setText(text)
+        if hasattr(self, "status_bar"):
+            self.status_bar.showMessage("已复制多视角 6D 结果", 3000)
+
     def _refresh_mv6d_result_text(self, snap: MultiView6DPoseSnapshot) -> None:
         gt_xyz, gt_R = self._mv6d_gt_pose()
         text = format_multiview_6d_text(
@@ -54359,7 +55267,14 @@ class CameraTopicWindow(QMainWindow):
             gt_R=gt_R,
             gt_enabled=self.mv6d_gt_enable_check.isChecked(),
         )
-        self.mv6d_result_edit.setPlainText(text)
+        edit = self.mv6d_result_edit
+        bar = edit.verticalScrollBar()
+        selecting = edit.hasFocus() and edit.textCursor().hasSelection()
+        if not selecting and not bar.isSliderDown() and edit.toPlainText() != text:
+            scroll_value = bar.value()
+            edit.setPlainText(text)
+            bar.setValue(min(scroll_value, bar.maximum()))
+            bar.raise_()
         if self.mv6d_gt_enable_check.isChecked() and gt_xyz is not None and gt_R is not None:
             t_mm, r_deg, d_mm = pose_error_metrics(
                 snap.position_xyz, snap.rotation_matrix, gt_xyz, gt_R
@@ -54653,6 +55568,9 @@ class CameraTopicWindow(QMainWindow):
                     pass
 
         rendered_head = _render_one(snap.head_topic, snap.head_result, "HEAD 6D")
+        _skel_images = {}
+        if rendered_head is not None:
+            _skel_images[str(snap.head_topic)] = rendered_head
         # 不可见腕：只显示画面，不叠加伪位姿（避免“参考了不可见腕”的错觉）
         if left_result is not None:
             rendered_left = _render_one(left_topic, left_result, "L-WRIST 6D")
@@ -54694,6 +55612,14 @@ class CameraTopicWindow(QMainWindow):
                     )
                 except Exception:
                     pass
+        if rendered_left is not None:
+            _skel_images[str(left_topic)] = rendered_left
+        if rendered_right is not None:
+            _skel_images[str(right_topic)] = rendered_right
+        _skel_drawn = self._mv6d_overlay_hand_skeleton(_skel_images)
+        rendered_head = _skel_drawn.get(str(snap.head_topic), rendered_head)
+        rendered_left = _skel_drawn.get(str(left_topic), rendered_left)
+        rendered_right = _skel_drawn.get(str(right_topic), rendered_right)
         self._set_mv6d_preview_label(
             self.mv6d_head_preview,
             rendered_head,
@@ -54832,6 +55758,44 @@ class CameraTopicWindow(QMainWindow):
                 return np.asarray(T, dtype=np.float64)
         return None
 
+    def _mv6d_manual_extrinsic_matrix(
+        self, color_topic: str = "", frame: str = ""
+    ) -> Optional[np.ndarray]:
+        """手眼标定页保存的外参。残差大于 2cm，或腕部相对 TCP 远于 35cm 的结果不用。"""
+        try:
+            from camera_extrinsic_calib import compose_base_camera, load_store
+        except Exception:
+            return None
+        cameras = load_store().get("cameras") or {}
+        entry = cameras.get(str(color_topic or ""))
+        if entry is None and normalize_frame_id(frame) == "camera_frame":
+            entry = cameras.get("/camera/head_color")
+        if not isinstance(entry, dict):
+            return None
+        try:
+            rms = float(entry.get("rms_m") or 0.0)
+        except (TypeError, ValueError):
+            rms = 0.0
+        if rms > 0.02:
+            return None
+        if entry.get("model") == "eye_in_hand":
+            raw = entry.get("T_tcp_camera")
+            tcp = self._calib_tcp(str(entry.get("arm_side") or ""))
+            if not tcp or raw is None:
+                return None
+            t_tcp = np.asarray(raw, dtype=np.float64)
+            if t_tcp.shape != (4, 4) or float(np.linalg.norm(t_tcp[:3, 3])) > 0.35:
+                return None
+            matrix = compose_base_camera(tcp["xyz"], tcp["xyzw"], t_tcp)
+        else:
+            raw = entry.get("T_base_camera")
+            if raw is None:
+                return None
+            matrix = np.asarray(raw, dtype=np.float64)
+        if getattr(matrix, "shape", None) != (4, 4) or not np.isfinite(matrix).all():
+            return None
+        return matrix
+
     def _mv6d_reproject_head_seed_to_wrist(
         self,
         *,
@@ -54907,6 +55871,226 @@ class CameraTopicWindow(QMainWindow):
             return None, None
         return ui, vi
 
+    def _mv6d_pose_in_base(self, snap: MultiView6DPoseSnapshot):
+        """把估计位姿变到 base_link。变不了就返回 None，避免画到相机系坐标上。"""
+        frame = normalize_frame_id(snap.frame_id)
+        base = normalize_frame_id(BASE_LINK_FRAME)
+        xyz = np.asarray(snap.position_xyz, dtype=np.float64).reshape(3)
+        rotation = np.asarray(snap.rotation_matrix, dtype=np.float64).reshape(3, 3)
+        corners = None
+        if snap.obb_corners is not None:
+            arr = np.asarray(snap.obb_corners, dtype=np.float64)
+            if arr.shape == (8, 3):
+                corners = arr
+        extents = snap.obb_extents
+        if not np.isfinite(xyz).all() or not np.isfinite(rotation).all():
+            return None
+        if (snap.tf_ok and (not frame or frame == base)) or frame == base:
+            return xyz, rotation, corners, extents
+        if not frame or frame in ("camera", "cam", "optical_frame"):
+            try:
+                head_t = snap.head_topic or "/camera/head_color"
+                frame = self.node.resolve_segment_camera_frame(head_t, "") or frame or "camera"
+            except Exception:
+                frame = frame or "camera"
+        matrix = self._mv6d_sim_extrinsic_matrix(snap.head_topic or "", "", frame or "")
+        if matrix is None:
+            matrix = self._mv6d_manual_extrinsic_matrix(snap.head_topic or "", frame or "")
+        if matrix is None:
+            try:
+                tf_buffer = self.node.get_tf_buffer()
+            except Exception:
+                tf_buffer = None
+            if tf_buffer is not None and frame:
+                matrix = lookup_transform_matrix(tf_buffer, BASE_LINK_FRAME, frame)
+        if matrix is None:
+            return None
+        matrix = np.asarray(matrix, dtype=np.float64)
+        if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+            return None
+        xyz_b = matrix[:3, :3] @ xyz + matrix[:3, 3]
+        rotation_b = matrix[:3, :3] @ rotation
+        corners_b = None
+        if corners is not None:
+            corners_b = transform_points_by_matrix(corners.astype(np.float32), matrix)
+        return xyz_b, rotation_b, corners_b, extents
+
+    def _mv6d_T_base_from_head(self, snap: MultiView6DPoseSnapshot):
+        """头部相机到 base_link。腕部标定误差大，分割点只用头部外参。"""
+        topic = snap.head_topic or "/camera/head_color"
+        frame = ""
+        try:
+            frame = self.node.resolve_segment_camera_frame(topic, "") or ""
+        except Exception:
+            frame = ""
+        matrix = self._mv6d_sim_extrinsic_matrix(topic, "", frame)
+        if matrix is None:
+            matrix = self._mv6d_manual_extrinsic_matrix(topic, frame)
+        if matrix is None:
+            try:
+                tf_buffer = self.node.get_tf_buffer()
+            except Exception:
+                tf_buffer = None
+            if tf_buffer is not None and frame:
+                matrix = lookup_transform_matrix(tf_buffer, BASE_LINK_FRAME, frame)
+        if matrix is None:
+            return None
+        matrix = np.asarray(matrix, dtype=np.float64)
+        if matrix.shape != (4, 4) or not np.isfinite(matrix).all():
+            return None
+        return matrix
+
+    def _mv6d_sam3_points_in_base(self, snap: MultiView6DPoseSnapshot):
+        result = snap.head_result
+        if result is None or result.points_3d is None:
+            return None, ""
+        points = np.asarray(result.points_3d, dtype=np.float32).reshape(-1, 3)
+        if points.shape[0] == 0 or not np.isfinite(points).all():
+            return None, ""
+        matrix = self._mv6d_T_base_from_head(snap)
+        if matrix is None:
+            return None, "外参"
+        if points.shape[0] > 6000:
+            step = int(np.ceil(points.shape[0] / 6000.0))
+            points = points[::step]
+        return transform_points_by_matrix(points, matrix), ""
+
+    def _camera_pose_to_base(self, snap: MultiView6DPoseSnapshot, result: Object6DPoseResult):
+        matrix = self._mv6d_T_base_from_head(snap)
+        if matrix is None or result is None:
+            return None
+        xyz = np.asarray(result.position_xyz, dtype=np.float64).reshape(3)
+        rotation = np.asarray(result.rotation_matrix, dtype=np.float64).reshape(3, 3)
+        if not np.isfinite(xyz).all() or not np.isfinite(rotation).all():
+            return None
+        xyz_b = matrix[:3, :3] @ xyz + matrix[:3, 3]
+        rotation_b = matrix[:3, :3] @ rotation
+        corners_b = None
+        if result.obb_corners is not None:
+            corners = np.asarray(result.obb_corners, dtype=np.float32)
+            if corners.shape == (8, 3):
+                corners_b = transform_points_by_matrix(corners, matrix)
+        return xyz_b, rotation_b, corners_b, result.obb_extents
+
+    def _collect_method_poses(
+        self,
+        snap: MultiView6DPoseSnapshot,
+        *,
+        selected: str,
+        head_bgr,
+        head_depth,
+        head_topic: str,
+        head_depth_topic: str,
+        seed_u: int,
+        seed_v: int,
+        get_intrinsics,
+    ):
+        """同一张 SAM3 掩码上补齐另外两种方法，连同当前结果一起交给机器人页。"""
+        labels = {
+            POSE_BACKEND_PCA: "PCA",
+            POSE_BACKEND_FOUNDATIONPOSE: "FoundPose",
+            POSE_BACKEND_ANY6D: "Any6D",
+        }
+        poses = {}
+        notes: List[str] = []
+        selected_pose = self._mv6d_pose_in_base(snap)
+        if selected_pose is not None:
+            poses[str(selected or POSE_BACKEND_PCA)] = selected_pose
+        result = snap.head_result
+        if result is None or result.mask is None or head_bgr is None or head_depth is None:
+            if selected_pose is None:
+                notes.append("三种方法都缺少可放到 base_link 的位姿")
+            return poses, notes
+        depth = np.asarray(head_depth)
+        dh, dw = depth.shape[:2]
+        mask = np.asarray(result.mask)
+        if mask.shape[:2] != (dh, dw):
+            mask = resize_mask_to_shape(mask, (dh, dw))
+        ch, cw = np.asarray(head_bgr).shape[:2]
+        u_d, v_d = scale_uv_to_shape(int(seed_u), int(seed_v), (ch, cw), (dh, dw))
+        fx, fy, cx, cy = get_intrinsics(head_depth_topic or head_topic, dw, dh)
+        for backend in (POSE_BACKEND_PCA, POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY6D):
+            if backend in poses:
+                continue
+            label = labels.get(backend, backend)
+            try:
+                view = self._pose_on_mask(
+                    head_bgr,
+                    depth,
+                    mask,
+                    u_d,
+                    v_d,
+                    fx,
+                    fy,
+                    cx,
+                    cy,
+                    backend,
+                    method_tag="head",
+                    seg_method="sam3",
+                )
+            except Exception as exc:
+                notes.append(f"{label} 失败：{exc}")
+                continue
+            if view is None:
+                notes.append(f"{label} 无结果")
+                continue
+            converted = self._camera_pose_to_base(snap, view)
+            if converted is None:
+                notes.append(f"{label} 缺少可用外参")
+                continue
+            poses[backend] = converted
+        return poses, notes
+
+    def _show_sam3_on_robot_view(self, snap: MultiView6DPoseSnapshot, silent: bool = False) -> None:
+        points, reason = self._mv6d_sam3_points_in_base(snap)
+        if points is None:
+            if reason and not silent:
+                self.status_bar.showMessage(
+                    "SAM3 分割点仍在相机系，缺少可用外参，机器人页未画出。", 8000
+                )
+            return
+        self._robot_sam3_points = points
+        view = getattr(self, "_robot_view", None)
+        if view is not None and hasattr(view, "set_sam3_points"):
+            view.set_sam3_points(points)
+
+    def _show_mv6d_on_robot_view(
+        self,
+        snap: MultiView6DPoseSnapshot,
+        silent: bool = False,
+        method_poses=None,
+    ) -> None:
+        try:
+            self._show_sam3_on_robot_view(snap, silent=silent)
+        except Exception as exc:
+            if not silent:
+                self.status_bar.showMessage(f"机器人页未画出 SAM3：{exc}", 8000)
+        poses = dict(method_poses or {})
+        if not poses:
+            converted = self._mv6d_pose_in_base(snap)
+            if converted is not None:
+                text = str(getattr(snap, "method", "") or "").lower()
+                if "foundation" in text:
+                    key = POSE_BACKEND_FOUNDATIONPOSE
+                elif "any6d" in text:
+                    key = POSE_BACKEND_ANY6D
+                else:
+                    key = POSE_BACKEND_PCA
+                poses[key] = converted
+        if not poses:
+            if not silent:
+                self.status_bar.showMessage(
+                    "位姿仍在相机系，缺少可用外参，机器人页未画出。", 8000
+                )
+            return
+        stored = dict(getattr(self, "_robot_method_poses", {}) or {})
+        stored.update(poses)
+        self._robot_method_poses = stored
+        view = getattr(self, "_robot_view", None)
+        if view is not None and hasattr(view, "set_method_pose"):
+            for key, pose in poses.items():
+                view.set_method_pose(key, *pose)
+
     def _mv6d_xyz_in_base_link(
         self, snap: MultiView6DPoseSnapshot
     ) -> Tuple[Optional[Tuple[float, float, float]], str]:
@@ -54942,16 +56126,20 @@ class CameraTopicWindow(QMainWindow):
                 )
             except Exception:
                 pass
+        extrinsic_note = "sim外参"
         T_sim = self._mv6d_sim_extrinsic_matrix(
             snap.head_topic or "", "", frame or ""
         )
+        if T_sim is None:
+            T_sim = self._mv6d_manual_extrinsic_matrix(snap.head_topic or "", frame or "")
+            extrinsic_note = "手工外参"
         if T_sim is not None:
             p = transform_points_by_matrix(
                 np.asarray([xyz], dtype=np.float32), T_sim
             )[0]
             return (
                 (float(p[0]), float(p[1]), float(p[2])),
-                f"{frame or 'camera'}→base_link(sim外参)",
+                f"{frame or 'camera'}→base_link({extrinsic_note})",
             )
         tf_buffer = None
         try:
@@ -55336,6 +56524,31 @@ class CameraTopicWindow(QMainWindow):
         )
         return True
 
+    def _adopt_mv6d_segment_target(self, snap: MultiView6DPoseSnapshot) -> bool:
+        """把已变到 base_link 的 6D 位置记成「分割位姿」，单选框才可以选。"""
+        if not hasattr(self, "move_target_segment_radio"):
+            return False
+        xyz, note = self._mv6d_xyz_in_base_link(snap)
+        if xyz is None:
+            return False
+        quat = snap.quaternion_xyzw
+        self._store_segment_target(
+            SegmentPoseTarget(
+                camera_frame=BASE_LINK_FRAME,
+                position_xyz=(float(xyz[0]), float(xyz[1]), float(xyz[2])),
+                quaternion_xyzw=(
+                    float(quat[0]),
+                    float(quat[1]),
+                    float(quat[2]),
+                    float(quat[3]),
+                ),
+                source_topic=snap.head_topic or "/camera/head_color",
+                label=f"多视角6D ({note})",
+                keep_tcp_orientation=True,
+            )
+        )
+        return True
+
     def _on_mv6d_estimate_finished(self, payload: object) -> None:
         self._mv6d_busy = False
         self.mv6d_once_btn.setEnabled(True)
@@ -55353,6 +56566,30 @@ class CameraTopicWindow(QMainWindow):
         if not isinstance(snap, MultiView6DPoseSnapshot):
             return
         self._mv6d_last_snap = snap
+        try:
+            self._show_mv6d_on_robot_view(
+                snap,
+                silent=silent,
+                method_poses=payload.get("method_poses"),
+            )
+        except Exception as exc:
+            if not silent:
+                self.status_bar.showMessage(f"机器人页未画出 6D：{exc}", 8000)
+        from mv6d_grasp_input import observation_from_snapshot
+        try:
+            captured_at = float(payload.get("captured_at", 0))
+            base_pose = self._mv6d_pose_in_base(snap)
+            observation = observation_from_snapshot(
+                snap,
+                captured_at,
+                f"mv6d:{captured_at:.9f}",
+                base_pose=base_pose,
+            )
+            self.grasp_execution_panel.set_observation(observation)
+        except Exception as exc:
+            self.grasp_execution_panel.message = f"视觉6D输入转换失败: {exc}"
+            self.grasp_execution_panel.refresh()
+
         # 先用仿真物体自动校准 GT，再刷新误差显示（避免手填 GT 导致「假 800mm」）
         try:
             xyz_est, _ = self._mv6d_xyz_in_base_link(snap)
@@ -55368,6 +56605,11 @@ class CameraTopicWindow(QMainWindow):
                 self.status_bar.showMessage(f"多视角 6D 叠加失败: {exc}")
         elapsed = float(payload.get("elapsed_s") or 0.0)
         filled = False
+        if not silent:
+            try:
+                self._adopt_mv6d_segment_target(snap)
+            except Exception as exc:
+                self.status_bar.showMessage(f"分割位姿未写入: {exc}")
         if (
             not silent
             and getattr(self, "mv6d_fill_cmd_check", None) is not None
@@ -55656,15 +56898,322 @@ class CameraTopicWindow(QMainWindow):
             return "fail", msg
         return "ok", msg
 
+    def _update_arm_repeat_btn(self) -> None:
+        btn = getattr(self, "arm_repeat_btn", None)
+        if btn is None:
+            return
+        if getattr(self, "_repeat_active", False):
+            cycle = int(getattr(self, "_repeat_cycle", 0) or 0)
+            btn.setText("取消重复")
+            btn.setStyleSheet(f"color: {UI_ACCENT_RED};")
+            btn.setEnabled(True)
+            btn.setToolTip(f"停止重复执行（当前第 {cycle} 轮）")
+            return
+        btn.setText("重复执行")
+        btn.setStyleSheet("")
+        btn.setEnabled(True)
+        btn.setToolTip(
+            "左右臂按当前目标各移动一次，再回到界面启动时记下的初始关节位置，然后按间隔重复。\n"
+            "回初始按上次下发的关节角插值，不依赖尚未更新的关节反馈。\n"
+            "执行中再点一次取消。"
+        )
+
+    def _stop_arm_repeat(self, message: str, *, cancel_motion: bool) -> None:
+        was_active = bool(getattr(self, "_repeat_active", False))
+        self._repeat_active = False
+        self._repeat_queue = []
+        self._repeat_busy_retries = 0
+        self._repeat_skip_retries = 0
+        self._repeat_last_goal = None
+        self._repeat_advance_pending = False
+        wait_timer = getattr(self, "_repeat_wait_timer", None)
+        if wait_timer is not None:
+            wait_timer.stop()
+        self._update_arm_repeat_btn()
+        if cancel_motion and was_active:
+            if self._is_sim_arm_moving():
+                self._cancel_sim_arm_move("")
+            elif self.node.is_slow_motion_busy():
+                self.node.cancel_slow_motion()
+        if message:
+            self.status_bar.showMessage(message, 8000)
+        self._update_arm_move_btns_ui()
+
+    def _on_arm_repeat_clicked(self) -> None:
+        if self._repeat_active:
+            self._stop_arm_repeat("已取消重复执行", cancel_motion=True)
+            return
+        if self._arm_text_motion_busy():
+            self.status_bar.showMessage("已有移动进行中，请先停掉再重复执行", 6000)
+            return
+        sim = bool(self._sim_teleop_active() or self._sim_abs_cmd_ready())
+        if not sim and not self.node.is_arm_enabled():
+            self.status_bar.showMessage("手臂未使能：请先点「启用手臂」", 6000)
+            return
+        homes: Dict[str, Tuple[Tuple[float, float, float], Tuple[float, float, float, float]]] = {}
+        outs: List[ResolvedArmMoveGoal] = []
+        for side in ("left", "right"):
+            tcp = self._tcp_for_relative_goal(side)
+            if tcp is None:
+                continue
+            homes[side] = (
+                (float(tcp[0][0]), float(tcp[0][1]), float(tcp[0][2])),
+                (float(tcp[1][0]), float(tcp[1][1]), float(tcp[1][2]), float(tcp[1][3])),
+            )
+            goal = self._resolve_move_goal(side)
+            if goal is None:
+                continue
+            outs.append(goal)
+        if not homes:
+            self.status_bar.showMessage("无法重复：没有左右臂当前位置", 8000)
+            return
+        if not outs:
+            self.status_bar.showMessage(
+                "无法重复：请先给左臂或右臂设置偏移，或选择分割位姿", 8000
+            )
+            return
+        home_goals = []
+        for side in ("left", "right"):
+            if side not in homes or not any(goal.arm_side == side for goal in outs):
+                continue
+            recorded = self._arm_home_pose.get(side)
+            pose = recorded if recorded is not None else homes[side]
+            home_goals.append(
+                ResolvedArmMoveGoal(
+                    position_xyz=pose[0],
+                    quaternion_xyzw=pose[1],
+                    label=f"{arm_side_label(side)}回初始",
+                    arm_side=side,
+                )
+            )
+        home_q = getattr(self, "_arm_home_q16", None)
+        if not isinstance(home_q, list) or len(home_q) < 16:
+            home_q = self.node._load_host_fk_q16()
+        self._repeat_home_q16 = (
+            [float(v) for v in home_q[:16]] if home_q and len(home_q) >= 16 else None
+        )
+        commanded = getattr(self.node, "_commanded_q16", None)
+        if not isinstance(commanded, list) or len(commanded) < 16:
+            commanded = self.node._load_host_fk_q16()
+        self._repeat_commanded_q16 = (
+            [float(v) for v in commanded[:16]] if commanded and len(commanded) >= 16 else None
+        )
+        self._text_cmd_queue.clear()
+        self._repeat_out_goals = outs
+        self._repeat_home_goals = home_goals
+        self._repeat_cycle = 0
+        self._repeat_busy_retries = 0
+        self._repeat_skip_retries = 0
+        self._repeat_last_goal = None
+        self._repeat_active = True
+        self._update_arm_repeat_btn()
+        self._begin_repeat_cycle()
+
+    def _begin_repeat_cycle(self) -> None:
+        if not self._repeat_active:
+            return
+        self._repeat_cycle += 1
+        self._repeat_queue = list(self._repeat_out_goals) + list(self._repeat_home_goals)
+        self._repeat_busy_retries = 0
+        self._repeat_skip_retries = 0
+        names = "、".join(arm_side_label(goal.arm_side) for goal in self._repeat_out_goals)
+        self.status_bar.showMessage(f"重复执行第 {self._repeat_cycle} 轮：{names}", 5000)
+        self._advance_repeat_queue()
+
+    def _advance_repeat_queue(self) -> None:
+        if not self._repeat_active:
+            return
+        if self._arm_text_motion_busy():
+            self._repeat_busy_retries += 1
+            if self._repeat_busy_retries > 25:
+                self._stop_arm_repeat("重复执行中断：上一段移动未结束", cancel_motion=False)
+                return
+            self._schedule_repeat_advance()
+            return
+        self._repeat_busy_retries = 0
+        if not self._repeat_queue:
+            interval = 0.0
+            spin = getattr(self, "arm_repeat_interval_spin", None)
+            if spin is not None:
+                interval = max(0.0, float(spin.value()))
+            self.status_bar.showMessage(
+                f"第 {self._repeat_cycle} 轮已回到初始位置，{interval:.1f} 秒后继续",
+                5000,
+            )
+            self._repeat_wait_timer.start(int(round(interval * 1000.0)))
+            return
+        goal = self._repeat_queue.pop(0)
+        self._kick_repeat_goal(goal)
+
+    def _schedule_repeat_advance(self, delay_ms: int = 200) -> None:
+        if self._repeat_advance_pending or not self._repeat_active:
+            return
+        self._repeat_advance_pending = True
+        QTimer.singleShot(max(0, int(delay_ms)), self._advance_repeat_queue_from_timer)
+
+    def _repeat_goal_is_home(self, goal: ResolvedArmMoveGoal) -> bool:
+        return "回初始" in str(goal.label or "")
+
+    def _repeat_arm_indexes(self, side: str):
+        return range(9, 16) if side == "right" else range(2, 9)
+
+    def _repeat_merge_commanded(self, q16, side: str) -> None:
+        if not q16 or len(q16) < 16:
+            return
+        fresh = [float(v) for v in list(q16)[:16]]
+        base = self._repeat_commanded_q16
+        if not base or len(base) < 16:
+            self._repeat_commanded_q16 = fresh
+            return
+        merged = [float(v) for v in base[:16]]
+        for index in list(self._repeat_arm_indexes(side)) + [0, 1]:
+            merged[index] = fresh[index]
+        self._repeat_commanded_q16 = merged
+
+    def _repeat_home_joints_far(self, goal: ResolvedArmMoveGoal, tol_rad: float = 0.02) -> bool:
+        home = self._repeat_home_q16
+        commanded = self._repeat_commanded_q16
+        if not home or not commanded or len(home) < 16 or len(commanded) < 16:
+            return False
+        return any(
+            abs(float(commanded[index]) - float(home[index])) > tol_rad
+            for index in self._repeat_arm_indexes(goal.arm_side)
+        )
+
+    def _repeat_home_joint_target(self, goal: ResolvedArmMoveGoal) -> Optional[List[float]]:
+        home = self._repeat_home_q16
+        commanded = self._repeat_commanded_q16
+        if not home or not commanded or len(home) < 16 or len(commanded) < 16:
+            return None
+        target = [float(v) for v in commanded[:16]]
+        for index in self._repeat_arm_indexes(goal.arm_side):
+            target[index] = float(home[index])
+        if not any(self._repeat_goal_is_home(item) for item in self._repeat_queue):
+            target[0] = float(home[0])
+            target[1] = float(home[1])
+        return target
+
+    def _repeat_tcp_near_goal(self, goal: ResolvedArmMoveGoal, tol_m: float = 0.015) -> bool:
+        tcp = self._tcp_for_relative_goal(goal.arm_side)
+        if tcp is None:
+            return False
+        dx = float(tcp[0][0]) - float(goal.position_xyz[0])
+        dy = float(tcp[0][1]) - float(goal.position_xyz[1])
+        dz = float(tcp[0][2]) - float(goal.position_xyz[2])
+        return dx * dx + dy * dy + dz * dz <= tol_m * tol_m
+
+    def _advance_repeat_queue_from_timer(self) -> None:
+        self._repeat_advance_pending = False
+        self._advance_repeat_queue()
+
+    def _kick_repeat_goal(self, goal: ResolvedArmMoveGoal) -> None:
+        sim = bool(self._sim_teleop_active() or self._sim_abs_cmd_ready())
+        if sim:
+            msg = self._start_sim_arm_move(goal.arm_side, goal)
+        else:
+            if not self.node.is_arm_enabled():
+                self._stop_arm_repeat("手臂未使能，已停止重复", cancel_motion=False)
+                return
+            if self._repeat_goal_is_home(goal):
+                target = self._repeat_home_joint_target(goal)
+                start = self._repeat_commanded_q16
+                if target is not None and start is not None:
+                    msg = self.node.request_joint_space_move(start, target, goal)
+                else:
+                    msg = self.node.request_slow_move_to_goal(goal)
+            else:
+                if self._repeat_commanded_q16 is not None:
+                    self.node._motion_seed_override = list(self._repeat_commanded_q16)
+                msg = self.node.request_slow_move_to_goal(goal)
+        self._repeat_last_goal = goal
+        self._update_arm_move_btns_ui()
+        text = str(msg)
+        if text.startswith("无法"):
+            self._repeat_queue.insert(0, goal)
+            self._stop_arm_repeat(f"{text}（已停止重复）", cancel_motion=False)
+            return
+        if text.startswith("已有移动"):
+            self._repeat_queue.insert(0, goal)
+            self._schedule_repeat_advance()
+            return
+        if "无需移动" in text:
+            self._on_repeat_step_finished(False, text)
+            return
+        self.status_bar.showMessage(
+            f"重复第 {self._repeat_cycle} 轮：{goal.label}", 4000
+        )
+        if not self._arm_text_motion_busy():
+            QTimer.singleShot(0, lambda done=text: self._on_repeat_step_finished(True, done))
+
+    def _on_repeat_wait_timeout(self) -> None:
+        if not self._repeat_active:
+            return
+        self._begin_repeat_cycle()
+
+    def _on_repeat_step_finished(self, ok: bool, text: str) -> None:
+        if not self._repeat_active:
+            return
+        if not ok:
+            goal = self._repeat_last_goal
+            # 关节反馈还停在出发姿态时，笛卡尔回初始会被报成「无需移动」。
+            # 这时不能当成已经回到初始位置。
+            if "无需移动" in text and goal is not None:
+                if self._repeat_goal_is_home(goal) and self._repeat_home_joints_far(goal):
+                    self._repeat_skip_retries += 1
+                    if self._repeat_skip_retries <= 8:
+                        self._repeat_queue.insert(0, goal)
+                        self._schedule_repeat_advance(400)
+                        return
+                    self._stop_arm_repeat(
+                        "回初始失败：关节仍停在出发姿态（已停止重复）",
+                        cancel_motion=False,
+                    )
+                    return
+                if self._repeat_tcp_near_goal(goal) or (
+                    self._repeat_goal_is_home(goal) and not self._repeat_home_joints_far(goal)
+                ):
+                    self._repeat_skip_retries = 0
+                    self.status_bar.showMessage(f"{goal.label} 已在目标，继续重复", 3000)
+                    self._schedule_repeat_advance(400)
+                    return
+                self._repeat_skip_retries += 1
+                if self._repeat_skip_retries <= 8:
+                    self._repeat_queue.insert(0, goal)
+                    self._schedule_repeat_advance(400)
+                    return
+            self._stop_arm_repeat(f"{text}（已停止重复）", cancel_motion=False)
+            return
+        goal = self._repeat_last_goal
+        commanded = getattr(self.node, "_commanded_q16", None)
+        if goal is not None and isinstance(commanded, list):
+            self._repeat_merge_commanded(commanded, goal.arm_side)
+        self._repeat_skip_retries = 0
+        # 等关节反馈跟上，再规划回初始，避免下一段被判成零位移。
+        self._schedule_repeat_advance(500)
+
+    def _after_arm_motion_settled(self, ok: bool, text: str) -> bool:
+        if not getattr(self, "_repeat_active", False):
+            return False
+        self._on_repeat_step_finished(ok, text)
+        return True
+
     def _on_arm_move_clicked(self, arm_side: str) -> None:
+        if getattr(self, "_repeat_active", False) and not self._arm_text_motion_busy():
+            self._stop_arm_repeat("已停止重复执行", cancel_motion=False)
         side_name = arm_side_label(arm_side)
         if self._is_sim_arm_moving():
             moving = str((self._sim_arm_move or {}).get("arm_side", ""))
             if moving != arm_side:
                 return
             self._text_cmd_queue.clear()
+            repeating = bool(self._repeat_active)
+            if repeating:
+                self._repeat_active = False
+                self._repeat_queue = []
+                self._repeat_wait_timer.stop()
             msg = self._cancel_sim_arm_move()
-            self.status_bar.showMessage(msg)
+            self._update_arm_repeat_btn()
+            self.status_bar.showMessage("已取消重复执行" if repeating else msg)
             self._update_arm_move_btns_ui()
             return
         if self.node.is_slow_motion_busy():
@@ -55716,6 +57265,9 @@ class CameraTopicWindow(QMainWindow):
         self._update_arm_pose_display()
 
     def _on_slow_motion_finished(self, ok: bool, text: str) -> None:
+        if self._after_arm_motion_settled(ok, text):
+            self._update_arm_move_btns_ui()
+            return
         if self._text_cmd_pumping:
             self.status_bar.showMessage(text)
             self._update_arm_move_btns_ui()
@@ -57048,6 +58600,12 @@ class CameraTopicWindow(QMainWindow):
                 self.node.ensure_topic_scan()
             except Exception:
                 pass
+        # Acquisition dependencies do not require extra visible depth panels.
+        for color_topic in list(ros_enabled):
+            if not is_depth_topic(color_topic):
+                depth_topic = self._get_paired_depth_topic_name(color_topic)
+                if depth_topic:
+                    ros_enabled.add(depth_topic)
         self.node.set_enabled_topics(ros_enabled)
         self._rebuild_panels(enabled)
 

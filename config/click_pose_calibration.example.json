@@ -1,0 +1,15 @@
+{
+  "cameras": {
+    "/camera/head_color": {
+      "width": 1280,
+      "height": 800,
+      "K": [[0, 0, 0], [0, 0, 0], [0, 0, 1]],
+      "rectified": false,
+      "depth_registered_to_color": false,
+      "depth_topic": "/camera/head_depth",
+      "optical_frame": "REPLACE_WITH_ACTUAL_RECTIFIED_COLOR_OPTICAL_FRAME",
+      "base_frame": "base_link",
+      "T_base_camera": null
+    }
+  }
+}
