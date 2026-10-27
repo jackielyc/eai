@@ -1,4 +1,8 @@
-"""Read-only Cartesian IK preflight; never publishes or assumes collision safety."""
+"""Read-only IK preflight; never publishes or assumes collision safety.
+
+Pregrasp uses a joint-space transit to a verified terminal IK solution. Approach
+and lift retain Cartesian interpolation because their path geometry matters.
+"""
 import argparse
 import hashlib
 import json
@@ -8,7 +12,12 @@ import time
 import numpy as np
 
 from click_pose import validate_transform
-from grasp_execution import timed_waypoints
+from grasp_execution import (TCP_POSITION_TOLERANCE_M,
+                             TCP_ROTATION_TOLERANCE_RAD, timed_waypoints)
+
+
+MAX_CARTESIAN_SEGMENT_M = .60
+MAX_ROTATION_SEGMENT_RAD = 1.6
 
 
 def prepare(request):
@@ -25,38 +34,105 @@ def prepare(request):
         raise ValueError('无效实测关节种子')
     indices = [ik._q_idx[name] for name in _JOINT_NAMES]
     lower, upper = ik.model.lowerPositionLimit[indices], ik.model.upperPositionLimit[indices]
-    def check(q):
-        if not np.isfinite(q).all() or np.any(q < lower) or np.any(q > upper):
-            raise ValueError('IK 超出 URDF 关节限位')
+    def check(q, context=''):
+        if not np.isfinite(q).all():
+            raise ValueError('IK 解包含非有限关节值' + (f'（{context}）' if context else ''))
+        over = np.maximum(lower-q, q-upper)
+        bad = np.flatnonzero(over > 1e-3)
+        if bad.size:
+            i = int(bad[0])
+            where = f'，{context}' if context else ''
+            raise ValueError(
+                f'IK 超出 URDF 关节限位：{_JOINT_NAMES[i]}={q[i]:.4f} rad，'
+                f'允许 [{lower[i]:.4f}, {upper[i]:.4f}]{where}'
+            )
+        np.clip(q, lower, upper, out=q)
         pin.forwardKinematics(ik.model, ik.data, ik.q_from_list(q))
         pin.updateFramePlacements(ik.model, ik.data)
         return ik.data.oMf[fid].copy()
-    start = check(seed)
+    start = check(seed, '起点')
     T = validate_transform(preview['goals'][stage])
     dist = np.linalg.norm(T[:3, 3]-start.translation)
     delta_rotation = pin.log3(start.rotation.T @ T[:3, :3])
     angle = np.linalg.norm(delta_rotation)
-    if dist > .35 or angle > 1.6:
-        raise ValueError('单段位移>0.35m或旋转>约90度，请先手动移动到附近')
-    steps = max(2, int(np.ceil(max(dist/.005, angle/.03))))
-    rows = [seed.tolist()]
-    for alpha in np.linspace(0, 1, steps+1)[1:]:
-        xyz = start.translation*(1-alpha)+T[:3, 3]*alpha
-        R = start.rotation @ pin.exp3(delta_rotation*alpha)
-        quat = pin.Quaternion(R).coeffs()
-        solved = ik.solve(rows[-1], moving_side=side, goal_xyz=tuple(xyz),
-                          goal_xyzw=tuple(quat), pos_tol=.002, ori_tol=.02, max_iters=150)
+    simulation = request.get('execution_mode') == 'simulation'
+    allow_waist = request.get('allow_waist') is True
+    max_dist = MAX_CARTESIAN_SEGMENT_M
+    max_angle = MAX_ROTATION_SEGMENT_RAD
+    if dist > max_dist or angle > max_angle:
+        mode = '仿真' if simulation else '真机'
+        raise ValueError(
+            f'{mode}单段距离 {dist:.3f}m（上限 {max_dist:.2f}m），'
+            f'旋转 {np.degrees(angle):.1f}°（上限 {np.degrees(max_angle):.0f}°）；'
+            '请调整目标或先移动到附近'
+        )
+    fixed = ((list(range(9,16)) if allow_waist else [0, 1, *range(9,16)])
+             if side == 'left' else
+             (list(range(2,9)) if allow_waist else list(range(9))))
+    if stage == 'pregrasp':
+        quat = pin.Quaternion(T[:3, :3]).coeffs()
+        solved = ik.solve(seed.tolist(), moving_side=side, goal_xyz=tuple(T[:3, 3]),
+                          goal_xyzw=tuple(quat), pos_tol=.002, ori_tol=.02,
+                          max_iters=500, allow_waist=allow_waist)
         if solved is None:
-            raise ValueError(f'IK 未收敛（路径 {alpha:.0%}）')
-        actual = check(np.asarray(solved))
-        if np.linalg.norm(actual.translation-xyz) > .004 or np.linalg.norm(pin.log3(R.T @ actual.rotation)) > .04:
-            raise ValueError('IK 位姿误差过大（包括旋转），不能只按位置通过')
-        if np.max(np.abs(np.asarray(solved)-rows[-1])) > .12:
-            raise ValueError('相邻 IK 解跳变超过 0.12 rad')
-        fixed = [0, 1, *range(9,16)] if side == 'left' else list(range(9))
-        if np.max(np.abs(np.asarray(solved)[fixed]-seed[fixed])) > 1e-7:
+            if not allow_waist:
+                with_waist = ik.solve(
+                    seed.tolist(), moving_side=side, goal_xyz=tuple(T[:3, 3]),
+                    goal_xyzw=tuple(quat), pos_tol=.002, ori_tol=.02,
+                    max_iters=500, allow_waist=True,
+                )
+                if with_waist is not None:
+                    waist_delta = np.asarray(with_waist[:2], dtype=float) - seed[:2]
+                    raise ValueError(
+                        '预抓取终点在腰部固定时无解；允许腰部参与后可求解，'
+                        f'需要升降变化 {waist_delta[0]:+.3f}m、俯仰变化 '
+                        f'{np.degrees(waist_delta[1]):+.1f}°。可勾选“腰部参与 IK”后重试'
+                    )
+            raise ValueError('预抓取终点 IK 未收敛（已允许腰部参与）' if allow_waist else
+                             '预抓取终点 IK 未收敛：固定腰部和允许腰部参与两种求解均失败')
+        solved = np.asarray(solved, dtype=float)
+        actual = check(solved, '预抓取终点')
+        position_error = float(np.linalg.norm(actual.translation-T[:3, 3]))
+        rotation_error = float(np.linalg.norm(pin.log3(T[:3, :3].T @ actual.rotation)))
+        if position_error > TCP_POSITION_TOLERANCE_M or rotation_error > TCP_ROTATION_TOLERANCE_RAD:
+            raise ValueError(
+                f'预抓取终点 IK 误差过大：位置 {position_error*1000:.1f}mm，'
+                f'旋转 {np.degrees(rotation_error):.2f}°'
+            )
+        if np.max(np.abs(solved[fixed]-seed[fixed])) > 1e-7:
             raise ValueError('IK 改动了腰部或另一只手臂')
-        rows.append(solved)
+        steps = max(2, int(np.ceil(np.max(np.abs(solved-seed))/.03)))
+        rows = np.linspace(seed, solved, steps+1).tolist()
+        path_kind = 'joint_space_pregrasp'
+    else:
+        steps = max(2, int(np.ceil(max(dist/.005, angle/.03))))
+        rows = [seed.tolist()]
+        for alpha in np.linspace(0, 1, steps+1)[1:]:
+            xyz = start.translation*(1-alpha)+T[:3, 3]*alpha
+            R = start.rotation @ pin.exp3(delta_rotation*alpha)
+            quat = pin.Quaternion(R).coeffs()
+            solved = ik.solve(rows[-1], moving_side=side, goal_xyz=tuple(xyz),
+                              goal_xyzw=tuple(quat), pos_tol=.002, ori_tol=.02,
+                              max_iters=150, allow_waist=allow_waist)
+            if solved is None:
+                raise ValueError(f'IK 未收敛（路径 {alpha:.0%}）')
+            solved = np.asarray(solved, dtype=float)
+            actual = check(solved, f'路径 {alpha:.0%}')
+            position_error = float(np.linalg.norm(actual.translation-xyz))
+            rotation_error = float(np.linalg.norm(pin.log3(R.T @ actual.rotation)))
+            if position_error > TCP_POSITION_TOLERANCE_M or rotation_error > TCP_ROTATION_TOLERANCE_RAD:
+                raise ValueError(
+                    f'IK 位姿误差过大：路径 {alpha:.0%}，位置误差 {position_error*1000:.1f}mm'
+                    f'（上限 {TCP_POSITION_TOLERANCE_M*1000:.1f}mm），'
+                    f'旋转误差 {np.degrees(rotation_error):.2f}°'
+                    f'（上限 {np.degrees(TCP_ROTATION_TOLERANCE_RAD):.2f}°）'
+                )
+            if np.max(np.abs(solved-np.asarray(rows[-1]))) > .12:
+                raise ValueError('相邻 IK 解跳变超过 0.12 rad')
+            if np.max(np.abs(solved[fixed]-seed[fixed])) > 1e-7:
+                raise ValueError('IK 改动了腰部或另一只手臂')
+            rows.append(solved.tolist())
+        path_kind = 'cartesian'
     # Check interpolated paths as well, including TCP workspace bounds.
     bounds = np.asarray(profile['workspace_m'])
     for a, b in zip(rows, rows[1:]):
@@ -69,7 +145,9 @@ def prepare(request):
         raise ValueError('单段轨迹超过 180 秒，请缩短移动距离')
     return {'ok': True, 'preview_id': preview['id'], 'stage': stage, 'arm_side': side,
             'backend': 'host_ik_manual', 'ik_checked': True, 'joint_limits_checked': True,
-            'collision_checked': False, 'planned_at': time.time(), 'target': T.tolist(),
+            'collision_checked': False, 'path_kind': path_kind,
+            'waist_included': allow_waist,
+            'planned_at': time.time(), 'target': T.tolist(),
             'joint_waypoints': rows, 'times_s': times,
             'urdf_sha256': hashlib.sha256(Path(profile['urdf_path']).read_bytes()).hexdigest()}
 

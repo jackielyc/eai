@@ -10,6 +10,35 @@ from pathlib import Path
 
 import numpy as np
 
+
+TCP_POSITION_TOLERANCE_M = .010
+TCP_ROTATION_TOLERANCE_RAD = np.deg2rad(5.0)
+WRENCH_MAX_AGE_S = .5
+
+
+def evaluate_wrench(sample, force_limit_n, torque_limit_nm, now=None):
+    """Return (violation, force_norm, torque_norm) for a wrist sample."""
+    now = time.time() if now is None else float(now)
+    if not isinstance(sample, dict):
+        return '未收到六维力反馈', None, None
+    age = now-float(sample.get('stamp') or 0.)
+    if not 0 <= age <= WRENCH_MAX_AGE_S:
+        return f'六维力反馈过期（{age:.2f}s）', None, None
+    state = int(sample.get('force_state', 0) or 0)
+    if state != 0:
+        return f'六维力传感器状态异常 force_state={state}', None, None
+    force = np.asarray(sample.get('force'), dtype=float)
+    torque = np.asarray(sample.get('torque'), dtype=float)
+    if force.shape != (3,) or torque.shape != (3,) or not np.isfinite([force, torque]).all():
+        return '六维力数据格式无效', None, None
+    force_norm = float(np.linalg.norm(force))
+    torque_norm = float(np.linalg.norm(torque))
+    if force_norm > float(force_limit_n):
+        return f'合力 {force_norm:.2f}N 超过 {force_limit_n:.2f}N', force_norm, torque_norm
+    if torque_norm > float(torque_limit_nm):
+        return f'合力矩 {torque_norm:.3f}N·m 超过 {torque_limit_nm:.3f}N·m', force_norm, torque_norm
+    return None, force_norm, torque_norm
+
 from click_pose import validate_transform
 
 
@@ -169,7 +198,10 @@ class JointRunner:
                 self.stop('实际关节偏离指令超过 0.15 rad', failed=True)
                 return
             side = self.plan['arm_side']
-            fixed = list(range(9, 16)) + [0, 1] if side == 'left' else list(range(9))
+            waist_fixed = [] if self.plan.get('waist_included') else [0, 1]
+            fixed = ([0, 1] if side == 'both' else
+                     (list(range(9, 16)) + waist_fixed if side == 'left'
+                      else list(range(2, 9)) + waist_fixed))
             if np.max(np.abs(q[fixed]-self.rows[0, fixed])) > .03:
                 self.stop('另一只手臂或腰部发生移动', failed=True)
                 return
@@ -183,12 +215,15 @@ class JointRunner:
             self.last_command = command
             self.trajectory_elapsed = elapsed
             if elapsed >= self.times[-1]:
-                tcp = measured[side]
-                T = validate_transform(self.plan['target'])
-                R = rotation_from_quaternion(tcp['xyzw'])
-                angle = np.arccos(np.clip((np.trace(T[:3, :3].T @ R)-1)/2, -1, 1))
-                reached = (np.max(np.abs(q-self.rows[-1])) < .02
-                           and np.linalg.norm(np.asarray(tcp['xyz'])-T[:3, 3]) < .005 and angle < .05)
+                reached = np.max(np.abs(q-self.rows[-1])) < .02
+                for target_side in (('left','right') if side == 'both' else (side,)):
+                    tcp = measured[target_side]
+                    T = validate_transform(self.plan['targets'][target_side] if side == 'both' else self.plan['target'])
+                    R = rotation_from_quaternion(tcp['xyzw'])
+                    angle = np.arccos(np.clip((np.trace(T[:3, :3].T @ R)-1)/2, -1, 1))
+                    reached = (reached
+                               and np.linalg.norm(np.asarray(tcp['xyz'])-T[:3, 3]) < TCP_POSITION_TOLERANCE_M
+                               and angle < TCP_ROTATION_TOLERANCE_RAD)
                 if measured['arm_received_at'] != self.last_feedback_stamp:
                     self.stable_count = self.stable_count+1 if reached else 0
                     self.last_feedback_stamp = measured['arm_received_at']
@@ -360,8 +395,8 @@ class Sequence:
         else:
             raise ValueError("当前没有待确认的手部动作")
 
-    def begin_plan(self):
-        stage = self.stage
+    def begin_plan(self, stage=None):
+        stage = self.stage if stage is None else stage
         if stage not in ("pregrasp", "approach", "lift"):
             raise ValueError("当前阶段不能规划机械臂")
         self.pending_stage = stage
@@ -404,7 +439,7 @@ class Sequence:
         if not ok:
             self.fail(reason or "执行失败")
         else:
-            self.state = {"pregrasp": "at_pregrasp", "approach": "at_grasp", "lift": "complete"}[self.pending_stage]
+            self.state = {"pregrasp": "at_pregrasp", "approach": "at_grasp", "lift": "complete", "restore": "complete"}[self.pending_stage]
             self.plan = None
 
     def stop(self, motion_active=False):

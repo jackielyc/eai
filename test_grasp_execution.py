@@ -10,7 +10,8 @@ import unittest
 import numpy as np
 
 from grasp_execution import (JointRunner, Sequence, load_profile, make_preview,
-                             manual_candidate, read_feedback, sample_trajectory, timed_waypoints)
+                             evaluate_wrench, manual_candidate, read_feedback,
+                             sample_trajectory, timed_waypoints)
 
 
 def example():
@@ -27,6 +28,19 @@ def example():
 
 
 class GeometryTests(unittest.TestCase):
+    def test_wrench_validation_detects_force_torque_stale_and_sensor_error(self):
+        now = 100.
+        ok = {'force':[3.,4.,0.], 'torque':[0.,0.,.2], 'force_state':0, 'stamp':now}
+        violation, force, torque = evaluate_wrench(ok, 10., .5, now=now)
+        self.assertIsNone(violation)
+        self.assertEqual(force, 5.)
+        self.assertEqual(torque, .2)
+        sample = dict(ok, force=[11.,0.,0.])
+        self.assertIn('合力', evaluate_wrench(sample,10.,.5,now=now)[0])
+        sample = dict(ok, torque=[0.,0.,.6])
+        self.assertIn('合力矩', evaluate_wrench(sample,10.,.5,now=now)[0])
+        self.assertIn('过期', evaluate_wrench(dict(ok,stamp=99.),10.,.5,now=now)[0])
+        self.assertIn('状态异常', evaluate_wrench(dict(ok,force_state=-1),10.,.5,now=now)[0])
     def test_transform_approach_axis_is_grasp_axis_not_tcp_axis(self):
         p, obs = example()
         p['T_grasp_tcp'] = [[0, -1, 0, .1], [1, 0, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
@@ -182,6 +196,22 @@ class RunnerTests(unittest.TestCase):
             self.runner.resume()
         self.runner.stop()
         self.assertEqual(self.runner.state, 'stopping')
+
+    def test_waist_may_move_only_when_plan_explicitly_includes_it(self):
+        plan = dict(self.plan, waist_included=True,
+                    joint_waypoints=[[0.]*16, [.02, .02]+[0.]*14])
+        runner = JointRunner(plan, self.sent.append, lambda:self.data, lambda:True,
+                             clock=lambda:self.now)
+        self.now = .5
+        runner.tick()
+        self.assertEqual(runner.state, 'running')
+        self.assertGreater(self.sent[-1][0], 0.)
+        plan['waist_included'] = False
+        runner = JointRunner(plan, self.sent.append, lambda:self.data, lambda:True,
+                             clock=lambda:self.now)
+        self.data['q16'][0] = .04
+        runner.tick()
+        self.assertEqual(runner.state, 'stopping')
 
     def test_start_drift_and_model_mismatch_rejected(self):
         self.data['q16'][0] = .1

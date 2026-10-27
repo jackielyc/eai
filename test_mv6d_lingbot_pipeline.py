@@ -204,20 +204,20 @@ class ResultRoutingTests(unittest.TestCase):
 
     def test_async_result_prefers_head_and_reports_lingbot_failure(self):
         displayed, errors, cleared = [], [], []
-        owner = NS(_clear_lingbot_depth_result=lambda: cleared.append(True),mv6d_once_btn=NS(setEnabled=lambda _: None, setText=lambda _: None),
+        owner = NS(_mv6d_last_snap=None, _clear_lingbot_depth_result=lambda: cleared.append(True),mv6d_once_btn=NS(setEnabled=lambda _: None, setText=lambda _: None),
                    _on_lingbot_depth_result=displayed.append,
                    mv6d_result_edit=NS(setPlainText=errors.append),
                    status_bar=NS(showMessage=lambda _: None))
         head = {'tag': 'head', 'ok': True}
         m.CameraTopicWindow._on_mv6d_estimate_finished(owner, {
-            'ok': False, 'silent': True, 'depth_source': 'lingbot', 'error': 'refinement failed',
+            'ok': False, 'silent': False, 'depth_source': 'lingbot', 'error': 'refinement failed',
             'lingbot_results': [{'tag': 'left_wrist', 'ok': True}, head],
         })
         self.assertEqual(displayed, [])
-        self.assertEqual(cleared, [True])
+        self.assertEqual(cleared, [])  # Failed attempts preserve previous cached cloud.
         self.assertIn('refinement failed', errors[0])
         m.CameraTopicWindow._on_mv6d_estimate_finished(owner, {
-            'ok': True, 'silent': True,
+            'ok': True, 'silent': False,
             'lingbot_results': [{'tag': 'left_wrist', 'ok': True}, head],
         })
         self.assertEqual(displayed, [head])

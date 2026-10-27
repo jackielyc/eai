@@ -24,7 +24,7 @@ from PyQt5.QtGui import (
     QSurfaceFormat,
     QVector3D,
 )
-from PyQt5.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QOpenGLWidget, QVBoxLayout, QWidget, QDoubleSpinBox, QGridLayout
+from PyQt5.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QOpenGLWidget, QVBoxLayout, QWidget, QDoubleSpinBox, QGridLayout, QPushButton
 
 try:
     from PyQt5.QtGui import QOpenGLShader, QOpenGLShaderProgram, QOpenGLBuffer
@@ -1259,6 +1259,20 @@ class RobotView3D(QWidget):
         self._simulation_hands = {}
         self._simulation_label = QLabel('机器人姿态来源：真机反馈')
         layout.addWidget(self._simulation_label)
+        self.grasp_action_callback = None
+        actions = QHBoxLayout()
+        self.grasp_stop_button = QPushButton('停止 / 取消')
+        self.grasp_restore_button = QPushButton('恢复启动状态')
+        self.grasp_stop_button.clicked.connect(lambda: self._grasp_action('stop'))
+        self.grasp_restore_button.clicked.connect(lambda: self._grasp_action('restore'))
+        actions.addWidget(self.grasp_stop_button)
+        actions.addWidget(self.grasp_restore_button)
+        self._restore_scene_check = QCheckBox('已确认恢复路径及手周围无障碍（真机）')
+        actions.addWidget(self._restore_scene_check)
+        self._grasp_action_note = QLabel('恢复双臂和双手；执行方式沿用分阶段抓取页，腰部不移动。')
+        self._grasp_action_note.setWordWrap(True)
+        layout.addLayout(actions)
+        layout.addWidget(self._grasp_action_note)
         self._hand_model = None
         self.simulation_hand_callback = None
         self._sim_hand_controls = {}
@@ -1593,6 +1607,10 @@ class RobotView3D(QWidget):
     def _change_simulation_hand(self, side):
         if self._simulation_q is not None and self.simulation_hand_callback:
             self.simulation_hand_callback(side, [box.value() for box in self._sim_hand_controls[side]])
+
+    def _grasp_action(self, action):
+        if self.grasp_action_callback:
+            self._grasp_action_note.setText(self.grasp_action_callback(action))
 
     def _sync_pose(self, key: str) -> None:
         item = self._pose_items.get(key)

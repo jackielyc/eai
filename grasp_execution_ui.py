@@ -14,19 +14,34 @@ from PyQt5.QtCore import QProcess, QProcessEnvironment, QTimer, Qt
 from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QWidget, QGridLayout, QMessageBox)
 
-from grasp_execution import Sequence, JointRunner, load_profile, make_preview, read_feedback, manual_candidate
+from grasp_execution import (Sequence, JointRunner, evaluate_wrench, load_profile,
+                             make_preview, read_feedback, manual_candidate)
 
 
 class GraspExecutionPanel(QWidget):
     def __init__(self, node, busy, parent=None, preview_image=None, open_perception=None,
-                 fill_extrinsic=None, ensure_feedback=None, open_calibration=None, robot_preview=None, simulation_display=None):
+                 fill_extrinsic=None, ensure_feedback=None, open_calibration=None, robot_preview=None,
+                 simulation_display=None, wrench_feedback=None, ensure_wrench_monitor=None):
         super().__init__(parent)
         self.node, self.other_busy = node, busy
         self.preview_image_callback = preview_image
         self.robot_preview_callback = robot_preview
         self.simulation_display = simulation_display
+        self.wrench_feedback = wrench_feedback
+        self.ensure_wrench_monitor = ensure_wrench_monitor
+        self._wrench_guard_triggered = None
         self.simulation = None
         self._sim_reserved = False
+        self._execute_after_plan = False
+        self._startup_snapshot = None
+        self._startup_deadline = time.monotonic() + 10.
+        self._startup_recording = True
+        self._restoring = False
+        self._restore_hands_goal = None
+        try:
+            self._startup_seed = read_feedback(os.environ.get('EAI_HOST_FK_STATE', '/tmp/eai_host_fk_state.json'))['q16']
+        except Exception:
+            self._startup_seed = [0.] * 16
         self.open_perception = open_perception
         self.fill_extrinsic = fill_extrinsic
         self.ensure_feedback = ensure_feedback
@@ -46,7 +61,7 @@ class GraspExecutionPanel(QWidget):
         heading = QLabel('分阶段抓取')
         heading.setStyleSheet('font-size: 17px; font-weight: 600;')
         layout.addWidget(heading)
-        hint = QLabel('选择候选 → 预览 → 张开 → 预抓取 → 接近 → 闭合确认 → 抬起')
+        hint = QLabel('预览、手部验证和 IK 预检可独立使用；执行本段会自动预检所选动作，通过后执行。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
         mode_row = QHBoxLayout()
@@ -147,23 +162,76 @@ class GraspExecutionPanel(QWidget):
         layout.addLayout(shape_row)
         self.scene_confirm = QCheckBox('手动分步模式：当前无自动避障，已确认本段路径及手周围无障碍')
         layout.addWidget(self.scene_confirm)
+        stage_row = QHBoxLayout()
+        stage_row.addWidget(QLabel('抓取手臂'))
+        self.grasp_arm = QComboBox()
+        self.grasp_arm.addItem('左臂 / Link7_l', 'left')
+        self.grasp_arm.addItem('右臂 / Link7_r', 'right')
+        self.grasp_arm.currentIndexChanged.connect(self.change_grasp_arm)
+        stage_row.addWidget(self.grasp_arm)
+        self.waist_participation = QCheckBox('腰部参与 IK')
+        self.waist_participation.setChecked(False)
+        self.waist_participation.setToolTip(
+            '允许腰部升降和俯仰参与所选手臂的 IK 与执行；当前无自动碰撞规划。'
+        )
+        self.waist_participation.toggled.connect(self.change_waist_participation)
+        stage_row.addWidget(self.waist_participation)
+        stage_row.addWidget(QLabel('本段动作'))
+        self.motion_stage = QComboBox()
+        for label, key in (('预抓取', 'pregrasp'), ('接近物体', 'approach'), ('抬起', 'lift')):
+            self.motion_stage.addItem(label, key)
+        stage_row.addWidget(self.motion_stage)
+        layout.addLayout(stage_row)
+        wrench_row = QHBoxLayout()
+        self.wrench_guard_check = QCheckBox('六维力超限自动暂停')
+        self.wrench_guard_check.setChecked(True)
+        self.wrench_guard_check.setToolTip(
+            '真机运动时监控所选腕部合力/合力矩；数据缺失、过期或传感器异常也会暂停。'
+        )
+        wrench_row.addWidget(self.wrench_guard_check)
+        wrench_row.addWidget(QLabel('合力上限'))
+        self.force_limit = QDoubleSpinBox()
+        self.force_limit.setRange(.1, 500.)
+        self.force_limit.setDecimals(1)
+        self.force_limit.setValue(15.)
+        self.force_limit.setSuffix(' N')
+        wrench_row.addWidget(self.force_limit)
+        wrench_row.addWidget(QLabel('合力矩上限'))
+        self.torque_limit = QDoubleSpinBox()
+        self.torque_limit.setRange(.01, 50.)
+        self.torque_limit.setDecimals(2)
+        self.torque_limit.setValue(1.)
+        self.torque_limit.setSuffix(' N·m')
+        wrench_row.addWidget(self.torque_limit)
+        layout.addLayout(wrench_row)
+        self.wrench_guard_status = QLabel(
+            '保护起始值未经3D打印支架破坏试验认证；请按材料、打印方向和实测载荷调整。'
+        )
+        self.wrench_guard_status.setWordWrap(True)
+        layout.addWidget(self.wrench_guard_status)
         row = QGridLayout()
         self.preview_button = QPushButton('预览抓取位置')
         self.hand_button = QPushButton('张开手')
         self.confirm_button = QPushButton('确认手已张开')
-        self.plan_button = QPushButton('预检下一段 IK')
+        self.plan_button = QPushButton('预检本段 IK')
         self.execute_button = QPushButton('执行本段')
         self.pause_button = QPushButton('暂停')
         self.stop_button = QPushButton('停止 / 取消')
+        self.restore_button = QPushButton('恢复启动状态')
+        self.restore_button.setToolTip('恢复本次界面启动时的双臂关节和双手开合；腰部保持当前位置')
         for index, (button, callback) in enumerate(((self.preview_button, self.preview), (self.hand_button, self.hand),
                                  (self.confirm_button, self.confirm), (self.plan_button, self.plan),
                                  (self.execute_button, self.execute), (self.pause_button, self.pause_or_resume),
-                                 (self.stop_button, self.stop))):
+                                 (self.stop_button, self.stop), (self.restore_button, self.restore_startup))):
             button.clicked.connect(callback)
             button.setMinimumHeight(34)
             row.addWidget(button, index // 3, index % 3)
         self.stop_button.setStyleSheet('QPushButton { border: 1px solid #c65b55; font-weight: 600; }')
         layout.addLayout(row)
+        self.execution_feedback = QLabel('尚未请求执行')
+        self.execution_feedback.setWordWrap(True)
+        self.execution_feedback.setStyleSheet('color: #d0a85c;')
+        layout.addWidget(self.execution_feedback)
         self.report = QTextEdit()
         self.report.setReadOnly(True)
         self.report.setMinimumHeight(130)
@@ -182,8 +250,117 @@ class GraspExecutionPanel(QWidget):
         self.candidates.currentIndexChanged.connect(self.invalidate_preview)
         for spin in self.contact_offsets:
             spin.valueChanged.connect(self.offset_changed)
+        self.capture_startup_state()
+        if self.ensure_wrench_monitor:
+            self.ensure_wrench_monitor()
         self.check_readiness()
         self.refresh()
+
+    def wrench_guard_violation(self, sides=None):
+        if self.is_simulation or not self.wrench_guard_check.isChecked():
+            self.wrench_guard_status.setText('仿真不产生真实六维力，保护不触发。' if self.is_simulation else '六维力保护已关闭。')
+            return None
+        if self.wrench_feedback is None:
+            self.wrench_guard_status.setText('六维力保护不可用：未连接反馈读取器。')
+            return '未连接六维力反馈读取器'
+        if sides is None:
+            sides = (str(self.grasp_arm.currentData() or 'right'),)
+        reports = []
+        for side in sides:
+            sample = self.wrench_feedback(side)
+            violation, force_norm, torque_norm = evaluate_wrench(
+                sample, self.force_limit.value(), self.torque_limit.value())
+            label = '左腕' if side == 'left' else '右腕'
+            if force_norm is not None:
+                reports.append(f'{label} |F|={force_norm:.2f}N |M|={torque_norm:.3f}N·m')
+            if violation:
+                self.wrench_guard_status.setText(label + '：' + violation)
+                return label + '：' + violation
+        self.wrench_guard_status.setText('；'.join(reports) if reports else '等待六维力反馈')
+        return None
+
+    def read_startup_hands(self):
+        from arm_text_commands import HAND_JOINT_ORDER, canonical_hand_joint
+        stamps = getattr(self.node, '_grasp_hand_state_received_at', {})
+        if any(not 0 <= time.time()-stamps.get(side, 0) <= 2. for side in ('left','right')):
+            raise ValueError('双手反馈尚未就绪或已过期')
+        state = self.node.get_robot_state()
+        hands = {}
+        for side in ('left','right'):
+            values = {canonical_hand_joint(name): float(value) for name,value in getattr(state, side+'_hand')}
+            vector = [values[name] for name in HAND_JOINT_ORDER]
+            from grasp_execution import hand_positions
+            hands[side] = hand_positions(vector)
+        return hands
+
+    def capture_startup_state(self):
+        if not self._startup_recording or self._startup_snapshot is not None:
+            return
+        if time.monotonic() > self._startup_deadline:
+            self._startup_recording = False
+            return
+        try:
+            measured = read_feedback(os.environ.get('EAI_HOST_FK_STATE', '/tmp/eai_host_fk_state.json'))
+            hands = self.read_startup_hands()
+            self._startup_snapshot = copy.deepcopy(dict(measured, hands=hands))
+            self.simulation = None
+            self._startup_recording = False
+        except Exception:
+            pass
+
+    def restore_startup(self):
+        if self.process or self.runner or self.sequence.state == 'stop_unconfirmed':
+            self.message = '请先停止当前任务并等待停止确认，再恢复启动状态。'
+            self.refresh()
+            return
+        try:
+            self._startup_recording = False
+            profile = self.selected_profile()
+            if self.is_simulation:
+                simulation = self.simulation_backend()
+                startup = self._simulation_startup
+                measured = simulation.feedback()
+            else:
+                if self._startup_snapshot is None:
+                    raise ValueError('界面启动时未采集到完整双臂/双手反馈，不能恢复；不会用零位代替')
+                startup = self._startup_snapshot
+                measured = self.feedback()
+            from grasp_restore import prepare_restore
+            identifier = uuid.uuid4().hex
+            plan = prepare_restore(profile, measured, startup, identifier)
+            preview = dict(id=identifier, arm_side='both', hand_model=profile['hand_model'],
+                           tcp_link='Link7_l / Link7_r', base_frame='base_link',
+                           observation_id='restore:'+identifier, goals={'approach':plan['target']})
+            self.sequence.reset(preview, profile)
+            self.sequence.pending_stage = 'restore'
+            self.sequence.plan = dict(plan, accepted_at=time.monotonic())
+            self.sequence.state = 'planned'
+            self._restore_hands_goal = copy.deepcopy(startup['hands'])
+            self._restoring = True
+            self._execute_ready_plan()
+            if self.runner is None:
+                self._restoring = False
+        except Exception as exc:
+            self._restoring = False
+            self.message = '恢复未启动：' + str(exc)
+        self.refresh()
+
+    def finish_restore_hands(self):
+        hands = self._restore_hands_goal
+        if self.is_simulation:
+            for side, values in hands.items():
+                self.simulation_backend().hand(side, values)
+            return '仿真双臂和双手已恢复启动状态。'
+        self.feedback()
+        if not self.node.is_hand_enabled():
+            raise ValueError('双臂已恢复，但手未使能，无法恢复双手')
+        self.node._grasp_hand_command_authorized = True
+        try:
+            for side, values in hands.items():
+                self.node.apply_hand_joint_positions(side, values)
+        finally:
+            self.node._grasp_hand_command_authorized = False
+        return '双臂已恢复启动状态；双手恢复指令已发送，请观察实物确认到位。'
 
     def load_plan_validity(self, *_):
         if not self.reserved:
@@ -191,8 +368,35 @@ class GraspExecutionPanel(QWidget):
         try:
             profile = load_profile(self.profile_path.text().strip(), require_calibration=False)
             self.plan_validity.setValue(float(profile['max_plan_age_s']))
+            if hasattr(self, 'grasp_arm'):
+                self.grasp_arm.blockSignals(True)
+                self.grasp_arm.setCurrentIndex(0 if profile['arm_side'] == 'left' else 1)
+                self.grasp_arm.blockSignals(False)
         except Exception:
             self.plan_validity.setValue(600)
+
+    def change_grasp_arm(self, *_):
+        if self.runner or self.process or self.reserved:
+            return
+        if (self.observation and
+                self.observation.get('grasps', {}).get('model') == 'manual_current_hand_orientation'):
+            self.observation.pop('grasps', None)
+            self.candidates.clear()
+        self.sequence = Sequence()
+        self.scene_confirm.setChecked(False)
+        side = '左臂' if self.grasp_arm.currentData() == 'left' else '右臂'
+        self.message = f'已选择{side}抓取；依赖旧手腕朝向的候选和计划已清除，请重新生成或预览。'
+        self.check_readiness()
+        self.refresh()
+
+    def change_waist_participation(self, checked):
+        if self.runner or self.process or self.reserved:
+            return
+        self.sequence = Sequence()
+        self.scene_confirm.setChecked(False)
+        self.message = ('已允许腰部参与 IK；旧计划已清除，请重新预检。'
+                        if checked else '已固定腰部；旧计划已清除，请重新预检。')
+        self.refresh()
 
     @property
     def is_simulation(self):
@@ -214,17 +418,17 @@ class GraspExecutionPanel(QWidget):
                 raise ValueError('未连接机器人页面仿真显示')
             from grasp_simulation import GraspSimulation
             profile = load_profile(self.profile_path.text().strip(), require_calibration=False)
-            try:
-                seed = read_feedback(os.environ.get('EAI_HOST_FK_STATE', '/tmp/eai_host_fk_state.json'))['q16']
-            except Exception:
-                seed = [0.] * 16
+            seed = (self._startup_snapshot or {}).get('q16', self._startup_seed)
             self.simulation = GraspSimulation(profile, seed, self.simulation_display)
+            self.simulation.hands = copy.deepcopy((self._startup_snapshot or {}).get('hands', {'left':[0.]*6, 'right':[0.]*6}))
+            self._simulation_startup = dict(self.simulation.feedback(), hands=copy.deepcopy(self.simulation.hands))
         return self.simulation
 
     def open_simulation_controls(self):
         if not self.is_simulation:
             return
         try:
+            self._startup_recording = False
             simulation = self.simulation_backend()
             simulation.publish(simulation.q)
             self.message = '已打开机器人页面仿真手控制；仅改变模型，不发送真机命令。'
@@ -298,7 +502,7 @@ class GraspExecutionPanel(QWidget):
                 raise ValueError('请先估计手型并结束当前动作')
             if self.observation.get('execution_blockers'):
                 raise ValueError('；'.join(self.observation['execution_blockers']))
-            profile = load_profile(self.profile_path.text().strip(), require_calibration=not self.is_simulation)
+            profile = self.selected_profile(require_calibration=True)
             opened, closed = calibrated_preset(profile, self.hand_shape_suggestion)
             self.shape_override = (self.observation['observation_id'], self.profile_path.text().strip(), opened, closed)
             self.sequence = Sequence()
@@ -309,6 +513,9 @@ class GraspExecutionPanel(QWidget):
 
     def selected_profile(self, require_calibration=True):
         profile = load_profile(self.profile_path.text().strip(), require_calibration=require_calibration and not self.is_simulation)
+        side = str(self.grasp_arm.currentData() or profile['arm_side'])
+        profile['arm_side'] = side
+        profile['tcp_link'] = 'Link7_l' if side == 'left' else 'Link7_r'
         override = getattr(self, 'shape_override', None)
         if override and self.observation and override[:2] == (self.observation['observation_id'], self.profile_path.text().strip()):
             profile['open_positions'], profile['close_positions'] = override[2:]
@@ -353,7 +560,8 @@ class GraspExecutionPanel(QWidget):
             path = Path(self.profile_path.text().strip())
             if not path.is_file():
                 raise ValueError(f'抓取配置不存在：{path}。请先填写 config/grasp_execution.example.json 中的实际标定数据并另存；模板不能直接用于执行。')
-            profile = load_profile(path, require_calibration=False)
+            profile = self.selected_profile(require_calibration=False)
+            lines.append(f"✓ 当前选择：{'左臂 / Link7_l' if profile['arm_side'] == 'left' else '右臂 / Link7_r'}")
             if profile.get('calibrated'):
                 lines.append('✓ 抓取配置已通过格式和标定声明检查')
             else:
@@ -516,11 +724,17 @@ class GraspExecutionPanel(QWidget):
             if not self.observation:
                 raise ValueError('请先点击估计')
             profile = self.selected_profile(require_calibration=False)
+            self._ensure_extrinsic()
+            if not self.observation.get('grasps', {}).get('candidates'):
+                self.observation['grasps'] = manual_candidate(
+                    self.observation, profile, self.feedback(), [s.value()/100 for s in self.contact_offsets])
+                self.populate_candidates()
             result = make_preview(self.observation, self.candidates.currentIndex(), profile)
             self.sequence.reset(result, profile)
             if self.robot_preview_callback:
                 self.robot_preview_callback(result)
             if self.is_simulation:
+                self._startup_recording = False
                 simulation = self.simulation_backend()
                 simulation.publish(simulation.q)
             if self.preview_image_callback is not None:
@@ -530,7 +744,7 @@ class GraspExecutionPanel(QWidget):
                 else:
                     self.preview_image.setPixmap(pixmap)
             extra = '' if profile.get('calibrated') else ' 当前 T_grasp_tcp 未标定，预览仅供核对，不能执行。'
-            self.message = '预览完成。下一步检查并张开手；此时尚未验证机械臂轨迹。' + extra
+            self.message = '预览完成；可独立验证手型或执行所选阶段，尚未验证机械臂轨迹。' + extra
         except Exception as exc:
             self.sequence.preview = None
             self.message = str(exc)
@@ -538,72 +752,117 @@ class GraspExecutionPanel(QWidget):
                 self.robot_preview_callback(getattr(exc, 'preview', None))
         self.refresh()
 
-    def reserve(self):
+    def reserve(self, require_preview=True):
         if not self.is_simulation and self.other_busy():
             raise ValueError('已有手臂移动/文本队列/遥控，请先结束，不能同时控制')
-        if not self.scene_confirm.isChecked():
+        if not self.scene_confirm.isChecked() and not self.is_simulation:
             raise ValueError('本阶段尚未接入自动避障，请先确认本段路径周围无障碍')
         if not self.is_simulation and (not self.node.is_arm_enabled() or not self.node.is_hand_enabled()):
             raise ValueError('请先手动启用手臂和手；抓取流程不自动使能')
-        if not self.sequence.preview:
+        if require_preview and not self.sequence.preview:
             raise ValueError('请先预览抓取位置')
-        if not self.is_simulation and not self.sequence.profile.get('calibrated'):
+        profile = self.sequence.profile if require_preview else self.selected_profile()
+        if not self.is_simulation and not profile.get('calibrated'):
             raise ValueError('抓取配置尚未完成手型/TCP 标定，不能发送开合或手臂运动')
         self.set_reserved(True)
 
     def hand(self):
         try:
-            self.reserve()
-            stage = self.sequence.stage
-            if stage not in ('open', 'close'):
-                raise ValueError('当前不是开合阶段')
+            self._startup_recording = False
+            if self.runner or self.process:
+                raise ValueError('请先结束当前轨迹或预检')
+            self.reserve(require_preview=False)
+            stage = 'close' if self.sequence.stage == 'close' else 'open'
             self.feedback()
-            values = self.sequence.preview['open_positions' if stage == 'open' else 'close_positions']
+            profile = self.selected_profile()
+            values = profile['open_positions' if stage == 'open' else 'close_positions']
             if self.is_simulation:
-                self.simulation_backend().hand(self.sequence.profile['arm_side'], values)
+                self.simulation_backend().hand(profile['arm_side'], values)
+            else:
+                self.node._grasp_hand_command_authorized = True
+                try:
+                    self.node.apply_hand_joint_positions(profile['arm_side'], values)
+                finally:
+                    self.node._grasp_hand_command_authorized = False
+            if self.sequence.preview and self.sequence.stage in ('open', 'close'):
                 self.sequence.hand_sent()
-                self.message = '仿真手型已更新，请确认后继续；没有发送真机命令。'
-                self.refresh()
-                return
-            self.node._grasp_hand_command_authorized = True
-            try:
-                self.node.apply_hand_joint_positions(self.sequence.profile['arm_side'], values)
-            finally:
-                self.node._grasp_hand_command_authorized = False
-            self.sequence.hand_sent()
-            self.message = '开合命令已发送；请观察实物，确认张开或确实抓住后再继续。'
+            self.message = '手部开合验证已发送；不会自动执行手臂。'
         except Exception as exc:
             if self.sequence.state == 'planning' and self.process is None:
                 self.sequence.fail(str(exc))
             self.message = str(exc)
+        finally:
+            if not self.runner and not self.process and self.sequence.state != 'stop_unconfirmed':
+                self.set_reserved(False)
         self.refresh()
 
     def confirm(self):
         try:
-            self.sequence.confirm_hand()
-            self.message = ('请规划预抓取路径' if self.sequence.state == 'opened'
-                            else '已人工确认抓住；请预检抬起路径。没有力反馈，系统不能自动证明抓取成功。')
+            if self.sequence.state in ('await_open', 'await_grasp'):
+                self.sequence.confirm_hand()
+            self.message = '已记录手部人工确认；该确认不作为执行本段的前提，不会发送运动命令。'
         except Exception as exc:
             self.message = str(exc)
         self.refresh()
 
-    def plan(self):
+    def plan(self, execute_after=False):
         try:
-            self.reserve()
-            stage = self.sequence.begin_plan()
+            if self.runner or self.process or self.sequence.state == 'stop_unconfirmed':
+                raise ValueError('请先结束当前任务或确认停止状态')
+            self._execute_after_plan = bool(execute_after)
+            self.sequence = Sequence()
+            profile = self.selected_profile(require_calibration=False)
+            if not self.observation:
+                raise ValueError('请先获取视觉估计结果')
+            self._ensure_extrinsic()
+            if not self.observation.get('grasps', {}).get('candidates'):
+                self.observation['grasps'] = manual_candidate(
+                    self.observation, profile, self.feedback(), [s.value()/100 for s in self.contact_offsets])
+                self.populate_candidates()
+            result = make_preview(self.observation, self.candidates.currentIndex(), profile)
+            self.sequence.reset(result, profile)
+            if execute_after:
+                self.reserve()
+            else:
+                self.set_reserved(True)
+            stage = self.sequence.begin_plan(self.motion_stage.currentData())
             feedback = self.feedback()
-            self.launch('plan', stage=stage, start_joints=feedback['q16'])
+            self.launch('plan', stage=stage, start_joints=feedback['q16'],
+                        allow_waist=self.waist_participation.isChecked())
         except Exception as exc:
-            if self.sequence.state == 'planning' and self.process is None:
+            self._execute_after_plan = False
+            if self.process is None and self.runner is None and self.sequence.state != 'stop_unconfirmed':
                 self.sequence.fail(str(exc))
                 self.set_reserved(False)
             self.message = str(exc)
         self.refresh()
 
     def execute(self):
+        if self.runner or self.process or self.sequence.state == 'stop_unconfirmed':
+            return
+        plan = self.sequence.plan
+        valid = (self.sequence.state == 'planned' and plan is not None
+                 and plan.get('stage') == self.motion_stage.currentData()
+                 and time.monotonic()-plan['accepted_at'] <= self.sequence.profile['max_plan_age_s'])
+        if not valid:
+            self.message = '执行请求已收到，正在自动计算目标并预检 IK；通过后才会启动运动。'
+            self.execution_feedback.setText(self.message)
+            self.plan(execute_after=True)
+            return
+        self._execute_ready_plan()
+
+    def _execute_ready_plan(self):
         try:
+            self._startup_recording = False
             self.reserve()
-            plan = self.sequence.begin_execute(manual_path_confirmed=self.scene_confirm.isChecked())
+            if not self.is_simulation:
+                sides = ('left', 'right') if self.sequence.plan.get('arm_side') == 'both' else (self.sequence.plan['arm_side'],)
+                violation = self.wrench_guard_violation(sides)
+                if violation:
+                    raise ValueError('六维力保护未就绪：' + violation)
+            plan = self.sequence.begin_execute(
+                manual_path_confirmed=self.scene_confirm.isChecked() or self.is_simulation
+            )
             if self.is_simulation:
                 simulation = self.simulation_backend()
                 self.runner = JointRunner(plan, simulation.publish, simulation.feedback, lambda: True)
@@ -631,6 +890,8 @@ class GraspExecutionPanel(QWidget):
                 self.runner.stop(str(exc), failed=True)
             elif self.sequence.state == 'executing':
                 self.sequence.fail(str(exc))
+            else:
+                self.set_reserved(False)
             self.message = str(exc)
         self.refresh()
 
@@ -639,6 +900,15 @@ class GraspExecutionPanel(QWidget):
             return
         try:
             if self.runner.state == 'paused':
+                if self._wrench_guard_triggered:
+                    side = self.runner.plan.get('arm_side', 'right')
+                    sides = ('left', 'right') if side == 'both' else (side,)
+                    violation = self.wrench_guard_violation(sides)
+                    if violation:
+                        self.message = '六维力仍不满足继续条件：' + violation
+                        self.refresh()
+                        return
+                    self._wrench_guard_triggered = None
                 self.runner.resume()
             else:
                 self.runner.pause()
@@ -654,7 +924,8 @@ class GraspExecutionPanel(QWidget):
         self.mode = mode
         self.job_directory = self.root / '.cache' / 'grasp_execution' / uuid.uuid4().hex
         self.job_directory.mkdir(parents=True)
-        request = dict(mode=mode, profile=self.sequence.profile, preview=self.sequence.preview, **extra)
+        request = dict(mode=mode, execution_mode=('simulation' if self.is_simulation else 'hardware'),
+                       profile=self.sequence.profile, preview=self.sequence.preview, **extra)
         (self.job_directory / 'request.json').write_text(json.dumps(request, ensure_ascii=False, allow_nan=False))
         self.process = QProcess(self)
         environment = QProcessEnvironment.systemEnvironment()
@@ -692,6 +963,7 @@ class GraspExecutionPanel(QWidget):
         self.read_output()
         process, self.process = self.process, None
         process.deleteLater()
+        execute_requested = self._execute_after_plan
         try:
             path = self.job_directory / 'result.json'
             result = json.loads(path.read_text()) if path.is_file() else {
@@ -700,19 +972,33 @@ class GraspExecutionPanel(QWidget):
                 self.message = '预检已取消，没有发送运动命令'
             elif not result.get('ok'):
                 self.sequence.fail(result.get('error', f'Worker exit={exit_code}'))
-                self.message = self.sequence.error
+                self.message = (('执行未启动：IK 预检失败：' if execute_requested else 'IK 预检失败：')
+                                + self.sequence.error)
+                self.execution_feedback.setText(self.message)
             else:
                 self.sequence.accept_plan(result)
                 self.message = (f"{result['stage']} IK/限位/连续性预检通过，约 {result['times_s'][-1]:.1f} 秒。"
                                 '本段路径确认已保留，可直接点击“执行本段”；未做自动碰撞检查。')
         except Exception as exc:
             self.sequence.fail(str(exc))
-            self.message = str(exc)
+            self.message = ('执行未启动：' if execute_requested else '') + str(exc)
+            self.execution_feedback.setText(self.message)
         if self.sequence.state in ('complete', 'stopped', 'failed'):
+            self.set_reserved(False)
+        execute_after = self._execute_after_plan
+        self._execute_after_plan = False
+        if execute_after and self.sequence.state == 'planned':
+            self.execution_feedback.setText('IK 预检通过，正在启动执行。')
+            self._execute_ready_plan()
+        elif self.sequence.state == 'planned':
             self.set_reserved(False)
         self.refresh()
 
     def stop(self):
+        self._execute_after_plan = False
+        self._restoring = False
+        self._restore_hands_goal = None
+        self._wrench_guard_triggered = None
         if self.sequence.state == 'stop_unconfirmed':
             self.message = '保持位置未获反馈确认，保留控制锁。请使用机器人停止装置并检查状态。'
             self.refresh()
@@ -729,12 +1015,34 @@ class GraspExecutionPanel(QWidget):
         self.refresh()
 
     def monitor(self):
+        self.capture_startup_state()
         if self.runner:
+            if not self.is_simulation and self.runner.state == 'running':
+                side = self.runner.plan.get('arm_side', 'right')
+                sides = ('left', 'right') if side == 'both' else (side,)
+                violation = self.wrench_guard_violation(sides)
+                if violation:
+                    self._wrench_guard_triggered = violation
+                    self.runner.pause()
+                    self.message = '六维力保护触发，正在暂停并保持位置：' + violation
             self.runner.tick()
             if self.runner.state in ('pausing', 'paused'):
-                self.message = self.runner.message
+                if self._wrench_guard_triggered:
+                    self.message = ('六维力保护触发，已暂停并保持位置：' + self._wrench_guard_triggered
+                                    if self.runner.state == 'paused' else
+                                    '六维力保护触发，正在暂停并保持位置：' + self._wrench_guard_triggered)
+                else:
+                    self.message = self.runner.message
             if self.runner.state not in ('running', 'pausing', 'paused', 'stopping'):
                 state, message = self.runner.state, self.runner.message
+                if self._restoring:
+                    if state == 'complete':
+                        try:
+                            message = self.finish_restore_hands()
+                        except Exception as exc:
+                            state, message = 'failed', str(exc)
+                    self._restoring = False
+                    self._restore_hands_goal = None
                 self.runner = None
                 if not self.is_simulation:
                     self.node._stop_slow_motion_mode_timer()
@@ -750,6 +1058,8 @@ class GraspExecutionPanel(QWidget):
                         self.sequence.state = state
                 self.message = message
                 self.scene_confirm.setChecked(False)
+                if state == 'complete':
+                    self.set_reserved(False)
                 if self.sequence.state in ('complete', 'stopped', 'failed'):
                     self.set_reserved(False)
                     self.observation = None  # A physical movement consumes the observation.
@@ -761,6 +1071,11 @@ class GraspExecutionPanel(QWidget):
     def refresh(self):
         state, stage = self.sequence.state, self.sequence.stage
         busy = self.process is not None or self.runner is not None
+        guard_editable = self.runner is None or self.runner.state == 'paused'
+        for widget in (self.wrench_guard_check, self.force_limit, self.torque_limit):
+            widget.setEnabled(guard_editable and self.process is None)
+        self.restore_button.setEnabled(not busy and state != 'stop_unconfirmed')
+        self.motion_stage.setEnabled(not busy and state != 'stop_unconfirmed')
         self.execution_mode.setEnabled(not busy and not self.reserved)
         self.simulation_controls_button.setEnabled(self.is_simulation and not busy)
         runner_state = self.runner.state if self.runner is not None else ''
@@ -774,7 +1089,7 @@ class GraspExecutionPanel(QWidget):
             expired = remaining < 0
             seconds = max(0, math.ceil(remaining))
             self.plan_expiry_label.setText(
-                '规划已过期，请停止后重新预检' if expired else
+                '规划已过期；点击执行本段会自动重新预检' if expired else
                 f'规划剩余有效期：{seconds // 60:02d}:{seconds % 60:02d}（分:秒）')
         elif state == 'executing':
             self.plan_expiry_label.setText('本段已暂停，轨迹计时冻结' if runner_state in ('pausing', 'paused') else
@@ -782,6 +1097,8 @@ class GraspExecutionPanel(QWidget):
         else:
             self.plan_expiry_label.setText('尚无待执行计划；预检通过后开始倒计时')
         self.source_combo.setEnabled(not busy and not self.reserved and bool(self.method_observations))
+        self.grasp_arm.setEnabled(not busy and not self.reserved)
+        self.waist_participation.setEnabled(not busy and not self.reserved)
         self.suggest_shape_button.setEnabled(not busy and not self.reserved)
         self.apply_shape_button.setEnabled(not busy and not self.reserved and self.hand_shape_suggestion is not None)
         self.preview_button.setEnabled(not busy and not self.reserved and self.observation is not None)
@@ -800,12 +1117,19 @@ class GraspExecutionPanel(QWidget):
         for button in (self.preview_button, self.manual_candidate_button, self.import_button):
             button.setToolTip(reason if not button.isEnabled() else '仅准备/预览，不会自动移动机器人')
         self.scene_confirm.setEnabled(not busy)
-        self.hand_button.setEnabled(not busy and self.sequence.preview is not None and stage in ('open', 'close'))
+        self.hand_button.setEnabled(not busy and state != 'stop_unconfirmed')
         self.hand_button.setText('闭合手' if stage == 'close' else '张开手')
-        self.confirm_button.setEnabled(not busy and state in ('await_open', 'await_grasp'))
+        self.confirm_button.setEnabled(not busy and state != 'stop_unconfirmed')
         self.confirm_button.setText('确认已抓住物体' if state == 'await_grasp' else '确认手已张开')
-        self.plan_button.setEnabled(not busy and stage in ('pregrasp', 'approach', 'lift'))
-        self.execute_button.setEnabled(not busy and state == 'planned' and not expired)
+        self.plan_button.setEnabled(not busy and self.observation is not None and state != 'stop_unconfirmed')
+        self.execute_button.setEnabled(not busy and self.observation is not None and state != 'stop_unconfirmed')
+        if self.process is not None and self._execute_after_plan:
+            self.execute_button.setText('自动预检中…')
+        elif self.runner is not None:
+            self.execute_button.setText('本段执行中…')
+        else:
+            self.execute_button.setText('执行本段（仿真）' if self.is_simulation else '执行本段（真机）')
+        self.execute_button.setToolTip('执行所选阶段；如无有效计划，自动计算目标和预检，通过后执行。不自动开合手。')
         self.stop_button.setEnabled(self.sequence.preview is not None or busy)
         states = {'idle': '待开始', 'await_open': '等待确认张开', 'opened': '手已张开',
                   'planning': '预检中', 'planned': '等待执行确认', 'executing': '移动中',
@@ -813,11 +1137,12 @@ class GraspExecutionPanel(QWidget):
                   'await_grasp': '等待确认抓住', 'grasp_confirmed': '已确认夹持',
                   'complete': '已完成抬起', 'stopping': '正在停止', 'stopped': '已停止',
                   'failed': '失败', 'stop_unconfirmed': '停止未确认'}
-        stages = {'open': '张开手', 'pregrasp': '预抓取位置', 'approach': '接近物体', 'close': '闭合手', 'lift': '抬起'}
+        stages = {'open': '张开手', 'pregrasp': '预抓取位置', 'approach': '接近物体', 'close': '闭合手', 'lift': '抬起', 'restore': '恢复启动状态'}
         if runner_state in ('pausing', 'paused'):
             states['executing'] = '正在暂停' if runner_state == 'pausing' else '已暂停'
         display_stage = stage or (getattr(self.sequence, 'pending_stage', None) if state in ('planning', 'planned', 'executing') else None)
         lines = [('仿真执行（仅运动学播放，不控制真机）' if self.is_simulation else '真机执行'),
+                 ('腰部参与 IK 与执行' if self.waist_participation.isChecked() else '腰部固定'),
                  f"状态: {states.get(state, state)}；当前/下一阶段: {stages.get(display_stage, '--')}",
                  '手动分步模式：未接入自动避障', self.message]
         if self.observation:
@@ -830,7 +1155,7 @@ class GraspExecutionPanel(QWidget):
             for name, T in p['goals'].items():
                 lines.append(f'{name} XYZ(m): '+str(np.asarray(T)[:3, 3].round(4).tolist()))
             lines.append('TCP 旋转矩阵: '+np.array2string(np.asarray(p['goals']['approach'])[:3, :3], precision=3))
-        if state == 'complete':
+        if state == 'complete' and getattr(self.sequence, 'pending_stage', None) != 'restore':
             lines.append('已完成抬起到位；抓取成功由人工确认，不含力/触觉验证。可使用手动开合释放，重新抓取须重新估计。')
         text = '\n'.join(lines)
         if self.report.toPlainText() != text:

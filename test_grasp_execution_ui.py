@@ -38,7 +38,23 @@ class UiTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.node = FakeNode()
-        self.panel = GraspExecutionPanel(self.node, busy=lambda: False)
+        self.wrench_samples = {
+            side: {'force':[0.,0.,0.], 'torque':[0.,0.,0.],
+                   'force_state':0}
+            for side in ('left','right')
+        }
+        def wrench_feedback(side):
+            sample = self.wrench_samples.get(side)
+            if sample is None:
+                return None
+            result = dict(sample)
+            result.setdefault('stamp', __import__('time').time())
+            return result
+        self.panel = GraspExecutionPanel(
+            self.node, busy=lambda: False,
+            wrench_feedback=wrench_feedback,
+            ensure_wrench_monitor=lambda:None,
+        )
         self.panel.execution_mode.setCurrentIndex(1)
         self.profile, self.obs = example()
         path = Path(self.tmp.name)/'profile.json'
@@ -71,6 +87,134 @@ class UiTests(unittest.TestCase):
         self.panel.feedback_button.click()
         self.assertEqual(calls, ['start'])
         self.assertIn('已请求启动 FK', self.panel.message)
+
+    def test_wrench_limit_pauses_and_requires_manual_safe_resume(self):
+        class Runner:
+            state='running'; message=''; plan={'arm_side':'right'}
+            def tick(self): pass
+            def pause(self): self.state='paused'; self.message='paused'
+            def resume(self): self.state='running'; self.message='running'
+        self.panel.runner = Runner()
+        self.panel.sequence.state = 'executing'
+        self.wrench_samples['right'] = {
+            'force':[16.,0.,0.], 'torque':[0.,0.,0.],
+            'force_state':0, 'stamp':__import__('time').time()}
+        self.panel.monitor()
+        self.assertEqual(self.panel.runner.state, 'paused')
+        self.assertIn('六维力保护触发', self.panel.message)
+        self.panel.pause_or_resume()
+        self.assertEqual(self.panel.runner.state, 'paused')
+        self.assertIn('仍不满足', self.panel.message)
+        self.wrench_samples['right'] = {
+            'force':[2.,0.,0.], 'torque':[0.,0.,.1],
+            'force_state':0, 'stamp':__import__('time').time()}
+        self.panel.pause_or_resume()
+        self.assertEqual(self.panel.runner.state, 'running')
+        self.assertIsNone(self.panel._wrench_guard_triggered)
+
+    def test_real_execution_requires_fresh_wrench_when_guard_enabled(self):
+        self.wrench_samples['right'] = None
+        self.panel.sequence.profile = self.profile
+        self.panel.sequence.preview = dict(id='p', arm_side='right', hand_model='test_hand',
+                                           tcp_link='Link7_r', base_frame='base_link',
+                                           goals={'approach':np.eye(4).tolist()})
+        self.panel.sequence.pending_stage = 'pregrasp'
+        self.panel.sequence.state = 'planned'
+        self.panel.sequence.plan = dict(
+            accepted_at=__import__('time').monotonic(), arm_side='right', stage='pregrasp')
+        self.panel.scene_confirm.setChecked(True)
+        self.panel._execute_ready_plan()
+        self.assertIsNone(self.panel.runner)
+        self.assertIn('六维力保护未就绪', self.panel.message)
+        self.assertFalse(self.node._grasp_execution_reserved)
+
+    def test_selected_grasp_arm_controls_profile_preview_and_hand(self):
+        self.assertEqual(self.panel.grasp_arm.currentData(), 'right')
+        self.panel.grasp_arm.setCurrentIndex(0)
+        profile = self.panel.selected_profile()
+        self.assertEqual(profile['arm_side'], 'left')
+        self.assertEqual(profile['tcp_link'], 'Link7_l')
+        self.panel.set_observation(self.obs)
+        self.panel.preview()
+        self.assertEqual(self.panel.sequence.preview['arm_side'], 'left')
+        self.assertEqual(self.panel.sequence.preview['tcp_link'], 'Link7_l')
+        self.panel.scene_confirm.setChecked(True)
+        self.panel.hand_button.click()
+        self.assertEqual(self.node.hand_commands, [('left', self.profile['open_positions'])])
+
+    def test_switching_arm_invalidates_current_orientation_candidate(self):
+        observation = copy.deepcopy(self.obs)
+        observation['grasps']['model'] = 'manual_current_hand_orientation'
+        observation['grasps']['candidates'][0]['source'] = 'manual'
+        self.panel.set_observation(observation)
+        self.assertEqual(self.panel.candidates.count(), 1)
+        self.panel.grasp_arm.setCurrentIndex(0)
+        self.assertNotIn('grasps', self.panel.observation)
+        self.assertEqual(self.panel.candidates.count(), 0)
+        self.assertIsNone(self.panel.sequence.preview)
+
+    def test_restore_simulation_returns_both_arms_and_hands_without_hardware(self):
+        from robot_view3d import _resolve_urdf
+        frames = []
+        self.panel.simulation_display = lambda q,h: frames.append(copy.deepcopy((q,h)))
+        self.panel.execution_mode.setCurrentIndex(0)
+        self.profile['urdf_path'] = _resolve_urdf()
+        Path(self.panel.profile_path.text()).write_text(json.dumps(self.profile))
+        self.panel._startup_seed = [0.] * 16
+        self.panel._startup_snapshot = None
+        self.panel.simulation = None
+        sim = self.panel.simulation_backend()
+        sim.q[0] = .1  # Restoration must leave waist where it currently is.
+        sim.q[2], sim.q[9] = .02, -.02
+        sim.hands = {'left':[.4]*6, 'right':[.3]*6}
+        self.panel.scene_confirm.setChecked(True)
+        self.panel.restore_button.click()
+        self.assertIsNotNone(self.panel.runner, self.panel.message)
+        self.assertEqual(self.panel.runner.plan['arm_side'],'both')
+        self.panel.runner.started -= self.panel.runner.times[-1]
+        for _ in range(4): self.panel.monitor()
+        self.assertIsNone(self.panel.runner)
+        np.testing.assert_allclose(sim.q[2:], [0.]*14)
+        self.assertEqual(sim.q[0], .1)
+        self.assertEqual(sim.hands, {'left':[0.]*6,'right':[0.]*6})
+        self.assertIn('已恢复', self.panel.message)
+        self.assertFalse(self.node.hand_commands)
+        self.assertFalse(self.node.arm_commands)
+
+    def test_real_restore_rejects_missing_startup_feedback(self):
+        self.panel._startup_snapshot = None
+        self.panel.restore_button.click()
+        self.assertIn('启动时未采集', self.panel.message)
+        self.assertIsNone(self.panel.runner)
+        self.assertFalse(self.node.hand_commands)
+
+    def test_cancelling_restore_does_not_restore_hands_after_stop(self):
+        self.panel.execution_mode.setCurrentIndex(0)
+        self.panel._restoring = True
+        self.panel._restore_hands_goal = {'left':[.2]*6,'right':[.3]*6}
+        runner = SimpleNamespace(state='running', message='cancelled', tick=lambda:None)
+        runner.stop = lambda: setattr(runner, 'state', 'stopped')
+        self.panel.runner = runner
+        self.panel.sequence.state = 'executing'
+        self.panel.sequence.pending_stage = 'restore'
+        with patch.object(self.panel, 'finish_restore_hands') as finish:
+            self.panel.stop()
+            self.panel.monitor()
+            finish.assert_not_called()
+        self.assertFalse(self.panel._restoring)
+        self.assertIsNone(self.panel._restore_hands_goal)
+
+    def test_startup_snapshot_is_not_overwritten(self):
+        import time
+        self.panel._startup_recording = True
+        self.panel._startup_deadline = time.monotonic()+10
+        self.panel._startup_snapshot = None
+        with patch('grasp_execution_ui.read_feedback', return_value={'q16':[.1]*16,'urdf_sha256':'test'}), \
+             patch.object(self.panel, 'read_startup_hands', return_value={'left':[.2]*6,'right':[.3]*6}):
+            self.panel.capture_startup_state()
+        with patch('grasp_execution_ui.read_feedback', return_value={'q16':[.9]*16}):
+            self.panel.capture_startup_state()
+        self.assertEqual(self.panel._startup_snapshot['q16'], [.1]*16)
 
     def test_simulation_hand_execute_pause_stop_never_call_hardware(self):
         from grasp_simulation import GraspSimulation
@@ -123,6 +267,27 @@ class UiTests(unittest.TestCase):
         self.assertFalse(self.node.arm_commands)
         self.assertGreater(len(frames), 1)
 
+    def test_simulation_execute_does_not_require_hardware_path_checkbox(self):
+        self.panel.execution_mode.setCurrentIndex(0)
+        self.panel.scene_confirm.setChecked(False)
+        self.panel.sequence.profile = self.profile
+        self.panel.sequence.preview = dict(id='preview', arm_side='right', hand_model='test_hand',
+                                           tcp_link='Link7_r', base_frame='base_link',
+                                           goals={'approach':np.eye(4).tolist()})
+        self.panel.sequence.state = 'planned'
+        self.panel.sequence.pending_stage = 'pregrasp'
+        self.panel.sequence.plan = dict(
+            ok=True, preview_id='preview', stage='pregrasp', accepted_at=__import__('time').monotonic(),
+            joint_waypoints=[[0.]*16,[0.]*16], times_s=[0,1],
+            urdf_sha256='model', arm_side='right', target=np.eye(4).tolist())
+        with patch('grasp_execution_ui.JointRunner') as runner:
+            self.panel.simulation = SimpleNamespace(
+                publish=lambda q:None, q=[0.]*16,
+                feedback=lambda:{'q16':[0.]*16, 'urdf_sha256':'model'})
+            self.panel._execute_ready_plan()
+            runner.assert_called_once()
+        self.assertEqual(self.panel.sequence.state, 'executing')
+
     def test_successful_preflight_keeps_confirmation_and_allows_execute_click(self):
         self.panel.set_observation(self.obs)
         self.panel.preview()
@@ -132,6 +297,7 @@ class UiTests(unittest.TestCase):
         seq.confirm_hand()
         seq.begin_plan()
         result = dict(ok=True, preview_id=seq.preview['id'], stage='pregrasp',
+                      arm_side='right',
                       backend='host_ik_manual', joint_limits_checked=True,
                       ik_checked=True, times_s=[0, 1])
         self.panel.job_directory = Path(self.tmp.name)
@@ -165,7 +331,7 @@ class UiTests(unittest.TestCase):
         with patch('grasp_execution_ui.time.monotonic', return_value=1001):
             self.panel.refresh()
         self.assertIn('过期', self.panel.plan_expiry_label.text())
-        self.assertFalse(self.panel.execute_button.isEnabled())
+        self.assertTrue(self.panel.execute_button.isEnabled())  # Execution will replan.
 
     def test_source_switch_discards_preview_and_uses_current_batch(self):
         first = copy.deepcopy(self.obs)
@@ -215,7 +381,7 @@ class UiTests(unittest.TestCase):
         self.assertIsNotNone(self.panel.sequence.preview)
         self.assertFalse(self.node.hand_commands)
         self.assertFalse(self.node.arm_commands)
-        self.assertFalse(self.panel.execute_button.isEnabled())
+        self.assertTrue(self.panel.execute_button.isEnabled())
 
     def test_robot_preview_receives_success_and_blocked_workspace_geometry(self):
         displayed = []
@@ -229,7 +395,7 @@ class UiTests(unittest.TestCase):
         self.panel.preview_button.click()
         self.assertTrue(displayed[-1]['diagnostic_only'])
         self.assertIsNone(self.panel.sequence.preview)
-        self.assertFalse(self.panel.hand_button.isEnabled())
+        self.assertTrue(self.panel.hand_button.isEnabled())  # Hand verification is independent of arm geometry.
         self.assertIn('XYZ=', self.panel.message)
         self.assertFalse(self.node.hand_commands)
 
@@ -251,7 +417,7 @@ class UiTests(unittest.TestCase):
         self.assertFalse(self.node.hand_commands)
         self.assertFalse(self.node.arm_commands)
 
-    def test_open_is_explicit_and_requires_manual_completion_confirmation(self):
+    def test_open_is_explicit_but_confirmation_does_not_gate_ik(self):
         self.panel.set_observation(self.obs)
         self.panel.preview()
         self.panel.hand_button.click()
@@ -260,7 +426,7 @@ class UiTests(unittest.TestCase):
         self.panel.hand_button.click()
         self.assertEqual(self.node.hand_commands, [('right', self.profile['open_positions'])])
         self.assertEqual(self.panel.sequence.state, 'await_open')
-        self.assertFalse(self.panel.plan_button.isEnabled())
+        self.assertTrue(self.panel.plan_button.isEnabled())
         self.panel.confirm_button.click()
         self.assertEqual(self.panel.sequence.state, 'opened')
         self.assertTrue(self.panel.plan_button.isEnabled())
@@ -275,10 +441,92 @@ class UiTests(unittest.TestCase):
         self.panel.preview()
         self.panel.scene_confirm.setChecked(True)
         self.panel.hand()
+        self.panel.set_reserved(True)  # A locked planning/execution target cannot be replaced.
         other = dict(self.obs, observation_id='other')
         self.panel.set_observation(other)
         self.assertEqual(self.panel.sequence.preview['observation_id'], 'test')
         self.panel.stop()
+
+    def test_hand_and_confirmation_work_without_pose_or_preview(self):
+        self.panel.scene_confirm.setChecked(True)
+        self.panel.hand_button.click()
+        self.assertEqual(self.node.hand_commands, [('right', self.profile['open_positions'])])
+        self.assertIsNone(self.panel.sequence.preview)
+        self.panel.confirm_button.click()
+        self.assertIn('已记录', self.panel.message)
+        self.assertFalse(self.node.arm_commands)
+
+    def test_direct_execute_automatically_prechecks_selected_stage(self):
+        self.panel.set_observation(self.obs)
+        self.panel.motion_stage.setCurrentIndex(1)
+        self.panel.waist_participation.setChecked(True)
+        self.panel.scene_confirm.setChecked(True)
+        with patch.object(self.panel, 'launch') as launch:
+            self.panel.execute_button.click()
+        self.assertEqual(self.panel.sequence.state, 'planning')
+        self.assertTrue(self.panel._execute_after_plan)
+        self.assertEqual(launch.call_args.kwargs['stage'], 'approach')
+        self.assertTrue(launch.call_args.kwargs['allow_waist'])
+        self.assertFalse(self.node.hand_commands)
+        self.assertFalse(self.node.arm_commands)
+        self.panel.job_directory = Path(self.tmp.name)
+        result = dict(ok=True, preview_id=self.panel.sequence.preview['id'], stage='approach',
+                      backend='host_ik_manual', ik_checked=True, joint_limits_checked=True, times_s=[0,1])
+        (self.panel.job_directory/'result.json').write_text(json.dumps(result))
+        self.panel.process = SimpleNamespace(deleteLater=lambda:None)
+        with patch.object(self.panel, 'read_output'), patch.object(self.panel, '_execute_ready_plan') as execute:
+            self.panel.finished(0,0)
+            execute.assert_called_once()
+
+    def test_standalone_precheck_does_not_execute_and_cancel_revokes_execution(self):
+        self.panel.set_observation(self.obs)
+        self.panel.motion_stage.setCurrentIndex(2)
+        with patch.object(self.panel, 'launch') as launch:
+            self.panel.plan_button.click()
+        self.assertEqual(launch.call_args.kwargs['stage'], 'lift')
+        self.assertFalse(self.panel._execute_after_plan)
+
+    def test_waist_toggle_invalidates_plan_and_is_locked_while_busy(self):
+        self.panel.sequence.state = 'planned'
+        self.panel.sequence.plan = {'accepted_at': 1}
+        self.panel.scene_confirm.setChecked(True)
+        self.panel.waist_participation.setChecked(True)
+        self.assertEqual(self.panel.sequence.state, 'idle')
+        self.assertIsNone(self.panel.sequence.plan)
+        self.assertFalse(self.panel.scene_confirm.isChecked())
+        self.assertIn('腰部参与', self.panel.message)
+        self.panel.process = SimpleNamespace()
+        self.panel.refresh()
+        self.assertFalse(self.panel.waist_participation.isEnabled())
+        self.panel.process = None
+        self.assertFalse(self.node.hand_commands)
+        self.panel._execute_after_plan = True
+        self.panel.stop()
+        self.assertFalse(self.panel._execute_after_plan)
+
+    def test_direct_execution_failed_precheck_never_starts_runner(self):
+        self.panel.set_observation(self.obs)
+        self.panel.scene_confirm.setChecked(True)
+        with patch.object(self.panel, 'launch'):
+            self.panel.execute_button.click()
+        self.panel.job_directory = Path(self.tmp.name)
+        (self.panel.job_directory/'result.json').write_text(json.dumps({'ok':False,'error':'IK rejected'}))
+        self.panel.process = SimpleNamespace(deleteLater=lambda:None)
+        with patch.object(self.panel, 'read_output'), patch.object(self.panel, '_execute_ready_plan') as execute:
+            self.panel.finished(1,0)
+            execute.assert_not_called()
+        self.assertEqual(self.panel.sequence.state,'failed')
+        self.assertIn('执行未启动：IK 预检失败', self.panel.message)
+        self.assertIn('IK rejected', self.panel.execution_feedback.text())
+        self.assertFalse(self.panel._execute_after_plan)
+        self.assertIsNone(self.panel.runner)
+        self.assertFalse(self.node.hand_commands)
+
+    def test_execute_button_names_the_active_backend(self):
+        self.panel.set_observation(self.obs)
+        self.assertIn('真机', self.panel.execute_button.text())
+        self.panel.execution_mode.setCurrentIndex(0)
+        self.assertIn('仿真', self.panel.execute_button.text())
 
     def test_legacy_segmentation_no_longer_schedules_auto_motion(self):
         tree = ast.parse(Path(__file__).with_name('show_camera_topics.py').read_text())

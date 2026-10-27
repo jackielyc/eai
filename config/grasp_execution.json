@@ -1,9 +1,9 @@
 {
   "calibrated": true,
-  "arm_side": "right",
+  "arm_side": "left",
   "hand_model": "ruiyan_6dof_v1",
   "base_frame": "base_link",
-  "tcp_link": "Link7_r",
+  "tcp_link": "Link7_l",
   "planner_python": "/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/grasp_ik_env/bin/python",
   "urdf_path": "/share_data/projects/mahjong/share/personal/liyichao/a2d-tele/modules/control/wbc/assets/A2D_NoHand/A2D_NoHand_Flattened.urdf",
   "T_grasp_tcp": [
@@ -50,7 +50,7 @@
       0.4
     ],
     [
-      1.0,
+      1.5,
       0.5,
       1.3
     ]

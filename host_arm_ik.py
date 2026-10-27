@@ -172,6 +172,7 @@ class HostArmIK:
         damp: float = 1e-3,
         step: float = 0.35,
         prefer_position: bool = True,
+        allow_waist: bool = True,
     ) -> Optional[List[float]]:
         """求解 moving_side 的 Link7 到目标位姿；失败返回 None。
 
@@ -187,7 +188,7 @@ class HostArmIK:
         )
         # 大位移时放开腰部两轴，否则单臂 7 关节经常够不到桌面目标
         idx_sets = [arm_idxs]
-        if travel > 0.12:
+        if allow_waist and travel > 0.12:
             idx_sets.append(self._waist_idxs + arm_idxs)
 
         def _goal_se3(xyzw: Sequence[float]):

@@ -5740,7 +5740,8 @@ IDLE_CONTROL_MODE = 99
 MODEL_CONTROL_MODE = 0
 TELEOP_CONTROL_MODES = {1, 3}
 ARM_MOVE_SPEED_MIN_RAD_S = 0.10
-ARM_MOVE_SPEED_MAX_RAD_S = 1.00
+# Both A2D_NoHand URDF and a2d_tele.robot.yaml limit the arms to 3.14 rad/s.
+ARM_MOVE_SPEED_MAX_RAD_S = 3.14
 ARM_MOVE_SPEED_DEFAULT_RAD_S = 0.45
 ARM_MOVE_MIN_DURATION_S = 0.8
 ARM_MOVE_MAX_DURATION_S = 10.0
@@ -9695,10 +9696,15 @@ def build_interpolated_joints(
 
 
 def slider_to_arm_move_speed(slider_val: int) -> float:
-    pct = max(10, min(100, int(slider_val))) / 100.0
+    pct = (max(10, min(100, int(slider_val))) - 10) / 90.0
     return ARM_MOVE_SPEED_MIN_RAD_S + pct * (
         ARM_MOVE_SPEED_MAX_RAD_S - ARM_MOVE_SPEED_MIN_RAD_S
     )
+
+
+def arm_move_speed_to_slider(speed: float) -> int:
+    pct = (float(speed) - ARM_MOVE_SPEED_MIN_RAD_S) / (ARM_MOVE_SPEED_MAX_RAD_S - ARM_MOVE_SPEED_MIN_RAD_S)
+    return max(10, min(100, int(round(10 + 90*pct))))
 
 
 def format_arm_move_speed_label(slider_val: int) -> str:
@@ -9716,9 +9722,11 @@ def compute_arm_move_duration_s(
     max_delta = max(abs(goal_joints[i] - start_joints[i]) for i in range(16))
     if max_delta < 1e-4:
         return 0.0
-    speed = max(ARM_MOVE_SPEED_MIN_RAD_S, float(joint_speed_rad_s))
-    duration = max_delta / speed
-    return max(ARM_MOVE_MIN_DURATION_S, min(ARM_MOVE_MAX_DURATION_S, duration))
+    speed = max(ARM_MOVE_SPEED_MIN_RAD_S, min(ARM_MOVE_SPEED_MAX_RAD_S, float(joint_speed_rad_s)))
+    # Linear interpolation: do not truncate long durations and exceed the limit.
+    # The first coordinate is the lift (metres), capped at 0.5 m/s in WBC config.
+    duration = max(max_delta / speed, abs(goal_joints[0]-start_joints[0]) / .5)
+    return max(ARM_MOVE_MIN_DURATION_S, duration)
 
 
 def _joint_dict_from_msg(msg: JointState) -> Dict[str, float]:
@@ -13904,11 +13912,14 @@ class ScaledPixmapLabel(QLabel):
     clicked = pyqtSignal()
     clicked_pixel = pyqtSignal(int, int)
 
-    def __init__(self, placeholder: str = "暂无图像", parent: Optional[QWidget] = None) -> None:
+    def __init__(self, placeholder: str = "暂无图像", parent: Optional[QWidget] = None,
+                 *, fill_frame: bool = False) -> None:
         super().__init__(placeholder, parent)
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(140, 100)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._fill_frame = bool(fill_frame)
+        policy = QSizePolicy.Ignored if self._fill_frame else QSizePolicy.Expanding
+        self.setSizePolicy(policy, policy)
         self._source_pixmap: Optional[QPixmap] = None
         self._source_wh: Optional[Tuple[int, int]] = None
         self._selected = False
@@ -14004,20 +14015,35 @@ class ScaledPixmapLabel(QLabel):
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
-        # 切 tab 会连环 resize，立即 Smooth 缩放会卡死点击
-        t = getattr(self, "_resize_timer", None)
-        if t is None:
-            t = QTimer(self)
-            t.setSingleShot(True)
-            t.timeout.connect(self._refresh_scaled)
-            self._resize_timer = t
-        t.start(80)
+        if self._fill_frame:
+            # The source pixmap is already preview-sized and FastTransformation
+            # is cheap. Immediate scaling avoids visible staircase growth.
+            self._refresh_scaled()
+            return
+        # Other large preview users retain debouncing to avoid tab-switch stalls.
+        timer = getattr(self, "_resize_timer", None)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(self._refresh_scaled)
+            self._resize_timer = timer
+        timer.start(80)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        if self._fill_frame:
+            return QSize(320, 180)
+        return super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        if self._fill_frame:
+            return QSize(140, 100)
+        return super().minimumSizeHint()
 
     def _refresh_scaled(self) -> None:
         if self._source_pixmap is None or self._source_pixmap.isNull():
             return
         scaled = self._source_pixmap.scaled(
-            self.size(),
+            QSize(max(1, self.width()), max(1, self.height())),
             Qt.KeepAspectRatio,
             Qt.FastTransformation,
         )
@@ -14060,9 +14086,9 @@ class Mv6dLightboxWindow(QWidget):
 
         views = QHBoxLayout()
         views.setSpacing(8)
-        self.head_label = ScaledPixmapLabel("头部 6D")
-        self.left_wrist_label = ScaledPixmapLabel("左腕 6D")
-        self.right_wrist_label = ScaledPixmapLabel("右腕 6D")
+        self.head_label = ScaledPixmapLabel("头部 6D", fill_frame=True)
+        self.left_wrist_label = ScaledPixmapLabel("左腕 6D", fill_frame=True)
+        self.right_wrist_label = ScaledPixmapLabel("右腕 6D", fill_frame=True)
         # 兼容旧调用：wrist_label 指向左腕
         self.wrist_label = self.left_wrist_label
         for lab, title in (
@@ -16204,7 +16230,7 @@ class CameraTopicNode(Node):
             else:
                 self._abort_slow_motion_prep("目标关节与当前几乎相同，无需移动")
             return
-        steps = max(2, int(duration_s * ARM_MOVE_JOINT_HZ))
+        steps = max(2, int(math.ceil(duration_s * ARM_MOVE_JOINT_HZ)))
         joint_poses = build_interpolated_joints(start_joints, goal_joints, steps, linear=True)
         self.get_logger().info(
             f"关节轨迹: {steps} 步 @ {ARM_MOVE_JOINT_HZ:.0f}Hz / {duration_s:.1f}s, "
@@ -17492,6 +17518,9 @@ class CameraTopicNode(Node):
         hand = [(n, float(msg.position[i])) for i, n in enumerate(msg.name) if i < len(msg.position)]
         with self._robot_lock:
             self._robot_state.left_hand = hand
+            if not hasattr(self, '_grasp_hand_state_received_at'):
+                self._grasp_hand_state_received_at = {}
+            self._grasp_hand_state_received_at['left'] = time.time()
         self._touch_robot_state()
 
     def _on_right_hand_state(self, msg: JointState) -> None:
@@ -17500,6 +17529,9 @@ class CameraTopicNode(Node):
         hand = [(n, float(msg.position[i])) for i, n in enumerate(msg.name) if i < len(msg.position)]
         with self._robot_lock:
             self._robot_state.right_hand = hand
+            if not hasattr(self, '_grasp_hand_state_received_at'):
+                self._grasp_hand_state_received_at = {}
+            self._grasp_hand_state_received_at['right'] = time.time()
         self._touch_robot_state()
 
     def _on_left_tcp_pose(self, msg: PoseStamped, source_topic: str = ROBOT_LEFT_TCP_TOPIC) -> None:
@@ -26019,6 +26051,10 @@ class CameraTopicWindow(QMainWindow):
         self._topic_types: Dict[str, List[str]] = {}
         self._frame_cache: Dict[str, np.ndarray] = {}
         self._last_segment_target: Optional[SegmentPoseTarget] = None
+        self._grasp_wrench_lock = threading.Lock()
+        self._grasp_wrench_cache: Dict[str, dict] = {}
+        self._grasp_wrench_subs = []
+        self._grasp_wrench_monitor_started = False
         self._click_pose_busy = False
         self._click_pose_bridge = Sam3CallBridge()
         self._click_pose_bridge.finished.connect(self._on_click_pose_finished)
@@ -30469,6 +30505,8 @@ class CameraTopicWindow(QMainWindow):
             fill_extrinsic=self._fill_grasp_observation_extrinsic,
             ensure_feedback=self._ensure_host_fk,
             open_calibration=self._open_grasp_profile_calibration,
+            wrench_feedback=self._grasp_wrench_feedback,
+            ensure_wrench_monitor=self._ensure_grasp_wrench_monitor,
         )
 
 
@@ -30632,14 +30670,7 @@ class CameraTopicWindow(QMainWindow):
         arm_row1.addWidget(QLabel("移动速度"))
         self.arm_move_speed_slider = QSlider(Qt.Horizontal)
         self.arm_move_speed_slider.setRange(10, 100)
-        default_speed_slider = int(
-            round(
-                (ARM_MOVE_SPEED_DEFAULT_RAD_S - ARM_MOVE_SPEED_MIN_RAD_S)
-                / (ARM_MOVE_SPEED_MAX_RAD_S - ARM_MOVE_SPEED_MIN_RAD_S)
-                * 90
-            )
-            + 10
-        )
+        default_speed_slider = arm_move_speed_to_slider(ARM_MOVE_SPEED_DEFAULT_RAD_S)
         self.arm_move_speed_slider.setValue(default_speed_slider)
         self.arm_move_speed_slider.setMinimumWidth(100)
         self.arm_move_speed_slider.setMaximumWidth(160)
@@ -31334,9 +31365,9 @@ class CameraTopicWindow(QMainWindow):
 
         mv6d_preview_row = QHBoxLayout()
         mv6d_preview_row.setSpacing(6)
-        self.mv6d_head_preview = ScaledPixmapLabel("头部 · 点击选择物体")
-        self.mv6d_left_wrist_preview = ScaledPixmapLabel("左腕 · 点击放大")
-        self.mv6d_right_wrist_preview = ScaledPixmapLabel("右腕 · 点击放大")
+        self.mv6d_head_preview = ScaledPixmapLabel("头部 · 点击选择物体", fill_frame=True)
+        self.mv6d_left_wrist_preview = ScaledPixmapLabel("左腕 · 点击放大", fill_frame=True)
+        self.mv6d_right_wrist_preview = ScaledPixmapLabel("右腕 · 点击放大", fill_frame=True)
         # 兼容旧引用：单腕预览别名指向左腕
         self.mv6d_wrist_preview = self.mv6d_left_wrist_preview
         self.mv6d_head_preview.setMinimumHeight(240)
@@ -33997,8 +34028,16 @@ class CameraTopicWindow(QMainWindow):
         self._restore_real_robot_backends_order()
         self._restore_arm_panels_order()
         self._restore_viewer_ui_state()
+        self._on_arm_move_speed_changed(self.arm_move_speed_slider.value())
         self._on_mv6d_methods_changed()
         # After restore: fix Pi_05 + LingBot-only ckpt (or clear incompatible leftovers).
+        self.mv6d_enable_check.blockSignals(True)
+        self.mv6d_enable_check.setChecked(False)
+        self.mv6d_enable_check.setEnabled(False)
+        self.mv6d_enable_check.setToolTip('开发缓存模式：仅点击“估计一次”且成功后更新结果')
+        self.mv6d_enable_check.blockSignals(False)
+        self._mv6d_timer.stop()
+        QTimer.singleShot(0, self._restore_mv6d_cache)
         self._sanitize_sim_eval_policy_ckpt_pair()
         self._sync_sim_backend_tab_from_radios()
         self._sync_real_robot_backend_tab_from_radios()
@@ -41819,6 +41858,7 @@ class CameraTopicWindow(QMainWindow):
 
         payload: Dict[str, object] = {
             "version": 1,
+            "arm_move_speed_mapping_version": 2,
             "widgets": widgets,
             "control_tab": control_tab,
             "splitter_sizes": splitter_sizes,
@@ -41848,6 +41888,11 @@ class CameraTopicWindow(QMainWindow):
         if isinstance(widgets, dict):
             widgets = dict(widgets)
             widgets.pop("mv6d_gt_enable_check", None)
+            saved_speed = widgets.get('arm_move_speed_slider')
+            if state.get('arm_move_speed_mapping_version', 1) < 2 and isinstance(saved_speed, dict):
+                old_value = max(10, min(100, int(saved_speed.get('value', 46))))
+                old_speed = .1 + (old_value/100.)*.9
+                widgets['arm_move_speed_slider'] = dict(saved_speed, value=arm_move_speed_to_slider(old_speed))
         restored = 0
         pending_combo: Dict[str, object] = {}
         if isinstance(widgets, dict):
@@ -50779,6 +50824,65 @@ class CameraTopicWindow(QMainWindow):
         if panel.is_simulation:
             panel.simulation_backend().hand(side, values)
 
+    def _robot_grasp_action(self, action):
+        panel = self.grasp_execution_panel
+        if action == 'restore':
+            view = getattr(self, '_robot_view', None)
+            if not panel.is_simulation and view is not None:
+                panel.scene_confirm.setChecked(view._restore_scene_check.isChecked())
+                view._restore_scene_check.setChecked(False)
+            panel.restore_startup()
+        else:
+            panel.stop()
+        return panel.message
+
+    def _grasp_wrench_feedback(self, side):
+        with self._grasp_wrench_lock:
+            sample = self._grasp_wrench_cache.get(str(side))
+            return None if sample is None else dict(sample)
+
+    def _on_grasp_wrench(self, side, msg):
+        try:
+            values = [float(v) for v in (msg.force_data or [])]
+            valid = len(values) >= 6 and all(math.isfinite(v) for v in values[:6])
+            sample = {
+                'force': values[:3] if valid else None,
+                'torque': values[3:6] if valid else None,
+                'force_state': int(getattr(msg, 'force_state', 0) or 0),
+                'stamp': time.time(),
+            }
+        except Exception:
+            sample = {'force': None, 'torque': None, 'force_state': -3, 'stamp': time.time()}
+        with self._grasp_wrench_lock:
+            self._grasp_wrench_cache[str(side)] = sample
+
+    def _ensure_grasp_wrench_monitor(self):
+        if self._grasp_wrench_monitor_started:
+            return
+        self._grasp_wrench_monitor_started = True
+        self.node.enqueue_ros_op(self._setup_grasp_wrench_monitor_on_ros)
+
+    def _setup_grasp_wrench_monitor_on_ros(self):
+        try:
+            from robot_view3d import import_arm_state
+            from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+            ArmState = import_arm_state()
+            qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                             history=HistoryPolicy.KEEP_LAST, depth=1,
+                             durability=DurabilityPolicy.VOLATILE)
+            for side, topic in (('left', '/hal/left_arm_data'), ('right', '/hal/right_arm_data')):
+                sub = self.node.create_subscription(
+                    ArmState, topic,
+                    lambda msg, bound=side: self._on_grasp_wrench(bound, msg), qos)
+                self._grasp_wrench_subs.append(sub)
+        except Exception as exc:
+            with self._grasp_wrench_lock:
+                for side in ('left', 'right'):
+                    self._grasp_wrench_cache[side] = {
+                        'force': None, 'torque': None, 'force_state': -3,
+                        'stamp': time.time(), 'error': str(exc),
+                    }
+
     def _display_grasp_simulation(self, joints, hands):
         self._robot_grasp_simulation = (joints, hands)
         if joints is not None and getattr(self, '_robot_view', None) is None:
@@ -53682,32 +53786,20 @@ class CameraTopicWindow(QMainWindow):
         self.status_bar.showMessage("位姿已记录；请显式选择手臂并确认移动，不再自动移动左臂")
 
     def _on_mv6d_enable_toggled(self, checked: bool) -> None:
+        self._mv6d_timer.stop()
+        self.mv6d_enable_check.blockSignals(True)
+        self.mv6d_enable_check.setChecked(False)
+        self.mv6d_enable_check.blockSignals(False)
         if checked:
-            if not self._mv6d_ensure_object_selected(silent=False):
-                self.mv6d_enable_check.blockSignals(True)
-                self.mv6d_enable_check.setChecked(False)
-                self.mv6d_enable_check.blockSignals(False)
-                return
-            self._on_mv6d_interval_changed(self.mv6d_interval_spin.value())
-            self._mv6d_timer.start()
-            self.status_bar.showMessage("多视角 6D：实时估计已开启")
-            self._on_mv6d_estimate_once()
-        else:
-            self._mv6d_timer.stop()
-            self.status_bar.showMessage("多视角 6D：实时估计已关闭")
+            self.status_bar.showMessage('开发缓存模式：请点击“估计一次”更新结果')
 
     def _on_mv6d_interval_changed(self, value: float) -> None:
         ms = max(200, int(float(value) * 1000.0))
         self._mv6d_timer.setInterval(ms)
 
     def _on_mv6d_timer_tick(self) -> None:
-        if self._mv6d_busy:
-            return
-        if not self.mv6d_enable_check.isChecked():
-            return
-        if not self._mv6d_object_picked:
-            return
-        self._start_mv6d_estimate(silent=True)
+        # Cached developer workflow: only the explicit once button updates results.
+        return
 
     def _on_mv6d_estimate_once(self) -> None:
         if not self._mv6d_ensure_object_selected(silent=False):
@@ -53738,6 +53830,7 @@ class CameraTopicWindow(QMainWindow):
                 holder.layout().addWidget(view, 1)
                 self._robot_view = view
                 view.simulation_hand_callback = self._control_grasp_simulation_hand
+                view.grasp_action_callback = self._robot_grasp_action
                 sim_q, sim_hands = getattr(self, '_robot_grasp_simulation', (None, {}))
                 view.set_simulation_state(sim_q, sim_hands)
                 view.set_grasp_preview(getattr(self, '_robot_grasp_preview', None))
@@ -53949,28 +54042,27 @@ class CameraTopicWindow(QMainWindow):
         else:
             self._mv6d_live_head_bgr = None
         wrist_pending = []
-        if self._mv6d_last_snap is None:
-            for side, lab, cache, empty in (
-                (
-                    "left",
-                    self.mv6d_left_wrist_preview,
-                    "_mv6d_left_wrist_pix",
-                    "左腕 · 等待画面\n勾选 /camera/hand_left_color 或 left_wrist_color",
-                ),
-                (
-                    "right",
-                    self.mv6d_right_wrist_preview,
-                    "_mv6d_right_wrist_pix",
-                    "右腕 · 等待画面\n勾选 /camera/hand_right_color 或 right_wrist_color",
-                ),
-            ):
-                lab.setVisible(True)
-                src = self._pick_mv6d_color_frame(side)
-                if src is None:
-                    self._set_mv6d_preview_label(lab, None, empty, cache_attr=cache)
-                    continue
-                pending[src[0]] = src[1]
-                wrist_pending.append((lab, cache, empty, src[0]))
+        for side, lab, cache, empty in (
+            (
+                "left",
+                self.mv6d_left_wrist_preview,
+                "_mv6d_left_wrist_pix",
+                "左腕 · 等待画面\n勾选 /camera/hand_left_color 或 left_wrist_color",
+            ),
+            (
+                "right",
+                self.mv6d_right_wrist_preview,
+                "_mv6d_right_wrist_pix",
+                "右腕 · 等待画面\n勾选 /camera/hand_right_color 或 right_wrist_color",
+            ),
+        ):
+            lab.setVisible(True)
+            src = self._pick_mv6d_color_frame(side)
+            if src is None:
+                self._set_mv6d_preview_label(lab, None, empty, cache_attr=cache)
+                continue
+            pending[src[0]] = src[1]
+            wrist_pending.append((lab, cache, empty, src[0]))
         drawn = self._mv6d_overlay_hand_skeleton(pending)
         if head_bgr is not None:
             self._set_mv6d_preview_label(
@@ -54461,7 +54553,7 @@ class CameraTopicWindow(QMainWindow):
         left_src = self._pick_mv6d_color_frame("left")
         right_src = self._pick_mv6d_color_frame("right")
         if head_src is None and left_src is None and right_src is None:
-            if not silent:
+            if not silent and getattr(self, '_mv6d_last_snap', None) is None:
                 self.mv6d_result_edit.setPlainText(
                     "错误: 未拿到头部或腕部彩色图。\n"
                     "请勾选 /camera/head_color 与 "
@@ -54597,7 +54689,10 @@ class CameraTopicWindow(QMainWindow):
             msg = f"正在用 SAM3 分割，再计算 {active_names}（结果文本用 {method_name}）…"
             if need_refine:
                 msg = f"正在用 LingBot-Depth 补深度，随后 SAM3，并计算 {active_names}…"
-            self.mv6d_result_edit.setPlainText(msg)
+            if getattr(self, '_mv6d_last_snap', None) is None:
+                self.mv6d_result_edit.setPlainText(msg)
+            else:
+                self.status_bar.showMessage(msg + '（保留上次结果直到成功）')
 
         def _work() -> None:
             t0 = time.time()
@@ -56786,13 +56881,14 @@ class CameraTopicWindow(QMainWindow):
         if not isinstance(payload, dict):
             return
         silent = bool(payload.get("silent"))
+        if silent:
+            return
         if not payload.get("ok"):
-            if payload.get("depth_source") == "lingbot":
-                self._clear_lingbot_depth_result()
             err = str(payload.get("error") or "未知错误")
             if not silent or payload.get("depth_source") == "lingbot":
-                self.mv6d_result_edit.setPlainText(f"失败: {err}")
-                self.status_bar.showMessage(f"多视角 6D 失败: {err[:120]}")
+                if self._mv6d_last_snap is None:
+                    self.mv6d_result_edit.setPlainText(f"失败: {err}")
+                self.status_bar.showMessage(f"多视角 6D 失败，保留上次结果: {err[:120]}")
             return
         depth_results = payload.get("lingbot_results") or []
         if depth_results:
@@ -56804,6 +56900,11 @@ class CameraTopicWindow(QMainWindow):
             return
         self._mv6d_last_snap = snap
         try:
+            self._robot_method_poses = {}
+            view = getattr(self, '_robot_view', None)
+            if view is not None:
+                for key in ('pca', 'foundationpose', 'any6d'):
+                    view.set_method_pose(key, None, None)
             self._show_mv6d_on_robot_view(
                 snap,
                 silent=silent,
@@ -56833,6 +56934,16 @@ class CameraTopicWindow(QMainWindow):
                 observation['observation_id'] += ':' + key
                 observations[key] = observation
             self.grasp_execution_panel.set_method_observations(observations)
+            from mv6d_cache import save_cache
+            save_cache(self._mv6d_cache_path(), {
+                'snap': snap, 'captured_at': captured_at,
+                'method_poses': getattr(self, '_robot_method_poses', {}),
+                'observations': observations,
+                'sam3_points': getattr(self, '_robot_sam3_points', None),
+                'lingbot_results': payload.get('lingbot_results') or [],
+                'robot_lingbot_depth': getattr(self, '_robot_lingbot_depth', None),
+                'depth_source': payload.get('depth_source'),
+            })
         except Exception as exc:
             self.grasp_execution_panel.message = f"视觉6D输入转换失败: {exc}"
             self.grasp_execution_panel.refresh()
@@ -56873,6 +56984,58 @@ class CameraTopicWindow(QMainWindow):
                 f"多视角 6D 完成 ({snap.method}, {elapsed:.2f}s, "
                 f"pts={snap.fused_points}){extra}"
             )
+
+    def _mv6d_cache_path(self):
+        return os.path.join(EAI_DIR, '.cache', 'mv6d_last_success.npz')
+
+    def _restore_mv6d_cache(self):
+        path = self._mv6d_cache_path()
+        if not os.path.isfile(path) or self._mv6d_busy:
+            return
+        try:
+            from mv6d_cache import load_cache
+            cached = load_cache(path, {'MultiView6DPoseSnapshot': MultiView6DPoseSnapshot,
+                                       'Object6DPoseResult': Object6DPoseResult})
+            snap = cached['snap']
+            if not isinstance(snap, MultiView6DPoseSnapshot):
+                raise ValueError('缓存快照类型错误')
+            self._mv6d_last_snap = snap
+            self._robot_method_poses = cached['method_poses']
+            self._robot_sam3_points = cached.get('sam3_points')
+            self._robot_lingbot_depth = cached.get('robot_lingbot_depth')
+            view = getattr(self, '_robot_view', None)
+            if view is not None:
+                for key, pose in self._robot_method_poses.items():
+                    view.set_method_pose(key, *pose)
+                view.set_sam3_points(self._robot_sam3_points)
+                cloud = self._robot_lingbot_depth or {}
+                if cloud.get('ply') and os.path.isfile(cloud['ply']):
+                    view.set_lingbot_depth_from_ply(cloud['ply'], color_topic=cloud.get('color_topic', ''))
+            observations = cached['observations']
+            for obs in observations.values():
+                obs['source_label'] = obs.get('source_label', '') + ' / 历史缓存'
+            self.grasp_execution_panel.set_method_observations(observations)
+            self._refresh_mv6d_result_text(snap)
+            # Put the cached source on screen immediately. Full overlay
+            # rendering can depend on UI/TF helpers that are still starting.
+            cached_head = getattr(getattr(snap, 'head_result', None), 'source_bgr', None)
+            if cached_head is not None:
+                source = np.asarray(cached_head)
+                self._set_mv6d_preview_label(
+                    self.mv6d_head_preview, source,
+                    '头部 · 历史缓存无图像', cache_attr='_mv6d_head_pix',
+                    source_wh=(int(source.shape[1]), int(source.shape[0])),
+                )
+            try:
+                self._apply_mv6d_overlays(snap)
+            except Exception as exc:
+                # Keep the cached source usable; live frames can refresh it too.
+                self.status_bar.showMessage('已恢复6D缓存原图；叠加稍后重试：' + str(exc)[:120])
+            stamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(cached['captured_at']))
+            self.mv6d_result_edit.setPlainText('已加载历史缓存，估计时间：' + stamp + '\n' + self.mv6d_result_edit.toPlainText())
+            self.status_bar.showMessage('已恢复上次6D结果；点击“估计一次”成功后更新。')
+        except Exception as exc:
+            self.status_bar.showMessage('6D缓存未加载：' + str(exc))
 
     def _on_arm_text_command(self) -> None:
         text = self.arm_text_cmd_edit.text().strip()
@@ -58682,11 +58845,8 @@ class CameraTopicWindow(QMainWindow):
         if now - last < 0.5:
             return
         self._mv6d_preview_refresh_at = now
-        # 已有估计结果且开了叠加：实况刷新交给估计完成回调；此处只刷无叠加的轻量实况
-        snap = getattr(self, "_mv6d_last_snap", None)
-        overlay = getattr(self, "mv6d_overlay_check", None)
-        if snap is not None and overlay is not None and overlay.isChecked():
-            return
+        # A restored result belongs to the previous capture. It must not block
+        # live head/wrist frames used to select the next object.
         try:
             self._refresh_mv6d_live_previews_for_pick()
         except Exception:
