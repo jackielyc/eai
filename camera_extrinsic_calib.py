@@ -17,6 +17,7 @@ STORE_PATH = Path(__file__).resolve().parent / "config" / "camera_extrinsics.jso
 CAMERAS = (
     {
         "topic": "/camera/head_color",
+        "width": 1280, "height": 800,
         "label": "头部",
         "model": "eye_to_hand",
         "arm_side": "",
@@ -28,6 +29,7 @@ CAMERAS = (
     },
     {
         "topic": "/camera/hand_left_color",
+        "width": 848, "height": 480,
         "label": "左腕",
         "model": "eye_in_hand",
         "arm_side": "left",
@@ -39,6 +41,7 @@ CAMERAS = (
     },
     {
         "topic": "/camera/hand_right_color",
+        "width": 848, "height": 480,
         "label": "右腕",
         "model": "eye_in_hand",
         "arm_side": "right",

@@ -46,8 +46,10 @@ FP_MESH="${FP_MESH:-}"
 NVDIFFRAST_SRC="${NVDIFFRAST_SRC:-}"
 PYTORCH3D_SRC="${PYTORCH3D_SRC:-}"
 if [[ -z "${FOUNDATIONPOSE_ROOT:-}" ]]; then
-    if [[ -d "${SCRIPT_DIR}/FoundationPose" ]]; then
+    if [[ -f "${SCRIPT_DIR}/FoundationPose/estimater.py" ]]; then
         FOUNDATIONPOSE_ROOT="${SCRIPT_DIR}/FoundationPose"
+    elif [[ -f "${SCRIPT_DIR}/../FoundationPose/estimater.py" ]]; then
+        FOUNDATIONPOSE_ROOT="$(cd "${SCRIPT_DIR}/../FoundationPose" && pwd)"
     else
         FOUNDATIONPOSE_ROOT="${HOME}/FoundationPose"
     fi

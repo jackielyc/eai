@@ -11,6 +11,7 @@ import os
 import time
 
 import numpy as np
+from perception_geometry import calibrated_intrinsics, DEPTH_MIN_M, DEPTH_MAX_M, valid_depth_mask, validated_camera_transform
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from rclpy.node import Node
@@ -53,8 +54,8 @@ _CAMERAS = (
 )
 
 _STRIDE = 6
-_MIN_M = 0.08
-_MAX_M = 2.5
+_MIN_M = DEPTH_MIN_M
+_MAX_M = DEPTH_MAX_M
 _MIN_PERIOD = 0.12
 _MOSAIC_TOPIC = "/eai/color_mosaic"
 _MOSAIC_W = 640
@@ -93,7 +94,7 @@ def _quat_from_R(R: np.ndarray):
 def _load_extrinsics() -> dict:
     try:
         with open(_EXTRINSICS, "r", encoding="utf-8") as handle:
-            return json.load(handle).get("cameras") or {}
+            return {topic: dict(entry, color_topic=topic) for topic, entry in (json.load(handle).get("cameras") or {}).items()}
     except Exception:
         return {}
 
@@ -103,20 +104,12 @@ def _placement(cam: dict, spec: dict):
     parent = spec["fallback_parent"]
     xyz = (0.0, 0.0, 0.0)
     quat = (0.0, 0.0, 0.0, 1.0)
-    if not cam:
-        return parent, xyz, quat, "无外参文件，挂在 %s" % parent
-    rms = float(cam.get("rms_m") or 1.0)
-    model = cam.get("model") or ""
-    key = "T_tcp_camera" if model == "eye_in_hand" else "T_base_camera"
-    raw = cam.get(key)
-    if not isinstance(raw, list) or len(raw) < 3:
-        return parent, xyz, quat, "外参矩阵缺失，挂在 %s" % parent
-    T = np.asarray(raw, dtype=np.float64)
-    trans = T[:3, 3]
-    usable = rms <= 0.02 and (model != "eye_in_hand" or float(np.linalg.norm(trans)) <= 0.35)
-    if not usable:
+    T, reason = validated_camera_transform(cam)
+    if T is None:
         link = cam.get("tcp_link") or parent
-        return link, xyz, quat, "外参 rms %.2f m，点云挂在 %s" % (rms, link)
+        return link, xyz, quat, f"未标定示意：{reason}，挂在 {link}"
+    model = cam.get("model")
+    trans = T[:3, 3]
     parent = cam.get("base_frame") or "base_link"
     if model == "eye_in_hand":
         parent = cam.get("tcp_link") or parent
@@ -124,21 +117,10 @@ def _placement(cam: dict, spec: dict):
 
 
 def _intrinsics(cam: dict, width: int, height: int):
-    intr = (cam or {}).get("intrinsics") or {}
-    try:
-        fx = float(intr["fx"])
-        fy = float(intr["fy"])
-        cx = float(intr["cx"])
-        cy = float(intr["cy"])
-    except (KeyError, TypeError, ValueError):
-        fx = fy = 0.9 * max(width, height)
-        cx = width / 2.0
-        cy = height / 2.0
-        return fx, fy, cx, cy
-    if cx > 1.0 and abs(width - 2.0 * cx) / max(width, 1) > 0.25:
-        scale = width / (2.0 * cx)
-        fx, fy, cx, cy = fx * scale, fy * scale, cx * scale, cy * scale
-    return fx, fy, cx, cy
+    k = calibrated_intrinsics(cam, width, height)
+    if k is not None:
+        return k
+    return 0.9 * max(width, height), 0.9 * max(width, height), width / 2., height / 2.
 
 
 def _depth_meters(msg: Image) -> np.ndarray:
@@ -254,7 +236,7 @@ class DepthCloudNode(Node):
         self._tf = StaticTransformBroadcaster(self)
         transforms = []
         for spec in _CAMERAS:
-            cam = self._cams.get(spec["color"]) or {}
+            cam = dict(self._cams.get(spec["color"]) or {}, color_topic=spec["color"])
             parent, xyz, quat, note = _placement(cam, spec)
             self.get_logger().info("%s: %s" % (spec["depth"], note))
             transforms.append(self._tf_msg(parent, spec["frame"], xyz, quat))
@@ -321,7 +303,7 @@ class DepthCloudNode(Node):
             fx, fy, cx, cy = _intrinsics(cam, w, h)
             sub = depth[::_STRIDE, ::_STRIDE]
             vs, us = np.mgrid[0:h:_STRIDE, 0:w:_STRIDE]
-            valid = (sub > _MIN_M) & (sub < _MAX_M) & np.isfinite(sub)
+            valid = valid_depth_mask(sub)
             if not np.any(valid):
                 return
             z = sub[valid]

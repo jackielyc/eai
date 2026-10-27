@@ -145,6 +145,7 @@ def _ensure_pyqtgraph_opengl() -> Tuple[Any, Any]:
 
 
 import rclpy
+from perception_geometry import resolve_intrinsics, sanitize_depth, valid_depth_mask, DEPTH_MIN_M, DEPTH_MAX_M, validated_camera_transform
 from PyQt5.QtCore import (
     Qt,
     QProcess,
@@ -2795,12 +2796,12 @@ LINGBOT_VISION_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_vision")
 LINGBOT_VISION_EXAMPLE = os.path.join(
     LINGBOT_VISION_ROOT_DEFAULT, "examples", "example.png"
 )
-LINGBOT_DEPTH_ROOT_DEFAULT = (
-    "/share_data/projects/mahjong/share/personal/liyichao/lingbot-depth"
-)
-LINGBOT_DEPTH_PYTHON_DEFAULT = (
-    "/share_data/projects/mahjong/share/personal/liyichao/miniconda3/envs/eai/bin/python"
-)
+LINGBOT_DEPTH_ROOT_DEFAULT = os.path.abspath(os.path.expanduser(
+    os.environ.get("LINGBOT_DEPTH_ROOT") or os.path.join(EAI_DIR, "..", "lingbot-depth")
+))
+LINGBOT_DEPTH_PYTHON_DEFAULT = os.path.abspath(os.path.expanduser(
+    os.environ.get("LINGBOT_DEPTH_PYTHON") or os.path.join(EAI_DIR, "..", "envs", "lingbot-depth", "bin", "python")
+))
 LINGBOT_DEPTH_RUN_SCRIPT = os.path.join(EAI_DIR, "run_lingbot_depth.sh")
 LINGBOT_DEPTH_CACHE_DIR = os.path.join(EAI_DIR, ".cache", "lingbot_depth")
 LINGBOT_DEPTH_MODEL_DEFAULT = "robbyant/lingbot-depth-pretrain-vitl-14-v0.5"
@@ -6280,7 +6281,7 @@ def depth_to_point_cloud(
         np.arange(0, h, dtype=np.float32) * stride,
     )
 
-    valid = (depth_sub > 0.01) & (depth_sub < max_depth) & np.isfinite(depth_sub)
+    valid = valid_depth_mask(depth_sub, DEPTH_MIN_M, min(float(max_depth), DEPTH_MAX_M))
     if not np.any(valid):
         return np.empty((0, 3), dtype=np.float32), np.empty((0, 4), dtype=np.float32)
 
@@ -8076,7 +8077,7 @@ def mask_to_points_3d(
     if len(xs) == 0:
         return np.empty((0, 3), dtype=np.float32), np.empty((0, 2), dtype=np.float32)
     zs = depth_m[ys, xs]
-    valid = (zs > 0.01) & np.isfinite(zs)
+    valid = valid_depth_mask(zs)
     xs = xs[valid].astype(np.float32)
     ys = ys[valid].astype(np.float32)
     zs = zs[valid]
@@ -8510,23 +8511,7 @@ def refine_stereo_segment(
     if len(cluster_idx) < 5:
         return mask, points
 
-    # 去掉明显比种子更深的点（俯视时桌面/背景），减少中心被桌面拉偏
     refined_points = points[cluster_idx]
-    try:
-        depth_m_full = depth_to_meters_array(depth)
-        seed_z = float(
-            depth_m_full[
-                max(0, min(depth_m_full.shape[0] - 1, int(seed_v))),
-                max(0, min(depth_m_full.shape[1] - 1, int(seed_u))),
-            ]
-        )
-        if np.isfinite(seed_z) and seed_z > 0.05:
-            z_keep = refined_points[:, 2] <= (seed_z + 0.022)
-            if int(np.count_nonzero(z_keep)) >= max(5, SEGMENT_3D_MIN_POINTS // 2):
-                cluster_idx = cluster_idx[z_keep]
-                refined_points = points[cluster_idx]
-    except Exception:
-        pass
 
     refined_uv = uv[cluster_idx]
     refined_mask_crop = uv_to_mask(refined_uv, mask_crop.shape)
@@ -8665,6 +8650,10 @@ class Object6DPoseResult:
     pixel_count: int
     point_count: int
     method: str
+    raw_mask: Optional[np.ndarray] = None
+    source_bgr: Optional[np.ndarray] = None
+    intrinsics: Optional[Tuple[float, float, float, float]] = None
+    diagnostics_dir: str = ""
 
 
 @dataclass
@@ -9173,7 +9162,7 @@ def draw_mv6d_hud_banner(
         f"RPY ({r:.1f}, {p:.1f}, {yw:.1f}) deg",
     ]
     if err_t_mm is not None and err_r_deg is not None:
-        lines.append(f"err |t|={err_t_mm:.1f}mm  |R|={err_r_deg:.1f}deg")
+        lines.append(f"pose-ref delta |t|={err_t_mm:.1f}mm |R|={err_r_deg:.1f}deg")
     font = cv2.FONT_HERSHEY_SIMPLEX
     scale = 0.45 if w >= 640 else 0.38
     y0 = 18
@@ -9260,23 +9249,27 @@ def format_multiview_6d_text(
             f"头: {snap.head_topic or '-'}  |  参与融合腕: {wrist_used}"
             f"  |  主腕: {snap.wrist_topic or '-'}"
         )
-    if gt_enabled and gt_xyz is not None and gt_R is not None:
+    if gt_enabled and gt_xyz is not None and gt_R is not None and normalize_frame_id(snap.frame_id) == BASE_LINK_FRAME:
         gx, gy, gz = [float(v) for v in gt_xyz]
         gr, gp, gyaw = rotation_matrix_to_euler_xyz(np.asarray(gt_R, dtype=np.float64))
-        lines.append(f"真值 XYZ=({gx:.4f}, {gy:.4f}, {gz:.4f}) m")
+        lines.append(f"参考 XYZ=({gx:.4f}, {gy:.4f}, {gz:.4f}) m")
         lines.append(
-            f"真值 RPY=({math.degrees(gr):.2f}°, {math.degrees(gp):.2f}°, "
+            f"参考 RPY=({math.degrees(gr):.2f}°, {math.degrees(gp):.2f}°, "
             f"{math.degrees(gyaw):.2f}°)"
         )
         t_mm, r_deg, d_mm = pose_error_metrics(snap.position_xyz, snap.rotation_matrix, gt_xyz, gt_R)
         lines.append(
-            f"误差 |Δt|={t_mm:.1f} mm  (Δx={d_mm[0]:+.1f}, Δy={d_mm[1]:+.1f}, Δz={d_mm[2]:+.1f})  "
+            f"位姿参考差值（非 SAM3 分割误差） |Δt|={t_mm:.1f} mm  (Δx={d_mm[0]:+.1f}, Δy={d_mm[1]:+.1f}, Δz={d_mm[2]:+.1f})  "
             f"|ΔR|={r_deg:.2f}°"
         )
     elif gt_enabled:
-        lines.append("真值: 未设置（填 XYZ/RPY 或加载仿真 GT 文件）")
+        lines.append("参考比较不可用：请确认参考已设置且估计位于 base_link")
     else:
-        lines.append("真值对比: 未启用")
+        lines.append("参考位姿对比: 未启用（选择当前目标后确认参考值）")
+    if snap.head_result is not None:
+        debug_dir = getattr(snap.head_result, "diagnostics_dir", "")
+        if debug_dir:
+            lines.append(f"SAM3 原始二维掩码 / 深度过滤掩码: {debug_dir}")
     if snap.notes:
         lines.append(snap.notes)
     return "\n".join(lines)
@@ -15423,6 +15416,7 @@ class CameraTopicNode(Node):
         self.subscriptions_map: Dict[str, object] = {}
         self.camera_info_subs: Dict[str, object] = {}
         self._camera_intrinsics: Dict[str, Tuple[float, float, float, float]] = {}
+        self._camera_intrinsics_sizes: Dict[str, Tuple[int, int]] = {}
         self.click_frames = click_pose.FrameBuffer()
         self.enabled_topics: set[str] = set()
         self._state_lock = threading.Lock()
@@ -17631,12 +17625,18 @@ class CameraTopicNode(Node):
             self._pending_enabled = set(topics)
 
     def get_intrinsics(self, topic: str, width: int, height: int) -> Tuple[float, float, float, float]:
-        if topic in self._camera_intrinsics:
-            return self._camera_intrinsics[topic]
-        return default_intrinsics(width, height)
+        k, _source = resolve_intrinsics(
+            topic, width, height, live=self._camera_intrinsics,
+            live_sizes=self._camera_intrinsics_sizes,
+        )
+        return k
 
     def _camera_info_callback(self, msg: CameraInfo, depth_topic: str) -> None:
-        self._camera_intrinsics[depth_topic] = intrinsics_from_camera_info(msg)
+        k = intrinsics_from_camera_info(msg)
+        if msg.width <= 0 or msg.height <= 0 or min(k[:2]) <= 0:
+            return
+        self._camera_intrinsics[depth_topic] = k
+        self._camera_intrinsics_sizes[depth_topic] = (int(msg.width), int(msg.height))
         if msg.header.frame_id:
             self._camera_frame_ids[depth_topic] = msg.header.frame_id
 
@@ -23468,6 +23468,10 @@ class LingbotDepthLauncher(QObject):
         super().__init__(parent)
         self._process: Optional[QProcess] = None
         self._result: Optional[dict] = None
+        from lingbot_depth_io import ResultStream
+        self._output = ResultStream()
+        self._cancelled = False
+        self._result_context = {}
 
     def is_running(self) -> bool:
         return self._process is not None and self._process.state() in (
@@ -23490,6 +23494,7 @@ class LingbotDepthLauncher(QObject):
         sparse_z: float = 0.45,
         seed_u: Optional[int] = None,
         seed_v: Optional[int] = None,
+        color_topic: str = "",
     ) -> None:
         if self.is_running():
             self.status_message.emit("LingBot-Depth 正在运行")
@@ -23498,9 +23503,11 @@ class LingbotDepthLauncher(QObject):
         if not os.path.isfile(script):
             self.status_message.emit(f"未找到脚本: {script}")
             return
-        out_dir = os.path.abspath(
-            os.path.expanduser(out_dir or LINGBOT_DEPTH_CACHE_DIR)
-        )
+        if not out_dir:
+            import tempfile
+            os.makedirs(LINGBOT_DEPTH_CACHE_DIR, exist_ok=True)
+            out_dir = tempfile.mkdtemp(prefix="run_", dir=LINGBOT_DEPTH_CACHE_DIR)
+        out_dir = os.path.abspath(os.path.expanduser(out_dir))
         os.makedirs(out_dir, exist_ok=True)
         cache_dir = os.path.join(EAI_DIR, ".cache", "huggingface")
         os.makedirs(cache_dir, exist_ok=True)
@@ -23559,7 +23566,11 @@ class LingbotDepthLauncher(QObject):
         qenv.insert("HF_HOME", cache_dir)
         qenv.insert("HUGGINGFACE_HUB_CACHE", cache_dir)
 
+        from lingbot_depth_io import ResultStream
         self._result = None
+        self._output = ResultStream()
+        self._cancelled = False
+        self._result_context = {"color_topic": color_topic, "request_started_at": time.time()}
         proc = QProcess(self)
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.readyReadStandardOutput.connect(self._on_process_output)
@@ -23567,8 +23578,8 @@ class LingbotDepthLauncher(QObject):
         proc.errorOccurred.connect(self._on_process_error)
         proc.setWorkingDirectory(LINGBOT_DEPTH_ROOT_DEFAULT)
         proc.setProcessEnvironment(qenv)
-        proc.start("bash", [script, *args])
         self._process = proc
+        proc.start("bash", [script, *args])
         self.running_changed.emit(True)
         src = f"example={example}" if example.strip() else f"rgb={rgb}"
         self.log_line.emit(f"$ bash run_lingbot_depth.sh --model {model} {src}")
@@ -23578,12 +23589,15 @@ class LingbotDepthLauncher(QObject):
         if not self.is_running():
             self.status_message.emit("当前没有运行中的 LingBot-Depth")
             return
+        self._cancelled = True
         self.status_message.emit("正在停止 LingBot-Depth…")
         if self._process is not None:
-            self._process.terminate()
-            QTimer.singleShot(2500, self._force_kill)
+            proc = self._process
+            proc.terminate()
+            QTimer.singleShot(2500, lambda: self._force_kill(proc))
 
     def shutdown(self) -> None:
+        self._cancelled = True
         if self._process is not None and self._process.state() != QProcess.NotRunning:
             self._process.terminate()
             self._process.waitForFinished(1500)
@@ -23593,48 +23607,48 @@ class LingbotDepthLauncher(QObject):
         self._process = None
         self.running_changed.emit(False)
 
-    def _force_kill(self) -> None:
-        if self._process is not None and self._process.state() != QProcess.NotRunning:
-            self._process.kill()
+    def _force_kill(self, proc=None) -> None:
+        proc = proc if proc is not None else self._process
+        try:
+            if proc is not None and proc.state() != QProcess.NotRunning:
+                proc.kill()
+        except RuntimeError:
+            pass  # The captured previous QProcess has already been deleted.
 
     def _on_process_output(self) -> None:
         if self._process is None:
             return
-        data = bytes(self._process.readAllStandardOutput()).decode(
-            "utf-8", errors="replace"
-        )
-        for line in data.splitlines():
-            text = line.rstrip()
-            if not text:
-                continue
-            if text.startswith("[RESULT] "):
-                raw = text[len("[RESULT] ") :].strip()
-                try:
-                    self._result = json.loads(raw)
-                except json.JSONDecodeError:
-                    self.log_line.emit(text)
-                    continue
-                continue
-            self.log_line.emit(text)
+        for line in self._output.feed(bytes(self._process.readAllStandardOutput())):
+            self.log_line.emit(line)
+        self._result = self._output.result
 
-    def _on_process_finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+    def _on_process_finished(self, exit_code: int, status: QProcess.ExitStatus) -> None:
+        self._on_process_output()
+        for line in self._output.feed(final=True):
+            self.log_line.emit(line)
+        result = dict(self._output.result or {})
+        result.update(self._result_context)
+        proc = self._process
+        self._process = None
         self.running_changed.emit(False)
-        result = self._result or {}
-        if result.get("ok"):
+        if result.get("ok") and exit_code == 0 and status == QProcess.NormalExit and not self._cancelled:
             self.result_ready.emit(result)
             self.status_message.emit("LingBot-Depth 完成")
         else:
-            err = str(result.get("error") or f"退出码 {exit_code}")
+            err = "已停止" if self._cancelled else str(result.get("error") or f"退出码 {exit_code}，未返回有效结果")
             self.status_message.emit(f"LingBot-Depth 失败: {err}")
             self.log_line.emit(f"[ERROR] {err}")
-            self.result_ready.emit({"ok": False, "error": err})
-        self._process = None
+            self.result_ready.emit(dict(self._result_context, ok=False, error=err))
+        if proc is not None:
+            proc.deleteLater()
 
     def _on_process_error(self, error: QProcess.ProcessError) -> None:
         if error == QProcess.FailedToStart:
             self.log_line.emit("[ERROR] 无法启动 run_lingbot_depth.sh")
             self.status_message.emit("无法启动 LingBot-Depth")
             self.running_changed.emit(False)
+            self._process = None
+            self.result_ready.emit(dict(self._result_context, ok=False, error="无法启动 LingBot-Depth"))
 
 
 class RewardModelLauncher(QObject):
@@ -26698,7 +26712,7 @@ class CameraTopicWindow(QMainWindow):
         depth_path_row.addWidget(self.lingbot_depth_rgb_browse_btn)
         depth_path_row.addWidget(QLabel("Depth"))
         self.lingbot_depth_depth_edit = QLineEdit()
-        self.lingbot_depth_depth_edit.setPlaceholderText("raw_depth.png（16-bit mm）")
+        self.lingbot_depth_depth_edit.setPlaceholderText("uint16 PNG（毫米）或浮点 NPY（米）")
         depth_path_row.addWidget(self.lingbot_depth_depth_edit, 1)
         self.lingbot_depth_depth_browse_btn = QPushButton("…")
         self.lingbot_depth_depth_browse_btn.setFixedWidth(28)
@@ -26722,10 +26736,9 @@ class CameraTopicWindow(QMainWindow):
         depth_run_row.setSpacing(6)
         self.lingbot_depth_run_btn = QPushButton("运行精修")
         self.lingbot_depth_run_btn.setToolTip(
-            "启动子进程跑 LingBot-Depth，并在下方显示结果。"
+            "按「空间感知模型」页配置独立精修，并在该页预览；6D 串联请勾选「LingBot-Depth 补深度」后估计。"
         )
         self.lingbot_depth_run_btn.clicked.connect(self._on_lingbot_depth_run_clicked)
-        depth_run_row.addWidget(self.lingbot_depth_run_btn)
         self.lingbot_depth_stop_btn = QPushButton("停止")
         self.lingbot_depth_stop_btn.setObjectName("dangerAction")
         self.lingbot_depth_stop_btn.setEnabled(False)
@@ -31055,9 +31068,9 @@ class CameraTopicWindow(QMainWindow):
         mv6d_row1.addWidget(self.mv6d_enable_check)
         self.mv6d_lingbot_depth_check = QCheckBox("LingBot-Depth 补深度")
         self.mv6d_lingbot_depth_check.setToolTip(
-            "无传感器 depth 时用 LingBot-Depth 1.0（v0.5）从 RGB+稀疏先验补全深度，再走 RGB-D 6D。\n"
-            "关闭则保持 RGB-only（快，尺度依赖假定深度）。\n"
-            "模型跟随「深度精修」页当前选择；实时估计时会明显变慢。"
+            "勾选后先用 LingBot-Depth 精修各视角深度，再做 SAM3 分割和 PCA/FP/Any6D 位姿估计。\n"
+            "有原始深度时精修；无深度时用稀疏先验补全，尺度依赖先验。失败则停止本轮。\n"
+            "模型跟随「空间感知模型」页配置；实时估计时会明显变慢。"
         )
         mv6d_row1.addWidget(self.mv6d_lingbot_depth_check)
         self.mv6d_fill_cmd_check = QCheckBox("回填文本指挥")
@@ -31076,6 +31089,7 @@ class CameraTopicWindow(QMainWindow):
         )
         self.mv6d_once_btn.clicked.connect(self._on_mv6d_estimate_once)
         mv6d_row1.addWidget(self.mv6d_once_btn)
+        mv6d_row1.addWidget(self.lingbot_depth_run_btn)
         mv6d_row1.addWidget(QLabel("腕相机"))
         self.mv6d_wrist_combo = ImeSafeComboBox()
         # data 用逻辑侧 "left"/"right"；实际 topic 运行时按 hand_* / left_wrist_* 解析
@@ -31221,17 +31235,17 @@ class CameraTopicWindow(QMainWindow):
 
         mv6d_gt_row = QHBoxLayout()
         mv6d_gt_row.setSpacing(4)
-        self.mv6d_gt_enable_check = QCheckBox("对比真值")
+        self.mv6d_gt_enable_check = QCheckBox("对比当前目标参考位姿")
         self.mv6d_gt_enable_check.setToolTip(
-            "启用后用下方 XYZ/RPY（base_link）与估计值比误差；"
+            "确认下方 XYZ/RPY 是当前目标的 base_link 参考位姿后启用。差值不是 SAM3 分割误差；"
             "也可「加载仿真GT」读 object_gt_pose.json"
         )
         self.mv6d_gt_enable_check.toggled.connect(self._on_mv6d_gt_params_changed)
         mv6d_gt_row.addWidget(self.mv6d_gt_enable_check)
         for axis, attr, tip in (
-            ("X", "mv6d_gt_x_spin", "真值 X (m, base_link)"),
-            ("Y", "mv6d_gt_y_spin", "真值 Y (m, base_link)"),
-            ("Z", "mv6d_gt_z_spin", "真值 Z (m, base_link)"),
+            ("X", "mv6d_gt_x_spin", "参考 X (m, base_link)"),
+            ("Y", "mv6d_gt_y_spin", "参考 Y (m, base_link)"),
+            ("Z", "mv6d_gt_z_spin", "参考 Z (m, base_link)"),
         ):
             mv6d_gt_row.addWidget(QLabel(axis))
             spin = QDoubleSpinBox()
@@ -31245,9 +31259,9 @@ class CameraTopicWindow(QMainWindow):
             setattr(self, attr, spin)
             mv6d_gt_row.addWidget(spin)
         for axis, attr, tip in (
-            ("R", "mv6d_gt_roll_spin", "真值 roll (°)"),
-            ("P", "mv6d_gt_pitch_spin", "真值 pitch (°)"),
-            ("Y", "mv6d_gt_yaw_spin", "真值 yaw (°)"),
+            ("R", "mv6d_gt_roll_spin", "参考 roll (°)"),
+            ("P", "mv6d_gt_pitch_spin", "参考 pitch (°)"),
+            ("Y", "mv6d_gt_yaw_spin", "参考 yaw (°)"),
         ):
             mv6d_gt_row.addWidget(QLabel(axis))
             spin = QDoubleSpinBox()
@@ -41010,6 +41024,9 @@ class CameraTopicWindow(QMainWindow):
         self._sim_eval_launcher.shutdown()
         if getattr(self, "_lingbot_launcher", None) is not None:
             self._lingbot_launcher.shutdown()
+        cancel = getattr(self, "_mv6d_lingbot_cancel", None)
+        if cancel is not None:
+            cancel.set()
         if getattr(self, "_lingbot_depth_launcher", None) is not None:
             self._lingbot_depth_launcher.shutdown()
         if getattr(self, "_reward_launcher", None) is not None:
@@ -41811,6 +41828,9 @@ class CameraTopicWindow(QMainWindow):
             return
 
         widgets = state.get("widgets")
+        if isinstance(widgets, dict):
+            widgets = dict(widgets)
+            widgets.pop("mv6d_gt_enable_check", None)
         restored = 0
         pending_combo: Dict[str, object] = {}
         if isinstance(widgets, dict):
@@ -42475,7 +42495,10 @@ class CameraTopicWindow(QMainWindow):
             getattr(self, "_lingbot_depth_launcher", None)
             and self._lingbot_depth_launcher.is_running()
         )
+        running = running or bool(getattr(self, "_mv6d_lingbot_active", False))
         source = str(self.lingbot_depth_source_combo.currentData() or "camera")
+        self.lingbot_depth_topic_combo.setEnabled(not running and source == "camera")
+        self.lingbot_depth_topic_refresh_btn.setEnabled(not running and source == "camera")
         file_mode = source == "file"
         example_mode = source == "example"
         self.lingbot_depth_run_btn.setEnabled(not running)
@@ -42549,7 +42572,7 @@ class CameraTopicWindow(QMainWindow):
             self,
             "选择原始深度图",
             initial,
-            "Depth (*.png);;All files (*)",
+            "Depth (*.png *.npy);;All files (*)",
         )
         if selected:
             self.lingbot_depth_depth_edit.setText(selected)
@@ -42871,6 +42894,7 @@ class CameraTopicWindow(QMainWindow):
         self,
     ) -> Optional[Tuple[str, str, str, str]]:
         """返回 (example_id, rgb, depth, intrinsics)；example 模式时后三者为空。"""
+        self._lingbot_depth_capture_topic = ""
         source = str(self.lingbot_depth_source_combo.currentData() or "camera")
         if source == "example":
             return str(int(self.lingbot_depth_example_spin.value())), "", "", ""
@@ -42959,39 +42983,26 @@ class CameraTopicWindow(QMainWindow):
                     self._on_lingbot_depth_status("无深度帧")
                 return None
 
-            out_dir = os.path.join(LINGBOT_DEPTH_CACHE_DIR, "camera_input")
-            os.makedirs(out_dir, exist_ok=True)
-            rgb_path = os.path.join(out_dir, "rgb.png")
-            depth_path = os.path.join(out_dir, "raw_depth.png")
-            K_path = os.path.join(out_dir, "intrinsics.txt")
-
-            bgr = np.asarray(color_bgr)
-            if bgr.ndim == 2:
-                bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
-            depth_arr = np.asarray(depth)
-            if depth_arr.ndim == 3:
-                depth_arr = depth_arr[:, :, 0]
-            if depth_arr.shape[:2] != bgr.shape[:2]:
-                depth_arr = cv2.resize(
-                    depth_arr,
-                    (bgr.shape[1], bgr.shape[0]),
-                    interpolation=cv2.INTER_NEAREST,
-                )
-            if depth_arr.dtype == np.float32 or depth_arr.dtype == np.float64:
-                depth_u16 = np.clip(depth_arr * 1000.0, 0, 65535).astype(np.uint16)
-            else:
-                depth_u16 = depth_arr.astype(np.uint16)
-
-            h, w = bgr.shape[:2]
-            fx, fy, cx, cy = self.node.get_intrinsics(depth_topic, w, h)
-            if abs(fx - 0.9 * max(w, h)) < 1e-3:
-                fx, fy, cx, cy = self.node.get_intrinsics(color_topic, w, h)
-            K = np.array(
-                [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float64
-            )
-            cv2.imwrite(rgb_path, bgr)
-            cv2.imwrite(depth_path, depth_u16)
-            np.savetxt(K_path, K, fmt="%.6f")
+            from lingbot_depth_io import write_camera_inputs
+            import tempfile
+            os.makedirs(LINGBOT_DEPTH_CACHE_DIR, exist_ok=True)
+            out_dir = tempfile.mkdtemp(prefix="camera_input_", dir=LINGBOT_DEPTH_CACHE_DIR)
+            try:
+                bgr = np.array(color_bgr, copy=True)
+                depth_arr = np.array(depth, copy=True)
+                if bgr.ndim == 2:
+                    bgr = cv2.cvtColor(bgr, cv2.COLOR_GRAY2BGR)
+                if depth_arr.ndim != 2:
+                    raise ValueError("相机深度必须是二维数组")
+                h, w = depth_arr.shape
+                fx, fy, cx, cy = self.node.get_intrinsics(depth_topic, w, h)
+                K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+                rgb_path, depth_path, K_path = write_camera_inputs(out_dir, bgr, depth_arr, K)
+                self._lingbot_depth_capture_topic = color_topic
+            except (ValueError, OSError) as exc:
+                self._append_lingbot_depth_log(f"[ERROR] {exc}")
+                self._on_lingbot_depth_status(f"输入无效: {exc}")
+                return None
             self._append_lingbot_depth_log(
                 f"已抓帧 color={color_topic} depth={depth_topic} -> {out_dir}"
             )
@@ -43014,10 +43025,12 @@ class CameraTopicWindow(QMainWindow):
         return "", rgb, depth, intrinsics
 
     def _on_lingbot_depth_run_clicked(self) -> None:
-        if self._lingbot_depth_launcher.is_running():
+        if self._lingbot_depth_launcher.is_running() or getattr(self, "_mv6d_lingbot_active", False):
+            self._on_lingbot_depth_status("LingBot-Depth 正在运行，请等待或停止当前任务")
             return
         resolved = self._resolve_lingbot_depth_inputs()
         if resolved is None:
+            self._clear_lingbot_depth_result()
             return
         example, rgb, depth, intrinsics = resolved
         self.lingbot_depth_rgb_label.set_source_pixmap(
@@ -43025,15 +43038,9 @@ class CameraTopicWindow(QMainWindow):
         )
         self.lingbot_depth_input_label.set_source_pixmap(None)
         self.lingbot_depth_refined_label.set_source_pixmap(None)
-        # 记住本次用的彩色相机，结果点云挂到对应外参上。
-        source = str(self.lingbot_depth_source_combo.currentData() or "camera")
-        color_topic = ""
-        if source == "camera":
-            color_topic = str(self.lingbot_depth_topic_combo.currentData() or "").strip()
-            if not color_topic:
-                picked = self._pick_lingbot_depth_color_source()
-                if picked is not None:
-                    color_topic = str(picked[0] or "")
+        # Bind the result to the captured frame, not a later dropdown selection.
+        color_topic = str(getattr(self, "_lingbot_depth_capture_topic", "") or "")
+        self._clear_lingbot_depth_result()
         self._lingbot_depth_last_color_topic = color_topic
 
         model_override = self.lingbot_depth_model_edit.text().strip()
@@ -43048,27 +43055,55 @@ class CameraTopicWindow(QMainWindow):
             intrinsics=intrinsics,
             model=model,
             device=device,
+            color_topic=color_topic,
         )
         self._update_lingbot_depth_ui()
 
     def _on_lingbot_depth_stop_clicked(self) -> None:
         self._append_lingbot_depth_log("--- 用户停止 LingBot-Depth ---")
+        cancel = getattr(self, "_mv6d_lingbot_cancel", None)
+        if getattr(self, "_mv6d_lingbot_active", False) and cancel is not None:
+            cancel.set()
+            realtime = getattr(self, "mv6d_enable_check", None)
+            if realtime is not None:
+                realtime.setChecked(False)
+            self._on_lingbot_depth_status("已请求停止；当前步骤结束后退出本轮 6D")
+            return
         self._lingbot_depth_launcher.stop()
         self._update_lingbot_depth_ui()
+
+    def _clear_lingbot_depth_result(self) -> None:
+        self._robot_lingbot_depth = None
+        view = getattr(self, "_robot_view", None)
+        if view is not None and hasattr(view, "set_lingbot_depth"):
+            view.set_lingbot_depth(None)
+        label = getattr(self, "lingbot_depth_refined_label", None)
+        if label is not None:
+            label.set_source_pixmap(None)
 
     def _show_lingbot_depth_on_robot_view(
         self, result: dict, *, silent: bool = False
     ) -> None:
         ply = str(result.get("point_cloud") or "").strip()
         if not ply or not os.path.isfile(ply):
+            self._clear_lingbot_depth_result()
             if not silent:
                 self.status_bar.showMessage(
                     "LingBot-Depth 没有 point_cloud.ply，机器人页未更新。", 8000
                 )
             return
         color_topic = str(
-            getattr(self, "_lingbot_depth_last_color_topic", "") or ""
+            result["color_topic"] if "color_topic" in result
+            else getattr(self, "_lingbot_depth_last_color_topic", "") or ""
         ).strip()
+        if not color_topic:
+            self._robot_lingbot_depth = None
+            view = getattr(self, "_robot_view", None)
+            if view is not None and hasattr(view, "set_lingbot_depth"):
+                view.set_lingbot_depth(None)
+            if not silent:
+                self.status_bar.showMessage("示例/本地文件结果已生成；未绑定实机相机，不放入机器人坐标系。", 8000)
+            return
         payload = {
             "ply": ply,
             "color_topic": color_topic,
@@ -43086,6 +43121,7 @@ class CameraTopicWindow(QMainWindow):
         try:
             view.set_lingbot_depth_from_ply(ply, color_topic=color_topic)
         except Exception as exc:
+            self._clear_lingbot_depth_result()
             if not silent:
                 self.status_bar.showMessage(
                     f"机器人页未画出 LingBot-Depth：{exc}", 8000
@@ -43098,6 +43134,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_lingbot_depth_result(self, result: dict) -> None:
         if not result.get("ok"):
+            self._clear_lingbot_depth_result()
             return
         for key, label in (
             ("rgb", self.lingbot_depth_rgb_label),
@@ -43112,6 +43149,18 @@ class CameraTopicWindow(QMainWindow):
             f"load={result.get('load_s')}s infer={result.get('infer_s')}s "
             f"points={result.get('points')} device={result.get('device')}"
         )
+        pixels = int(result.get("width") or 0) * int(result.get("height") or 0)
+        if pixels and "input_valid_pixels" in result:
+            self._append_lingbot_depth_log(
+                f"原始有效深度 {int(result['input_valid_pixels']) / pixels:.1%}，"
+                f"精修有效深度 {int(result.get('output_valid_pixels') or 0) / pixels:.1%}；"
+                "补全点不等于传感器实测点，显示范围统一为 0.08–2.5m。"
+            )
+        if result.get("median_change_mm") is not None:
+            self._append_lingbot_depth_log(
+                f"相对输入深度变化：中位数 {result['median_change_mm']:.1f}mm，"
+                f"P95 {result['p95_change_mm']:.1f}mm（非真值误差）。"
+            )
         try:
             self._show_lingbot_depth_on_robot_view(result, silent=False)
         except Exception as exc:
@@ -53746,6 +53795,7 @@ class CameraTopicWindow(QMainWindow):
         self.mv6d_head_v_spin.setValue(int(v))
         self.mv6d_head_u_spin.blockSignals(False)
         self.mv6d_head_v_spin.blockSignals(False)
+        self.mv6d_gt_enable_check.setChecked(False)
         self._mv6d_object_picked = True
         self._mv6d_update_seed_status_label()
         self._refresh_mv6d_live_previews_for_pick()
@@ -53754,6 +53804,7 @@ class CameraTopicWindow(QMainWindow):
         )
 
     def _on_mv6d_seed_spin_changed(self, *_args) -> None:
+        self.mv6d_gt_enable_check.setChecked(False)
         # 手动改 spin 也视为已选，避免只能点图
         if not getattr(self, "_mv6d_object_picked", False):
             # 未点选过时改数字不自动解锁，避免默认 320,240 误触发
@@ -53982,6 +54033,10 @@ class CameraTopicWindow(QMainWindow):
         self._sync_mv6d_lightbox()
         self._refresh_mv6d_live_previews_for_pick()
 
+    def _mv6d_sim_reference_is_current(self) -> bool:
+        state = self._read_sim_robot_state()
+        return bool(sim_state_is_fresh is not None and sim_state_is_fresh(state, 5.0))
+
     def _mv6d_gt_pose(
         self,
     ) -> Tuple[Optional[Tuple[float, float, float]], Optional[np.ndarray]]:
@@ -54000,6 +54055,9 @@ class CameraTopicWindow(QMainWindow):
         return xyz, R
 
     def _on_mv6d_load_sim_gt(self) -> None:
+        if not self._mv6d_sim_reference_is_current():
+            self.status_bar.showMessage("没有当前运行的仿真状态；请手动填写并确认当前目标参考位姿")
+            return
         root = ""
         try:
             root = self._sim_bridge_dir()
@@ -54016,8 +54074,12 @@ class CameraTopicWindow(QMainWindow):
             )
             return
         try:
+            if time.time() - os.path.getmtime(path) > 5.0:
+                raise ValueError("仿真参考文件已过期")
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if normalize_frame_id(str(data.get("frame_id") or BASE_LINK_FRAME)) != BASE_LINK_FRAME:
+                raise ValueError("仿真参考必须使用 base_link 坐标系")
             xyz = data.get("xyz") or data.get("position") or data.get("t")
             if not xyz or len(xyz) < 3:
                 raise ValueError("缺少 xyz")
@@ -54153,19 +54215,18 @@ class CameraTopicWindow(QMainWindow):
         return None
 
     def _mv6d_lingbot_model_id(self) -> str:
-        """跟随深度精修页模型；稀疏补全优先 DC，否则默认 v0.5。"""
-        combo = getattr(self, "lingbot_depth_model_combo", None)
-        if combo is not None:
-            mid = str(combo.currentData() or "").strip()
-            if mid:
-                return mid
+        """跟随深度精修配置，优先使用用户指定的本地权重。"""
         edit = getattr(self, "lingbot_depth_model_edit", None)
         if edit is not None:
             custom = str(edit.text() or "").strip()
             if custom:
                 return custom
-        # 无传感器 depth 时 DC 对稀疏先验更稳
-        return "robbyant/lingbot-depth-postrain-dc-vitl14"
+        combo = getattr(self, "lingbot_depth_model_combo", None)
+        if combo is not None:
+            mid = str(combo.currentData() or "").strip()
+            if mid:
+                return mid
+        return LINGBOT_DEPTH_MODEL_DEFAULT
 
     def _refine_depth_with_lingbot_sync(
         self,
@@ -54177,35 +54238,48 @@ class CameraTopicWindow(QMainWindow):
         sparse_z_m: float,
         get_intrinsics,
         tag: str = "view",
-    ) -> Optional[np.ndarray]:
-        """同步调用 LingBot-Depth 1.0：RGB + 稀疏先验 → float32 米制 depth。
-
-        在后台线程调用；失败返回 None（调用方回退 RGB-only）。
-        """
+        depth: Optional[np.ndarray] = None,
+        depth_topic: str = "",
+        model: str = LINGBOT_DEPTH_MODEL_DEFAULT,
+        device: str = "auto",
+        result_callback=None,
+        cancel_event=None,
+    ) -> np.ndarray:
+        """后台精修 RGB-D；无 depth 时使用稀疏先验，失败抛错且不回退。"""
         script = LINGBOT_DEPTH_RUN_SCRIPT
         if not os.path.isfile(script):
             raise RuntimeError(f"未找到 {script}")
         h, w = color_bgr.shape[:2]
-        fx, fy, cx, cy = get_intrinsics(topic, w, h)
-        out_dir = os.path.join(
-            LINGBOT_DEPTH_CACHE_DIR, "mv6d", f"{tag}_{int(time.time() * 1000)}"
-        )
-        os.makedirs(out_dir, exist_ok=True)
-        rgb_path = os.path.join(out_dir, "rgb.png")
-        K_path = os.path.join(out_dir, "intrinsics.txt")
-        cv2.imwrite(rgb_path, color_bgr)
-        with open(K_path, "w", encoding="utf-8") as f:
-            f.write(
-                f"{float(fx):.6f} 0 {float(cx):.6f}\n"
-                f"0 {float(fy):.6f} {float(cy):.6f}\n"
-                "0 0 1\n"
-            )
+        rgb_for_depth = color_bgr
+        if depth is not None:
+            raw_shape = np.asarray(depth).shape
+            if len(raw_shape) != 2:
+                raise RuntimeError(f"原始深度形状异常: {raw_shape}")
+            h, w = raw_shape
+            if color_bgr.shape[:2] != (h, w):
+                # Keep the sensor's pixel grid and intrinsics for every pose backend.
+                rgb_for_depth = cv2.resize(color_bgr, (w, h), interpolation=cv2.INTER_LINEAR)
+        fx, fy, cx, cy = get_intrinsics(depth_topic or topic, w, h)
+        import tempfile
+        work_root = os.path.join(LINGBOT_DEPTH_CACHE_DIR, "mv6d")
+        os.makedirs(work_root, exist_ok=True)
+        out_dir = tempfile.mkdtemp(prefix=f"{tag}_", dir=work_root)
+        from lingbot_depth_io import write_camera_inputs, validate_intrinsics, run_cancelable
+        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
+        depth_path = ""
+        try:
+            if depth is not None:
+                rgb_path, depth_path, K_path = write_camera_inputs(out_dir, rgb_for_depth, depth, K)
+            else:
+                validate_intrinsics(K)
+                rgb_path = os.path.join(out_dir, "rgb.png")
+                K_path = os.path.join(out_dir, "intrinsics.txt")
+                if not cv2.imwrite(rgb_path, rgb_for_depth):
+                    raise OSError(f"无法写出 LingBot RGB: {rgb_path}")
+                np.savetxt(K_path, K, fmt="%.8f")
+        except (ValueError, OSError) as exc:
+            raise RuntimeError(str(exc)) from exc
 
-        model = self._mv6d_lingbot_model_id()
-        device = "auto"
-        dev_combo = getattr(self, "lingbot_depth_device_combo", None)
-        if dev_combo is not None:
-            device = str(dev_combo.currentData() or "auto")
         cache_dir = os.path.join(EAI_DIR, ".cache", "huggingface")
         os.makedirs(cache_dir, exist_ok=True)
 
@@ -54234,21 +54308,19 @@ class CameraTopicWindow(QMainWindow):
             rgb_path,
             "--intrinsics",
             K_path,
-            "--allow-empty-depth",
-            "--sparse-z",
-            f"{float(sparse_z_m):.4f}",
-            "--seed-u",
-            str(int(seed_u)),
-            "--seed-v",
-            str(int(seed_v)),
-            "--no-mask",
         ]
-        proc = subprocess.run(
+        if depth_path:
+            cmd.extend(["--depth", depth_path])
+        else:
+            cmd.extend([
+                "--allow-empty-depth", "--sparse-z", f"{float(sparse_z_m):.4f}",
+                "--seed-u", str(int(seed_u)), "--seed-v", str(int(seed_v)),
+            ])
+        proc = run_cancelable(
             cmd,
+            cancel_event=cancel_event,
             cwd=LINGBOT_DEPTH_ROOT_DEFAULT,
             env=env,
-            capture_output=True,
-            text=True,
             timeout=600,
         )
         result: Dict[str, object] = {}
@@ -54267,10 +54339,14 @@ class CameraTopicWindow(QMainWindow):
         if not os.path.isfile(npy_path):
             raise RuntimeError(f"LingBot-Depth 未写出 depth_refined.npy: {out_dir}")
         depth_m = np.load(npy_path)
-        if depth_m.ndim != 2:
-            raise RuntimeError(f"depth_refined 形状异常: {depth_m.shape}")
-        # float32 米制；depth_to_meters_array 对非 uint16 原样使用
-        return np.ascontiguousarray(depth_m.astype(np.float32))
+        if depth_m.shape != (h, w):
+            raise RuntimeError(f"depth_refined 形状异常: {depth_m.shape}，应为 {(h, w)}")
+        valid = valid_depth_mask(depth_m)
+        if not np.any(valid):
+            raise RuntimeError(f"LingBot-Depth 没有有效深度 ({tag})")
+        if result_callback is not None:
+            result_callback(dict(result, color_topic=topic, tag=tag))
+        return np.ascontiguousarray(np.where(valid, depth_m, 0.0), dtype=np.float32)
 
     def _start_mv6d_estimate(self, *, silent: bool = False) -> None:
         try:
@@ -54327,17 +54403,23 @@ class CameraTopicWindow(QMainWindow):
             getattr(self, "mv6d_lingbot_depth_check", None)
             and self.mv6d_lingbot_depth_check.isChecked()
         )
-        need_refine = use_lingbot and (
-            (head_bgr is not None and head_depth is None)
-            or (left_wrist_bgr is not None and left_wrist_depth is None)
-            or (right_wrist_bgr is not None and right_wrist_depth is None)
+        launcher = getattr(self, "_lingbot_depth_launcher", None)
+        if use_lingbot and launcher is not None and launcher.is_running():
+            if not silent:
+                self.status_bar.showMessage("独立深度精修正在运行，请等待或停止后再估计 6D")
+            return
+        need_refine = use_lingbot
+        lingbot_model = self._mv6d_lingbot_model_id() if use_lingbot else ""
+        lingbot_device = (
+            str(self.lingbot_depth_device_combo.currentData() or "auto")
+            if use_lingbot else "auto"
         )
         any_wrist_depth = left_wrist_depth is not None or right_wrist_depth is not None
         rgb_only = head_depth is None and not any_wrist_depth and not need_refine
         if need_refine:
             if not silent:
                 self.status_bar.showMessage(
-                    "多视角 6D：无深度 → LingBot-Depth 1.0 补全后再估 6D…"
+                    "多视角 6D：LingBot-Depth 精修 → SAM3 → PCA / FP / Any6D…"
                 )
         elif rgb_only:
             if not silent:
@@ -54361,21 +54443,21 @@ class CameraTopicWindow(QMainWindow):
             self.mv6d_method_combo.currentData() or POSE_BACKEND_PCA
         )
         # 拷贝到线程，避免 UI 帧被覆盖
-        head_bgr_c = None if head_bgr is None else np.ascontiguousarray(head_bgr)
+        head_bgr_c = None if head_bgr is None else np.ascontiguousarray(head_bgr).copy()
         left_bgr_c = (
-            None if left_wrist_bgr is None else np.ascontiguousarray(left_wrist_bgr)
+            None if left_wrist_bgr is None else np.ascontiguousarray(left_wrist_bgr).copy()
         )
         right_bgr_c = (
-            None if right_wrist_bgr is None else np.ascontiguousarray(right_wrist_bgr)
+            None if right_wrist_bgr is None else np.ascontiguousarray(right_wrist_bgr).copy()
         )
-        head_depth_c = None if head_depth is None else np.ascontiguousarray(head_depth)
+        head_depth_c = None if head_depth is None else np.ascontiguousarray(head_depth).copy()
         left_depth_c = (
-            None if left_wrist_depth is None else np.ascontiguousarray(left_wrist_depth)
+            None if left_wrist_depth is None else np.ascontiguousarray(left_wrist_depth).copy()
         )
         right_depth_c = (
             None
             if right_wrist_depth is None
-            else np.ascontiguousarray(right_wrist_depth)
+            else np.ascontiguousarray(right_wrist_depth).copy()
         )
         # RGB-only 假定深度必须是「相机光心到物体」的距离，不能用 base_link 下 TCP 的 Z
         # （后者曾导致回填绝对目标飞出工作区，越执行越远）
@@ -54403,6 +54485,11 @@ class CameraTopicWindow(QMainWindow):
             tf_buffer = None
 
         self._mv6d_busy = True
+        self._mv6d_lingbot_active = use_lingbot
+        cancel_event = threading.Event() if use_lingbot else None
+        self._mv6d_lingbot_cancel = cancel_event
+        if hasattr(self, "_update_lingbot_depth_ui"):
+            self._update_lingbot_depth_ui()
         if not silent:
             self.mv6d_once_btn.setEnabled(False)
             self.mv6d_once_btn.setText("估计中…")
@@ -54419,59 +54506,52 @@ class CameraTopicWindow(QMainWindow):
         def _work() -> None:
             t0 = time.time()
             notes_extra: List[str] = []
+            lingbot_results: List[dict] = []
             try:
                 hd = head_depth_c
                 ld = left_depth_c
                 rd = right_depth_c
                 if need_refine:
-                    if head_bgr_c is not None and hd is None:
+                    refined = []
+                    views = (
+                        ("head", "头部", head_topic, head_depth_topic, head_bgr_c, hd, assumed_z),
+                        ("left_wrist", "左腕", left_wrist_topic, left_depth_topic, left_bgr_c, ld, max(0.08, assumed_z * 0.7)),
+                        ("right_wrist", "右腕", right_wrist_topic, right_depth_topic, right_bgr_c, rd, max(0.08, assumed_z * 0.7)),
+                    )
+                    for tag, label, topic, depth_topic, rgb, raw_depth, prior in views:
+                        if cancel_event.is_set():
+                            raise RuntimeError("LingBot-Depth 已停止，本轮 6D 已取消")
+                        if rgb is None:
+                            refined.append(None)
+                            continue
+                        ch, cw = rgb.shape[:2]
+                        su = max(0, min(cw - 1, seed_u)) if tag == "head" else cw // 2
+                        sv = max(0, min(ch - 1, seed_v)) if tag == "head" else ch // 2
                         try:
-                            ch, cw = head_bgr_c.shape[:2]
-                            su = max(0, min(cw - 1, seed_u))
-                            sv = max(0, min(ch - 1, seed_v))
-                            hd = self._refine_depth_with_lingbot_sync(
-                                head_bgr_c,
-                                topic=head_topic,
-                                seed_u=su,
-                                seed_v=sv,
-                                sparse_z_m=assumed_z,
-                                get_intrinsics=node.get_intrinsics,
-                                tag="head",
+                            depth_m = self._refine_depth_with_lingbot_sync(
+                                rgb, topic=topic, depth_topic=depth_topic, depth=raw_depth,
+                                seed_u=su, seed_v=sv, sparse_z_m=prior,
+                                get_intrinsics=node.get_intrinsics, tag=tag,
+                                model=lingbot_model, device=lingbot_device,
+                                result_callback=lingbot_results.append,
+                                cancel_event=cancel_event,
                             )
-                            notes_extra.append("头部深度 ← LingBot-Depth 1.0")
+                            if depth_m is None:
+                                raise RuntimeError("未返回精修深度")
                         except Exception as exc:
-                            notes_extra.append(f"头部 LingBot-Depth 失败→RGB-only: {exc}")
-                    # 腕部 LingBot 仅作预补深度；最终是否融合仍由「目标是否在视野内」决定
-                    if left_bgr_c is not None and ld is None:
-                        try:
-                            wh, ww = left_bgr_c.shape[:2]
-                            ld = self._refine_depth_with_lingbot_sync(
-                                left_bgr_c,
-                                topic=left_wrist_topic,
-                                seed_u=ww // 2,
-                                seed_v=wh // 2,
-                                sparse_z_m=max(0.08, assumed_z * 0.7),
-                                get_intrinsics=node.get_intrinsics,
-                                tag="left_wrist",
-                            )
-                            notes_extra.append("左腕深度 ← LingBot-Depth 1.0")
-                        except Exception as exc:
-                            notes_extra.append(f"左腕 LingBot-Depth 失败: {exc}")
-                    if right_bgr_c is not None and rd is None:
-                        try:
-                            wh, ww = right_bgr_c.shape[:2]
-                            rd = self._refine_depth_with_lingbot_sync(
-                                right_bgr_c,
-                                topic=right_wrist_topic,
-                                seed_u=ww // 2,
-                                seed_v=wh // 2,
-                                sparse_z_m=max(0.08, assumed_z * 0.7),
-                                get_intrinsics=node.get_intrinsics,
-                                tag="right_wrist",
-                            )
-                            notes_extra.append("右腕深度 ← LingBot-Depth 1.0")
-                        except Exception as exc:
-                            notes_extra.append(f"右腕 LingBot-Depth 失败: {exc}")
+                            raise RuntimeError(f"{label} LingBot-Depth 精修失败，本轮已停止：{exc}") from exc
+                        refined.append(depth_m)
+                        source_note = "原始 RGB-D 精修" if raw_depth is not None else f"稀疏先验 {prior:.3f}m 补全"
+                        notes_extra.append(f"{label}深度 ← LingBot-Depth（{source_note}）")
+                        if lingbot_results and lingbot_results[-1].get("tag") == tag:
+                            info = lingbot_results[-1]
+                            pixels = int(info.get("width", 0)) * int(info.get("height", 0))
+                            if pixels and "input_valid_pixels" in info:
+                                coverage = float(info["input_valid_pixels"]) / pixels
+                                notes_extra.append(f"{label}原始有效深度覆盖率 {coverage:.1%}；其余为模型补全")
+                    hd, ld, rd = refined
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("LingBot-Depth 已停止，本轮 6D 已取消")
                 snap = self._compute_mv6d_snapshot(
                     head_topic=head_topic,
                     head_bgr=head_bgr_c,
@@ -54499,6 +54579,8 @@ class CameraTopicWindow(QMainWindow):
                     snap.notes = (
                         f"{snap.notes}; {extra}" if snap.notes else extra
                     )
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("已停止，本轮 6D 已取消")
                 method_poses = {}
                 try:
                     method_poses, pose_notes = self._collect_method_poses(
@@ -54523,6 +54605,8 @@ class CameraTopicWindow(QMainWindow):
                         if snap.notes
                         else f"其余方法未画出：{exc}"
                     )
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RuntimeError("已停止，本轮 6D 已取消")
                 payload = {
                     "ok": True,
                     "snap": snap,
@@ -54531,11 +54615,15 @@ class CameraTopicWindow(QMainWindow):
                     "elapsed_s": time.time() - t0,
                     "silent": silent,
                     "lingbot_notes": notes_extra,
+                    "lingbot_results": lingbot_results,
+                    "depth_source": "lingbot" if use_lingbot else "sensor",
                 }
             except Exception as exc:
                 payload = {
                     "ok": False,
                     "error": str(exc),
+                    "lingbot_results": lingbot_results,
+                    "depth_source": "lingbot" if use_lingbot else "sensor",
                     "elapsed_s": time.time() - t0,
                     "silent": silent,
                 }
@@ -54570,6 +54658,16 @@ class CameraTopicWindow(QMainWindow):
         )
         if mask is None or not np.any(mask):
             raise RuntimeError("SAM3 没有分出区域")
+        raw_mask = np.asarray(mask, dtype=bool).copy()
+        debug_dir = os.path.join(EAI_DIR, ".cache", "sam3", f"mv6d-{method_tag}")
+        os.makedirs(debug_dir, exist_ok=True)
+        cv2.imwrite(os.path.join(debug_dir, "rgb.png"), color_bgr)
+        cv2.imwrite(os.path.join(debug_dir, "mask_raw.png"), raw_mask.astype(np.uint8) * 255)
+        overlay = color_bgr.copy()
+        overlay[raw_mask] = (0.55 * overlay[raw_mask] + 0.45 * np.array([0, 255, 0])).astype(np.uint8)
+        cv2.imwrite(os.path.join(debug_dir, "overlay_raw.png"), overlay)
+        # Reset the postprocessed mask so a failed new run cannot show an older mask.
+        cv2.imwrite(os.path.join(debug_dir, "mask_depth_filtered.png"), np.zeros((ch, cw), dtype=np.uint8))
         if depth is None:
             if backend != POSE_BACKEND_PCA:
                 raise RuntimeError(f"{backend} 需要深度图")
@@ -54582,7 +54680,7 @@ class CameraTopicWindow(QMainWindow):
                 mask = resize_mask_to_shape(mask, (dh, dw))
             u_d, v_d = scale_uv_to_shape(su, sv, (ch, cw), (dh, dw))
             depth_use = depth
-        return CameraTopicWindow._pose_on_mask(
+        result = CameraTopicWindow._pose_on_mask(
             color_bgr,
             depth_use,
             mask,
@@ -54596,6 +54694,14 @@ class CameraTopicWindow(QMainWindow):
             method_tag=method_tag,
             seg_method=seg_method,
         )
+
+        if result is not None:
+            result.raw_mask = raw_mask
+            result.source_bgr = color_bgr.copy()
+            result.intrinsics = (float(fx), float(fy), float(cx), float(cy))
+            result.diagnostics_dir = debug_dir
+            cv2.imwrite(os.path.join(debug_dir, "mask_depth_filtered.png"), result.mask.astype(np.uint8) * 255)
+        return result
 
     @staticmethod
     def _pose_on_mask(
@@ -54613,6 +54719,10 @@ class CameraTopicWindow(QMainWindow):
         method_tag: str,
         seg_method: str,
     ) -> Optional[Object6DPoseResult]:
+        depth = sanitize_depth(depth)
+        mask = np.asarray(mask, dtype=bool) & valid_depth_mask(depth)
+        if not np.any(mask):
+            raise RuntimeError("分割区域没有有效深度（0.08–2.5m）")
         if backend == POSE_BACKEND_FOUNDATIONPOSE:
             body = run_foundationpose_estimation(
                 color_bgr,
@@ -55275,12 +55385,12 @@ class CameraTopicWindow(QMainWindow):
             edit.setPlainText(text)
             bar.setValue(min(scroll_value, bar.maximum()))
             bar.raise_()
-        if self.mv6d_gt_enable_check.isChecked() and gt_xyz is not None and gt_R is not None:
+        if self.mv6d_gt_enable_check.isChecked() and gt_xyz is not None and gt_R is not None and normalize_frame_id(snap.frame_id) == BASE_LINK_FRAME:
             t_mm, r_deg, d_mm = pose_error_metrics(
                 snap.position_xyz, snap.rotation_matrix, gt_xyz, gt_R
             )
             self.mv6d_error_label.setText(
-                f"误差 |Δt|={t_mm:.1f} mm  "
+                f"位姿参考差值（非 SAM3 分割误差） |Δt|={t_mm:.1f} mm  "
                 f"(Δx={d_mm[0]:+.1f}, Δy={d_mm[1]:+.1f}, Δz={d_mm[2]:+.1f})  "
                 f"|ΔR|={r_deg:.2f}°  |  frame={snap.frame_id}"
             )
@@ -55293,7 +55403,7 @@ class CameraTopicWindow(QMainWindow):
             self.mv6d_error_label.setText(
                 f"估计 XYZ=({x:.4f}, {y:.4f}, {z:.4f}) m  "
                 f"RPY=({math.degrees(r):.1f}°, {math.degrees(p):.1f}°, {math.degrees(yw):.1f}°)  "
-                f"| 未启用真值对比"
+                f"| 参考位姿对比未启用或坐标系不一致"
             )
             self.mv6d_error_label.setStyleSheet(f"color: {UI_ACCENT_BLUE};")
         self._sync_mv6d_lightbox()
@@ -55303,7 +55413,8 @@ class CameraTopicWindow(QMainWindow):
     ) -> Tuple[Optional[float], Optional[float]]:
         gt_xyz, gt_R = self._mv6d_gt_pose()
         if (
-            not self.mv6d_gt_enable_check.isChecked()
+            normalize_frame_id(snap.frame_id) != BASE_LINK_FRAME
+            or not self.mv6d_gt_enable_check.isChecked()
             or gt_xyz is None
             or gt_R is None
         ):
@@ -55468,7 +55579,9 @@ class CameraTopicWindow(QMainWindow):
         ) -> Optional[np.ndarray]:
             if not color_topic:
                 return None
-            src = self._frame_cache.get(color_topic)
+            src = getattr(view_result, "source_bgr", None)
+            if src is None:
+                src = self._frame_cache.get(color_topic)
             panel = self.panels.get(color_topic)
             if src is None and isinstance(panel, CameraPanel):
                 src = panel._latest_image
@@ -55490,13 +55603,20 @@ class CameraTopicWindow(QMainWindow):
                 fx, fy, cx0, cy0 = self.node.get_intrinsics(color_topic, cw, ch)
                 intr = (fx, fy, cx0, cy0)
 
+            saved_k = getattr(view_result, "intrinsics", None)
+            if saved_k is not None:
+                mh, mw = view_result.mask.shape[:2]
+                intr = (saved_k[0] * cw / mw, saved_k[1] * ch / mh,
+                        saved_k[2] * cw / mw, saved_k[3] * ch / mh)
+
             xyz_c, R_c, corners, note = self._resolve_mv6d_cam_pose_for_view(
                 snap, color_topic, depth_topic, view_result
             )
             mask = None
             centroid = None
             if view_result is not None:
-                mask = resize_mask_to_shape(view_result.mask, (ch, cw))
+                raw_mask = getattr(view_result, "raw_mask", None)
+                mask = resize_mask_to_shape(raw_mask if raw_mask is not None else view_result.mask, (ch, cw))
                 centroid = scale_uv_to_shape(
                     int(round(view_result.centroid_uv[0])),
                     int(round(view_result.centroid_uv[1])),
@@ -55667,6 +55787,7 @@ class CameraTopicWindow(QMainWindow):
             if err_t is not None and err_r is not None:
                 payload["error_t_mm"] = float(err_t)
                 payload["error_r_deg"] = float(err_r)
+                payload["error_kind"] = "pose_reference_difference"
             with open(
                 os.path.join(bridge, "object_6d_pose.json"), "w", encoding="utf-8"
             ) as f:
@@ -55772,14 +55893,11 @@ class CameraTopicWindow(QMainWindow):
             entry = cameras.get("/camera/head_color")
         if not isinstance(entry, dict):
             return None
-        try:
-            rms = float(entry.get("rms_m") or 0.0)
-        except (TypeError, ValueError):
-            rms = 0.0
-        if rms > 0.02:
+        calibrated, _reason = validated_camera_transform(entry)
+        if calibrated is None:
             return None
         if entry.get("model") == "eye_in_hand":
-            raw = entry.get("T_tcp_camera")
+            raw = calibrated
             tcp = self._calib_tcp(str(entry.get("arm_side") or ""))
             if not tcp or raw is None:
                 return None
@@ -55788,7 +55906,7 @@ class CameraTopicWindow(QMainWindow):
                 return None
             matrix = compose_base_camera(tcp["xyz"], tcp["xyzw"], t_tcp)
         else:
-            raw = entry.get("T_base_camera")
+            raw = calibrated
             if raw is None:
                 return None
             matrix = np.asarray(raw, dtype=np.float64)
@@ -56003,7 +56121,8 @@ class CameraTopicWindow(QMainWindow):
             return poses, notes
         depth = np.asarray(head_depth)
         dh, dw = depth.shape[:2]
-        mask = np.asarray(result.mask)
+        raw_mask = getattr(result, "raw_mask", None)
+        mask = np.asarray(raw_mask if raw_mask is not None else result.mask)
         if mask.shape[:2] != (dh, dw):
             mask = resize_mask_to_shape(mask, (dh, dw))
         ch, cw = np.asarray(head_bgr).shape[:2]
@@ -56162,6 +56281,8 @@ class CameraTopicWindow(QMainWindow):
         self,
     ) -> List[Tuple[str, Tuple[float, float, float]]]:
         """从仿真 sim_robot_state.objects 读可抓物体位姿（跳过 init_region）。"""
+        if not self._mv6d_sim_reference_is_current():
+            return []
         state = self._read_sim_robot_state()
         if not isinstance(state, dict):
             return []
@@ -56371,6 +56492,8 @@ class CameraTopicWindow(QMainWindow):
         self, xyz_est: Optional[Tuple[float, float, float]]
     ) -> None:
         """估计完成后自动把最近仿真物体写入 GT 旋钮，误差才有意义。"""
+        if not self._mv6d_sim_reference_is_current():
+            return
         if xyz_est is None:
             return
         if getattr(self, "mv6d_gt_enable_check", None) is None:
@@ -56551,17 +56674,28 @@ class CameraTopicWindow(QMainWindow):
 
     def _on_mv6d_estimate_finished(self, payload: object) -> None:
         self._mv6d_busy = False
+        self._mv6d_lingbot_active = False
+        self._mv6d_lingbot_cancel = None
+        if hasattr(self, "_update_lingbot_depth_ui"):
+            self._update_lingbot_depth_ui()
         self.mv6d_once_btn.setEnabled(True)
         self.mv6d_once_btn.setText("估计一次")
         if not isinstance(payload, dict):
             return
         silent = bool(payload.get("silent"))
         if not payload.get("ok"):
+            if payload.get("depth_source") == "lingbot":
+                self._clear_lingbot_depth_result()
             err = str(payload.get("error") or "未知错误")
-            if not silent:
+            if not silent or payload.get("depth_source") == "lingbot":
                 self.mv6d_result_edit.setPlainText(f"失败: {err}")
                 self.status_bar.showMessage(f"多视角 6D 失败: {err[:120]}")
             return
+        depth_results = payload.get("lingbot_results") or []
+        if depth_results:
+            # UI updates stay on the main thread; prefer the head camera cloud.
+            depth_result = next((r for r in depth_results if r.get("tag") == "head"), depth_results[0])
+            self._on_lingbot_depth_result(depth_result)
         snap = payload.get("snap")
         if not isinstance(snap, MultiView6DPoseSnapshot):
             return

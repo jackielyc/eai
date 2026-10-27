@@ -46,6 +46,7 @@ def _any6d_root_candidates() -> list[Path]:
     raw = (
         os.environ.get("ANY6D_ROOT", "").strip(),
         str(script_dir / "Any6D"),
+        str(script_dir.parent / "Any6D"),
         os.path.expanduser("~/Any6D"),
         os.path.expanduser("~/workspace_liyichao/Any6D"),
         os.path.expanduser("~/workspace_liyichao/eai/Any6D"),
@@ -432,18 +433,24 @@ def pose_request(payload: Dict[str, Any], *, tag: str = "worker") -> Dict[str, A
 
 
 def run_once() -> int:
-    raw = sys.stdin.read()
-    if not raw.strip():
-        print(json.dumps({"ok": False, "error": "stdin 为空"}), flush=True)
-        return 1
-    try:
-        payload = json.loads(raw)
-        result = pose_request(payload, tag="once")
-        print(json.dumps(result), flush=True)
-        return 0
-    except Exception as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}), flush=True)
-        return 1
+    # Keep stdout JSON-only, including native C++ printf and Warp startup logs.
+    # This is a one-shot process: leave fd 1 redirected until process exit so
+    # delayed native-buffer flushes cannot corrupt the response.
+    sys.stdout.flush()
+    with os.fdopen(os.dup(sys.stdout.fileno()), "w") as result_stream:
+        os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+        raw = sys.stdin.read()
+        if not raw.strip():
+            print(json.dumps({"ok": False, "error": "stdin 为空"}), file=result_stream, flush=True)
+            return 1
+        try:
+            payload = json.loads(raw)
+            result = pose_request(payload, tag="once")
+            print(json.dumps(result), file=result_stream, flush=True)
+            return 0
+        except Exception as exc:
+            print(json.dumps({"ok": False, "error": str(exc)}), file=result_stream, flush=True)
+            return 1
 
 
 class _Handler(BaseHTTPRequestHandler):

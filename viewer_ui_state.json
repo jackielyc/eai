@@ -105,9 +105,9 @@
     },
     "lingbot_depth_topic_combo": {
       "kind": "combo",
-      "index": 1,
-      "text": "/camera/hand_right_color",
-      "data": "/camera/hand_right_color"
+      "index": 0,
+      "text": "/camera/hand_left_color",
+      "data": "/camera/hand_left_color"
     },
     "lingbot_depth_model_edit": {
       "kind": "line",
@@ -875,7 +875,7 @@
     },
     "arm_text_cmd_edit": {
       "kind": "line",
-      "text": "右臂移到 x=0.9034 y=-0.0409 z=0.8555"
+      "text": "右臂移到 x=0.8970 y=-0.0446 z=0.8578"
     },
     "left_hand_gap_slider_a": {
       "kind": "slider",
@@ -991,11 +991,11 @@
     },
     "mv6d_head_u_spin": {
       "kind": "spin",
-      "value": 321
+      "value": 308
     },
     "mv6d_head_v_spin": {
       "kind": "spin",
-      "value": 153
+      "value": 173
     },
     "mv6d_gt_enable_check": {
       "kind": "check",
@@ -1144,9 +1144,9 @@
     },
     "reward_topic_combo": {
       "kind": "combo",
-      "index": 2,
-      "text": "/camera/head_color",
-      "data": "/camera/head_color"
+      "index": 0,
+      "text": "/camera/hand_left_color",
+      "data": "/camera/hand_left_color"
     },
     "reward_single_path_edit": {
       "kind": "line",
@@ -1941,21 +1941,21 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "手臂/手",
+  "control_tab": "本地摄像头",
   "splitter_sizes": [
-    256,
-    73,
-    297
+    247,
+    132,
+    247
   ],
   "geometry": [
     0,
-    64,
-    2493,
-    1376
+    128,
+    3962,
+    2176
   ],
   "topic_checks": {
     "/camera/hand_left_color": true,
-    "/camera/hand_left_depth": false,
+    "/camera/hand_left_depth": true,
     "/camera/hand_left_fisheye": false,
     "/camera/hand_right_color": true,
     "/camera/hand_right_depth": false,

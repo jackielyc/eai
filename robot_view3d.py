@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
+from perception_geometry import valid_depth_mask, canonical_color_topic
 from PyQt5.QtCore import QPoint, Qt, QTimer
 from PyQt5.QtGui import (
     QMatrix4x4,
@@ -701,6 +702,7 @@ def _placement_for_color(color_topic: str) -> Tuple[str, np.ndarray, str]:
     """与实时深度同一套外参：返回 parent、相机相对 parent 的变换、说明。"""
     from depth_cloud_node import _CAMERAS, _load_extrinsics, _placement
 
+    color_topic = canonical_color_topic(color_topic)
     spec = None
     for item in _CAMERAS:
         if color_topic in (item.get("color"), item.get("depth")):
@@ -1030,7 +1032,7 @@ def _depth_points(
     h, w = depth.shape
     sub = depth[::stride, ::stride]
     vs, us = np.mgrid[0:h:stride, 0:w:stride]
-    valid = (sub > 0.08) & (sub < 2.5) & np.isfinite(sub)
+    valid = valid_depth_mask(sub)
     if not np.any(valid):
         return np.zeros((0, 6), dtype=np.float32)
     z = sub[valid].astype(np.float32)
@@ -1056,6 +1058,7 @@ def _pack_depth_image(
     encoding: str,
     color_bgr: Optional[np.ndarray] = None,
     fallback: Tuple[float, float, float] = (0.7, 0.7, 0.7),
+    intrinsics=None,
 ) -> Optional[np.ndarray]:
     from depth_cloud_node import _intrinsics
 
@@ -1070,7 +1073,7 @@ def _pack_depth_image(
     else:
         return None
     height, width = depth.shape
-    fx, fy, cx, cy = _intrinsics(cam, int(width), int(height))
+    fx, fy, cx, cy = intrinsics if intrinsics is not None else _intrinsics(cam, int(width), int(height))
     return _depth_points(
         depth, fx, fy, cx, cy, stride=4, color_bgr=color_bgr, fallback=fallback
     )
@@ -1112,6 +1115,7 @@ class RobotView3D(QWidget):
             self._pose_checks[key] = box
         self._sam3_check = QCheckBox("SAM3")
         self._sam3_check.setChecked(True)
+        self._sam3_check.setToolTip("SAM3 掩码结合深度和相机标定生成的三维点云；二维原始掩码另存于结果目录。")
         self._sam3_check.setToolTip("画出最近一次估计里 SAM3 分出的物体点云。")
         self._sam3_check.toggled.connect(self._set_sam3_enabled)
         row.addWidget(self._sam3_check)
@@ -1282,6 +1286,14 @@ class RobotView3D(QWidget):
             self._lingbot_note = ""
             self._sync_lingbot()
             return
+        keep = valid_depth_mask(arr[:, 2])
+        if not np.any(keep):
+            self.set_lingbot_depth(None)
+            return
+        if colors is not None:
+            color_array = np.asarray(colors).reshape(-1, 3)
+            colors = color_array[keep] if len(color_array) == len(arr) else None
+        arr = arr[keep]
         if arr.shape[0] > 80000:
             step = int(np.ceil(arr.shape[0] / 80000.0))
             arr = arr[::step]
@@ -1305,7 +1317,7 @@ class RobotView3D(QWidget):
         self._lingbot_colors = None if rgb is None else rgb.copy()
         self._lingbot_parent = parent
         self._lingbot_T = np.asarray(T, dtype=np.float64)
-        self._lingbot_note = note or f"LingBot {arr.shape[0]} 点 · {place_note}"
+        self._lingbot_note = f"{note or f'LingBot {arr.shape[0]} 点'} · {place_note}"
         self._sync_lingbot()
 
     def set_lingbot_depth_from_ply(self, ply_path: str, *, color_topic: str = "") -> None:
@@ -1451,7 +1463,7 @@ class RobotView3D(QWidget):
         clouds: List[dict] = []
         self._cloud_by_topic = {}
         for spec in _CAMERAS:
-            cam = cams.get(spec["color"]) or {}
+            cam = dict(cams.get(spec["color"]) or {}, color_topic=spec["color"])
             parent, xyz, quat, note = _placement(cam, spec)
             key = key_of[spec["depth"]]
             label = next(text for topic, name, text, _tip in _DEPTH_KEYS if name == key)
@@ -1694,7 +1706,10 @@ class RobotView3D(QWidget):
             from depth_cloud_node import _depth_meters, _intrinsics
 
             depth = _depth_meters(msg)
-            fx, fy, cx, cy = _intrinsics(cloud["cam"], int(msg.width), int(msg.height))
+            if self._ros_node is not None and hasattr(self._ros_node, "get_intrinsics"):
+                fx, fy, cx, cy = self._ros_node.get_intrinsics(cloud["topic"], int(msg.width), int(msg.height))
+            else:
+                fx, fy, cx, cy = _intrinsics(cloud["cam"], int(msg.width), int(msg.height))
             with cloud["lock"]:
                 color_bgr = cloud.get("color_bgr")
                 if color_bgr is not None:
@@ -1762,11 +1777,16 @@ class RobotView3D(QWidget):
                     (cloud, np.array(frame.image, copy=True), str(frame.encoding), color_img, token)
                 )
         for cloud, image, encoding, color_img, token in grabbed:
+            intr = None
+            if self._ros_node is not None and hasattr(self._ros_node, "get_intrinsics"):
+                h, w = np.asarray(image).shape[:2]
+                intr = self._ros_node.get_intrinsics(cloud["topic"], w, h)
             packed = _pack_depth_image(
                 cloud.get("cam") or {},
                 image,
                 encoding,
                 color_bgr=color_img,
+                intrinsics=intr,
                 fallback=tuple(cloud.get("color") or (0.7, 0.7, 0.7)),
             )
             if packed is None:

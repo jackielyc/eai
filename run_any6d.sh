@@ -34,8 +34,10 @@ ANY6D_PORT="${ANY6D_PORT:-8767}"
 ANY6D_HOST="${ANY6D_HOST:-127.0.0.1}"
 ANY6D_MESH="${ANY6D_MESH:-}"
 if [[ -z "${ANY6D_ROOT:-}" ]]; then
-  if [[ -d "${SCRIPT_DIR}/Any6D" ]]; then
+  if [[ -f "${SCRIPT_DIR}/Any6D/estimater.py" ]]; then
     ANY6D_ROOT="${SCRIPT_DIR}/Any6D"
+  elif [[ -f "${SCRIPT_DIR}/../Any6D/estimater.py" ]]; then
+    ANY6D_ROOT="$(cd "${SCRIPT_DIR}/../Any6D" && pwd)"
   else
     ANY6D_ROOT="${HOME}/Any6D"
   fi

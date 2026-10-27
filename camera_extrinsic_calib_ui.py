@@ -316,7 +316,7 @@ class CameraExtrinsicCalibPanel(QWidget):
                 "model": spec["model"],
                 "frame_id": self.samples[-1].get("frame_id") or "camera_frame",
                 "base_frame": "base_link",
-                "intrinsics": {"fx": self.fx.value(), "fy": self.fy.value(), "cx": self.cx.value(), "cy": self.cy.value()},
+                "intrinsics": {"fx": self.fx.value(), "fy": self.fy.value(), "cx": self.cx.value(), "cy": self.cy.value(), "width": spec["width"], "height": spec["height"]},
                 "rms_m": float(np.sqrt(np.mean(err ** 2))),
                 "max_m": float(np.max(err)),
                 "samples": len(self.samples),
