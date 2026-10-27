@@ -24,7 +24,7 @@ from PyQt5.QtGui import (
     QSurfaceFormat,
     QVector3D,
 )
-from PyQt5.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QOpenGLWidget, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QOpenGLWidget, QVBoxLayout, QWidget, QDoubleSpinBox, QGridLayout
 
 try:
     from PyQt5.QtGui import QOpenGLShader, QOpenGLShaderProgram, QOpenGLBuffer
@@ -240,12 +240,18 @@ def _link_color(name: str) -> Tuple[float, float, float]:
     return (0.72, 0.74, 0.77)
 
 
-def load_visuals(urdf_path: Optional[str] = None) -> List[dict]:
+def load_visuals(urdf_path: Optional[str] = None, hand_only=False) -> List[dict]:
     urdf_path = urdf_path or _resolve_urdf()
     root = ET.parse(urdf_path).getroot()
     visuals: List[dict] = []
     for link in root.findall("link"):
         link_name = link.get("name") or ""
+        # NoHand's fixed extension frames duplicate the Link7 mesh at an
+        # 11 cm offset. Keep the frames in FK, but do not render fake wrists.
+        if link_name in ('Link_l_ext', 'Link_r_ext'):
+            continue
+        if hand_only and not link_name.startswith(('hand1_', 'hand2_', 'wrist_connector_', 'wrist_camera_')):
+            continue
         color = _link_color(link_name)
         for visual in link.findall("visual"):
             mesh = visual.find("geometry/mesh")
@@ -266,6 +272,53 @@ def load_visuals(urdf_path: Optional[str] = None) -> List[dict]:
                 continue
             visuals.append({"link": link_name, "color": color, "packed": packed})
     return visuals
+
+
+class RuiyanHandModel:
+    """Hands, wrist brackets and cameras attached to the existing Link7 frames."""
+    def __init__(self):
+        self.path = os.path.join(os.path.dirname(__file__), '..', 'psi-policy', 'assets',
+                                 'A2D_RuiYan_D405', 'A2D_RuiYan_D405.urdf')
+        self.visuals = load_visuals(self.path, hand_only=True)
+        expected = {'wrist_connector_0', 'wrist_connector_1', 'wrist_camera_0', 'wrist_camera_1'}
+        if len(self.visuals) < 28 or not expected.issubset({item['link'] for item in self.visuals}):
+            raise ValueError('睿研左右手、腕部支架或相机网格不完整')
+        self.joints = []
+        for joint in ET.parse(self.path).getroot().findall('joint'):
+            child = joint.find('child').get('link')
+            if not child.startswith(('hand1_', 'hand2_', 'wrist_connector_', 'wrist_camera_')):
+                continue
+            origin = joint.find('origin')
+            limit = joint.find('limit')
+            axis = joint.find('axis')
+            self.joints.append((joint.find('parent').get('link'), child,
+                _xyz_rpy(origin.get('xyz'), origin.get('rpy')),
+                None if limit is None else (float(limit.get('lower')), float(limit.get('upper'))),
+                np.array([float(x) for x in axis.get('xyz').split()]) if axis is not None else np.array([0., 0., 1.])))
+
+    def poses(self, arm_poses, motors):
+        from robot_hand_skeleton import _MOTOR
+        frames = {'arm1_link_7': arm_poses['Link7_l'], 'arm2_link_7': arm_poses['Link7_r']}
+        pending = list(self.joints)
+        while pending:
+            ready = [joint for joint in pending if joint[0] in frames]
+            if not ready:
+                raise ValueError('睿研手关节树不完整')
+            for joint in ready:
+                parent, child, origin, limits, axis = joint
+                T = origin.copy()
+                if limits is not None:
+                    side = 'left' if child.startswith('hand1_') else 'right'
+                    channel = _MOTOR[child.split('_link_')[1]]
+                    value = float(np.clip(motors.get(side, {}).get(channel, 0.), 0., 1.))
+                    angle = limits[0] + value * (limits[1] - limits[0])
+                    a = axis / np.linalg.norm(axis)
+                    cross = np.array([[0., -a[2], a[1]], [a[2], 0., -a[0]], [-a[1], a[0], 0.]])
+                    R = np.eye(3) + np.sin(angle)*cross + (1.-np.cos(angle))*(cross @ cross)
+                    T[:3, :3] = T[:3, :3] @ R
+                frames[child] = frames[parent] @ T
+                pending = [entry for entry in pending if entry is not joint]
+        return {key: value for key, value in frames.items() if key.startswith(('hand', 'wrist_'))}
 
 
 class _Kinematics:
@@ -318,6 +371,36 @@ def read_q16(max_age_s: float = 2.0) -> Tuple[Optional[List[float]], float]:
     return None, -1.0
 
 
+def sample_reachable_positions(urdf_path, q16, count=6000):
+    """Sample Link7 positions within URDF joint limits at a fixed waist pose.
+
+    Position samples only: no collision, orientation or trajectory guarantee.
+    Own model/data so the rendering FK is never modified by the worker.
+    """
+    kin = _Kinematics(urdf_path)
+    pin, model = kin._pin, kin.model
+    q = kin.q.copy()
+    for name, value in zip(JOINT_NAMES, q16):
+        q[kin._q_idx[name]] = value
+    rng = np.random.default_rng(17)
+    result = {}
+    for side in ('l', 'r'):
+        indices = [kin._q_idx[f'joint{i}_{side}'] for i in range(1, 8)]
+        lo, hi = model.lowerPositionLimit[indices], model.upperPositionLimit[indices]
+        if not np.isfinite([lo, hi]).all() or np.any(lo >= hi):
+            raise ValueError('URDF 手臂关节限位无效')
+        samples = rng.uniform(lo, hi, (count, 7))
+        points = np.empty((count, 3))
+        fid = kin._frame[f'Link7_{side}']
+        for i, values in enumerate(samples):
+            q[indices] = values
+            pin.forwardKinematics(model, kin.data, q)
+            pin.updateFramePlacement(model, kin.data, fid)
+            points[i] = kin.data.oMf[fid].translation
+        result[side] = points
+    return result
+
+
 def _grid_lines(size: float = 2.0, step: float = 0.25) -> np.ndarray:
     pts = []
     n = int(size / step)
@@ -342,6 +425,7 @@ class _RobotGL(QOpenGLWidget):
         super().__init__(parent)
         self.setFormat(fmt)
         self._visuals = visuals
+        self.show_wrist_accessories = True
         self._poses: Dict[str, np.ndarray] = {}
         self._ready = False
         self._program = None
@@ -432,6 +516,8 @@ class _RobotGL(QOpenGLWidget):
         ident.setToIdentity()
         self._draw_item(self._grid, ident, lit=0.0, mode=_GL_LINES)
         for item in self._items:
+            if not self.show_wrist_accessories and item['link'].startswith(('wrist_connector_', 'wrist_camera_')):
+                continue
             pose = self._poses.get(item["link"])
             if pose is None:
                 continue
@@ -976,6 +1062,9 @@ _POSE_METHODS = (
     ("pca", "PCA", (1.0, 0.86, 0.15)),
     ("foundationpose", "FoundPose", (0.25, 0.85, 1.0)),
     ("any6d", "Any6D", (1.0, 0.5, 0.15)),
+    ("grasp_pregrasp", "预抓取（紫）", (0.9, 0.3, 0.9)),
+    ("grasp_approach", "接近（绿）", (0.2, 1.0, 0.3)),
+    ("grasp_lift", "抬起（黄）", (1.0, 0.9, 0.1)),
 )
 
 
@@ -1105,6 +1194,11 @@ class RobotView3D(QWidget):
         self._skel_check.setToolTip("用当前手腕位姿和睿研手的开合量，在左右手上画出估计骨架。")
         self._skel_check.toggled.connect(self._set_skeleton_enabled)
         row.addWidget(self._skel_check)
+        self._wrist_accessories_check = QCheckBox('腕部支架 / 相机')
+        self._wrist_accessories_check.setChecked(True)
+        self._wrist_accessories_check.setToolTip('显示随模型提供的腕部支架与 D405 外壳；按 URDF 安装关系随手腕移动。')
+        self._wrist_accessories_check.toggled.connect(self._show_wrist_accessories)
+        row.addWidget(self._wrist_accessories_check)
         self._pose_checks = {}
         for key, label, _rgb in _POSE_METHODS:
             box = QCheckBox(label)
@@ -1146,6 +1240,47 @@ class RobotView3D(QWidget):
         self._status = QLabel("正在加载机器人模型…")
         self._status.setStyleSheet("color: #9aa0a6;")
         layout.addWidget(self._status)
+        reach_row = QHBoxLayout()
+        self._reach_checks = {}
+        for side, label in (('l', '左臂可达采样（青）'), ('r', '右臂可达采样（橙）')):
+            box = QCheckBox(label)
+            box.setToolTip('当前腰部姿态下，按 URDF 关节限位采样的 Link7 位置；不含避障及指定手朝向约束。')
+            box.toggled.connect(self._refresh_reach_visibility)
+            reach_row.addWidget(box)
+            self._reach_checks[side] = box
+        layout.addLayout(reach_row)
+        self._reach_note = QLabel('勾选显示模型估算可达点；不是抓取配置工作空间，也不代表无碰撞可达。')
+        self._reach_note.setWordWrap(True)
+        layout.addWidget(self._reach_note)
+        self._reach_items = {}
+        self._reach_waist = None
+        self._reach_job = None
+        self._simulation_q = None
+        self._simulation_hands = {}
+        self._simulation_label = QLabel('机器人姿态来源：真机反馈')
+        layout.addWidget(self._simulation_label)
+        self._hand_model = None
+        self.simulation_hand_callback = None
+        self._sim_hand_controls = {}
+        controls = QGridLayout()
+        labels = ('拇指旋转', '拇指弯曲', '食指', '中指', '无名指', '小指')
+        controls.addWidget(QLabel('仿真手控制（0 张开，1 闭合）'), 0, 0)
+        for col, label in enumerate(labels, 1):
+            controls.addWidget(QLabel(label), 0, col)
+        for row_index, (side, label) in enumerate((('left', '左手'), ('right', '右手')), 1):
+            controls.addWidget(QLabel(label), row_index, 0)
+            boxes = []
+            for col in range(6):
+                box = QDoubleSpinBox()
+                box.setRange(0., .9 if col < 2 else 1.)
+                box.setSingleStep(.05)
+                box.setDecimals(3)
+                box.setEnabled(False)
+                box.valueChanged.connect(lambda _value, side=side: self._change_simulation_hand(side))
+                boxes.append(box)
+                controls.addWidget(box, row_index, col+1)
+            self._sim_hand_controls[side] = boxes
+        layout.addLayout(controls)
         self._gl: Optional[_RobotGL] = None
         self._kin: Optional[_Kinematics] = None
         self._clouds: List[dict] = []
@@ -1199,6 +1334,62 @@ class RobotView3D(QWidget):
             item["enabled"] = bool(enabled) and self._pose_hold.get(key) is not None
         if self._gl is not None:
             self._gl.update()
+
+    def _show_wrist_accessories(self, enabled):
+        if self._gl is not None:
+            self._gl.show_wrist_accessories = bool(enabled)
+            self._gl.update()
+
+    def _refresh_reach_visibility(self, *_):
+        for side, item in self._reach_items.items():
+            item['enabled'] = self._reach_checks[side].isChecked() and self._reach_waist is not None
+        if self._gl is not None:
+            self._gl.update()
+
+    def _update_reachable_space(self, q16, age):
+        if not any(box.isChecked() for box in self._reach_checks.values()):
+            return
+        if q16 is None or age < 0 or age > 2 or not np.isfinite(q16).all():
+            for item in self._reach_items.values():
+                item['enabled'] = False
+            self._reach_note.setText('可达空间等待新鲜关节反馈：请启动 FK 反馈。')
+            return
+        waist = np.asarray(q16[:2])
+        job = self._reach_job
+        if job is not None:
+            if not job['done']:
+                return
+            self._reach_job = None
+            if job.get('error'):
+                self._reach_note.setText('可达空间计算失败：' + job['error'])
+                return
+            if np.allclose(waist, job['waist'], atol=.005, rtol=0):
+                for side, points in job['points'].items():
+                    packed = np.empty((len(points), 6), dtype=np.float32)
+                    packed[:, :3] = points
+                    packed[:, 3:] = (0.1, .85, 1.) if side == 'l' else (1., .55, .15)
+                    item = self._reach_items[side]
+                    with item['lock']:
+                        item['pending'] = packed
+                self._reach_waist = waist.copy()
+                self._reach_note.setText('左右臂各 6000 个 Link7 可达采样点；固定当前腰部姿态，不含碰撞、手指接触点及指定朝向约束。')
+        if self._reach_waist is not None and np.allclose(waist, self._reach_waist, atol=.005, rtol=0):
+            self._refresh_reach_visibility()
+            return
+        self._reach_waist = None
+        self._refresh_reach_visibility()
+        self._reach_note.setText('正在计算当前腰部姿态下的可达空间…')
+        job = {'done': False, 'waist': waist.copy()}
+        self._reach_job = job
+        values = list(q16)
+        def compute():
+            try:
+                job['points'] = sample_reachable_positions(_resolve_urdf(), values)
+            except Exception as exc:
+                job['error'] = str(exc)
+            finally:
+                job['done'] = True
+        threading.Thread(target=compute, daemon=True).start()
 
     def _set_sam3_enabled(self, enabled: bool) -> None:
         self._sam3_on = bool(enabled)
@@ -1373,6 +1564,36 @@ class RobotView3D(QWidget):
     def set_estimated_pose(self, xyz, rotation, corners=None, extents=None) -> None:
         self.set_method_pose("pca", xyz, rotation, corners, extents)
 
+    def set_grasp_preview(self, preview) -> None:
+        for stage in ('pregrasp', 'approach', 'lift'):
+            goal = (preview or {}).get('goals', {}).get(stage)
+            if goal is None:
+                self.set_method_pose('grasp_' + stage, None, None)
+            else:
+                transform = np.asarray(goal, dtype=float)
+                self.set_method_pose('grasp_' + stage, transform[:3, 3], transform[:3, :3],
+                                     extents=(.012, .012, .012))
+        if preview:
+            prefix = '仅诊断：目标越界，不能执行。' if preview.get('diagnostic_only') else '抓取目标预览，尚未进行轨迹碰撞检查。'
+            self._status.setText(prefix + ' 紫=预抓取，绿=接近，黄=抬起；可分别取消勾选。')
+
+    def set_simulation_state(self, joints, hands):
+        self._simulation_q = None if joints is None else list(joints)
+        self._simulation_hands = dict(hands)
+        for side, boxes in self._sim_hand_controls.items():
+            for box, value in zip(boxes, hands.get(side, [0.] * 6)):
+                box.blockSignals(True)
+                box.setValue(value)
+                box.setEnabled(joints is not None)
+                box.blockSignals(False)
+        self._simulation_label.setText('仿真执行：模型姿态，不是真机反馈；无物体接触仿真'
+                                       if joints is not None else '机器人姿态来源：真机反馈')
+        self._tick()
+
+    def _change_simulation_hand(self, side):
+        if self._simulation_q is not None and self.simulation_hand_callback:
+            self.simulation_hand_callback(side, [box.value() for box in self._sim_hand_controls[side]])
+
     def _sync_pose(self, key: str) -> None:
         item = self._pose_items.get(key)
         if item is None:
@@ -1412,10 +1633,13 @@ class RobotView3D(QWidget):
         try:
             urdf = _resolve_urdf()
             visuals = load_visuals(urdf)
+            self._hand_model = RuiyanHandModel()
+            visuals.extend(self._hand_model.visuals)
             if not visuals:
                 raise RuntimeError("URDF 里没有可用的视觉网格")
             self._kin = _Kinematics(urdf)
             self._gl = _RobotGL(visuals, self)
+            self._gl.show_wrist_accessories = self._wrist_accessories_check.isChecked()
             self._clouds = self._make_clouds()
             self._skels = self._make_skeletons()
             self._wrenches = self._make_wrenches()
@@ -1424,11 +1648,14 @@ class RobotView3D(QWidget):
             }
             self._sam3 = self._make_sam3()
             self._lingbot = self._make_lingbot()
+            self._reach_items = {side: self._make_sam3() for side in ('l', 'r')}
+            for item in self._reach_items.values():
+                item['point_size'] = 2.0
             self._gl.set_clouds(self._clouds)
             self._gl.set_skeletons(self._skels)
             self._gl.set_wrenches(self._wrenches)
             self._gl.set_pose_items(
-                list(self._pose_items.values()) + [self._sam3, self._lingbot]
+                list(self._pose_items.values()) + [self._sam3, self._lingbot] + list(self._reach_items.values())
             )
             self._sync_pose6d()
             self._sync_sam3()
@@ -1575,13 +1802,7 @@ class RobotView3D(QWidget):
             "point_size": 3.0,
         }
 
-    def _update_skeleton(self) -> None:
-        if not self._skels:
-            return
-        for skel in self._skels:
-            skel["enabled"] = bool(self._skel_on)
-        if not self._skel_on:
-            return
+    def _hand_motors(self):
         motors = {"left": {}, "right": {}}
         node = self._ros_node
         if node is not None and hasattr(node, "get_robot_state"):
@@ -1591,10 +1812,18 @@ class RobotView3D(QWidget):
                 motors["right"] = {name: value for name, value in state.right_hand}
             except Exception:
                 pass
-        try:
-            from robot_hand_skeleton import skeleton_in_link
-        except Exception:
+        if self._simulation_q is not None:
+            order = ('thumb_rotation', 'thumb_bend', 'index', 'middle', 'ring', 'pinky')
+            motors = {side: dict(zip(order, self._simulation_hands.get(side, [0.] * 6)))
+                      for side in ('left', 'right')}
+        return motors
+
+    def _update_skeleton(self) -> None:
+        for skel in self._skels:
+            skel['enabled'] = bool(self._skel_on)
+        if not self._skel_on:
             return
+        motors = self._hand_motors()
         for skel in self._skels:
             try:
                 packed = _skeleton_lines(skel["side"], motors.get(skel["side"]) or {})
@@ -1850,6 +2079,9 @@ class RobotView3D(QWidget):
         if self._gl is None or self._kin is None:
             return
         q16, age = read_q16()
+        if self._simulation_q is not None:
+            q16, age = self._simulation_q, 0.
+        self._update_reachable_space(q16, age)
         self._ingest_cached_depth()
         self._update_skeleton()
         for item in self._wrenches:
@@ -1863,7 +2095,10 @@ class RobotView3D(QWidget):
         else:
             prefix = ""
         try:
-            self._gl.set_poses(self._kin.link_poses(q16))
+            poses = self._kin.link_poses(q16)
+            if self._hand_model is not None:
+                poses.update(self._hand_model.poses(poses, self._hand_motors()))
+            self._gl.set_poses(poses)
         except Exception as exc:
             self._status.setText(f"正运动学失败：{exc}")
             return

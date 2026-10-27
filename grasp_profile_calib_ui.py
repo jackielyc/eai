@@ -22,6 +22,13 @@ from PyQt5.QtWidgets import (
 from grasp_execution import load_profile
 
 
+RUIYAN_FACTORY_HAND_MODEL = "ruiyan_6dof_v1"
+RUIYAN_FACTORY_OPEN_POSITIONS = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+# Ruiyan commands are normalized to [0, 1].  The shipped driver limits the
+# two thumb motors to 0.9 while the four finger motors accept the full range.
+RUIYAN_FACTORY_CLOSE_POSITIONS = (0.9, 0.9, 1.0, 1.0, 1.0, 1.0)
+
+
 def _spin(low: float, high: float, value: float, suffix: str = "") -> QDoubleSpinBox:
     box = QDoubleSpinBox()
     box.setRange(low, high)
@@ -68,8 +75,14 @@ class GraspProfileCalibrationPanel(QWidget):
         self.arm.addItem("右臂 / Link7_r", "right")
         self.arm.addItem("左臂 / Link7_l", "left")
         form.addRow("执行侧", self.arm)
-        self.hand_model = QLineEdit("ruiyan_6dof_v1")
+        self.hand_model = QLineEdit(RUIYAN_FACTORY_HAND_MODEL)
         form.addRow("实际手型标识", self.hand_model)
+        self.ruiyan_factory_button = QPushButton("加载睿研出厂手型默认值")
+        self.ruiyan_factory_button.setToolTip(
+            "填入睿研六通道的出厂开合范围；不会改动机器人安装相关的 TCP 和工作空间。"
+        )
+        self.ruiyan_factory_button.clicked.connect(self.load_ruiyan_factory_defaults)
+        form.addRow("出厂预设", self.ruiyan_factory_button)
         self.workspace = []
         grid = QGridLayout()
         for col, label in enumerate(("X", "Y", "Z")):
@@ -139,13 +152,28 @@ class GraspProfileCalibrationPanel(QWidget):
             and self.workspace_checked.isChecked()
         )
 
+    def load_ruiyan_factory_defaults(self):
+        """Fill the hand fields backed by the shipped Ruiyan driver limits."""
+        self.hand_model.setText(RUIYAN_FACTORY_HAND_MODEL)
+        for box, value in zip(self.open_positions, RUIYAN_FACTORY_OPEN_POSITIONS):
+            box.setValue(value)
+        for box, value in zip(self.close_positions, RUIYAN_FACTORY_CLOSE_POSITIONS):
+            box.setValue(value)
+        self.hand_checked.setChecked(False)
+        self.status.setText(
+            "已加载睿研出厂手型默认值：0 为全张，拇指两通道最大 0.9，"
+            "其余四指最大 1.0。TCP 和工作空间属于整机安装参数，未被改动；"
+            "请在低风险空载状态复核后再确认并保存。"
+        )
+        self._update_save()
+
     def load(self):
         try:
             path = Path(self.path.text()).expanduser()
             profile = load_profile(path, require_calibration=False)
             side = str(profile.get("arm_side") or "right")
             self.arm.setCurrentIndex(0 if side == "right" else 1)
-            self.hand_model.setText(str(profile.get("hand_model") or "ruiyan_6dof_v1"))
+            self.hand_model.setText(str(profile.get("hand_model") or RUIYAN_FACTORY_HAND_MODEL))
             for row, values in zip(self.workspace, profile.get("workspace_m") or []):
                 for box, value in zip(row, values):
                     box.setValue(float(value))

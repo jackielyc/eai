@@ -35,6 +35,25 @@ class ProfileCalibrationTests(unittest.TestCase):
         self.panel.workspace_checked.setChecked(True)
         self.assertTrue(self.panel.save_button.isEnabled())
 
+    def test_ruiyan_factory_defaults_fill_only_hand_fields(self):
+        self.panel.tcp_translation[0].setValue(8.0)
+        self.panel.workspace[0][0].setValue(0.1)
+        for box in (self.panel.tcp_checked, self.panel.hand_checked, self.panel.workspace_checked):
+            box.setChecked(True)
+
+        self.panel.load_ruiyan_factory_defaults()
+
+        self.assertEqual(self.panel.hand_model.text(), 'ruiyan_6dof_v1')
+        self.assertEqual([box.value() for box in self.panel.open_positions], [0.0] * 6)
+        self.assertEqual(
+            [box.value() for box in self.panel.close_positions],
+            [0.9, 0.9, 1.0, 1.0, 1.0, 1.0],
+        )
+        self.assertEqual(self.panel.tcp_translation[0].value(), 8.0)
+        self.assertEqual(self.panel.workspace[0][0].value(), 0.1)
+        self.assertFalse(self.panel.hand_checked.isChecked())
+        self.assertFalse(self.panel.save_button.isEnabled())
+
     def test_save_marks_profile_only_after_confirmation(self):
         for box in (self.panel.tcp_checked, self.panel.hand_checked, self.panel.workspace_checked):
             box.setChecked(True)

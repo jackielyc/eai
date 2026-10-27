@@ -13,7 +13,7 @@
   "joint_velocity_rad_s": 0.1,
   "joint_acceleration_rad_s2": 0.2,
   "max_observation_age_s": 60,
-  "max_plan_age_s": 30,
+  "max_plan_age_s": 600,
   "workspace_m": [[0, -0.5, 0.4], [0.8, 0.5, 1.3]],
   "open_positions": [0, 0, 0, 0, 0, 0],
   "close_positions": [0.5, 0.5, 0.5, 0.5, 0.5, 0.5]

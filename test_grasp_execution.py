@@ -111,7 +111,7 @@ class SequenceTests(unittest.TestCase):
         s.reset(s.preview, self.profile)
         s.hand_sent(); s.confirm_hand(); s.begin_plan()
         s.accept_plan(self.accepted('pregrasp'), now=0)
-        with self.assertRaisesRegex(ValueError, '过期'): s.begin_execute(now=100, manual_path_confirmed=True)
+        with self.assertRaisesRegex(ValueError, '过期'): s.begin_execute(now=100 + self.profile['max_plan_age_s'], manual_path_confirmed=True)
         self.assertEqual(s.state, 'failed')
 
 
@@ -149,6 +149,39 @@ class RunnerTests(unittest.TestCase):
             self.runner.tick()
         self.assertEqual(self.runner.state, 'stopped')
         np.testing.assert_array_equal(self.sent[-1], [0]*16)
+
+    def test_pause_resume_freezes_trajectory_clock(self):
+        self.now = .3
+        self.runner.tick()
+        held = self.sent[-1].copy()
+        self.data['q16'] = held
+        self.runner.pause()
+        for _ in range(4):
+            self.runner.tick()
+        self.assertEqual(self.runner.state, 'pausing')
+        for i in range(3):
+            self.data['arm_received_at'] = i+1
+            self.now += .02
+            self.runner.tick()
+        self.assertEqual(self.runner.state, 'paused')
+        self.now = 100
+        self.runner.tick()
+        np.testing.assert_allclose(self.sent[-1], held)
+        self.runner.resume()
+        self.runner.tick()
+        np.testing.assert_allclose(self.sent[-1], held)
+        self.assertEqual(self.runner.state, 'running')
+
+    def test_pause_can_be_cancelled_and_drift_prevents_resume(self):
+        self.runner.pause()
+        for i in range(3):
+            self.data['arm_received_at'] = i+1
+            self.runner.tick()
+        self.data['q16'][9] = .03
+        with self.assertRaisesRegex(ValueError, '位置发生变化'):
+            self.runner.resume()
+        self.runner.stop()
+        self.assertEqual(self.runner.state, 'stopping')
 
     def test_start_drift_and_model_mismatch_rejected(self):
         self.data['q16'][0] = .1

@@ -21,6 +21,7 @@ class InlineThread:
 
 
 class Harness:
+    _mv6d_enabled_methods = m.CameraTopicWindow._mv6d_enabled_methods
     _start_mv6d_estimate = m.CameraTopicWindow._start_mv6d_estimate
     _estimate_view_6d = staticmethod(m.CameraTopicWindow._estimate_view_6d)
     _pose_on_mask = staticmethod(m.CameraTopicWindow._pose_on_mask)
@@ -63,7 +64,7 @@ class Harness:
     def _compute_mv6d_snapshot(self, **kw):
         self.snapshot_inputs = kw
         result = self._estimate_view_6d(kw['head_bgr'], kw['head_depth'], 2, 1,
-                                       100., 100., 3., 2., method_tag='head', pose_backend=self.backend)
+                                       100., 100., 3., 2., method_tag='head', pose_backend=kw['pose_backend'])
         return NS(head_result=result, notes='')
     def _mv6d_pose_in_base(self, snap): return ('selected-pose',)
     def _camera_pose_to_base(self, snap, result): return ('other-pose',)

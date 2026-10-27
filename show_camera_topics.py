@@ -30463,6 +30463,8 @@ class CameraTopicWindow(QMainWindow):
                           or self._sim_teleop_active() or bool(self._text_cmd_queue)),
             parent=self,
             preview_image=self._render_grasp_preview,
+            robot_preview=self._show_grasp_preview_on_robot,
+            simulation_display=self._display_grasp_simulation,
             open_perception=self._open_visual_6d_for_grasp,
             fill_extrinsic=self._fill_grasp_observation_extrinsic,
             ensure_feedback=self._ensure_host_fk,
@@ -31158,15 +31160,31 @@ class CameraTopicWindow(QMainWindow):
         mv6d_row1.addStretch(1)
         mv6d_layout.addLayout(mv6d_row1)
 
+        method_switch_row = QHBoxLayout()
+        method_switch_row.addWidget(QLabel("启用方法"))
+        for backend, label, attr in (
+            (POSE_BACKEND_PCA, "PCA", "mv6d_pca_enabled_check"),
+            (POSE_BACKEND_FOUNDATIONPOSE, "FoundationPose", "mv6d_foundationpose_enabled_check"),
+            (POSE_BACKEND_ANY6D, "Any6D", "mv6d_any6d_enabled_check"),
+        ):
+            check = QCheckBox(label)
+            check.setChecked(True)
+            check.setToolTip(f"开启后计算 {label} 位姿；关闭时跳过计算并清除其机器人页结果。")
+            setattr(self, attr, check)
+            check.toggled.connect(self._on_mv6d_methods_changed)
+            method_switch_row.addWidget(check)
+        method_switch_row.addStretch(1)
+        mv6d_layout.addLayout(method_switch_row)
+
         mv6d_row2 = QHBoxLayout()
         mv6d_row2.setSpacing(6)
-        mv6d_row2.addWidget(QLabel("方法"))
+        mv6d_row2.addWidget(QLabel("结果来源"))
         self.mv6d_method_combo = ImeSafeComboBox()
         self.mv6d_method_combo.addItem("PCA", POSE_BACKEND_PCA)
         self.mv6d_method_combo.addItem("FoundationPose", POSE_BACKEND_FOUNDATIONPOSE)
         self.mv6d_method_combo.addItem("Any6D", POSE_BACKEND_ANY6D)
         self.mv6d_method_combo.setToolTip(
-            "三种方法都先用头部点击点做 SAM3 分割，并一起画到机器人页。\n"
+            "只计算上方已开启的方法，共用 SAM3 分割并显示到机器人页。\n"
             "这里选中的方法写入结果文本和抓取目标。\n"
             "PCA：分割区域的点云包围盒。\n"
             "FoundPose：使用位姿设置里的物体 mesh。\n"
@@ -31219,10 +31237,8 @@ class CameraTopicWindow(QMainWindow):
         mv6d_error_row.addWidget(self.mv6d_copy_btn)
         mv6d_layout.addLayout(mv6d_error_row)
 
-        mv6d_detail = QGroupBox("详情（真值 / 结果文本）")
-        mv6d_detail.setCheckable(True)
-        mv6d_detail.setChecked(False)
-        mv6d_detail.setToolTip("展开后可编辑真值、查看完整估计文本")
+        mv6d_detail = QGroupBox("详情（参考位姿 / 结果文本）")
+        mv6d_detail.setToolTip("结果框内可用滚轮、滚动条或 PageUp/PageDown 查看完整文本")
         mv6d_detail.setStyleSheet(
             f"QGroupBox {{ color: {UI_TEXT_PRIMARY}; border: 1px solid {UI_BORDER}; "
             f"margin-top: 6px; padding-top: 4px; }}"
@@ -31294,7 +31310,7 @@ class CameraTopicWindow(QMainWindow):
         self.mv6d_result_edit.setContextMenuPolicy(Qt.DefaultContextMenu)
         self.mv6d_result_edit.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.mv6d_result_edit.setPlaceholderText(
-            "头+腕 6D 估计结果、真值与误差将显示在这里…"
+            "头+腕 6D 估计结果、参考位姿差值及诊断信息将显示在这里…"
         )
         self.mv6d_result_edit.setStyleSheet(
             f"QTextEdit {{ color: {UI_TEXT_PRIMARY}; background-color: {UI_BG_LOG}; "
@@ -31307,9 +31323,9 @@ class CameraTopicWindow(QMainWindow):
             f"QTextEdit QScrollBar::add-line:vertical, QTextEdit QScrollBar::sub-line:vertical {{ height: 0; }}"
             f"QTextEdit QScrollBar::add-page:vertical, QTextEdit QScrollBar::sub-page:vertical {{ background: transparent; }}"
         )
-        self.mv6d_result_edit.setMinimumHeight(72)
-        self.mv6d_result_edit.setMaximumHeight(160)
-        self.mv6d_result_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.mv6d_result_edit.setMinimumHeight(160)
+        self.mv6d_result_edit.setMaximumHeight(320)
+        self.mv6d_result_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOn)
         result_bar = self.mv6d_result_edit.verticalScrollBar()
         result_bar.setEnabled(True)
         result_bar.raise_()
@@ -33981,6 +33997,7 @@ class CameraTopicWindow(QMainWindow):
         self._restore_real_robot_backends_order()
         self._restore_arm_panels_order()
         self._restore_viewer_ui_state()
+        self._on_mv6d_methods_changed()
         # After restore: fix Pi_05 + LingBot-only ckpt (or clear incompatible leftovers).
         self._sanitize_sim_eval_policy_ckpt_pair()
         self._sync_sim_backend_tab_from_radios()
@@ -50757,6 +50774,30 @@ class CameraTopicWindow(QMainWindow):
         self.arm_panel_mv6d_radio.setChecked(True)
         self._apply_arm_panel_stack()
 
+    def _control_grasp_simulation_hand(self, side, values):
+        panel = self.grasp_execution_panel
+        if panel.is_simulation:
+            panel.simulation_backend().hand(side, values)
+
+    def _display_grasp_simulation(self, joints, hands):
+        self._robot_grasp_simulation = (joints, hands)
+        if joints is not None and getattr(self, '_robot_view', None) is None:
+            self._on_mv6d_show_robot()
+        view = getattr(self, '_robot_view', None)
+        if view is not None:
+            view.set_simulation_state(joints, hands)
+        if joints is not None and not getattr(self, '_grasp_sim_display_active', False):
+            self._on_mv6d_show_robot()
+        self._grasp_sim_display_active = joints is not None
+
+    def _show_grasp_preview_on_robot(self, preview):
+        self._robot_grasp_preview = preview
+        if preview is not None:
+            self._on_mv6d_show_robot()
+        view = getattr(self, '_robot_view', None)
+        if view is not None:
+            view.set_grasp_preview(preview)
+
     def _render_grasp_preview(self, preview):
         result = getattr(self, "_last_click_pose_snapshot", None)
         if preview["observation_id"].startswith("mv6d:"):
@@ -53696,6 +53737,10 @@ class CameraTopicWindow(QMainWindow):
                 view = RobotView3D(holder, ros_node=getattr(self, "node", None))
                 holder.layout().addWidget(view, 1)
                 self._robot_view = view
+                view.simulation_hand_callback = self._control_grasp_simulation_hand
+                sim_q, sim_hands = getattr(self, '_robot_grasp_simulation', (None, {}))
+                view.set_simulation_state(sim_q, sim_hands)
+                view.set_grasp_preview(getattr(self, '_robot_grasp_preview', None))
                 cached = getattr(self, "_robot_method_poses", None) or {}
                 if not cached:
                     old = getattr(self, "_robot_pose6d", None)
@@ -54348,7 +54393,52 @@ class CameraTopicWindow(QMainWindow):
             result_callback(dict(result, color_topic=topic, tag=tag))
         return np.ascontiguousarray(np.where(valid, depth_m, 0.0), dtype=np.float32)
 
+    def _mv6d_enabled_methods(self) -> Tuple[str, ...]:
+        return tuple(
+            backend for backend, attr in (
+                (POSE_BACKEND_PCA, "mv6d_pca_enabled_check"),
+                (POSE_BACKEND_FOUNDATIONPOSE, "mv6d_foundationpose_enabled_check"),
+                (POSE_BACKEND_ANY6D, "mv6d_any6d_enabled_check"),
+            )
+            if getattr(self, attr, None) is None or getattr(self, attr).isChecked()
+        )
+
+    def _on_mv6d_methods_changed(self, *_args) -> None:
+        enabled = self._mv6d_enabled_methods()
+        busy = bool(getattr(self, "_mv6d_busy", False))
+        for attr in ("mv6d_pca_enabled_check", "mv6d_foundationpose_enabled_check", "mv6d_any6d_enabled_check"):
+            check = getattr(self, attr, None)
+            if check is not None:
+                check.setEnabled(not busy)
+        combo = getattr(self, "mv6d_method_combo", None)
+        if combo is not None:
+            for index in range(combo.count()):
+                combo.model().item(index).setEnabled(combo.itemData(index) in enabled)
+            if enabled and combo.currentData() not in enabled:
+                combo.setCurrentIndex(combo.findData(enabled[0]))
+            combo.setEnabled(bool(enabled) and not busy)
+        button = getattr(self, "mv6d_once_btn", None)
+        if button is not None:
+            button.setEnabled(bool(enabled) and not busy)
+        realtime = getattr(self, "mv6d_enable_check", None)
+        if realtime is not None:
+            if not enabled:
+                realtime.setChecked(False)
+            realtime.setEnabled(bool(enabled))
+        stored = getattr(self, "_robot_method_poses", {})
+        view = getattr(self, "_robot_view", None)
+        for backend in POSE_BACKENDS:
+            if backend not in enabled:
+                stored.pop(backend, None)
+                if view is not None and hasattr(view, "set_method_pose"):
+                    view.set_method_pose(backend, None, None)
+
     def _start_mv6d_estimate(self, *, silent: bool = False) -> None:
+        enabled_backends = self._mv6d_enabled_methods()
+        if not enabled_backends:
+            if not silent:
+                self.status_bar.showMessage("请至少开启 PCA、FoundationPose、Any6D 中的一种方法")
+            return
         try:
             self._ensure_mv6d_camera_feeds()
         except Exception:
@@ -54419,7 +54509,7 @@ class CameraTopicWindow(QMainWindow):
         if need_refine:
             if not silent:
                 self.status_bar.showMessage(
-                    "多视角 6D：LingBot-Depth 精修 → SAM3 → PCA / FP / Any6D…"
+                    "多视角 6D：LingBot-Depth 精修 → SAM3 → 已开启的位姿方法…"
                 )
         elif rgb_only:
             if not silent:
@@ -54442,6 +54532,8 @@ class CameraTopicWindow(QMainWindow):
         pose_backend = str(
             self.mv6d_method_combo.currentData() or POSE_BACKEND_PCA
         )
+        if pose_backend not in enabled_backends:
+            pose_backend = enabled_backends[0]
         # 拷贝到线程，避免 UI 帧被覆盖
         head_bgr_c = None if head_bgr is None else np.ascontiguousarray(head_bgr).copy()
         left_bgr_c = (
@@ -54485,6 +54577,8 @@ class CameraTopicWindow(QMainWindow):
             tf_buffer = None
 
         self._mv6d_busy = True
+        if hasattr(self, "_on_mv6d_methods_changed"):
+            self._on_mv6d_methods_changed()
         self._mv6d_lingbot_active = use_lingbot
         cancel_event = threading.Event() if use_lingbot else None
         self._mv6d_lingbot_cancel = cancel_event
@@ -54498,9 +54592,11 @@ class CameraTopicWindow(QMainWindow):
                 POSE_BACKEND_FOUNDATIONPOSE: "FoundPose",
                 POSE_BACKEND_ANY6D: "Any6D",
             }.get(pose_backend, pose_backend)
-            msg = f"正在用 SAM3 分割，再计算 PCA、FoundPose、Any6D（结果文本用 {method_name}）…"
+            names = {POSE_BACKEND_PCA: "PCA", POSE_BACKEND_FOUNDATIONPOSE: "FoundationPose", POSE_BACKEND_ANY6D: "Any6D"}
+            active_names = "、".join(names[key] for key in enabled_backends)
+            msg = f"正在用 SAM3 分割，再计算 {active_names}（结果文本用 {method_name}）…"
             if need_refine:
-                msg = f"正在用 LingBot-Depth 补深度，随后 SAM3，并计算 PCA、FoundPose、Any6D…"
+                msg = f"正在用 LingBot-Depth 补深度，随后 SAM3，并计算 {active_names}…"
             self.mv6d_result_edit.setPlainText(msg)
 
         def _work() -> None:
@@ -54586,6 +54682,7 @@ class CameraTopicWindow(QMainWindow):
                     method_poses, pose_notes = self._collect_method_poses(
                         snap,
                         selected=pose_backend,
+                        enabled_backends=enabled_backends,
                         head_bgr=head_bgr_c,
                         head_depth=hd,
                         head_topic=head_topic,
@@ -56102,8 +56199,10 @@ class CameraTopicWindow(QMainWindow):
         seed_u: int,
         seed_v: int,
         get_intrinsics,
+        enabled_backends: Optional[Sequence[str]] = None,
     ):
-        """同一张 SAM3 掩码上补齐另外两种方法，连同当前结果一起交给机器人页。"""
+        """同一张 SAM3 掩码上计算已开启的方法，连同当前结果交给机器人页。"""
+        enabled = tuple(POSE_BACKENDS if enabled_backends is None else enabled_backends)
         labels = {
             POSE_BACKEND_PCA: "PCA",
             POSE_BACKEND_FOUNDATIONPOSE: "FoundPose",
@@ -56112,7 +56211,7 @@ class CameraTopicWindow(QMainWindow):
         poses = {}
         notes: List[str] = []
         selected_pose = self._mv6d_pose_in_base(snap)
-        if selected_pose is not None:
+        if selected_pose is not None and selected in enabled:
             poses[str(selected or POSE_BACKEND_PCA)] = selected_pose
         result = snap.head_result
         if result is None or result.mask is None or head_bgr is None or head_depth is None:
@@ -56128,7 +56227,7 @@ class CameraTopicWindow(QMainWindow):
         ch, cw = np.asarray(head_bgr).shape[:2]
         u_d, v_d = scale_uv_to_shape(int(seed_u), int(seed_v), (ch, cw), (dh, dw))
         fx, fy, cx, cy = get_intrinsics(head_depth_topic or head_topic, dw, dh)
-        for backend in (POSE_BACKEND_PCA, POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY6D):
+        for backend in enabled:
             if backend in poses:
                 continue
             label = labels.get(backend, backend)
@@ -56196,6 +56295,8 @@ class CameraTopicWindow(QMainWindow):
                 else:
                     key = POSE_BACKEND_PCA
                 poses[key] = converted
+        enabled = CameraTopicWindow._mv6d_enabled_methods(self)
+        poses = {key: pose for key, pose in poses.items() if key in enabled}
         if not poses:
             if not silent:
                 self.status_bar.showMessage(
@@ -56680,6 +56781,8 @@ class CameraTopicWindow(QMainWindow):
             self._update_lingbot_depth_ui()
         self.mv6d_once_btn.setEnabled(True)
         self.mv6d_once_btn.setText("估计一次")
+        if hasattr(self, "_on_mv6d_methods_changed"):
+            self._on_mv6d_methods_changed()
         if not isinstance(payload, dict):
             return
         silent = bool(payload.get("silent"))
@@ -56709,7 +56812,7 @@ class CameraTopicWindow(QMainWindow):
         except Exception as exc:
             if not silent:
                 self.status_bar.showMessage(f"机器人页未画出 6D：{exc}", 8000)
-        from mv6d_grasp_input import observation_from_snapshot
+        from mv6d_grasp_input import observation_from_snapshot, observations_from_methods
         try:
             captured_at = float(payload.get("captured_at", 0))
             base_pose = self._mv6d_pose_in_base(snap)
@@ -56718,8 +56821,18 @@ class CameraTopicWindow(QMainWindow):
                 captured_at,
                 f"mv6d:{captured_at:.9f}",
                 base_pose=base_pose,
+                depth_source=payload.get("depth_source"),
             )
-            self.grasp_execution_panel.set_observation(observation)
+            observations = observations_from_methods(
+                snap, captured_at, payload.get("method_poses") or {},
+                depth_source=payload.get("depth_source"),
+            )
+            if not observations:
+                method = str(snap.method).lower()
+                key = 'foundationpose' if 'foundation' in method else ('any6d' if 'any6d' in method else 'pca')
+                observation['observation_id'] += ':' + key
+                observations[key] = observation
+            self.grasp_execution_panel.set_method_observations(observations)
         except Exception as exc:
             self.grasp_execution_panel.message = f"视觉6D输入转换失败: {exc}"
             self.grasp_execution_panel.refresh()

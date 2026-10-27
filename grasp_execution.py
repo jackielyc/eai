@@ -95,11 +95,33 @@ class JointRunner:
         self.last_feedback_stamp = None
         self.stable_count = 0
         self.failure = False
+        self.trajectory_elapsed = 0.0
+
+    def pause(self):
+        if self.state != 'running':
+            return
+        self.pause_started = self.clock()
+        self.stable_count = 0
+        self.last_feedback_stamp = None
+        self.state, self.message = 'pausing', '正在保持当前位置，等待静止反馈'
+
+    def resume(self):
+        if self.state != 'paused':
+            raise ValueError('尚未确认暂停到位，不能继续')
+        measured = self.feedback()
+        if not self.enabled() or measured.get('urdf_sha256') != self.plan.get('urdf_sha256'):
+            raise ValueError('使能或机器人模型不匹配，不能继续')
+        if np.max(np.abs(np.asarray(measured['q16']) - self.last_command)) > .005:
+            raise ValueError('暂停后关节位置发生变化，请停止并重新预检')
+        self.started = self.clock() - self.trajectory_elapsed
+        self.stable_count = 0
+        self.last_feedback_stamp = None
+        self.state, self.message = 'running', '继续执行本段'
 
     def stop(self, reason='操作员取消', failed=False):
-        if self.state not in ('running', 'stopping'):
+        if self.state not in ('running', 'pausing', 'paused', 'stopping'):
             return
-        if self.state == 'running':
+        if self.state != 'stopping':
             self.stop_started = self.clock()
             self.hold = None
             self.stable_count = 0
@@ -107,7 +129,7 @@ class JointRunner:
         self.failure = self.failure or failed
 
     def tick(self):
-        if self.state not in ('running', 'stopping'):
+        if self.state not in ('running', 'pausing', 'paused', 'stopping'):
             return
         now = self.clock()
         try:
@@ -128,6 +150,21 @@ class JointRunner:
                 elif now-self.stop_started > 3:
                     self.state, self.message = 'stop_unconfirmed', '保持位置未获反馈确认，请使用机器人停止装置'
                 return
+            if self.state in ('pausing', 'paused'):
+                if measured.get('urdf_sha256') != self.plan.get('urdf_sha256'):
+                    raise ValueError('暂停期间机器人模型变化')
+                error = np.max(np.abs(q-self.last_command))
+                if error > .15 or (self.state == 'paused' and error > .005):
+                    raise ValueError('暂停期间关节偏离保持位置')
+                self.publish(self.last_command.tolist())
+                if measured['arm_received_at'] != self.last_feedback_stamp:
+                    self.stable_count = self.stable_count+1 if error < .005 else 0
+                    self.last_feedback_stamp = measured['arm_received_at']
+                if self.stable_count >= 3:
+                    self.state, self.message = 'paused', '已暂停，可点击继续执行'
+                elif now-self.pause_started > 3:
+                    self.stop('暂停未获静止反馈确认', failed=True)
+                return
             if np.max(np.abs(q-self.last_command)) > .15:
                 self.stop('实际关节偏离指令超过 0.15 rad', failed=True)
                 return
@@ -144,6 +181,7 @@ class JointRunner:
                 return
             self.publish(command.tolist())
             self.last_command = command
+            self.trajectory_elapsed = elapsed
             if elapsed >= self.times[-1]:
                 tcp = measured[side]
                 T = validate_transform(self.plan['target'])
@@ -192,7 +230,7 @@ def load_profile(path, require_calibration=True):
     if axis.shape != (3,) or not np.isfinite(axis).all() or not np.isclose(np.linalg.norm(axis), 1):
         raise ValueError("approach_axis_grasp 必须是已标定的单位接近方向")
     for key, lower, upper in (("pregrasp_distance_m", .01, .30), ("lift_distance_m", .01, .20),
-                              ("max_plan_age_s", .1, 30)):
+                              ("max_plan_age_s", .1, 3600)):
         value = float(profile[key])
         if not np.isfinite(value) or not lower <= value <= upper:
             raise ValueError(f"{key} 必须在 [{lower}, {upper}] 内")
@@ -234,9 +272,10 @@ def make_preview(observation, candidate_index, profile, now=None):
     lift = grasp.copy()
     lift[2, 3] += profile["lift_distance_m"]
     bounds = np.asarray(profile["workspace_m"])
+    violations = []
     for label, T in (("预抓取", pregrasp), ("接近", grasp), ("抬起", lift)):
         if np.any(T[:3, 3] < bounds[0]) or np.any(T[:3, 3] > bounds[1]):
-            raise ValueError(f"{label}目标超出已标定工作空间")
+            violations.append(f"{label}目标超出已标定工作空间：XYZ={T[:3, 3].round(4).tolist()}，范围={bounds.tolist()}")
     preview = {"arm_side": profile["arm_side"], "hand_model": profile["hand_model"],
                "base_frame": profile["base_frame"], "tcp_link": profile["tcp_link"],
                "captured_at": captured, "observation_id": observation["observation_id"],
@@ -245,6 +284,12 @@ def make_preview(observation, candidate_index, profile, now=None):
                "open_positions": hand_positions(candidate.get("open_positions", profile["open_positions"])),
                "close_positions": hand_positions(candidate.get("close_positions", profile["close_positions"]))}
     preview["id"] = fingerprint(preview)
+    if violations:
+        preview['diagnostic_only'] = True
+        preview['workspace_errors'] = violations
+        error = ValueError('；'.join(violations))
+        error.preview = preview
+        raise error
     return preview
 
 

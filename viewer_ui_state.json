@@ -875,7 +875,7 @@
     },
     "arm_text_cmd_edit": {
       "kind": "line",
-      "text": "右臂移到 x=0.8970 y=-0.0446 z=0.8578"
+      "text": "右臂移到 x=0.8097 y=-0.2319 z=0.8520"
     },
     "left_hand_gap_slider_a": {
       "kind": "slider",
@@ -903,11 +903,11 @@
     },
     "move_target_relative_radio": {
       "kind": "radio",
-      "checked": false
+      "checked": true
     },
     "move_target_segment_radio": {
       "kind": "radio",
-      "checked": true
+      "checked": false
     },
     "offset_x_spin": {
       "kind": "dspin",
@@ -959,7 +959,7 @@
     },
     "mv6d_lingbot_depth_check": {
       "kind": "check",
-      "checked": false
+      "checked": true
     },
     "mv6d_fill_cmd_check": {
       "kind": "check",
@@ -983,6 +983,18 @@
       "kind": "check",
       "checked": true
     },
+    "mv6d_pca_enabled_check": {
+      "kind": "check",
+      "checked": true
+    },
+    "mv6d_foundationpose_enabled_check": {
+      "kind": "check",
+      "checked": false
+    },
+    "mv6d_any6d_enabled_check": {
+      "kind": "check",
+      "checked": false
+    },
     "mv6d_method_combo": {
       "kind": "combo",
       "index": 0,
@@ -991,15 +1003,15 @@
     },
     "mv6d_head_u_spin": {
       "kind": "spin",
-      "value": 308
+      "value": 449
     },
     "mv6d_head_v_spin": {
       "kind": "spin",
-      "value": 173
+      "value": 229
     },
     "mv6d_gt_enable_check": {
       "kind": "check",
-      "checked": true
+      "checked": false
     },
     "mv6d_gt_x_spin": {
       "kind": "dspin",
@@ -1941,21 +1953,21 @@
       "text": "def act(o, g, m, skills, tools):\n    # programmatic policy from induced arm/hand actions\n    # task: libero / libero_pick_place_bowl\n    skills.look('table')\n    skills.reach('bowl')\n    skills.grasp('bowl')\n    return m\n"
     }
   },
-  "control_tab": "本地摄像头",
+  "control_tab": "手臂/手",
   "splitter_sizes": [
-    247,
-    132,
-    247
+    256,
+    73,
+    297
   ],
   "geometry": [
     0,
-    128,
-    3962,
-    2176
+    64,
+    2493,
+    1376
   ],
   "topic_checks": {
     "/camera/hand_left_color": true,
-    "/camera/hand_left_depth": true,
+    "/camera/hand_left_depth": false,
     "/camera/hand_left_fisheye": false,
     "/camera/hand_right_color": true,
     "/camera/hand_right_depth": false,
