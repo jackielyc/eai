@@ -104,6 +104,7 @@ class CacheTests(unittest.TestCase):
              _mv6d_left_wrist_pix=None,_mv6d_right_wrist_pix=None,
              _arm_panel_selector_key=lambda:'mv6d',_control_tab_title_is_current=lambda title:True,
              _pick_mv6d_color_frame=pick,_mv6d_object_picked=False,_mv6d_last_snap=self.snap,
+             _draw_mv6d_target_results=lambda image:image,
              _mv6d_overlay_hand_skeleton=lambda pending:dict(pending),
              _set_mv6d_preview_label=lambda label,image,*args,**kwargs:shown.append((label,image)),
              _sync_mv6d_lightbox=lambda:None)

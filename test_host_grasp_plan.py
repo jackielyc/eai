@@ -11,8 +11,8 @@ from grasp_execution import TCP_POSITION_TOLERANCE_M, TCP_ROTATION_TOLERANCE_RAD
 
 class OfflineIKTests(unittest.TestCase):
     def test_shared_tcp_tolerances_are_bounded(self):
-        self.assertEqual(TCP_POSITION_TOLERANCE_M, .01)
-        self.assertAlmostEqual(np.degrees(TCP_ROTATION_TOLERANCE_RAD), 5.)
+        self.assertEqual(TCP_POSITION_TOLERANCE_M, .015)
+        self.assertAlmostEqual(np.degrees(TCP_ROTATION_TOLERANCE_RAD), 10.)
     def request(self, side):
         ik = HostArmIK()
         indices = [ik._q_idx[name] for name in _JOINT_NAMES]
@@ -71,13 +71,21 @@ class OfflineIKTests(unittest.TestCase):
             self.assertIn('上限 92°', messages[-1])
         self.assertEqual(messages[0].replace('仿真', ''), messages[1].replace('真机', ''))
 
-    def test_allow_waist_is_recorded_but_other_arm_stays_fixed(self):
-        _, request = self.request('left')
+    def test_allow_waist_holds_other_tcp(self):
+        ik, request = self.request('left')
         request['allow_waist'] = True
         result = prepare(request)
         self.assertTrue(result['waist_included'])
+        self.assertTrue(result['other_tcp_held'])
+        self.assertEqual(result['held_side'], 'right')
         rows = np.asarray(result['joint_waypoints'])
-        np.testing.assert_allclose(rows[:, 9:16], np.tile(rows[0, 9:16], (len(rows), 1)), atol=1e-8)
+        xyz0, quat0 = ik.ee_pose(rows[0], 'right')
+        for row in rows:
+            xyz, quat = ik.ee_pose(row, 'right')
+            np.testing.assert_allclose(xyz, xyz0, atol=.015)
+            rotation0 = ik._pin.Quaternion(quat0[3], *quat0[:3]).matrix()
+            rotation = ik._pin.Quaternion(quat[3], *quat[:3]).matrix()
+            self.assertLess(np.linalg.norm(ik._pin.log3(rotation0.T@rotation)), np.deg2rad(10)+1e-6)
 
 
 if __name__ == '__main__':

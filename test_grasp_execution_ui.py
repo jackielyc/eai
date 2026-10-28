@@ -15,6 +15,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 from PyQt5.QtWidgets import QApplication
 
 from grasp_execution_ui import GraspExecutionPanel
+from grasp_task_workflow import TASKS
 from test_grasp_execution import example
 
 
@@ -87,6 +88,203 @@ class UiTests(unittest.TestCase):
         self.panel.feedback_button.click()
         self.assertEqual(calls, ['start'])
         self.assertIn('已请求启动 FK', self.panel.message)
+
+    def test_task_creation_controls_are_at_top_and_disable_while_busy(self):
+        self.assertEqual(self.panel.task_new_button.text(), '新建任务…')
+        self.assertEqual(self.panel.task_copy_button.text(), '复制任务…')
+        self.assertEqual(self.panel.task_manage_button.text(), '管理任务…')
+        self.panel.process = SimpleNamespace()
+        self.panel.refresh()
+        self.assertFalse(self.panel.task_new_button.isEnabled())
+        self.assertFalse(self.panel.task_copy_button.isEnabled())
+        self.assertFalse(self.panel.task_manage_button.isEnabled())
+        self.panel.process = None
+
+    def test_all_execute_and_pause_buttons_toggle_state(self):
+        self.assertEqual(self.panel.workflow_all_button.text(),'全部执行')
+        self.assertEqual(self.panel.workflow_auto_pause_button.text(),'暂停')
+        self.panel.set_target_observations({
+            'target-1':{'label':'手机','methods':{'pca':self.obs}},
+            'target-2':{'label':'盒子','methods':{'pca':dict(self.obs,observation_id='box')}},
+            'target-3':{'label':'盒盖','methods':{'pca':dict(self.obs,observation_id='lid')}},
+        })
+        self.panel.task_role_combos['phone'].setCurrentIndex(1)
+        self.panel.task_role_combos['box'].setCurrentIndex(2)
+        self.panel.task_role_combos['lid'].setCurrentIndex(3)
+        self.panel.execution_mode.setCurrentIndex(0)
+        with patch.object(self.panel,'_capture_auto_workflow_start',return_value={'q16':[0]*16}), \
+             patch.object(self.panel,'_schedule_auto_workflow') as schedule:
+            self.panel.workflow_all_button.click()
+            schedule.assert_called_once_with(0)
+        self.assertTrue(self.panel._workflow_auto_running)
+        self.panel.refresh();self.assertEqual(self.panel.workflow_all_button.text(),'取消执行')
+        self.panel.toggle_auto_workflow_pause()
+        self.assertTrue(self.panel._workflow_auto_paused)
+        self.panel.refresh();self.assertEqual(self.panel.workflow_auto_pause_button.text(),'继续执行')
+
+    def test_cancel_all_restores_captured_simulation_state_and_resets_flow(self):
+        from robot_view3d import _resolve_urdf
+        self.panel.execution_mode.setCurrentIndex(0)
+        self.profile['urdf_path']=_resolve_urdf()
+        Path(self.panel.profile_path.text()).write_text(json.dumps(self.profile))
+        self.panel.simulation_display=lambda q,h:None
+        self.panel.simulation=None
+        sim=self.panel.simulation_backend()
+        initial=dict(sim.feedback(),hands={'left':[.1]*6,'right':[.2]*6})
+        sim.q[2]=.03;sim.q[9]=-.03;sim.hands={'left':[.8]*6,'right':[.7]*6}
+        self.panel._workflow_auto_initial_snapshot=initial
+        self.panel._workflow_auto_running=True
+        self.panel._workflow_step=6;self.panel.task_flow.set_current(6)
+        self.panel.cancel_all_workflow()
+        self.assertIsNotNone(self.panel.runner,self.panel.message)
+        limit=int(self.panel.runner.times[-1]/.02)+20
+        for _ in range(limit):
+            if self.panel.runner is None: break
+            self.panel.runner.started-=.02
+            self.panel.monitor()
+        self.assertIsNone(self.panel.runner)
+        self.assertFalse(self.panel._workflow_auto_running)
+        self.assertEqual(self.panel._workflow_step,0)
+        np.testing.assert_allclose(sim.q[2:],initial['q16'][2:])
+        self.assertEqual(sim.hands,initial['hands'])
+        self.assertIn('已取消并恢复',self.panel.message)
+
+    def test_all_execute_chains_immediate_workflow_steps_to_completion(self):
+        from robot_view3d import _resolve_urdf
+        key='task_auto_immediate'
+        TASKS[key]={'name':'自动链测试','builtin':False,'roles':(('item','物品'),),
+                    'steps':({'label':'选择','kind':'target','role':'item'},
+                             {'label':'张开','kind':'hand','role':'item','open':True},
+                             {'label':'确认','kind':'confirm'},
+                             {'label':'完成','kind':'complete'})}
+        try:
+            self.panel.refresh_task_selector(key)
+            self.panel.set_target_observations({'target-1':{'label':'物品',
+                'methods':{'pca':self.obs}}})
+            self.panel.task_role_combos['item'].setCurrentIndex(1)
+            self.panel.execution_mode.setCurrentIndex(0)
+            self.panel.simulation_display=lambda q,h:None
+            self.profile['urdf_path']=_resolve_urdf()
+            Path(self.panel.profile_path.text()).write_text(json.dumps(self.profile))
+            self.panel.simulation=None
+            with patch.object(self.panel,'_schedule_auto_workflow'):
+                self.panel.toggle_all_workflow()
+                for _ in range(4): self.panel._run_auto_workflow_next()
+            self.assertFalse(self.panel._workflow_auto_running)
+            self.assertEqual(self.panel._workflow_step,3)
+            self.assertIn('全部流程执行完成',self.panel.message)
+        finally:
+            TASKS.pop(key,None)
+
+    def test_copy_task_immediately_creates_and_selects_named_copy(self):
+        key='task_test_copy'
+        try:
+            with patch('grasp_execution_ui.QInputDialog.getText', return_value=('装配流程副本',True)), \
+                 patch('grasp_execution_ui.new_task_key', return_value=key), \
+                 patch('grasp_execution_ui.save_tasks') as save:
+                self.panel.copy_task()
+            save.assert_called_once()
+            self.assertIn(key,TASKS)
+            self.assertEqual(TASKS[key]['name'],'装配流程副本')
+            self.assertFalse(TASKS[key]['builtin'])
+            self.assertEqual(self.panel.task_combo.currentData(),key)
+            self.assertIn('复制成功',self.panel.task_data_status.text())
+        finally:
+            TASKS.pop(key,None)
+
+    def test_multiple_targets_can_be_assigned_to_phone_box_workflow(self):
+        phone = copy.deepcopy(self.obs); phone['observation_id'] = 'phone-observation'
+        box = copy.deepcopy(self.obs); box['observation_id'] = 'box-observation'
+        self.panel.set_target_observations({
+            'target-1': {'label':'目标 1', 'methods':{'pca':phone}},
+            'target-2': {'label':'目标 2', 'methods':{'pca':box}},
+            'target-3': {'label':'目标 3', 'methods':{'pca':dict(self.obs,observation_id='lid')}},
+        })
+        self.assertEqual(self.panel.grasp_target_combo.count(), 3)
+        self.panel.task_role_combos['phone'].setCurrentIndex(1)
+        self.panel.task_role_combos['box'].setCurrentIndex(2)
+        self.panel.task_role_combos['lid'].setCurrentIndex(3)
+        self.panel.workflow_next_button.click()
+        self.assertEqual(self.panel._workflow_step, 0)
+        self.assertEqual(self.panel._workflow_substep, 1)
+        self.assertEqual(self.panel.observation['observation_id'], 'phone-observation')
+        with patch.object(self.panel, 'execute', side_effect=lambda:setattr(self.panel,'process',SimpleNamespace())) as execute:
+            self.panel.workflow_next_button.click()
+            execute.assert_called_once()
+        self.assertTrue(self.panel._workflow_waiting)
+        self.assertEqual(self.panel.motion_stage.currentData(), 'pregrasp')
+        self.assertEqual(self.panel.grasp_target_combo.currentData(), 'target-1')
+        self.panel.process = None
+
+    def test_phone_and_box_roles_must_be_distinct(self):
+        self.panel.set_target_observations({
+            'target-1': {'label':'目标 1', 'methods':{'pca':self.obs}},
+        })
+        self.panel.task_role_combos['phone'].setCurrentIndex(1)
+        self.panel.task_role_combos['box'].setCurrentIndex(1)
+        self.panel._workflow_step = 1
+        self.panel._workflow_substep = 0
+        self.panel.task_flow.set_current(1)
+        self.panel.execute_workflow_next()
+        self.assertIn('不能相同', self.panel.message)
+        self.assertFalse(self.panel._workflow_waiting)
+
+    def test_flowchart_node_click_selects_step_and_is_blocked_while_running(self):
+        self.panel._workflow_step=0;self.panel._workflow_substep=3
+        self.panel.task_flow._labels[2].clicked.emit(2)
+        self.assertEqual(self.panel._workflow_step,2)
+        self.assertEqual(self.panel._workflow_substep,0)
+        self.assertIn('盖上手机盒',self.panel.message)
+        self.assertIn('选择盒盖',self.panel.message)
+        self.panel.process=SimpleNamespace()
+        self.panel.task_flow._labels[0].clicked.emit(0)
+        self.assertEqual(self.panel._workflow_step,2)
+        self.assertIn('不能跳转',self.panel.message)
+        self.panel.process=None
+
+    def test_task_save_and_load_bind_targets_roles_and_workflow_step(self):
+        saved=[]
+        self.panel.save_task_data=lambda key,state:saved.append((key,state)) or '保存成功'
+        self.panel.set_target_observations({
+            'target-1':{'label':'手机','methods':{'pca':self.obs}},
+            'target-2':{'label':'盒子','methods':{'pca':dict(self.obs,observation_id='box')}},
+            'target-3':{'label':'盒盖','methods':{'pca':dict(self.obs,observation_id='lid')}},
+        })
+        self.panel.task_role_combos['phone'].setCurrentIndex(1)
+        self.panel.task_role_combos['box'].setCurrentIndex(2)
+        self.panel.task_role_combos['lid'].setCurrentIndex(3)
+        self.panel._workflow_step=2;self.panel._workflow_substep=4;self.panel.task_flow.set_current(2)
+        self.panel.grasp_arm.setCurrentIndex(0)
+        self.panel.waist_participation.setChecked(True)
+        self.panel.force_limit.setValue(22.)
+        self.panel.task_save_button.click()
+        self.assertEqual(saved[0][0],'phone_box_assembly')
+        self.assertEqual(saved[0][1]['roles'],{'phone':'target-1','box':'target-2','lid':'target-3'})
+        self.assertEqual(saved[0][1]['workflow_step'],2)
+        self.assertEqual(saved[0][1]['workflow_substep'],4)
+        self.assertEqual(saved[0][1]['step_settings']['2:4']['arm_side'],'left')
+        self.assertTrue(saved[0][1]['step_settings']['2:4']['allow_waist'])
+        self.assertEqual(saved[0][1]['step_settings']['2:4']['force_limit_n'],22.)
+        self.assertIn('保存成功',self.panel.task_data_status.text())
+
+        self.panel.load_task_data=lambda key:{'saved_at_text':'2026-10-27 18:00:00',
+            'target_observations':self.panel.target_observations,
+            'panel_state':{'roles':{'phone':'target-1','box':'target-2','lid':'target-3'},
+                           'selected_target':'target-2','workflow_step':2,'workflow_substep':6,
+                           'arm_side':'left','allow_waist':True,'motion_stage':'approach',
+                           'step_settings':{'2:6':{'arm_side':'right','allow_waist':True,
+                               'pose_method':'pca','execution_mode':'simulation','motion_stage':'approach',
+                               'target_id':'target-2','contact_offsets_cm':[1.,2.,3.],
+                               'wrench_guard':True,'force_limit_n':25.,'torque_limit_nm':1.5}}}}
+        self.panel.change_task_workflow()
+        self.assertEqual(self.panel._workflow_step,2)
+        self.assertEqual(self.panel._workflow_substep,6)
+        self.assertEqual(self.panel.grasp_target_combo.currentData(),'target-2')
+        self.assertEqual(self.panel.grasp_arm.currentData(),'right')
+        self.assertTrue(self.panel.waist_participation.isChecked())
+        self.assertEqual([spin.value() for spin in self.panel.contact_offsets],[1.,2.,3.])
+        self.assertEqual(self.panel.force_limit.value(),25.)
+        self.assertIn('已加载',self.panel.task_data_status.text())
 
     def test_wrench_limit_pauses_and_requires_manual_safe_resume(self):
         class Runner:
@@ -216,6 +414,21 @@ class UiTests(unittest.TestCase):
             self.panel.capture_startup_state()
         self.assertEqual(self.panel._startup_snapshot['q16'], [.1]*16)
 
+    def test_startup_arms_are_kept_when_hand_feedback_is_missing(self):
+        import time
+        self.panel._startup_recording = True
+        self.panel._startup_deadline = time.monotonic()-1
+        self.panel._startup_snapshot = None
+        measured={'q16':[.2]*16,'urdf_sha256':'model'}
+        with patch('grasp_execution_ui.read_feedback',return_value=measured), \
+             patch.object(self.panel,'read_startup_hands',side_effect=ValueError('missing')):
+            self.panel.capture_startup_state()
+        self.assertEqual(self.panel._startup_snapshot['q16'],[.2]*16)
+        self.assertEqual(self.panel._startup_snapshot['hands'],{})
+        self.assertFalse(self.panel._startup_recording)
+        self.panel._restore_hands_goal={}
+        self.assertIn('双手恢复已跳过',self.panel.finish_restore_hands())
+
     def test_simulation_hand_execute_pause_stop_never_call_hardware(self):
         from grasp_simulation import GraspSimulation
         from robot_view3d import _resolve_urdf
@@ -307,6 +520,8 @@ class UiTests(unittest.TestCase):
             self.panel.finished(0, 0)
         self.assertTrue(self.panel.scene_confirm.isChecked())
         self.assertTrue(self.panel.execute_button.isEnabled())
+        self.assertEqual(self.panel.execution_feedback.text(), self.panel.message)
+        self.assertIn('IK/限位/连续性预检通过', self.panel.execution_feedback.text())
         with patch('grasp_execution_ui.JointRunner') as runner, \
                 patch.object(self.node, '_enter_model_mode_for_motion', create=True), \
                 patch.object(self.node, '_release_ik_for_joint_move', create=True):

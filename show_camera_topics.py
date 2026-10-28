@@ -27,6 +27,7 @@ PyQt5 图形界面：显示 ROS2 中以 /camera 开头的 topic 及图像内容�
 from __future__ import annotations
 
 import argparse
+import copy
 import click_pose
 import base64
 import json
@@ -4693,6 +4694,49 @@ def _wrap_in_vscroll(inner: QWidget) -> QScrollArea:
     scroll.setWidget(inner)
     scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     return scroll
+
+
+def _tab_page_matches(widget: Optional[QWidget], original: Optional[QWidget]) -> bool:
+    if widget is None or original is None:
+        return False
+    if widget is original or getattr(widget, '_scroll_original', None) is original:
+        return True
+    return isinstance(widget, QScrollArea) and widget.widget() is original
+
+
+def _install_scroll_for_tab_widget(tabs: QTabWidget) -> int:
+    """Wrap every non-scroll page while preserving its original QWidget."""
+    wrapped = 0
+    current = tabs.currentIndex()
+    tabs.blockSignals(True)
+    try:
+        for index in range(tabs.count()):
+            page = tabs.widget(index)
+            if page is None or isinstance(page, QScrollArea):
+                continue
+            if getattr(page, '_auto_tab_scroll_content', False):
+                continue
+            title = tabs.tabText(index)
+            icon = tabs.tabIcon(index)
+            tooltip = tabs.tabToolTip(index)
+            whats_this = tabs.tabWhatsThis(index)
+            enabled = tabs.isTabEnabled(index)
+            data = tabs.tabBar().tabData(index)
+            tabs.removeTab(index)
+            scroll = _wrap_in_vscroll(page)
+            scroll._scroll_original = page
+            page._auto_tab_scroll_content = True
+            tabs.insertTab(index, scroll, icon, title)
+            tabs.setTabToolTip(index, tooltip)
+            tabs.setTabWhatsThis(index, whats_this)
+            tabs.setTabEnabled(index, enabled)
+            tabs.tabBar().setTabData(index, data)
+            wrapped += 1
+    finally:
+        if tabs.count():
+            tabs.setCurrentIndex(max(0, min(current, tabs.count()-1)))
+        tabs.blockSignals(False)
+    return wrapped
 
 
 def _always_visible_splitter(orientation: Qt.Orientation = Qt.Vertical) -> QSplitter:
@@ -30468,8 +30512,8 @@ class CameraTopicWindow(QMainWindow):
             f"color: {UI_TEXT_SECONDARY}; }}"
         )
         manual_layout = QVBoxLayout(manual_group)
-        manual_layout.setContentsMargins(8, 8, 8, 4)
-        manual_layout.setSpacing(4)
+        manual_layout.setContentsMargins(5, 5, 5, 3)
+        manual_layout.setSpacing(2)
 
         text_cmd_row = QHBoxLayout()
         text_cmd_row.setSpacing(6)
@@ -30507,6 +30551,8 @@ class CameraTopicWindow(QMainWindow):
             open_calibration=self._open_grasp_profile_calibration,
             wrench_feedback=self._grasp_wrench_feedback,
             ensure_wrench_monitor=self._ensure_grasp_wrench_monitor,
+            save_task_data=self._save_grasp_task_data,
+            load_task_data=self._load_grasp_task_data,
         )
 
 
@@ -30601,6 +30647,10 @@ class CameraTopicWindow(QMainWindow):
         self.right_hand_apply_btn.clicked.connect(self._on_right_hand_apply_active)
         right_hand_row.addWidget(self.right_hand_apply_btn)
         manual_layout.addLayout(right_hand_row)
+        self._manual_side_rows = {
+            "left": hand_row,
+            "right": right_hand_row,
+        }
 
         arm_conn_row = QHBoxLayout()
         arm_conn_row.setSpacing(6)
@@ -30623,7 +30673,6 @@ class CameraTopicWindow(QMainWindow):
             "最小栈摘要。鼠标悬停可看每个节点是否在运行。"
         )
         arm_conn_row.addWidget(self.arm_nodes_status_label, 1)
-        manual_layout.addLayout(arm_conn_row)
 
         enable_row = QHBoxLayout()
         enable_row.setSpacing(6)
@@ -30663,7 +30712,6 @@ class CameraTopicWindow(QMainWindow):
         self.mode0_btn.clicked.connect(self._on_model_mode_clicked)
         enable_row.addWidget(self.mode0_btn)
         enable_row.addStretch()
-        manual_layout.addLayout(enable_row)
 
         arm_row1 = QHBoxLayout()
         arm_row1.setSpacing(6)
@@ -30733,21 +30781,21 @@ class CameraTopicWindow(QMainWindow):
         self._right_arm_move_btn_idle_style = ""
         self._right_arm_move_btn_cancel_style = f"color: {UI_ACCENT_RED};"
         arm_row1.addStretch(1)
-        manual_layout.addLayout(arm_row1)
 
         pose_info_box = QHBoxLayout()
         pose_info_box.setSpacing(12)
         self.arm_pose_current_label = QLabel("当前 TCP: --")
         self.arm_pose_current_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.arm_pose_current_label.setStyleSheet(f"color: {UI_ACCENT_BLUE};")
-        self.arm_pose_current_label.setWordWrap(True)
+        self.arm_pose_current_label.setWordWrap(False)
+        self.arm_pose_current_label.setMaximumHeight(24)
         self.arm_pose_target_label = QLabel("目标 TCP: --")
         self.arm_pose_target_label.setFont(QFont(UI_MONO_FAMILY, UI_MONO_SIZE_SMALL))
         self.arm_pose_target_label.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
-        self.arm_pose_target_label.setWordWrap(True)
+        self.arm_pose_target_label.setWordWrap(False)
+        self.arm_pose_target_label.setMaximumHeight(24)
         pose_info_box.addWidget(self.arm_pose_current_label, 1)
         pose_info_box.addWidget(self.arm_pose_target_label, 1)
-        manual_layout.addLayout(pose_info_box)
 
         target_row = QHBoxLayout()
         target_row.setSpacing(6)
@@ -30769,7 +30817,18 @@ class CameraTopicWindow(QMainWindow):
         target_row.addWidget(self.move_target_segment_radio)
         target_row.addStretch(1)
         self._move_target_group.buttonToggled.connect(self._on_move_target_params_changed)
-        manual_layout.addLayout(target_row)
+        manual_system_row = QHBoxLayout()
+        manual_system_row.setSpacing(10)
+        manual_system_row.addLayout(arm_conn_row, 2)
+        manual_system_row.addLayout(enable_row, 2)
+        manual_system_row.addLayout(arm_row1, 2)
+        manual_layout.addLayout(manual_system_row)
+
+        manual_target_info_row = QHBoxLayout()
+        manual_target_info_row.setSpacing(10)
+        manual_target_info_row.addLayout(target_row)
+        manual_target_info_row.addLayout(pose_info_box, 1)
+        manual_layout.addLayout(manual_target_info_row)
 
         # 兼容旧逻辑：隐藏的 signed ΔXYZ（由六向输入框同步，供组合「臂移动」/文本指令）
         self.offset_x_label = QLabel("ΔX")
@@ -30790,7 +30849,7 @@ class CameraTopicWindow(QMainWindow):
             w.setVisible(False)
             w.setMaximumHeight(0)
 
-        # 每臂单独一行：前/后/左/右/上/下 +「臂移动」；勿塞进手部滑条行（会横向挤没）
+        # 每侧手和手臂共用一行；页面过宽时由手动控制 Tab 的横向滚动展示。
         self._arm_dir_spins: Dict[str, Dict[str, QDoubleSpinBox]] = {
             "left": {},
             "right": {},
@@ -30806,9 +30865,9 @@ class CameraTopicWindow(QMainWindow):
         self._arm_dir_row_titles: Dict[str, QLabel] = {}
         self._arm_dir_extra_widgets: List[QWidget] = []
         for arm_side, side_label in (("left", "左臂"), ("right", "右臂")):
-            dir_row = QHBoxLayout()
-            dir_row.setSpacing(4)
-            title = QLabel(f"{side_label}")
+            dir_row = self._manual_side_rows[arm_side]
+            dir_row.addSpacing(12)
+            title = QLabel(f"{side_label}:")
             title.setMinimumWidth(36)
             title.setToolTip(
                 f"{side_label}：六个方向各自输入步长(cm)，点后方「移动」只沿该方向；"
@@ -30847,10 +30906,14 @@ class CameraTopicWindow(QMainWindow):
             )
             dir_row.addWidget(move_btn)
             dir_row.addStretch(1)
-            manual_layout.addLayout(dir_row)
         self._sync_offset_spins_from_dir("left")
         self._update_move_offset_ui_visibility()
-        manual_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        for button in manual_group.findChildren(QPushButton):
+            button.setMaximumHeight(28)
+        for spin in (manual_group.findChildren(QSpinBox)
+                     + manual_group.findChildren(QDoubleSpinBox)):
+            spin.setMaximumHeight(27)
+        manual_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
         manual_group.setMinimumHeight(0)
         # 勿过矮：节点摘要 + 手/臂/六向输入需完整可见；高度由 splitter 分配
         manual_layout.setSizeConstraint(QLayout.SetMinimumSize)
@@ -31150,7 +31213,7 @@ class CameraTopicWindow(QMainWindow):
         self.mv6d_sync_seed_btn.clicked.connect(self._on_mv6d_sync_seed_from_segment)
         mv6d_row1.addWidget(self.mv6d_sync_seed_btn)
         self.mv6d_overlay_check = QCheckBox("叠加到预览")
-        self.mv6d_overlay_check.setChecked(False)
+        self.mv6d_overlay_check.setChecked(True)
         self.mv6d_overlay_check.setToolTip(
             "估计完成后叠加到手臂页头/腕预览（不写主相机面板，避免每帧重绘卡顿）"
         )
@@ -31243,11 +31306,28 @@ class CameraTopicWindow(QMainWindow):
             "必须先在头部预览图上点选目标物体，才会开始 6D 估计"
         )
         mv6d_row2.addWidget(self.mv6d_seed_status_label, 1)
+        mv6d_row2.addWidget(QLabel("目标"))
+        self.mv6d_target_combo = ImeSafeComboBox()
+        self.mv6d_target_combo.setMinimumWidth(170)
+        self.mv6d_target_combo.setToolTip("点击头部图像新增目标；选择目标可查看其点位和已完成的估计结果")
+        self.mv6d_target_combo.currentIndexChanged.connect(self._on_mv6d_target_changed)
+        mv6d_row2.addWidget(self.mv6d_target_combo)
+        self.mv6d_remove_target_btn = QPushButton("删除目标")
+        self.mv6d_remove_target_btn.clicked.connect(self._remove_mv6d_target)
+        mv6d_row2.addWidget(self.mv6d_remove_target_btn)
+        self.mv6d_clear_targets_btn = QPushButton("清空目标")
+        self.mv6d_clear_targets_btn.clicked.connect(self._clear_mv6d_targets)
+        mv6d_row2.addWidget(self.mv6d_clear_targets_btn)
         self.mv6d_hand_skel_label = QLabel("手骨架：未投影")
         self.mv6d_hand_skel_label.setWordWrap(True)
         self.mv6d_hand_skel_label.setStyleSheet(f"color: {UI_TEXT_MUTED};")
         mv6d_row2.addWidget(self.mv6d_hand_skel_label, 1)
         mv6d_layout.addLayout(mv6d_row2)
+        self.mv6d_batch_summary_label = QLabel('目标估计：尚未开始')
+        self.mv6d_batch_summary_label.setWordWrap(True)
+        self.mv6d_batch_summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.mv6d_batch_summary_label.setStyleSheet(f"color:{UI_TEXT_SECONDARY};")
+        mv6d_layout.addWidget(self.mv6d_batch_summary_label)
 
         mv6d_error_row = QHBoxLayout()
         mv6d_error_row.setSpacing(6)
@@ -31401,6 +31481,14 @@ class CameraTopicWindow(QMainWindow):
         self._mv6d_timer.timeout.connect(self._on_mv6d_timer_tick)
         self._mv6d_busy = False
         self._mv6d_object_picked = False
+        self._mv6d_targets: List[dict] = []
+        self._mv6d_target_results: Dict[str, dict] = {}
+        self._mv6d_target_serial = 0
+        self._mv6d_estimate_queue: List[str] = []
+        self._mv6d_active_target: Optional[dict] = None
+        self._mv6d_batch_active = False
+        self._mv6d_batch_capture = None
+        self._mv6d_batch_depth_cache = None
         self._mv6d_last_snap: Optional[MultiView6DPoseSnapshot] = None
         self._mv6d_head_pix: Optional[QPixmap] = None
         self._mv6d_left_wrist_pix: Optional[QPixmap] = None
@@ -31423,8 +31511,8 @@ class CameraTopicWindow(QMainWindow):
 
         arm_bottom = QWidget()
         arm_bottom_l = QVBoxLayout(arm_bottom)
-        arm_bottom_l.setContentsMargins(8, 8, 8, 8)
-        arm_bottom_l.setSpacing(8)
+        arm_bottom_l.setContentsMargins(4, 4, 4, 4)
+        arm_bottom_l.setSpacing(4)
         arm_bottom_l.addLayout(arm_panel_row)
         arm_bottom_l.addWidget(self._arm_panel_stack, 1)
         arm_bottom_l.setSizeConstraint(QLayout.SetMinimumSize)
@@ -31437,7 +31525,7 @@ class CameraTopicWindow(QMainWindow):
         manual_page = QWidget()
         manual_page_l = QVBoxLayout(manual_page)
         manual_page_l.setContentsMargins(0, 0, 0, 0)
-        manual_page_l.setSpacing(8)
+        manual_page_l.setSpacing(4)
         manual_page_l.addWidget(manual_group)
         manual_page_l.addWidget(arm_bottom, 1)
         self.arm_workspace_tabs.addTab(_wrap_in_vscroll(manual_page), "手动控制")
@@ -34043,6 +34131,7 @@ class CameraTopicWindow(QMainWindow):
         self._sync_real_robot_backend_tab_from_radios()
         self._sync_arm_panel_tab_from_radios()
         self._apply_arm_panel_stack()
+        self._install_scroll_on_all_tabs()
         self._control_tabs_order_guard = False
         self._sim_backend_tabs_order_guard = False
         self._real_robot_tabs_order_guard = False
@@ -41452,6 +41541,21 @@ class CameraTopicWindow(QMainWindow):
             self._replay_launcher.stop()
         self.ctx_status_label.setText("状态: 已停止")
         self._update_ctx_ui()
+
+    def _install_scroll_on_all_tabs(self) -> int:
+        tabs_list = []
+        root_tabs = getattr(self, 'control_tabs', None)
+        if isinstance(root_tabs, QTabWidget):
+            tabs_list.append(root_tabs)
+        tabs_list.extend(self.findChildren(QTabWidget))
+        unique = []
+        for tabs in tabs_list:
+            if tabs not in unique:
+                unique.append(tabs)
+        # Deepest first so nested pages are configured before their parent page
+        # is placed inside the outer scroll area.
+        unique.sort(key=lambda widget: len(widget.findChildren(QTabWidget)))
+        return sum(_install_scroll_for_tab_widget(tabs) for tabs in unique)
 
     def _apply_only_tabs(self, only_tabs: Sequence[str]) -> None:
         """启动时只保留指定控制区 tab；单个时隐藏 tab 栏。"""
@@ -53804,16 +53908,118 @@ class CameraTopicWindow(QMainWindow):
     def _on_mv6d_estimate_once(self) -> None:
         if not self._mv6d_ensure_object_selected(silent=False):
             return
+        targets = list(getattr(self, '_mv6d_targets', []))
+        if not targets:
+            return
+        self._mv6d_batch_active = True
+        self._mv6d_batch_capture = None
+        self._mv6d_batch_depth_cache = None
+        self._mv6d_estimate_queue = [target['id'] for target in targets]
+        for target in targets:
+            self._mv6d_target_results.pop(target['id'], None)
+        self._refresh_mv6d_target_combo()
+        self._start_next_mv6d_target()
+
+    def _start_next_mv6d_target(self) -> None:
+        if not self._mv6d_estimate_queue:
+            self._mv6d_batch_active = False
+            self._mv6d_batch_capture = None
+            self._mv6d_batch_depth_cache = None
+            self._mv6d_active_target = None
+            self.mv6d_once_btn.setEnabled(True)
+            self.mv6d_once_btn.setText('估计一次')
+            successes = sum(1 for result in self._mv6d_target_results.values() if result.get('ok'))
+            self.status_bar.showMessage(
+                f'多视角 6D：批量估计完成，成功 {successes}/{len(self._mv6d_targets)}')
+            self._refresh_mv6d_target_combo()
+            return
+        target_id = self._mv6d_estimate_queue.pop(0)
+        target = next((item for item in self._mv6d_targets if item['id'] == target_id), None)
+        if target is None:
+            self._start_next_mv6d_target()
+            return
+        self._set_mv6d_active_target(target, show_result=False)
+        self.mv6d_once_btn.setText(
+            f"估计中 {len(self._mv6d_targets)-len(self._mv6d_estimate_queue)}/{len(self._mv6d_targets)}…")
+        self._update_mv6d_batch_summary()
         self._start_mv6d_estimate(silent=False)
+
+    def _finish_mv6d_target(self, result: dict) -> None:
+        target = getattr(self, '_mv6d_active_target', None)
+        if target is not None:
+            stored = dict(result)
+            stored['target'] = dict(target)
+            self._mv6d_target_results[target['id']] = stored
+        self._sync_mv6d_targets_to_grasp()
+        self._refresh_mv6d_target_combo(target['id'] if target else '')
+        if self._mv6d_batch_active:
+            QTimer.singleShot(0, self._start_next_mv6d_target)
+
+    def _show_mv6d_target_result(self, result: dict) -> None:
+        if not result.get('ok'):
+            self.mv6d_result_edit.setPlainText('目标估计失败：' + str(result.get('error') or '未知错误'))
+            return
+        snap = result.get('snap')
+        if not isinstance(snap, MultiView6DPoseSnapshot):
+            return
+        self._mv6d_last_snap = snap
+        poses = result.get('method_poses') or {}
+        self._show_mv6d_on_robot_view(snap, silent=False, method_poses=poses)
+        observations = result.get('observations') or {}
+        if observations:
+            target_id = str(result.get('target', {}).get('id') or '')
+            if not self.grasp_execution_panel.select_target_observation(target_id):
+                self.grasp_execution_panel.set_method_observations(copy.deepcopy(observations))
+        self._refresh_mv6d_result_text(snap)
+        self._apply_mv6d_overlays(snap)
+
+    def _sync_mv6d_targets_to_grasp(self) -> None:
+        panel = getattr(self, 'grasp_execution_panel', None)
+        if panel is None:
+            return
+        entries = {}
+        for index, target in enumerate(self._mv6d_targets, 1):
+            result = self._mv6d_target_results.get(target['id'])
+            observations = (result or {}).get('observations') or {}
+            if observations:
+                entries[target['id']] = {
+                    'label': f"目标 {index} ({target['u']}, {target['v']})",
+                    'methods': observations,
+                }
+        panel.set_target_observations(entries)
+        visuals = []
+        backend = str(self.mv6d_method_combo.currentData() or POSE_BACKEND_PCA)
+        for target in self._mv6d_targets:
+            result = self._mv6d_target_results.get(target['id']) or {}
+            observations = result.get('observations') or {}
+            observation = observations.get(backend) or next(iter(observations.values()), None)
+            if not observation:
+                continue
+            raw = observation.get('T_base_object')
+            if raw is None:
+                try:
+                    raw = (np.asarray(observation['T_base_camera']) @
+                           np.asarray(observation['object_pose']['T_camera_object'])).tolist()
+                except Exception:
+                    continue
+            transform = np.asarray(raw, dtype=float)
+            extents = observation.get('object_pose', {}).get('extents_m')
+            visuals.append({'target_id':target['id'], 'xyz':transform[:3,3].tolist(),
+                            'rotation':transform[:3,:3].tolist(), 'extents':extents})
+        self._robot_target_poses = visuals
+        view = getattr(self, '_robot_view', None)
+        if view is not None and hasattr(view, 'set_target_poses'):
+            view.set_target_poses(visuals)
 
     def _on_mv6d_show_robot(self) -> None:
         holder = getattr(self, "_robot_view_holder", None)
         tabs = getattr(self, "arm_workspace_tabs", None)
         if holder is None or tabs is None:
             return
-        index = tabs.indexOf(holder)
-        if index >= 0:
-            tabs.setCurrentIndex(index)
+        for index in range(tabs.count()):
+            if _tab_page_matches(tabs.widget(index), holder):
+                tabs.setCurrentIndex(index)
+                break
 
     def _on_arm_workspace_tab_changed(self, index: int) -> None:
         holder = getattr(self, "_robot_view_holder", None)
@@ -53821,7 +54027,7 @@ class CameraTopicWindow(QMainWindow):
         view = getattr(self, "_robot_view", None)
         if holder is None or tabs is None:
             return
-        active = tabs.widget(index) is holder
+        active = _tab_page_matches(tabs.widget(index), holder)
         if active and view is None:
             try:
                 from robot_view3d import RobotView3D
@@ -53841,6 +54047,7 @@ class CameraTopicWindow(QMainWindow):
                         view.set_method_pose("pca", *old)
                 for key, pose in cached.items():
                     view.set_method_pose(key, *pose)
+                view.set_target_poses(getattr(self, '_robot_target_poses', []))
                 sam3_pts = getattr(self, "_robot_sam3_points", None)
                 if sam3_pts is not None:
                     view.set_sam3_points(sam3_pts)
@@ -53920,26 +54127,109 @@ class CameraTopicWindow(QMainWindow):
         if self._mv6d_object_picked:
             u = int(self.mv6d_head_u_spin.value())
             v = int(self.mv6d_head_v_spin.value())
-            lab.setText(f"已选物体 ({u}, {v}) · 可估计")
+            count = len(getattr(self, '_mv6d_targets', []))
+            lab.setText(f"当前目标 ({u}, {v}) · 共 {count} 个 · 可批量估计")
             lab.setStyleSheet(f"color: {UI_ACCENT_BLUE};")
         else:
             lab.setText("未选择物体 · 请点击头部预览")
             lab.setStyleSheet(f"color: {UI_ACCENT_ORANGE};")
 
-    def _mv6d_mark_object_picked(self, u: int, v: int, *, source: str = "预览") -> None:
+    def _set_mv6d_active_target(self, target: dict, *, show_result: bool = True) -> None:
+        self._mv6d_active_target = target
         self.mv6d_head_u_spin.blockSignals(True)
         self.mv6d_head_v_spin.blockSignals(True)
-        self.mv6d_head_u_spin.setValue(int(u))
-        self.mv6d_head_v_spin.setValue(int(v))
+        self.mv6d_head_u_spin.setValue(int(target['u']))
+        self.mv6d_head_v_spin.setValue(int(target['v']))
         self.mv6d_head_u_spin.blockSignals(False)
         self.mv6d_head_v_spin.blockSignals(False)
-        self.mv6d_gt_enable_check.setChecked(False)
         self._mv6d_object_picked = True
         self._mv6d_update_seed_status_label()
         self._refresh_mv6d_live_previews_for_pick()
+        if show_result and target['id'] in self._mv6d_target_results:
+            self._show_mv6d_target_result(self._mv6d_target_results[target['id']])
+
+    def _refresh_mv6d_target_combo(self, selected_id: str = '') -> None:
+        combo = self.mv6d_target_combo
+        selected_id = selected_id or str(combo.currentData() or '')
+        combo.blockSignals(True)
+        combo.clear()
+        for index, target in enumerate(self._mv6d_targets, 1):
+            result = self._mv6d_target_results.get(target['id'])
+            state = '✓' if result and result.get('ok') else ('×' if result else '○')
+            combo.addItem(f"{state} 目标 {index} ({target['u']}, {target['v']})", target['id'])
+        wanted = combo.findData(selected_id)
+        combo.setCurrentIndex(wanted if wanted >= 0 else combo.count()-1)
+        combo.blockSignals(False)
+        self.mv6d_remove_target_btn.setEnabled(bool(self._mv6d_targets) and not self._mv6d_busy)
+        self.mv6d_clear_targets_btn.setEnabled(bool(self._mv6d_targets) and not self._mv6d_busy)
+        self._update_mv6d_batch_summary()
+
+    def _update_mv6d_batch_summary(self) -> None:
+        label = getattr(self, 'mv6d_batch_summary_label', None)
+        if label is None:
+            return
+        parts = []
+        active_id = (getattr(self, '_mv6d_active_target', None) or {}).get('id')
+        for index, target in enumerate(self._mv6d_targets, 1):
+            result = self._mv6d_target_results.get(target['id'])
+            if target['id'] == active_id and self._mv6d_busy:
+                state = '估计中'
+            elif result and result.get('ok'):
+                snap = result.get('snap')
+                xyz = getattr(snap, 'position_xyz', None)
+                state = ('成功' if xyz is None else
+                         f"成功 XYZ=({xyz[0]:.3f},{xyz[1]:.3f},{xyz[2]:.3f})")
+            elif result:
+                state = '失败：' + str(result.get('error') or '未知错误')[:80]
+            else:
+                state = '等待'
+            parts.append(f"目标{index} {state}")
+        label.setText('目标估计：' + ('；'.join(parts) if parts else '尚未选择目标'))
+
+    def _mv6d_mark_object_picked(self, u: int, v: int, *, source: str = "预览") -> None:
+        self._mv6d_target_serial += 1
+        target = {'id': f'target-{self._mv6d_target_serial}', 'u': int(u), 'v': int(v)}
+        self._mv6d_targets.append(target)
+        self._refresh_mv6d_target_combo(target['id'])
+        self.mv6d_gt_enable_check.setChecked(False)
+        self._set_mv6d_active_target(target, show_result=False)
         self.status_bar.showMessage(
-            f"多视角 6D：已选物体 ({int(u)}, {int(v)})（{source}），可点「估计一次」"
+            f"多视角 6D：新增目标 {len(self._mv6d_targets)} ({int(u)}, {int(v)})（{source}）"
         )
+
+    def _on_mv6d_target_changed(self, *_args) -> None:
+        target_id = str(self.mv6d_target_combo.currentData() or '')
+        target = next((item for item in self._mv6d_targets if item['id'] == target_id), None)
+        if target is not None:
+            self._set_mv6d_active_target(target)
+
+    def _remove_mv6d_target(self) -> None:
+        if self._mv6d_busy:
+            return
+        target_id = str(self.mv6d_target_combo.currentData() or '')
+        self._mv6d_targets = [item for item in self._mv6d_targets if item['id'] != target_id]
+        self._mv6d_target_results.pop(target_id, None)
+        self._sync_mv6d_targets_to_grasp()
+        self._refresh_mv6d_target_combo()
+        if self._mv6d_targets:
+            self._on_mv6d_target_changed()
+        else:
+            self._mv6d_active_target = None
+            self._mv6d_object_picked = False
+            self._mv6d_update_seed_status_label()
+            self._refresh_mv6d_live_previews_for_pick()
+
+    def _clear_mv6d_targets(self) -> None:
+        if self._mv6d_busy:
+            return
+        self._mv6d_targets.clear()
+        self._mv6d_target_results.clear()
+        self._sync_mv6d_targets_to_grasp()
+        self._mv6d_active_target = None
+        self._mv6d_object_picked = False
+        self._refresh_mv6d_target_combo()
+        self._mv6d_update_seed_status_label()
+        self._refresh_mv6d_live_previews_for_pick()
 
     def _on_mv6d_seed_spin_changed(self, *_args) -> None:
         self.mv6d_gt_enable_check.setChecked(False)
@@ -53948,6 +54238,12 @@ class CameraTopicWindow(QMainWindow):
             # 未点选过时改数字不自动解锁，避免默认 320,240 误触发
             self._mv6d_update_seed_status_label()
             return
+        target = getattr(self, '_mv6d_active_target', None)
+        if target is not None:
+            target['u'] = int(self.mv6d_head_u_spin.value())
+            target['v'] = int(self.mv6d_head_v_spin.value())
+            self._mv6d_target_results.pop(target['id'], None)
+            self._refresh_mv6d_target_combo(target['id'])
         self._mv6d_update_seed_status_label()
         self._refresh_mv6d_live_previews_for_pick()
 
@@ -53968,6 +54264,48 @@ class CameraTopicWindow(QMainWindow):
             thickness=2,
         )
         cv2.circle(out, (uu, vv), 10, (0, 180, 255), 2, lineType=cv2.LINE_AA)
+        return out
+
+    def _draw_mv6d_seed_markers(self, bgr: np.ndarray) -> np.ndarray:
+        out = np.ascontiguousarray(bgr.copy())
+        targets = getattr(self, '_mv6d_targets', [])
+        active_id = (getattr(self, '_mv6d_active_target', None) or {}).get('id')
+        for index, target in enumerate(targets, 1):
+            out = self._draw_mv6d_seed_marker(out, target['u'], target['v'])
+            color = (0, 255, 255) if target['id'] == active_id else (255, 180, 0)
+            cv2.putText(out, str(index), (int(target['u'])+10, int(target['v'])-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, .65, color, 2, cv2.LINE_AA)
+        return out
+
+    def _draw_mv6d_target_results(self, bgr: np.ndarray) -> np.ndarray:
+        check = getattr(self, 'mv6d_overlay_check', None)
+        if check is None or not check.isChecked():
+            return bgr
+        out = np.ascontiguousarray(bgr.copy())
+        h, w = out.shape[:2]
+        colors = ((40,40,255),(40,230,80),(255,120,30),(30,210,255),(220,50,220),(220,220,40))
+        for index, target in enumerate(getattr(self, '_mv6d_targets', []), 1):
+            result = self._mv6d_target_results.get(target['id']) or {}
+            snap = result.get('snap')
+            view = getattr(snap, 'head_result', None)
+            if not result.get('ok') or view is None:
+                continue
+            saved_k = getattr(view, 'intrinsics', None)
+            if saved_k is None:
+                continue
+            mh, mw = view.mask.shape[:2]
+            intr = (saved_k[0]*w/mw, saved_k[1]*h/mh, saved_k[2]*w/mw, saved_k[3]*h/mh)
+            corners = np.asarray(view.obb_corners, dtype=float)
+            position = np.asarray(view.position_xyz, dtype=float)
+            rotation = np.asarray(view.rotation_matrix, dtype=float)
+            color = colors[(index-1) % len(colors)]
+            draw_obb_on_image(out, corners, *intr, color=color, thickness=2)
+            axis_len = max(.025, float(max(view.obb_extents))*.45)
+            draw_pose_axes_on_image(out, position, rotation, *intr, axis_len)
+            cu, cv = scale_uv_to_shape(int(view.centroid_uv[0]), int(view.centroid_uv[1]),
+                                       (mh,mw), (h,w))
+            cv2.putText(out, f'T{index}', (int(cu)+8,int(cv)-8),
+                        cv2.FONT_HERSHEY_SIMPLEX,.7,color,2,cv2.LINE_AA)
         return out
 
     def _mv6d_downscale_preview_bgr(self, bgr: np.ndarray, max_edge: int = 320) -> np.ndarray:
@@ -54033,11 +54371,8 @@ class CameraTopicWindow(QMainWindow):
             self._mv6d_live_head_bgr = np.ascontiguousarray(head_bgr)
             show = head_bgr
             if self._mv6d_object_picked:
-                show = self._draw_mv6d_seed_marker(
-                    show,
-                    int(self.mv6d_head_u_spin.value()),
-                    int(self.mv6d_head_v_spin.value()),
-                )
+                show = self._draw_mv6d_seed_markers(show)
+            show = self._draw_mv6d_target_results(show)
             pending["/camera/head_color"] = show
         else:
             self._mv6d_live_head_bgr = None
@@ -54128,6 +54463,7 @@ class CameraTopicWindow(QMainWindow):
                     self._apply_mv6d_overlays(snap)
                 except Exception as exc:
                     self.status_bar.showMessage(f"多视角 6D 叠加失败: {exc}")
+            self._refresh_mv6d_live_previews_for_pick()
             return
         # 关闭叠加时清掉头/双腕彩色与配对深度上的 6D 层
         topics = [
@@ -54581,6 +54917,26 @@ class CameraTopicWindow(QMainWindow):
             if right_wrist_bgr is not None
             else None
         )
+        batch_active = bool(getattr(self, '_mv6d_batch_active', False))
+        batch_capture = getattr(self, '_mv6d_batch_capture', None) if batch_active else None
+        if batch_capture is None and batch_active:
+            def clone(value):
+                return None if value is None else np.ascontiguousarray(value).copy()
+            batch_capture = {
+                'head_topic': head_topic, 'head_bgr': clone(head_bgr), 'head_depth': clone(head_depth),
+                'left_wrist_topic': left_wrist_topic, 'left_wrist_bgr': clone(left_wrist_bgr),
+                'left_wrist_depth': clone(left_wrist_depth),
+                'right_wrist_topic': right_wrist_topic, 'right_wrist_bgr': clone(right_wrist_bgr),
+                'right_wrist_depth': clone(right_wrist_depth), 'preferred_wrist': preferred_wrist,
+            }
+            self._mv6d_batch_capture = batch_capture
+        elif batch_capture is not None:
+            head_topic, head_bgr, head_depth = (batch_capture['head_topic'], batch_capture['head_bgr'], batch_capture['head_depth'])
+            left_wrist_topic, left_wrist_bgr, left_wrist_depth = (
+                batch_capture['left_wrist_topic'], batch_capture['left_wrist_bgr'], batch_capture['left_wrist_depth'])
+            right_wrist_topic, right_wrist_bgr, right_wrist_depth = (
+                batch_capture['right_wrist_topic'], batch_capture['right_wrist_bgr'], batch_capture['right_wrist_depth'])
+            preferred_wrist = batch_capture['preferred_wrist']
         use_lingbot = bool(
             getattr(self, "mv6d_lingbot_depth_check", None)
             and self.mv6d_lingbot_depth_check.isChecked()
@@ -54590,7 +54946,8 @@ class CameraTopicWindow(QMainWindow):
             if not silent:
                 self.status_bar.showMessage("独立深度精修正在运行，请等待或停止后再估计 6D")
             return
-        need_refine = use_lingbot
+        cached_depth = getattr(self, '_mv6d_batch_depth_cache', None) if batch_active else None
+        need_refine = use_lingbot and cached_depth is None
         lingbot_model = self._mv6d_lingbot_model_id() if use_lingbot else ""
         lingbot_device = (
             str(self.lingbot_depth_device_combo.currentData() or "auto")
@@ -54696,12 +55053,14 @@ class CameraTopicWindow(QMainWindow):
 
         def _work() -> None:
             t0 = time.time()
-            notes_extra: List[str] = []
-            lingbot_results: List[dict] = []
+            notes_extra: List[str] = list(cached_depth[3]) if cached_depth is not None else []
+            lingbot_results: List[dict] = copy.deepcopy(cached_depth[4]) if cached_depth is not None else []
             try:
-                hd = head_depth_c
-                ld = left_depth_c
-                rd = right_depth_c
+                if cached_depth is not None:
+                    hd, ld, rd = (None if value is None else np.ascontiguousarray(value).copy()
+                                  for value in cached_depth[:3])
+                else:
+                    hd, ld, rd = head_depth_c, left_depth_c, right_depth_c
                 if need_refine:
                     refined = []
                     views = (
@@ -54741,6 +55100,13 @@ class CameraTopicWindow(QMainWindow):
                                 coverage = float(info["input_valid_pixels"]) / pixels
                                 notes_extra.append(f"{label}原始有效深度覆盖率 {coverage:.1%}；其余为模型补全")
                     hd, ld, rd = refined
+                    if batch_active:
+                        self._mv6d_batch_depth_cache = (
+                            None if hd is None else np.ascontiguousarray(hd).copy(),
+                            None if ld is None else np.ascontiguousarray(ld).copy(),
+                            None if rd is None else np.ascontiguousarray(rd).copy(),
+                            list(notes_extra), copy.deepcopy(lingbot_results),
+                        )
                 if cancel_event is not None and cancel_event.is_set():
                     raise RuntimeError("LingBot-Depth 已停止，本轮 6D 已取消")
                 snap = self._compute_mv6d_snapshot(
@@ -56879,6 +57245,9 @@ class CameraTopicWindow(QMainWindow):
         if hasattr(self, "_on_mv6d_methods_changed"):
             self._on_mv6d_methods_changed()
         if not isinstance(payload, dict):
+            finish = getattr(self, '_finish_mv6d_target', None)
+            if callable(finish):
+                finish({'ok': False, 'error': '估计未返回结果'})
             return
         silent = bool(payload.get("silent"))
         if silent:
@@ -56889,6 +57258,9 @@ class CameraTopicWindow(QMainWindow):
                 if self._mv6d_last_snap is None:
                     self.mv6d_result_edit.setPlainText(f"失败: {err}")
                 self.status_bar.showMessage(f"多视角 6D 失败，保留上次结果: {err[:120]}")
+            finish = getattr(self, '_finish_mv6d_target', None)
+            if callable(finish):
+                finish({'ok': False, 'error': err})
             return
         depth_results = payload.get("lingbot_results") or []
         if depth_results:
@@ -56897,6 +57269,9 @@ class CameraTopicWindow(QMainWindow):
             self._on_lingbot_depth_result(depth_result)
         snap = payload.get("snap")
         if not isinstance(snap, MultiView6DPoseSnapshot):
+            finish = getattr(self, '_finish_mv6d_target', None)
+            if callable(finish):
+                finish({'ok': False, 'error': '估计快照类型无效'})
             return
         self._mv6d_last_snap = snap
         try:
@@ -56934,6 +57309,11 @@ class CameraTopicWindow(QMainWindow):
                 observation['observation_id'] += ':' + key
                 observations[key] = observation
             self.grasp_execution_panel.set_method_observations(observations)
+            payload['observations'] = observations
+            target = getattr(self, '_mv6d_active_target', None)
+            if target is not None:
+                payload['target'] = dict(target)
+                self._mv6d_target_results[target['id']] = copy.deepcopy(payload)
             from mv6d_cache import save_cache
             save_cache(self._mv6d_cache_path(), {
                 'snap': snap, 'captured_at': captured_at,
@@ -56943,6 +57323,8 @@ class CameraTopicWindow(QMainWindow):
                 'lingbot_results': payload.get('lingbot_results') or [],
                 'robot_lingbot_depth': getattr(self, '_robot_lingbot_depth', None),
                 'depth_source': payload.get('depth_source'),
+                'targets': copy.deepcopy(getattr(self, '_mv6d_targets', [])),
+                'target_results': copy.deepcopy(list(getattr(self, '_mv6d_target_results', {}).values())),
             })
         except Exception as exc:
             self.grasp_execution_panel.message = f"视觉6D输入转换失败: {exc}"
@@ -56984,9 +57366,99 @@ class CameraTopicWindow(QMainWindow):
                 f"多视角 6D 完成 ({snap.method}, {elapsed:.2f}s, "
                 f"pts={snap.fused_points}){extra}"
             )
+        finish = getattr(self, '_finish_mv6d_target', None)
+        if callable(finish):
+            finish(payload)
 
     def _mv6d_cache_path(self):
         return os.path.join(EAI_DIR, '.cache', 'mv6d_last_success.npz')
+
+    def _grasp_task_path(self, task_key):
+        from grasp_task_workflow import TASKS
+        if task_key not in TASKS:
+            raise ValueError('未知任务：' + str(task_key))
+        return os.path.join(EAI_DIR, '.cache', 'grasp_tasks', task_key + '.npz')
+
+    def _save_grasp_task_data(self, task_key, panel_state):
+        if not self._mv6d_targets or not self._mv6d_target_results:
+            raise ValueError('没有可保存的多目标6D结果')
+        from mv6d_cache import save_cache
+        from grasp_task_workflow import TASKS
+        saved_at = time.time()
+        payload = {
+            'task_key': task_key,
+            'saved_at': saved_at,
+            'panel_state': copy.deepcopy(panel_state),
+            'task_definition': copy.deepcopy(TASKS[task_key]),
+            'targets': copy.deepcopy(self._mv6d_targets),
+            'target_results': copy.deepcopy(list(self._mv6d_target_results.values())),
+            'last_snap': self._mv6d_last_snap,
+            'robot_method_poses': copy.deepcopy(getattr(self, '_robot_method_poses', {})),
+            'sam3_points': getattr(self, '_robot_sam3_points', None),
+            'robot_lingbot_depth': copy.deepcopy(getattr(self, '_robot_lingbot_depth', None)),
+        }
+        path = self._grasp_task_path(task_key)
+        save_cache(path, payload)
+        return '已保存图像、6D位姿和流程状态 → ' + path
+
+    def _load_grasp_task_data(self, task_key):
+        path = self._grasp_task_path(task_key)
+        if not os.path.isfile(path):
+            self._mv6d_targets = []
+            self._mv6d_target_results = {}
+            self._mv6d_active_target = None
+            self._mv6d_object_picked = False
+            self._refresh_mv6d_target_combo()
+            self._sync_mv6d_targets_to_grasp()
+            view = getattr(self, '_robot_view', None)
+            if view is not None and hasattr(view, 'set_target_poses'):
+                view.set_target_poses([])
+            return None
+        from mv6d_cache import load_cache
+        saved = load_cache(path, {
+            'MultiView6DPoseSnapshot': MultiView6DPoseSnapshot,
+            'Object6DPoseResult': Object6DPoseResult,
+        })
+        if saved.get('task_key') != task_key:
+            raise ValueError('任务缓存标识不匹配')
+        self._mv6d_targets = [dict(target) for target in saved.get('targets') or []]
+        results = saved.get('target_results') or []
+        self._mv6d_target_results = {
+            str(result.get('target', {}).get('id')): result
+            for result in results if result.get('target', {}).get('id')
+        }
+        self._mv6d_target_serial = max(
+            [int(str(target['id']).rsplit('-',1)[-1]) for target in self._mv6d_targets
+             if str(target.get('id','')).rsplit('-',1)[-1].isdigit()] or [len(self._mv6d_targets)])
+        self._mv6d_last_snap = saved.get('last_snap')
+        self._robot_method_poses = saved.get('robot_method_poses') or {}
+        self._robot_sam3_points = saved.get('sam3_points')
+        self._robot_lingbot_depth = saved.get('robot_lingbot_depth')
+        self._refresh_mv6d_target_combo()
+        self._sync_mv6d_targets_to_grasp()
+        if self._mv6d_targets:
+            selected = str((saved.get('panel_state') or {}).get('selected_target') or '')
+            index = self.mv6d_target_combo.findData(selected)
+            self.mv6d_target_combo.setCurrentIndex(index if index >= 0 else 0)
+            target_id = str(self.mv6d_target_combo.currentData() or '')
+            target = next((item for item in self._mv6d_targets if item['id'] == target_id), None)
+            if target is not None:
+                self._set_mv6d_active_target(
+                    target, show_result=hasattr(self, 'grasp_execution_panel'))
+        saved_at = float(saved.get('saved_at') or 0.)
+        return {
+            'panel_state': saved.get('panel_state') or {},
+            'task_definition': saved.get('task_definition'),
+            'target_observations': {
+                target_id: {'label': f"目标 {index} ({target['u']}, {target['v']})",
+                            'methods': self._mv6d_target_results[target_id].get('observations') or {}}
+                for index, target in enumerate(self._mv6d_targets, 1)
+                for target_id in (target['id'],)
+                if target_id in self._mv6d_target_results
+            },
+            'saved_at_text': (time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(saved_at))
+                              if saved_at else ''),
+        }
 
     def _restore_mv6d_cache(self):
         path = self._mv6d_cache_path()
@@ -57003,6 +57475,21 @@ class CameraTopicWindow(QMainWindow):
             self._robot_method_poses = cached['method_poses']
             self._robot_sam3_points = cached.get('sam3_points')
             self._robot_lingbot_depth = cached.get('robot_lingbot_depth')
+            targets = cached.get('targets') or []
+            target_results = cached.get('target_results') or []
+            if targets:
+                self._mv6d_targets = [dict(target) for target in targets]
+                self._mv6d_target_results = {
+                    str(result.get('target', {}).get('id')): result
+                    for result in target_results
+                    if result.get('target', {}).get('id')
+                }
+                self._mv6d_target_serial = max(
+                    [int(str(target['id']).rsplit('-', 1)[-1]) for target in targets
+                     if str(target.get('id', '')).rsplit('-', 1)[-1].isdigit()] or [len(targets)])
+                self._refresh_mv6d_target_combo()
+                self._sync_mv6d_targets_to_grasp()
+                self._on_mv6d_target_changed()
             view = getattr(self, '_robot_view', None)
             if view is not None:
                 for key, pose in self._robot_method_poses.items():

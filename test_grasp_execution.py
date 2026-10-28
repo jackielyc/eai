@@ -213,6 +213,16 @@ class RunnerTests(unittest.TestCase):
         runner.tick()
         self.assertEqual(runner.state, 'stopping')
 
+    def test_other_arm_compensation_is_allowed_when_tcp_hold_is_planned(self):
+        end=[.02,.02]+[.01]*14
+        plan=dict(self.plan,waist_included=True,other_tcp_held=True,
+                  held_side='left',held_target=np.eye(4).tolist(),
+                  joint_waypoints=[[0.]*16,end])
+        runner=JointRunner(plan,self.sent.append,lambda:self.data,lambda:True,clock=lambda:self.now)
+        self.now=.5;runner.tick()
+        self.assertEqual(runner.state,'running')
+        self.assertGreater(self.sent[-1][2],0.)
+
     def test_start_drift_and_model_mismatch_rejected(self):
         self.data['q16'][0] = .1
         with self.assertRaisesRegex(ValueError, '起点'):

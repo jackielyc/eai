@@ -1227,6 +1227,11 @@ class RobotView3D(QWidget):
         )
         self._wrench_check.toggled.connect(self._set_wrench_enabled)
         row.addWidget(self._wrench_check)
+        self._target_poses_check = QCheckBox("多目标6D")
+        self._target_poses_check.setChecked(True)
+        self._target_poses_check.setToolTip("同时显示多目标估计的包围盒和坐标轴，可取消勾选。")
+        self._target_poses_check.toggled.connect(self._set_target_poses_enabled)
+        row.addWidget(self._target_poses_check)
         row.addStretch(1)
         layout.addLayout(row)
         self._wrench_readout = QLabel("六维力：等待 /hal/left_arm_data、/hal/right_arm_data")
@@ -1255,6 +1260,8 @@ class RobotView3D(QWidget):
         self._reach_items = {}
         self._reach_waist = None
         self._reach_job = None
+        self._target_pose_item = None
+        self._target_pose_hold = []
         self._simulation_q = None
         self._simulation_hands = {}
         self._simulation_label = QLabel('机器人姿态来源：真机反馈')
@@ -1352,6 +1359,12 @@ class RobotView3D(QWidget):
     def _show_wrist_accessories(self, enabled):
         if self._gl is not None:
             self._gl.show_wrist_accessories = bool(enabled)
+            self._gl.update()
+
+    def _set_target_poses_enabled(self, enabled):
+        if self._target_pose_item is not None:
+            self._target_pose_item['enabled'] = bool(enabled) and bool(self._target_pose_hold)
+        if self._gl is not None:
             self._gl.update()
 
     def _refresh_reach_visibility(self, *_):
@@ -1578,6 +1591,25 @@ class RobotView3D(QWidget):
     def set_estimated_pose(self, xyz, rotation, corners=None, extents=None) -> None:
         self.set_method_pose("pca", xyz, rotation, corners, extents)
 
+    def set_target_poses(self, poses) -> None:
+        self._target_pose_hold = list(poses or [])
+        item = self._target_pose_item
+        if item is None:
+            return
+        colors = ((1.,.25,.25),(.25,1.,.35),(.25,.55,1.),(1.,.75,.15),(1.,.3,.9),(.3,1.,1.))
+        rows = []
+        for index, pose in enumerate(self._target_pose_hold):
+            packed = _pose6d_lines(pose['xyz'], pose['rotation'], pose.get('corners'),
+                                   pose.get('extents'), colors[index % len(colors)])
+            if len(packed):
+                rows.append(packed)
+        packed = np.concatenate(rows, axis=0) if rows else np.zeros((0,6), np.float32)
+        with item['lock']:
+            item['pending'] = packed
+        item['enabled'] = self._target_poses_check.isChecked() and bool(rows)
+        if self._gl is not None:
+            self._gl.update()
+
     def set_grasp_preview(self, preview) -> None:
         for stage in ('pregrasp', 'approach', 'lift'):
             goal = (preview or {}).get('goals', {}).get(stage)
@@ -1666,6 +1698,7 @@ class RobotView3D(QWidget):
             }
             self._sam3 = self._make_sam3()
             self._lingbot = self._make_lingbot()
+            self._target_pose_item = self._make_pose6d((1., .3, .3))
             self._reach_items = {side: self._make_sam3() for side in ('l', 'r')}
             for item in self._reach_items.values():
                 item['point_size'] = 2.0
@@ -1673,11 +1706,13 @@ class RobotView3D(QWidget):
             self._gl.set_skeletons(self._skels)
             self._gl.set_wrenches(self._wrenches)
             self._gl.set_pose_items(
-                list(self._pose_items.values()) + [self._sam3, self._lingbot] + list(self._reach_items.values())
+                list(self._pose_items.values()) + [self._sam3, self._lingbot, self._target_pose_item]
+                + list(self._reach_items.values())
             )
             self._sync_pose6d()
             self._sync_sam3()
             self._sync_lingbot()
+            self.set_target_poses(self._target_pose_hold)
             self.layout().addWidget(self._gl, 1)
             try:
                 self._subscribe_depth()

@@ -876,7 +876,7 @@
     },
     "arm_text_cmd_edit": {
       "kind": "line",
-      "text": "右臂移到 x=0.7422 y=-0.1482 z=0.8412"
+      "text": "右臂移到 x=0.7216 y=0.1057 z=0.8542"
     },
     "left_hand_gap_slider_a": {
       "kind": "slider",
@@ -1004,11 +1004,17 @@
     },
     "mv6d_head_u_spin": {
       "kind": "spin",
-      "value": 381
+      "value": 354
     },
     "mv6d_head_v_spin": {
       "kind": "spin",
-      "value": 282
+      "value": 183
+    },
+    "mv6d_target_combo": {
+      "kind": "combo",
+      "index": 0,
+      "text": "✓ 目标 1 (354, 183)",
+      "data": "target-4"
     },
     "mv6d_gt_enable_check": {
       "kind": "check",
@@ -1028,7 +1034,7 @@
     },
     "mv6d_gt_roll_spin": {
       "kind": "dspin",
-      "value": 90.0
+      "value": 88.0
     },
     "mv6d_gt_pitch_spin": {
       "kind": "dspin",
@@ -1963,8 +1969,8 @@
   "geometry": [
     0,
     64,
-    2493,
-    1376
+    1853,
+    1016
   ],
   "topic_checks": {
     "/camera/hand_left_color": true,

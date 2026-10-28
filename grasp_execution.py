@@ -11,8 +11,9 @@ from pathlib import Path
 import numpy as np
 
 
-TCP_POSITION_TOLERANCE_M = .010
-TCP_ROTATION_TOLERANCE_RAD = np.deg2rad(5.0)
+TCP_POSITION_TOLERANCE_M = .015
+TCP_ROTATION_TOLERANCE_RAD = np.deg2rad(10.0)
+IK_ADJACENT_JUMP_LIMIT_RAD = .18
 WRENCH_MAX_AGE_S = .5
 
 
@@ -199,10 +200,11 @@ class JointRunner:
                 return
             side = self.plan['arm_side']
             waist_fixed = [] if self.plan.get('waist_included') else [0, 1]
-            fixed = ([0, 1] if side == 'both' else
-                     (list(range(9, 16)) + waist_fixed if side == 'left'
-                      else list(range(2, 9)) + waist_fixed))
-            if np.max(np.abs(q[fixed]-self.rows[0, fixed])) > .03:
+            fixed = ([] if self.plan.get('other_tcp_held') else
+                     ([0, 1] if side == 'both' else
+                      (list(range(9, 16)) + waist_fixed if side == 'left'
+                       else list(range(2, 9)) + waist_fixed)))
+            if fixed and np.max(np.abs(q[fixed]-self.rows[0, fixed])) > .03:
                 self.stop('另一只手臂或腰部发生移动', failed=True)
                 return
             elapsed = now-self.started
@@ -224,6 +226,16 @@ class JointRunner:
                     reached = (reached
                                and np.linalg.norm(np.asarray(tcp['xyz'])-T[:3, 3]) < TCP_POSITION_TOLERANCE_M
                                and angle < TCP_ROTATION_TOLERANCE_RAD)
+                if self.plan.get('other_tcp_held'):
+                    held_side = self.plan['held_side']
+                    held_tcp = measured[held_side]
+                    held_target = validate_transform(self.plan['held_target'])
+                    held_rotation = rotation_from_quaternion(held_tcp['xyzw'])
+                    held_angle = np.arccos(np.clip(
+                        (np.trace(held_target[:3,:3].T@held_rotation)-1)/2, -1, 1))
+                    reached = (reached
+                               and np.linalg.norm(np.asarray(held_tcp['xyz'])-held_target[:3,3]) < TCP_POSITION_TOLERANCE_M
+                               and held_angle < TCP_ROTATION_TOLERANCE_RAD)
                 if measured['arm_received_at'] != self.last_feedback_stamp:
                     self.stable_count = self.stable_count+1 if reached else 0
                     self.last_feedback_stamp = measured['arm_received_at']

@@ -48,5 +48,16 @@ class HandModelTests(unittest.TestCase):
             self.assertEqual(len(calls), 1)
             view.deleteLater()
 
+    def test_multi_target_pose_layer_can_be_toggled(self):
+        with patch.object(RobotView3D, '_load'), patch.object(RobotView3D, '_tick'):
+            view=RobotView3D();view._target_pose_item=view._make_pose6d()
+            view.set_target_poses([{'xyz':[.3,.1,.8],'rotation':np.eye(3),
+                                    'extents':[.1,.2,.3]}])
+            self.assertTrue(view._target_pose_item['enabled'])
+            self.assertGreater(len(view._target_pose_item['pending']),0)
+            view._target_poses_check.setChecked(False)
+            self.assertFalse(view._target_pose_item['enabled'])
+            view.deleteLater()
+
 
 if __name__ == '__main__': unittest.main()

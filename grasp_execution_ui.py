@@ -12,16 +12,56 @@ import uuid
 import numpy as np
 from PyQt5.QtCore import QProcess, QProcessEnvironment, QTimer, Qt
 from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
-                             QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QWidget, QGridLayout, QMessageBox)
+                             QLabel, QLineEdit, QPushButton, QTextEdit, QVBoxLayout, QWidget, QGridLayout,
+                             QMessageBox, QDialog, QDialogButtonBox, QFormLayout, QInputDialog)
 
 from grasp_execution import (Sequence, JointRunner, evaluate_wrench, load_profile,
                              make_preview, read_feedback, manual_candidate)
+from grasp_task_workflow import (TASKS, TaskFlowWidget, format_steps, new_task_key,
+                                 parse_roles, parse_steps, reload_tasks, save_tasks,
+                                 validate_task)
+
+
+class TaskEditorDialog(QDialog):
+    def __init__(self, source=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('新建抓取任务')
+        self.resize(650, 500)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.name_edit = QLineEdit('' if source is None else source['name']+' 副本')
+        self.roles_edit = QLineEdit(
+            'object=目标' if source is None else
+            ', '.join(f'{key}={label}' for key, label in source['roles']))
+        self.steps_edit = QTextEdit(
+            '选择目标|target|object\n确认操作|confirm\n完成|complete'
+            if source is None else format_steps(source))
+        form.addRow('任务名称', self.name_edit)
+        form.addRow('目标角色', self.roles_edit)
+        form.addRow('流程步骤', self.steps_edit)
+        layout.addLayout(form)
+        hint = QLabel(
+            '角色格式：role=显示名，多个用逗号分隔。\n'
+            '步骤每行：名称|动作|角色|参数。动作支持 target、motion、hand、confirm、complete；'
+            'motion 参数为 pregrasp/approach/lift，hand 参数为 open/close。')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def definition(self):
+        return validate_task({'name': self.name_edit.text().strip(), 'builtin': False,
+                              'roles': parse_roles(self.roles_edit.text()),
+                              'steps': parse_steps(self.steps_edit.toPlainText())})
 
 
 class GraspExecutionPanel(QWidget):
     def __init__(self, node, busy, parent=None, preview_image=None, open_perception=None,
                  fill_extrinsic=None, ensure_feedback=None, open_calibration=None, robot_preview=None,
-                 simulation_display=None, wrench_feedback=None, ensure_wrench_monitor=None):
+                 simulation_display=None, wrench_feedback=None, ensure_wrench_monitor=None,
+                 save_task_data=None, load_task_data=None):
         super().__init__(parent)
         self.node, self.other_busy = node, busy
         self.preview_image_callback = preview_image
@@ -29,7 +69,23 @@ class GraspExecutionPanel(QWidget):
         self.simulation_display = simulation_display
         self.wrench_feedback = wrench_feedback
         self.ensure_wrench_monitor = ensure_wrench_monitor
+        self.save_task_data = save_task_data
+        self.load_task_data = load_task_data
         self._wrench_guard_triggered = None
+        self.target_observations = {}
+        self._workflow_step = 0
+        self._workflow_substep = 0
+        self._workflow_finished = False
+        self._workflow_waiting = False
+        self._workflow_step_settings = {}
+        self._workflow_auto_running = False
+        self._workflow_auto_paused = False
+        self._workflow_auto_cancel_requested = False
+        self._workflow_auto_restoring = False
+        self._workflow_auto_initial_snapshot = None
+        self._workflow_auto_timer = QTimer(self)
+        self._workflow_auto_timer.setSingleShot(True)
+        self._workflow_auto_timer.timeout.connect(self._run_auto_workflow_next)
         self.simulation = None
         self._sim_reserved = False
         self._execute_after_plan = False
@@ -64,6 +120,49 @@ class GraspExecutionPanel(QWidget):
         hint = QLabel('预览、手部验证和 IK 预检可独立使用；执行本段会自动预检所选动作，通过后执行。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        task_row = QHBoxLayout()
+        task_row.addWidget(QLabel('任务'))
+        self.task_combo = QComboBox()
+        for key, task in TASKS.items():
+            self.task_combo.addItem(task['name'], key)
+        self.task_combo.currentIndexChanged.connect(self.change_task_workflow)
+        task_row.addWidget(self.task_combo)
+        self.task_new_button = QPushButton('新建任务…')
+        self.task_new_button.clicked.connect(self.new_task)
+        task_row.addWidget(self.task_new_button)
+        self.task_copy_button = QPushButton('复制任务…')
+        self.task_copy_button.clicked.connect(self.copy_task)
+        task_row.addWidget(self.task_copy_button)
+        self.task_manage_button = QPushButton('管理任务…')
+        self.task_manage_button.clicked.connect(self.manage_tasks)
+        task_row.addWidget(self.task_manage_button)
+        self.workflow_next_button = QPushButton('执行流程下一步')
+        self.workflow_next_button.clicked.connect(self.execute_workflow_next)
+        task_row.addWidget(self.workflow_next_button)
+        self.workflow_reset_button = QPushButton('重置流程')
+        self.workflow_reset_button.clicked.connect(self.reset_task_workflow)
+        task_row.addWidget(self.workflow_reset_button)
+        self.task_save_button = QPushButton('保存任务数据')
+        self.task_save_button.clicked.connect(self.save_current_task)
+        task_row.addWidget(self.task_save_button)
+        self.workflow_all_button = QPushButton('全部执行')
+        self.workflow_all_button.clicked.connect(self.toggle_all_workflow)
+        task_row.addWidget(self.workflow_all_button)
+        self.workflow_auto_pause_button = QPushButton('暂停')
+        self.workflow_auto_pause_button.clicked.connect(self.toggle_auto_workflow_pause)
+        self.workflow_auto_pause_button.setEnabled(False)
+        task_row.addWidget(self.workflow_auto_pause_button)
+        task_row.addStretch(1)
+        layout.addLayout(task_row)
+        self.task_flow = TaskFlowWidget()
+        self.task_flow.step_selected.connect(self.select_workflow_step)
+        layout.addWidget(self.task_flow)
+        self.task_role_row = QHBoxLayout()
+        self.task_role_combos = {}
+        layout.addLayout(self.task_role_row)
+        self.task_data_status = QLabel('任务数据：尚未保存')
+        self.task_data_status.setWordWrap(True)
+        layout.addWidget(self.task_data_status)
         mode_row = QHBoxLayout()
         mode_row.addWidget(QLabel('执行方式'))
         self.execution_mode = QComboBox()
@@ -116,6 +215,12 @@ class GraspExecutionPanel(QWidget):
         layout.addLayout(expiry_row)
         self.plan_expiry_label = QLabel('尚无已通过预检的计划；通过后开始倒计时')
         layout.addWidget(self.plan_expiry_label)
+        target_row = QHBoxLayout()
+        target_row.addWidget(QLabel('操作目标'))
+        self.grasp_target_combo = QComboBox()
+        self.grasp_target_combo.currentIndexChanged.connect(self._on_grasp_target_changed)
+        target_row.addWidget(self.grasp_target_combo, 1)
+        layout.addLayout(target_row)
         source_row = QHBoxLayout()
         source_row.addWidget(QLabel('位姿来源'))
         self.source_combo = QComboBox()
@@ -253,6 +358,7 @@ class GraspExecutionPanel(QWidget):
         self.capture_startup_state()
         if self.ensure_wrench_monitor:
             self.ensure_wrench_monitor()
+        self.change_task_workflow()
         self.check_readiness()
         self.refresh()
 
@@ -294,19 +400,24 @@ class GraspExecutionPanel(QWidget):
         return hands
 
     def capture_startup_state(self):
-        if not self._startup_recording or self._startup_snapshot is not None:
+        if not self._startup_recording:
             return
-        if time.monotonic() > self._startup_deadline:
+        if self._startup_snapshot is None:
+            try:
+                measured = read_feedback(os.environ.get('EAI_HOST_FK_STATE', '/tmp/eai_host_fk_state.json'))
+                self._startup_snapshot = copy.deepcopy(dict(measured, hands={}))
+                self.simulation = None
+            except Exception:
+                measured = None
+        if self._startup_snapshot is not None and not self._startup_snapshot.get('hands'):
+            try:
+                self._startup_snapshot['hands'] = self.read_startup_hands()
+            except Exception:
+                pass
+        if self._startup_snapshot is not None and self._startup_snapshot.get('hands'):
             self._startup_recording = False
-            return
-        try:
-            measured = read_feedback(os.environ.get('EAI_HOST_FK_STATE', '/tmp/eai_host_fk_state.json'))
-            hands = self.read_startup_hands()
-            self._startup_snapshot = copy.deepcopy(dict(measured, hands=hands))
-            self.simulation = None
+        elif time.monotonic() > self._startup_deadline:
             self._startup_recording = False
-        except Exception:
-            pass
 
     def restore_startup(self):
         if self.process or self.runner or self.sequence.state == 'stop_unconfirmed':
@@ -315,38 +426,44 @@ class GraspExecutionPanel(QWidget):
             return
         try:
             self._startup_recording = False
-            profile = self.selected_profile()
             if self.is_simulation:
                 simulation = self.simulation_backend()
                 startup = self._simulation_startup
-                measured = simulation.feedback()
             else:
                 if self._startup_snapshot is None:
                     raise ValueError('界面启动时未采集到完整双臂/双手反馈，不能恢复；不会用零位代替')
                 startup = self._startup_snapshot
-                measured = self.feedback()
-            from grasp_restore import prepare_restore
-            identifier = uuid.uuid4().hex
-            plan = prepare_restore(profile, measured, startup, identifier)
-            preview = dict(id=identifier, arm_side='both', hand_model=profile['hand_model'],
-                           tcp_link='Link7_l / Link7_r', base_frame='base_link',
-                           observation_id='restore:'+identifier, goals={'approach':plan['target']})
-            self.sequence.reset(preview, profile)
-            self.sequence.pending_stage = 'restore'
-            self.sequence.plan = dict(plan, accepted_at=time.monotonic())
-            self.sequence.state = 'planned'
-            self._restore_hands_goal = copy.deepcopy(startup['hands'])
-            self._restoring = True
-            self._execute_ready_plan()
-            if self.runner is None:
-                self._restoring = False
+            self._start_restore_snapshot(startup, auto_restore=False)
         except Exception as exc:
             self._restoring = False
             self.message = '恢复未启动：' + str(exc)
+            self.execution_feedback.setText(self.message)
         self.refresh()
+
+    def _start_restore_snapshot(self, startup, *, auto_restore=False):
+        profile = self.selected_profile()
+        measured = self.simulation_backend().feedback() if self.is_simulation else self.feedback()
+        from grasp_restore import prepare_restore
+        identifier = uuid.uuid4().hex
+        plan = prepare_restore(profile, measured, startup, identifier)
+        preview = dict(id=identifier, arm_side='both', hand_model=profile['hand_model'],
+                       tcp_link='Link7_l / Link7_r', base_frame='base_link',
+                       observation_id='restore:'+identifier, goals={'approach':plan['target']})
+        self.sequence.reset(preview, profile)
+        self.sequence.pending_stage = 'restore'
+        self.sequence.plan = dict(plan, accepted_at=time.monotonic())
+        self.sequence.state = 'planned'
+        self._restore_hands_goal = copy.deepcopy(startup.get('hands') or {})
+        self._restoring = True
+        self._workflow_auto_restoring = bool(auto_restore)
+        self._execute_ready_plan()
+        if self.runner is None:
+            self._restoring = False
 
     def finish_restore_hands(self):
         hands = self._restore_hands_goal
+        if not hands:
+            return '双臂已恢复启动状态；启动时未采集到双手反馈，双手恢复已跳过。'
         if self.is_simulation:
             for side, values in hands.items():
                 self.simulation_backend().hand(side, values)
@@ -624,6 +741,575 @@ class GraspExecutionPanel(QWidget):
         self.suggest_shape()
         self.refresh()
 
+    def set_target_observations(self, targets):
+        if self.reserved or self.process or self.runner:
+            return
+        selected = str(self.grasp_target_combo.currentData() or '')
+        self.target_observations = copy.deepcopy(targets)
+        self.grasp_target_combo.blockSignals(True)
+        self.grasp_target_combo.clear()
+        for target_id, entry in self.target_observations.items():
+            self.grasp_target_combo.addItem(entry.get('label') or target_id, target_id)
+        index = self.grasp_target_combo.findData(selected)
+        self.grasp_target_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.grasp_target_combo.blockSignals(False)
+        self._refresh_task_role_targets()
+        if self.target_observations:
+            self._on_grasp_target_changed()
+        else:
+            self.method_observations = {}
+            self.observation = None
+            self.sequence = Sequence()
+            self.candidates.clear()
+            self.shape_override = None
+            self.refresh()
+
+    def select_target_observation(self, target_id):
+        index = self.grasp_target_combo.findData(str(target_id))
+        if index >= 0:
+            self.grasp_target_combo.setCurrentIndex(index)
+            self._on_grasp_target_changed()
+            return True
+        return False
+
+    def _on_grasp_target_changed(self, *_):
+        if self.reserved or self.process or self.runner:
+            return
+        target_id = str(self.grasp_target_combo.currentData() or '')
+        entry = self.target_observations.get(target_id)
+        if entry:
+            self.set_method_observations(entry.get('methods') or {})
+
+    def change_task_workflow(self, *_):
+        task_key = str(self.task_combo.currentData() or 'phone_box_assembly')
+        saved = None
+        if self.load_task_data:
+            try:
+                saved = self.load_task_data(task_key)
+                if (saved and saved.get('task_definition')
+                        and not TASKS.get(task_key, {}).get('builtin')):
+                    TASKS[task_key] = validate_task(saved['task_definition'])
+            except Exception as exc:
+                self.task_data_status.setText('任务数据加载失败：' + str(exc))
+        task = TASKS[task_key]
+        self._render_task_controls(task)
+        self.reset_task_workflow()
+        if saved:
+            self.set_target_observations(saved.get('target_observations') or {})
+            state = saved.get('panel_state') or {}
+            self._workflow_step_settings = copy.deepcopy(state.get('step_settings') or {})
+            for role, target_id in (state.get('roles') or {}).items():
+                combo = self.task_role_combos.get(role)
+                if combo is not None:
+                    index = combo.findData(target_id)
+                    if index >= 0:
+                        combo.setCurrentIndex(index)
+            target_id = str(state.get('selected_target') or '')
+            if target_id:
+                self.select_target_observation(target_id)
+            self._workflow_step = max(0, min(int(state.get('workflow_step', 0)), len(task['steps'])-1))
+            actions = task['steps'][self._workflow_step].get('actions') or ()
+            self._workflow_substep = max(0, min(int(state.get('workflow_substep', 0)),
+                                                max(0, len(actions)-1)))
+            self._workflow_finished = bool(state.get('workflow_finished', False))
+            self.task_flow.set_current(self._workflow_step)
+            if self._workflow_finished:
+                self.task_flow.set_current(len(task['steps']))
+            self._apply_workflow_step_settings(self._workflow_step, self._workflow_substep)
+            saved_at = str(saved.get('saved_at_text') or '')
+            self.task_data_status.setText('任务数据：已加载' + (f'（{saved_at}）' if saved_at else ''))
+        elif self.load_task_data:
+            self.set_target_observations({})
+            self._workflow_step_settings = {}
+            self.task_data_status.setText('任务数据：该任务尚无保存结果')
+
+    def _render_task_controls(self, task):
+        self.task_flow.set_task(task)
+        while self.task_role_row.count():
+            item = self.task_role_row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.task_role_combos = {}
+        for role, label in task['roles']:
+            self.task_role_row.addWidget(QLabel(label+'目标'))
+            combo = QComboBox()
+            self.task_role_combos[role] = combo
+            self.task_role_row.addWidget(combo)
+        self.task_role_row.addStretch(1)
+        self._refresh_task_role_targets()
+
+    def refresh_task_selector(self, selected_key=''):
+        selected_key = selected_key or str(self.task_combo.currentData() or '')
+        self.task_combo.blockSignals(True)
+        self.task_combo.clear()
+        for key, task in TASKS.items():
+            self.task_combo.addItem(task['name'], key)
+        index = self.task_combo.findData(selected_key)
+        self.task_combo.setCurrentIndex(index if index >= 0 else 0)
+        self.task_combo.blockSignals(False)
+        self.change_task_workflow()
+
+    def _create_task_from_dialog(self, source=None):
+        dialog = TaskEditorDialog(source, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        try:
+            definition = dialog.definition()
+            key = new_task_key()
+            TASKS[key] = definition
+            save_tasks(TASKS)
+            self.refresh_task_selector(key)
+            self.task_data_status.setText('任务定义已创建；运行数据尚未保存')
+        except Exception as exc:
+            self.task_data_status.setText('任务定义创建失败：' + str(exc))
+            QMessageBox.warning(self, '任务未创建', str(exc))
+
+    def new_task(self):
+        self._create_task_from_dialog(None)
+
+    def copy_task(self):
+        source = TASKS.get(str(self.task_combo.currentData() or ''))
+        if not source:
+            return
+        name, accepted = QInputDialog.getText(
+            self, '复制任务', '副本名称', text=source['name']+' 副本')
+        if not accepted:
+            return
+        try:
+            name = name.strip()
+            if not name:
+                raise ValueError('副本名称不能为空')
+            definition = validate_task(dict(copy.deepcopy(source), name=name, builtin=False))
+            key = new_task_key()
+            TASKS[key] = definition
+            save_tasks(TASKS)
+            self.refresh_task_selector(key)
+            self.task_data_status.setText('任务定义复制成功；运行数据尚未保存')
+            self.message = f'已复制任务“{source["name"]}”为“{name}”'
+            self.refresh()
+        except Exception as exc:
+            self.task_data_status.setText('任务复制失败：' + str(exc))
+            QMessageBox.warning(self, '任务复制失败', str(exc))
+
+    def manage_tasks(self):
+        action, ok = QInputDialog.getItem(
+            self, '管理任务', '操作', ('重命名当前任务', '删除当前任务', '导出当前任务', '导入任务'), 0, False)
+        if not ok:
+            return
+        key = str(self.task_combo.currentData() or '')
+        task = TASKS.get(key)
+        try:
+            if action == '重命名当前任务':
+                name, accepted = QInputDialog.getText(self, '重命名任务', '新名称', text=task['name'])
+                if accepted and name.strip():
+                    TASKS[key] = validate_task(dict(task, name=name.strip()))
+                    save_tasks(TASKS)
+                    self.refresh_task_selector(key)
+            elif action == '删除当前任务':
+                if task.get('builtin'):
+                    raise ValueError('内置任务不能删除，可以复制后修改')
+                if QMessageBox.question(self, '删除任务', f"删除任务定义“{task['name']}”？\n已保存运行数据不会删除。") == QMessageBox.Yes:
+                    TASKS.pop(key)
+                    save_tasks(TASKS)
+                    self.refresh_task_selector()
+            elif action == '导出当前任务':
+                path, _ = QFileDialog.getSaveFileName(self, '导出任务', task['name']+'.json', 'JSON (*.json)')
+                if path:
+                    Path(path).write_text(json.dumps({'version':1,'task':task}, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+            else:
+                path, _ = QFileDialog.getOpenFileName(self, '导入任务', '', 'JSON (*.json)')
+                if path:
+                    data = json.loads(Path(path).read_text(encoding='utf-8'))
+                    imported = validate_task(data.get('task') or data)
+                    imported['builtin'] = False
+                    new_key = new_task_key()
+                    TASKS[new_key] = imported
+                    save_tasks(TASKS)
+                    self.refresh_task_selector(new_key)
+        except Exception as exc:
+            QMessageBox.warning(self, '任务管理失败', str(exc))
+
+    def current_task_state(self):
+        self._capture_workflow_step_settings(self._workflow_step, self._workflow_substep)
+        return {
+            'roles': {role: str(combo.currentData() or '') for role, combo in self.task_role_combos.items()},
+            'selected_target': str(self.grasp_target_combo.currentData() or ''),
+            'workflow_step': self._workflow_step,
+            'workflow_substep': self._workflow_substep,
+            'workflow_finished': self._workflow_finished,
+            'arm_side': str(self.grasp_arm.currentData() or ''),
+            'allow_waist': self.waist_participation.isChecked(),
+            'motion_stage': str(self.motion_stage.currentData() or ''),
+            'pose_method': str(self.source_combo.currentData() or ''),
+            'step_settings': copy.deepcopy(self._workflow_step_settings),
+        }
+
+    def _workflow_action(self, index=None, substep=None):
+        task = TASKS.get(str(self.task_combo.currentData() or ''))
+        index = self._workflow_step if index is None else int(index)
+        substep = self._workflow_substep if substep is None else int(substep)
+        if not task or not 0 <= int(index) < len(task['steps']):
+            return None
+        step = task['steps'][index]
+        if step['kind'] == 'sequence':
+            actions = step.get('actions') or ()
+            return actions[substep] if 0 <= substep < len(actions) else None
+        return step
+
+    def _workflow_setting_key(self, index, substep):
+        return f'{int(index)}:{int(substep)}'
+
+    def _capture_workflow_step_settings(self, index, substep=0):
+        step = self._workflow_action(index, substep)
+        if step is None:
+            return
+        role = str(step.get('role') or '')
+        role_combo = self.task_role_combos.get(role)
+        self._workflow_step_settings[self._workflow_setting_key(index, substep)] = {
+            'step': copy.deepcopy(step),
+            'target_id': str(role_combo.currentData() or '') if role_combo else '',
+            'arm_side': str(self.grasp_arm.currentData() or ''),
+            'allow_waist': self.waist_participation.isChecked(),
+            'pose_method': str(self.source_combo.currentData() or ''),
+            'execution_mode': str(self.execution_mode.currentData() or ''),
+            'motion_stage': str(self.motion_stage.currentData() or ''),
+            'contact_offsets_cm': [spin.value() for spin in self.contact_offsets],
+            'wrench_guard': self.wrench_guard_check.isChecked(),
+            'force_limit_n': self.force_limit.value(),
+            'torque_limit_nm': self.torque_limit.value(),
+        }
+
+    def _apply_workflow_step_settings(self, index, substep=0):
+        settings = (self._workflow_step_settings.get(self._workflow_setting_key(index, substep))
+                    or self._workflow_step_settings.get(str(int(index))))
+        if not settings:
+            return
+        execution = self.execution_mode.findData(settings.get('execution_mode'))
+        if execution >= 0 and not self._workflow_auto_running:
+            self.execution_mode.setCurrentIndex(execution)
+        arm = self.grasp_arm.findData(settings.get('arm_side'))
+        if arm >= 0:
+            self.grasp_arm.setCurrentIndex(arm)
+        self.waist_participation.setChecked(bool(settings.get('allow_waist', False)))
+        method = self.source_combo.findData(settings.get('pose_method'))
+        if method >= 0 and self.source_combo.model().item(method).isEnabled():
+            self.source_combo.setCurrentIndex(method)
+        stage = self.motion_stage.findData(settings.get('motion_stage'))
+        if stage >= 0:
+            self.motion_stage.setCurrentIndex(stage)
+        for spin, value in zip(self.contact_offsets, settings.get('contact_offsets_cm') or []):
+            spin.setValue(float(value))
+        self.wrench_guard_check.setChecked(bool(settings.get('wrench_guard', True)))
+        self.force_limit.setValue(float(settings.get('force_limit_n', self.force_limit.value())))
+        self.torque_limit.setValue(float(settings.get('torque_limit_nm', self.torque_limit.value())))
+        target_id = str(settings.get('target_id') or '')
+        step = self._workflow_action(index, substep) or {}
+        role_combo = self.task_role_combos.get(str(step.get('role') or ''))
+        if role_combo is not None and target_id:
+            target_index = role_combo.findData(target_id)
+            if target_index >= 0:
+                role_combo.setCurrentIndex(target_index)
+
+    def save_current_task(self):
+        if self.runner or self.process or self.reserved:
+            self.message = '请先停止当前任务，再保存任务数据。'
+            self.refresh()
+            return
+        if not self.save_task_data:
+            self.task_data_status.setText('任务数据保存不可用：未连接保存入口')
+            return
+        try:
+            result = self.save_task_data(str(self.task_combo.currentData()), self.current_task_state())
+            self.task_data_status.setText('任务数据：' + str(result or '保存完成'))
+            self.message = str(result or '任务数据保存完成')
+        except Exception as exc:
+            self.task_data_status.setText('任务数据保存失败：' + str(exc))
+            self.message = '任务数据保存失败：' + str(exc)
+        self.refresh()
+
+    def _refresh_task_role_targets(self):
+        if not hasattr(self, 'task_role_combos'):
+            return
+        for combo in self.task_role_combos.values():
+            selected = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem('请选择…', '')
+            for target_id, entry in self.target_observations.items():
+                combo.addItem(entry.get('label') or target_id, target_id)
+            index = combo.findData(selected)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.blockSignals(False)
+
+    def reset_task_workflow(self):
+        if self.runner or self.process:
+            return
+        self._workflow_step = 0
+        self._workflow_substep = 0
+        self._workflow_finished = False
+        self._workflow_waiting = False
+        self.task_flow.set_current(0)
+        self.message = f"{self.task_combo.currentText()}：请选择任务目标，然后执行流程下一步。"
+        self.refresh()
+
+    def select_workflow_step(self, index):
+        if self.runner or self.process or self._workflow_waiting or self._workflow_auto_running:
+            self.message = '当前正在规划或执行，不能跳转流程步骤。'
+            self.refresh()
+            return
+        task = TASKS[str(self.task_combo.currentData())]
+        index = max(0, min(int(index), len(task['steps'])-1))
+        self._workflow_step = index
+        self._workflow_substep = 0
+        self._workflow_finished = False
+        self.sequence = Sequence()
+        self.scene_confirm.setChecked(False)
+        self.task_flow.set_current(index)
+        self._apply_workflow_step_settings(index, 0)
+        action = self._workflow_action()
+        role = str((action or {}).get('role') or '')
+        combo = self.task_role_combos.get(role)
+        target_id = str(combo.currentData() or '') if combo else ''
+        if target_id:
+            self.select_target_observation(target_id)
+        top = task['steps'][index]
+        self.message = f"已跳转到：{top['label']}" + (
+            f" → {action['label']}" if top['kind'] == 'sequence' and action else '')
+        self.refresh()
+
+    def _advance_task_workflow(self):
+        task = TASKS[str(self.task_combo.currentData())]
+        completed_action = self._workflow_action()
+        completed_kind = (completed_action or {}).get('kind', 'confirm')
+        top = task['steps'][self._workflow_step]
+        actions = top.get('actions') or ()
+        if actions and self._workflow_substep+1 < len(actions):
+            self._workflow_substep += 1
+            self.task_flow.set_current(self._workflow_step)
+            self._apply_workflow_step_settings(self._workflow_step, self._workflow_substep)
+            action = self._workflow_action()
+            self.message = f"流程：{top['label']} → {action['label']}"
+        elif self._workflow_step+1 < len(task['steps']):
+            self._workflow_step += 1
+            self._workflow_substep = 0
+            self.task_flow.set_current(self._workflow_step)
+            self._apply_workflow_step_settings(self._workflow_step, 0)
+            step = task['steps'][self._workflow_step]
+            action = self._workflow_action()
+            self.message = f"流程进入：{step['label']}" + (f" → {action['label']}" if step['kind']=='sequence' else '')
+        else:
+            self._workflow_finished = True
+            self.task_flow.set_current(len(task['steps']))
+            self.message = f"{task['name']}流程已完成。"
+        if (self._workflow_auto_running and not self._workflow_auto_cancel_requested
+                and not self._workflow_finished):
+            self._schedule_auto_workflow(1000 if completed_kind == 'hand' else 200)
+
+    def _workflow_target(self, role):
+        combo = self.task_role_combos.get(role)
+        target_id = str(combo.currentData() or '') if combo else ''
+        if not target_id or target_id not in self.target_observations:
+            raise ValueError(f"请先选择{dict(TASKS[str(self.task_combo.currentData())]['roles'])[role]}目标")
+        for other_role, other_combo in self.task_role_combos.items():
+            other_id = str(other_combo.currentData() or '')
+            if other_role != role and other_id and target_id == other_id:
+                labels = dict(TASKS[str(self.task_combo.currentData())]['roles'])
+                raise ValueError(f"{labels[role]}目标和{labels[other_role]}目标不能相同")
+        self.select_target_observation(target_id)
+        return target_id
+
+    def _workflow_hand(self, opened):
+        profile = self.selected_profile()
+        self.reserve(require_preview=False)
+        values = profile['open_positions' if opened else 'close_positions']
+        if self.is_simulation:
+            self.simulation_backend().hand(profile['arm_side'], values)
+        else:
+            self.node._grasp_hand_command_authorized = True
+            try:
+                self.node.apply_hand_joint_positions(profile['arm_side'], values)
+            finally:
+                self.node._grasp_hand_command_authorized = False
+        self.set_reserved(False)
+
+    def execute_workflow_next(self):
+        if self.runner or self.process or self._workflow_waiting:
+            return
+        task = TASKS[str(self.task_combo.currentData())]
+        step = self._workflow_action()
+        if step is None or self._workflow_finished:
+            self.message = f"{task['name']}流程已完成。"
+            self.refresh()
+            return
+        try:
+            self._capture_workflow_step_settings(self._workflow_step, self._workflow_substep)
+            kind = step['kind']
+            if kind == 'target':
+                self._workflow_target(step['role'])
+                self._advance_task_workflow()
+            elif kind == 'motion':
+                self._workflow_target(step['role'])
+                self.motion_stage.setCurrentIndex(self.motion_stage.findData(step['stage']))
+                self._workflow_waiting = True
+                self.execute()
+                if self.runner is None and self.process is None:
+                    self._workflow_waiting = False
+            elif kind == 'hand':
+                self._workflow_target(step['role'])
+                self._workflow_hand(step['open'])
+                self._advance_task_workflow()
+            elif kind == 'confirm':
+                self._advance_task_workflow()
+            elif kind == 'complete':
+                self._advance_task_workflow()
+        except Exception as exc:
+            self._workflow_waiting = False
+            self.set_reserved(False)
+            self.message = str(exc)
+            if self._workflow_auto_running:
+                self._workflow_auto_paused = True
+        self.refresh()
+
+    def _capture_auto_workflow_start(self):
+        if self.is_simulation:
+            simulation = self.simulation_backend()
+            return dict(simulation.feedback(), hands=copy.deepcopy(simulation.hands))
+        measured = copy.deepcopy(self.feedback())
+        try:
+            measured['hands'] = self.read_startup_hands()
+        except Exception:
+            measured['hands'] = {}
+        return measured
+
+    def toggle_all_workflow(self):
+        if self._workflow_auto_running:
+            self.cancel_all_workflow()
+            return
+        if self.runner or self.process or self.reserved:
+            self.message = '请先停止当前动作，再执行全部流程。'
+            self.refresh()
+            return
+        try:
+            for role, label in TASKS[str(self.task_combo.currentData())]['roles']:
+                combo = self.task_role_combos.get(role)
+                if combo is None or not combo.currentData():
+                    raise ValueError(f'请先选择{label}目标')
+            self._workflow_step = 0
+            self._workflow_substep = 0
+            self._workflow_finished = False
+            self._workflow_waiting = False
+            self.task_flow.set_current(0)
+            self._apply_workflow_step_settings(0, 0)
+            if not self.is_simulation and not self.scene_confirm.isChecked():
+                raise ValueError('真机全部执行前，请确认完整流程路径及手周围无障碍')
+            self._workflow_auto_initial_snapshot = self._capture_auto_workflow_start()
+            self._workflow_auto_running = True
+            self._workflow_auto_paused = False
+            self._workflow_auto_cancel_requested = False
+            self._workflow_auto_restoring = False
+            self.message = f'{self.task_combo.currentText()}：开始全部执行。'
+            self._schedule_auto_workflow(0)
+        except Exception as exc:
+            self.message = '全部执行未启动：' + str(exc)
+        self.refresh()
+
+    def _schedule_auto_workflow(self, delay_ms=250):
+        if (self._workflow_auto_running and not self._workflow_auto_paused
+                and not self._workflow_auto_cancel_requested):
+            self._workflow_auto_timer.start(max(0, int(delay_ms)))
+
+    def _run_auto_workflow_next(self):
+        if (not self._workflow_auto_running or self._workflow_auto_paused
+                or self._workflow_auto_cancel_requested or self.runner or self.process
+                or self._workflow_waiting):
+            return
+        task = TASKS[str(self.task_combo.currentData())]
+        step = self._workflow_action()
+        if self._workflow_finished or step is None:
+            self._workflow_auto_running = False
+            self._workflow_auto_initial_snapshot = None
+            self._workflow_auto_paused = False
+            self.message = f'{task["name"]}：全部流程执行完成。'
+            self.refresh()
+            return
+        self.execute_workflow_next()
+        if self._workflow_finished:
+            self._workflow_auto_running = False
+            self._workflow_auto_initial_snapshot = None
+            self._workflow_auto_paused = False
+            self.message = f'{task["name"]}：全部流程执行完成。'
+            self.refresh()
+
+    def toggle_auto_workflow_pause(self):
+        if not self._workflow_auto_running or self._workflow_auto_cancel_requested:
+            return
+        if self._workflow_auto_paused:
+            if self.runner is not None and self.runner.state == 'paused':
+                self.pause_or_resume()
+                if self.runner.state != 'running':
+                    return
+            elif self.runner is None and self.process is None and self.sequence.state == 'planned':
+                self._execute_ready_plan()
+                if self.runner is None:
+                    return
+            self._workflow_auto_paused = False
+            self.message = '全部流程继续执行。'
+            self._schedule_auto_workflow(0)
+        else:
+            self._workflow_auto_paused = True
+            self._workflow_auto_timer.stop()
+            if self.runner is not None and self.runner.state == 'running':
+                self.pause_or_resume()
+            self.message = '全部流程已暂停；当前轨迹保持位置。'
+        self.refresh()
+
+    def cancel_all_workflow(self):
+        if not self._workflow_auto_running:
+            return
+        self._workflow_auto_cancel_requested = True
+        self._workflow_auto_paused = False
+        self._workflow_auto_timer.stop()
+        self._execute_after_plan = False
+        self._workflow_waiting = False
+        if self.process is not None:
+            self.sequence.stop(motion_active=False)
+            self.process.terminate()
+        if self.runner is not None:
+            self.runner.stop('全部流程取消，准备恢复流程初始状态')
+        self.message = '正在取消全部流程；停止确认后恢复第一个流程的初始状态。'
+        if self.process is None and self.runner is None:
+            self._begin_auto_workflow_restore()
+        self.refresh()
+
+    def _begin_auto_workflow_restore(self):
+        if self._workflow_auto_restoring or not self._workflow_auto_initial_snapshot:
+            return
+        self._workflow_auto_restoring = True
+        try:
+            self._start_restore_snapshot(self._workflow_auto_initial_snapshot, auto_restore=True)
+            if self.runner is None:
+                raise ValueError(self.message or '恢复轨迹未启动')
+            self.message = '全部流程已取消，正在恢复流程初始双臂和双手状态。'
+        except Exception as exc:
+            self._finish_auto_workflow_cancel(False, str(exc))
+
+    def _finish_auto_workflow_cancel(self, restored, detail=''):
+        self._workflow_auto_timer.stop()
+        self._workflow_auto_running = False
+        self._workflow_auto_paused = False
+        self._workflow_auto_cancel_requested = False
+        self._workflow_auto_restoring = False
+        self._workflow_auto_initial_snapshot = None
+        self._workflow_waiting = False
+        self._workflow_step = 0
+        self._workflow_substep = 0
+        self._workflow_finished = False
+        self.task_flow.set_current(0)
+        self._apply_workflow_step_settings(0, 0)
+        self.message = ('全部流程已取消并恢复到流程初始状态。' if restored else
+                        '全部流程已取消，但恢复初始状态失败：' + detail)
+        self.refresh()
+
     def set_method_observations(self, observations):
         if self.reserved or self.process or self.runner:
             return
@@ -755,7 +1441,8 @@ class GraspExecutionPanel(QWidget):
     def reserve(self, require_preview=True):
         if not self.is_simulation and self.other_busy():
             raise ValueError('已有手臂移动/文本队列/遥控，请先结束，不能同时控制')
-        if not self.scene_confirm.isChecked() and not self.is_simulation:
+        if (not self.scene_confirm.isChecked() and not self.is_simulation
+                and not self._workflow_auto_restoring):
             raise ValueError('本阶段尚未接入自动避障，请先确认本段路径周围无障碍')
         if not self.is_simulation and (not self.node.is_arm_enabled() or not self.node.is_hand_enabled()):
             raise ValueError('请先手动启用手臂和手；抓取流程不自动使能')
@@ -856,12 +1543,15 @@ class GraspExecutionPanel(QWidget):
             self._startup_recording = False
             self.reserve()
             if not self.is_simulation:
-                sides = ('left', 'right') if self.sequence.plan.get('arm_side') == 'both' else (self.sequence.plan['arm_side'],)
+                sides = (('left', 'right') if (self.sequence.plan.get('arm_side') == 'both'
+                                               or self.sequence.plan.get('other_tcp_held'))
+                         else (self.sequence.plan['arm_side'],))
                 violation = self.wrench_guard_violation(sides)
                 if violation:
                     raise ValueError('六维力保护未就绪：' + violation)
             plan = self.sequence.begin_execute(
-                manual_path_confirmed=self.scene_confirm.isChecked() or self.is_simulation
+                manual_path_confirmed=(self.scene_confirm.isChecked() or self.is_simulation
+                                       or self._workflow_auto_restoring)
             )
             if self.is_simulation:
                 simulation = self.simulation_backend()
@@ -902,7 +1592,8 @@ class GraspExecutionPanel(QWidget):
             if self.runner.state == 'paused':
                 if self._wrench_guard_triggered:
                     side = self.runner.plan.get('arm_side', 'right')
-                    sides = ('left', 'right') if side == 'both' else (side,)
+                    sides = (('left', 'right') if (side == 'both' or self.runner.plan.get('other_tcp_held'))
+                             else (side,))
                     violation = self.wrench_guard_violation(sides)
                     if violation:
                         self.message = '六维力仍不满足继续条件：' + violation
@@ -945,6 +1636,7 @@ class GraspExecutionPanel(QWidget):
                            '--request', str(self.job_directory / 'request.json'),
                            '--output', str(self.job_directory / 'result.json')])
         self.message = '宿主机 IK 预检中（不会发送运动命令）…'
+        self.execution_feedback.setText(self.message)
 
     def read_output(self):
         if self.process:
@@ -977,28 +1669,45 @@ class GraspExecutionPanel(QWidget):
                 self.execution_feedback.setText(self.message)
             else:
                 self.sequence.accept_plan(result)
+                hold_note = '；另一只手末端保持 base_link 位姿' if result.get('other_tcp_held') else ''
                 self.message = (f"{result['stage']} IK/限位/连续性预检通过，约 {result['times_s'][-1]:.1f} 秒。"
-                                '本段路径确认已保留，可直接点击“执行本段”；未做自动碰撞检查。')
+                                f'本段路径确认已保留，可直接点击“执行本段”{hold_note}；未做自动碰撞检查。')
         except Exception as exc:
             self.sequence.fail(str(exc))
             self.message = ('执行未启动：' if execute_requested else '') + str(exc)
             self.execution_feedback.setText(self.message)
+        self.execution_feedback.setText(self.message)
         if self.sequence.state in ('complete', 'stopped', 'failed'):
             self.set_reserved(False)
+        if self._workflow_waiting and self.sequence.state == 'failed':
+            self._workflow_waiting = False
         execute_after = self._execute_after_plan
         self._execute_after_plan = False
         if execute_after and self.sequence.state == 'planned':
-            self.execution_feedback.setText('IK 预检通过，正在启动执行。')
-            self._execute_ready_plan()
+            if self._workflow_auto_running and self._workflow_auto_paused:
+                self.execution_feedback.setText('IK 预检通过；全部流程已暂停，等待继续。')
+                self.message = self.execution_feedback.text()
+            else:
+                self.execution_feedback.setText('IK 预检通过，正在启动执行。')
+                self._execute_ready_plan()
         elif self.sequence.state == 'planned':
             self.set_reserved(False)
+        elif self._workflow_auto_running and self.sequence.state == 'failed':
+            self._workflow_auto_paused = True
+            self._workflow_waiting = False
+        if self._workflow_auto_cancel_requested and self.process is None and self.runner is None:
+            QTimer.singleShot(0, self._begin_auto_workflow_restore)
         self.refresh()
 
     def stop(self):
+        if self._workflow_auto_running and not self._workflow_auto_cancel_requested:
+            self.cancel_all_workflow()
+            return
         self._execute_after_plan = False
         self._restoring = False
         self._restore_hands_goal = None
         self._wrench_guard_triggered = None
+        self._workflow_waiting = False
         if self.sequence.state == 'stop_unconfirmed':
             self.message = '保持位置未获反馈确认，保留控制锁。请使用机器人停止装置并检查状态。'
             self.refresh()
@@ -1019,10 +1728,13 @@ class GraspExecutionPanel(QWidget):
         if self.runner:
             if not self.is_simulation and self.runner.state == 'running':
                 side = self.runner.plan.get('arm_side', 'right')
-                sides = ('left', 'right') if side == 'both' else (side,)
+                sides = (('left', 'right') if (side == 'both' or self.runner.plan.get('other_tcp_held'))
+                         else (side,))
                 violation = self.wrench_guard_violation(sides)
                 if violation:
                     self._wrench_guard_triggered = violation
+                    if self._workflow_auto_running:
+                        self._workflow_auto_paused = True
                     self.runner.pause()
                     self.message = '六维力保护触发，正在暂停并保持位置：' + violation
             self.runner.tick()
@@ -1035,6 +1747,7 @@ class GraspExecutionPanel(QWidget):
                     self.message = self.runner.message
             if self.runner.state not in ('running', 'pausing', 'paused', 'stopping'):
                 state, message = self.runner.state, self.runner.message
+                was_auto_restore = self._workflow_auto_restoring
                 if self._restoring:
                     if state == 'complete':
                         try:
@@ -1042,6 +1755,7 @@ class GraspExecutionPanel(QWidget):
                         except Exception as exc:
                             state, message = 'failed', str(exc)
                     self._restoring = False
+                    self._workflow_auto_restoring = False
                     self._restore_hands_goal = None
                 self.runner = None
                 if not self.is_simulation:
@@ -1057,26 +1771,58 @@ class GraspExecutionPanel(QWidget):
                     if state == 'stop_unconfirmed':
                         self.sequence.state = state
                 self.message = message
-                self.scene_confirm.setChecked(False)
+                if not self._workflow_auto_running:
+                    self.scene_confirm.setChecked(False)
                 if state == 'complete':
                     self.set_reserved(False)
                 if self.sequence.state in ('complete', 'stopped', 'failed'):
                     self.set_reserved(False)
                     self.observation = None  # A physical movement consumes the observation.
+                if was_auto_restore:
+                    self._finish_auto_workflow_cancel(state == 'complete', message or state)
+                elif self._workflow_auto_cancel_requested:
+                    QTimer.singleShot(0, self._begin_auto_workflow_restore)
+                elif self._workflow_waiting:
+                    self._workflow_waiting = False
+                    if state == 'complete':
+                        self._advance_task_workflow()
+                    else:
+                        self.message = '流程步骤未完成：' + (message or state)
+                        if self._workflow_auto_running:
+                            self._workflow_auto_paused = True
         if self.process and self.sequence.state != 'stopped' and time.monotonic()-self.started > 180:
             self.stop()
             self.message = 'IK 预检超时，已取消'
+            self.execution_feedback.setText(self.message)
         self.refresh()
 
     def refresh(self):
         state, stage = self.sequence.state, self.sequence.stage
         busy = self.process is not None or self.runner is not None
+        auto_locked = self._workflow_auto_running
+        self.task_combo.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
+        self.task_new_button.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
+        self.task_copy_button.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
+        self.task_manage_button.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
+        self.workflow_next_button.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
+        self.workflow_reset_button.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
+        self.task_save_button.setEnabled(not busy and not self.reserved and not auto_locked)
+        self.workflow_all_button.setText('取消执行' if auto_locked else '全部执行')
+        self.workflow_all_button.setEnabled(not self._workflow_auto_cancel_requested)
+        self.workflow_auto_pause_button.setText('继续执行' if self._workflow_auto_paused else '暂停')
+        pause_ready = (not self._workflow_auto_paused or self.runner is None
+                       or self.runner.state == 'paused')
+        self.workflow_auto_pause_button.setEnabled(
+            auto_locked and not self._workflow_auto_cancel_requested and pause_ready)
+        self.grasp_target_combo.setEnabled(not busy and not self.reserved and not auto_locked)
+        for combo in self.task_role_combos.values():
+            combo.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
         guard_editable = self.runner is None or self.runner.state == 'paused'
         for widget in (self.wrench_guard_check, self.force_limit, self.torque_limit):
-            widget.setEnabled(guard_editable and self.process is None)
+            widget.setEnabled(guard_editable and self.process is None and not auto_locked)
         self.restore_button.setEnabled(not busy and state != 'stop_unconfirmed')
-        self.motion_stage.setEnabled(not busy and state != 'stop_unconfirmed')
-        self.execution_mode.setEnabled(not busy and not self.reserved)
+        self.motion_stage.setEnabled(not busy and state != 'stop_unconfirmed' and not auto_locked)
+        self.execution_mode.setEnabled(not busy and not self.reserved and not auto_locked)
         self.simulation_controls_button.setEnabled(self.is_simulation and not busy)
         runner_state = self.runner.state if self.runner is not None else ''
         self.pause_button.setEnabled(runner_state in ('running', 'paused'))
@@ -1097,8 +1843,8 @@ class GraspExecutionPanel(QWidget):
         else:
             self.plan_expiry_label.setText('尚无待执行计划；预检通过后开始倒计时')
         self.source_combo.setEnabled(not busy and not self.reserved and bool(self.method_observations))
-        self.grasp_arm.setEnabled(not busy and not self.reserved)
-        self.waist_participation.setEnabled(not busy and not self.reserved)
+        self.grasp_arm.setEnabled(not busy and not self.reserved and not auto_locked)
+        self.waist_participation.setEnabled(not busy and not self.reserved and not auto_locked)
         self.suggest_shape_button.setEnabled(not busy and not self.reserved)
         self.apply_shape_button.setEnabled(not busy and not self.reserved and self.hand_shape_suggestion is not None)
         self.preview_button.setEnabled(not busy and not self.reserved and self.observation is not None)
@@ -1141,8 +1887,18 @@ class GraspExecutionPanel(QWidget):
         if runner_state in ('pausing', 'paused'):
             states['executing'] = '正在暂停' if runner_state == 'pausing' else '已暂停'
         display_stage = stage or (getattr(self.sequence, 'pending_stage', None) if state in ('planning', 'planned', 'executing') else None)
+        startup = self._startup_snapshot or {}
+        startup_state = ('双臂+双手已记录' if startup.get('hands') else
+                         ('仅双臂已记录，双手缺失' if startup else '尚未记录'))
+        top_step = self.task_flow.current_step or {}
+        action = self._workflow_action()
+        workflow_text = top_step.get('label', '已完成')
+        if top_step.get('kind') == 'sequence' and action:
+            workflow_text += ' → ' + action['label']
         lines = [('仿真执行（仅运动学播放，不控制真机）' if self.is_simulation else '真机执行'),
+                 '启动恢复状态: '+startup_state,
                  ('腰部参与 IK 与执行' if self.waist_participation.isChecked() else '腰部固定'),
+                 f"任务: {self.task_combo.currentText()}；当前流程: {workflow_text}",
                  f"状态: {states.get(state, state)}；当前/下一阶段: {stages.get(display_stage, '--')}",
                  '手动分步模式：未接入自动避障', self.message]
         if self.observation:

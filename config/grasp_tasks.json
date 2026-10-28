@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "tasks": {
+    "phone_box_assembly": {
+      "name": "手机盒装配",
+      "builtin": true,
+      "roles": [
+        ["phone", "手机"],
+        ["box", "手机盒"],
+        ["lid", "手机盒盖"]
+      ],
+      "steps": [
+        {"label":"拿起手机","kind":"sequence","actions":[
+          {"label":"选择手机","kind":"target","role":"phone"},
+          {"label":"预抓取手机","kind":"motion","role":"phone","stage":"pregrasp"},
+          {"label":"接近手机","kind":"motion","role":"phone","stage":"approach"},
+          {"label":"闭合抓取","kind":"hand","role":"phone","open":false},
+          {"label":"确认夹持","kind":"confirm"},
+          {"label":"抬起手机","kind":"motion","role":"phone","stage":"lift"}
+        ]},
+        {"label":"放入手机盒","kind":"sequence","actions":[
+          {"label":"移动至盒上方","kind":"motion","role":"box","stage":"pregrasp"},
+          {"label":"放入盒内","kind":"motion","role":"box","stage":"approach"},
+          {"label":"张开释放手机","kind":"hand","role":"box","open":true},
+          {"label":"撤离手机盒","kind":"motion","role":"box","stage":"lift"}
+        ]},
+        {"label":"盖上手机盒","kind":"sequence","actions":[
+          {"label":"选择盒盖","kind":"target","role":"lid"},
+          {"label":"预抓取盒盖","kind":"motion","role":"lid","stage":"pregrasp"},
+          {"label":"接近盒盖","kind":"motion","role":"lid","stage":"approach"},
+          {"label":"闭合抓取盒盖","kind":"hand","role":"lid","open":false},
+          {"label":"抬起盒盖","kind":"motion","role":"lid","stage":"lift"},
+          {"label":"移动盒盖至盒上方","kind":"motion","role":"box","stage":"pregrasp"},
+          {"label":"放下盒盖","kind":"motion","role":"box","stage":"approach"},
+          {"label":"张开释放盒盖","kind":"hand","role":"box","open":true},
+          {"label":"撤离盒盖","kind":"motion","role":"box","stage":"lift"}
+        ]}
+      ]
+    },
+    "task_792ffcb18f": {
+      "name": "叠纸盒",
+      "builtin": false,
+      "roles": [
+        [
+          "phone",
+          "手机"
+        ],
+        [
+          "box",
+          "手机盒"
+        ]
+      ],
+      "steps": [
+        {
+          "label": "选择手机",
+          "kind": "target",
+          "role": "phone"
+        },
+        {
+          "label": "预抓取手机",
+          "kind": "motion",
+          "role": "phone",
+          "stage": "pregrasp"
+        },
+        {
+          "label": "接近手机",
+          "kind": "motion",
+          "role": "phone",
+          "stage": "approach"
+        },
+        {
+          "label": "闭合抓取",
+          "kind": "hand",
+          "role": "phone",
+          "open": false
+        },
+        {
+          "label": "确认夹持",
+          "kind": "confirm"
+        },
+        {
+          "label": "抬起手机",
+          "kind": "motion",
+          "role": "phone",
+          "stage": "lift"
+        },
+        {
+          "label": "移动至盒上方",
+          "kind": "motion",
+          "role": "box",
+          "stage": "pregrasp"
+        },
+        {
+          "label": "放入盒内",
+          "kind": "motion",
+          "role": "box",
+          "stage": "approach"
+        },
+        {
+          "label": "张开释放",
+          "kind": "hand",
+          "role": "box",
+          "open": true
+        },
+        {
+          "label": "撤离盒子",
+          "kind": "motion",
+          "role": "box",
+          "stage": "lift"
+        },
+        {
+          "label": "完成",
+          "kind": "complete"
+        }
+      ]
+    }
+  }
+}

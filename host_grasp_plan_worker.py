@@ -12,7 +12,7 @@ import time
 import numpy as np
 
 from click_pose import validate_transform
-from grasp_execution import (TCP_POSITION_TOLERANCE_M,
+from grasp_execution import (IK_ADJACENT_JUMP_LIMIT_RAD, TCP_POSITION_TOLERANCE_M,
                              TCP_ROTATION_TOLERANCE_RAD, timed_waypoints)
 
 
@@ -51,6 +51,9 @@ def prepare(request):
         pin.updateFramePlacements(ik.model, ik.data)
         return ik.data.oMf[fid].copy()
     start = check(seed, '起点')
+    held_side = 'right' if side == 'left' else 'left'
+    held_fid = ik._right_fid if side == 'left' else ik._left_fid
+    held_start = ik.data.oMf[held_fid].copy()
     T = validate_transform(preview['goals'][stage])
     dist = np.linalg.norm(T[:3, 3]-start.translation)
     delta_rotation = pin.log3(start.rotation.T @ T[:3, :3])
@@ -127,12 +130,48 @@ def prepare(request):
                     f'旋转误差 {np.degrees(rotation_error):.2f}°'
                     f'（上限 {np.degrees(TCP_ROTATION_TOLERANCE_RAD):.2f}°）'
                 )
-            if np.max(np.abs(solved-np.asarray(rows[-1]))) > .12:
-                raise ValueError('相邻 IK 解跳变超过 0.12 rad')
+            jump = np.abs(solved-np.asarray(rows[-1]))
+            if np.max(jump) > IK_ADJACENT_JUMP_LIMIT_RAD:
+                joint = int(np.argmax(jump))
+                raise ValueError(
+                    f'相邻 IK 解跳变：路径 {alpha:.0%}，{_JOINT_NAMES[joint]} '
+                    f'变化 {jump[joint]:.3f}rad，超过 {IK_ADJACENT_JUMP_LIMIT_RAD:.2f}rad')
             if np.max(np.abs(solved[fixed]-seed[fixed])) > 1e-7:
                 raise ValueError('IK 改动了腰部或另一只手臂')
             rows.append(solved.tolist())
         path_kind = 'cartesian'
+    other_tcp_held = False
+    if allow_waist:
+        held_quat = pin.Quaternion(held_start.rotation).coeffs()
+        active_indices = list(range(2,9)) if side == 'left' else list(range(9,16))
+        compensated = [list(rows[0])]
+        for row_index, row in enumerate(rows[1:], 1):
+            before = np.asarray(row, dtype=float)
+            solved = ik.solve(
+                before.tolist(), moving_side=held_side,
+                goal_xyz=tuple(held_start.translation), goal_xyzw=tuple(held_quat),
+                pos_tol=.002, ori_tol=.02, max_iters=250,
+                prefer_position=False, allow_waist=False,
+            )
+            if solved is None:
+                raise ValueError(f'腰部补偿失败：{held_side} 手 TCP 在路径 {row_index/(len(rows)-1):.0%} 无解')
+            solved = np.asarray(solved, dtype=float)
+            check(solved, f'另一侧 TCP 补偿 {row_index/(len(rows)-1):.0%}')
+            if np.max(np.abs(solved[[0,1,*active_indices]]-before[[0,1,*active_indices]])) > 1e-7:
+                raise ValueError('另一侧 TCP 补偿改动了腰部或执行臂')
+            held_actual = ik.data.oMf[held_fid]
+            held_pos_error = float(np.linalg.norm(held_actual.translation-held_start.translation))
+            held_rot_error = float(np.linalg.norm(pin.log3(held_start.rotation.T@held_actual.rotation)))
+            if held_pos_error > TCP_POSITION_TOLERANCE_M or held_rot_error > TCP_ROTATION_TOLERANCE_RAD:
+                raise ValueError(
+                    f'另一侧 TCP 保持误差过大：路径 {row_index/(len(rows)-1):.0%}，'
+                    f'位置 {held_pos_error*1000:.1f}mm，旋转 {np.degrees(held_rot_error):.1f}°')
+            jump = np.max(np.abs(solved-np.asarray(compensated[-1])))
+            if jump > IK_ADJACENT_JUMP_LIMIT_RAD:
+                raise ValueError(f'另一侧 TCP 补偿关节跳变 {jump:.3f}rad，超过 {IK_ADJACENT_JUMP_LIMIT_RAD:.2f}rad')
+            compensated.append(solved.tolist())
+        rows = compensated
+        other_tcp_held = True
     # Check interpolated paths as well, including TCP workspace bounds.
     bounds = np.asarray(profile['workspace_m'])
     for a, b in zip(rows, rows[1:]):
@@ -140,6 +179,12 @@ def prepare(request):
             actual = check(q)
             if np.any(actual.translation < bounds[0]) or np.any(actual.translation > bounds[1]):
                 raise ValueError('插值路径超出工作空间')
+            if other_tcp_held:
+                held_actual = ik.data.oMf[held_fid]
+                held_pos_error = float(np.linalg.norm(held_actual.translation-held_start.translation))
+                held_rot_error = float(np.linalg.norm(pin.log3(held_start.rotation.T@held_actual.rotation)))
+                if held_pos_error > TCP_POSITION_TOLERANCE_M or held_rot_error > TCP_ROTATION_TOLERANCE_RAD:
+                    raise ValueError('插值路径无法保持另一只手的末端空间位置')
     times = timed_waypoints(rows, profile['joint_velocity_rad_s'], profile['joint_acceleration_rad_s2'])
     if times[-1] > 180:
         raise ValueError('单段轨迹超过 180 秒，请缩短移动距离')
@@ -147,6 +192,8 @@ def prepare(request):
             'backend': 'host_ik_manual', 'ik_checked': True, 'joint_limits_checked': True,
             'collision_checked': False, 'path_kind': path_kind,
             'waist_included': allow_waist,
+            'other_tcp_held': other_tcp_held, 'held_side': held_side,
+            'held_target': held_start.homogeneous.tolist(),
             'planned_at': time.time(), 'target': T.tolist(),
             'joint_waypoints': rows, 'times_s': times,
             'urdf_sha256': hashlib.sha256(Path(profile['urdf_path']).read_bytes()).hexdigest()}

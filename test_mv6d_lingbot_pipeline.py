@@ -91,6 +91,19 @@ class Harness:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_multi_target_batch_reuses_capture_and_lingbot_depth(self):
+        h = Harness()
+        h._mv6d_batch_active = True
+        h._mv6d_batch_capture = None
+        h._mv6d_batch_depth_cache = None
+        self.assertTrue(h.run()['ok'])
+        first_events = list(h.events)
+        h._mv6d_busy = False  # Real UI callback clears this before advancing the batch.
+        self.assertTrue(h.run()['ok'])
+        self.assertEqual(first_events,
+                         ['lingbot:head','lingbot:left_wrist','lingbot:right_wrist','sam3'])
+        self.assertEqual(h.events, first_events + ['sam3'])
+
     def test_all_backends_share_refined_depth_even_with_sensor_depth(self):
         for backend in ('pca', 'foundationpose', 'any6d'):
             with self.subTest(backend=backend):
