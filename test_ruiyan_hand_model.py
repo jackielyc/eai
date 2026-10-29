@@ -1,6 +1,8 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 import numpy as np
 from PyQt5.QtWidgets import QApplication
@@ -8,6 +10,12 @@ from robot_view3d import RuiyanHandModel, RobotView3D
 
 
 class HandModelTests(unittest.TestCase):
+    def setUp(self):
+        self.preferences = tempfile.TemporaryDirectory()
+        self.preferences_path = Path(self.preferences.name)/'state.json'
+
+    def tearDown(self):
+        self.preferences.cleanup()
     @classmethod
     def setUpClass(cls):
         cls.model = RuiyanHandModel()
@@ -35,7 +43,7 @@ class HandModelTests(unittest.TestCase):
 
     def test_hand_controls_only_callback_in_simulation(self):
         with patch.object(RobotView3D, '_load'), patch.object(RobotView3D, '_tick'):
-            view = RobotView3D()
+            view = RobotView3D(preferences_path=self.preferences_path)
             calls = []
             view.simulation_hand_callback = lambda side, values: calls.append((side, values))
             self.assertFalse(view._sim_hand_controls['right'][2].isEnabled())
@@ -50,7 +58,7 @@ class HandModelTests(unittest.TestCase):
 
     def test_multi_target_pose_layer_can_be_toggled(self):
         with patch.object(RobotView3D, '_load'), patch.object(RobotView3D, '_tick'):
-            view=RobotView3D();view._target_pose_item=view._make_pose6d()
+            view=RobotView3D(preferences_path=self.preferences_path);view._target_pose_item=view._make_pose6d()
             view.set_target_poses([{'xyz':[.3,.1,.8],'rotation':np.eye(3),
                                     'extents':[.1,.2,.3]}])
             self.assertTrue(view._target_pose_item['enabled'])

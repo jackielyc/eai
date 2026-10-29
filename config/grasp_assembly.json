@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "tcp_targets": {},
+  "relations": {
+    "phone_box_assembly:phone:box": {"calibrated": false, "pose_method": "pca", "T_reference_object": null, "clearance_m": 0.05, "approach_axis_reference": [0, 0, 1]},
+    "phone_box_assembly:lid:box": {"calibrated": false, "pose_method": "pca", "T_reference_object": null, "clearance_m": 0.05, "approach_axis_reference": [0, 0, 1]}
+  },
+  "notes": "待标定：T_reference_object 为手机/盒盖在盒子坐标系内的期望物体位姿，不是 TCP 位姿。插入仍需实测精度与接触控制验证。"
+}

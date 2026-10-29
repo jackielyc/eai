@@ -13,10 +13,13 @@ DEFAULT_TASKS = {
     'phone_box_assembly': {
         'name': '手机盒装配',
         'builtin': True,
+        'definition_revision': 4,
+        'program_type': 'phone_assembly',
         'roles': (('phone', '手机'), ('box', '手机盒'), ('lid', '手机盒盖')),
         'steps': (
             {'label': '拿起手机', 'kind': 'sequence', 'actions': (
                 {'label': '选择手机', 'kind': 'target', 'role': 'phone'},
+                {'label': '张开手准备抓取手机', 'kind': 'hand', 'role': 'phone', 'open': True},
                 {'label': '预抓取手机', 'kind': 'motion', 'role': 'phone', 'stage': 'pregrasp'},
                 {'label': '接近手机', 'kind': 'motion', 'role': 'phone', 'stage': 'approach'},
                 {'label': '闭合抓取', 'kind': 'hand', 'role': 'phone', 'open': False},
@@ -28,17 +31,217 @@ DEFAULT_TASKS = {
                 {'label': '放入盒内', 'kind': 'motion', 'role': 'box', 'stage': 'approach'},
                 {'label': '张开释放手机', 'kind': 'hand', 'role': 'box', 'open': True},
                 {'label': '撤离手机盒', 'kind': 'motion', 'role': 'box', 'stage': 'lift'},
+                {'label': '确认手机已正确放入盒内', 'kind': 'confirm'},
             )},
             {'label': '盖上手机盒', 'kind': 'sequence', 'actions': (
                 {'label': '选择盒盖', 'kind': 'target', 'role': 'lid'},
+                {'label': '张开手准备抓取盒盖', 'kind': 'hand', 'role': 'lid', 'open': True},
                 {'label': '预抓取盒盖', 'kind': 'motion', 'role': 'lid', 'stage': 'pregrasp'},
                 {'label': '接近盒盖', 'kind': 'motion', 'role': 'lid', 'stage': 'approach'},
                 {'label': '闭合抓取盒盖', 'kind': 'hand', 'role': 'lid', 'open': False},
+                {'label': '确认盒盖夹持稳定', 'kind': 'confirm'},
                 {'label': '抬起盒盖', 'kind': 'motion', 'role': 'lid', 'stage': 'lift'},
                 {'label': '移动盒盖至盒上方', 'kind': 'motion', 'role': 'box', 'stage': 'pregrasp'},
                 {'label': '放下盒盖', 'kind': 'motion', 'role': 'box', 'stage': 'approach'},
                 {'label': '张开释放盒盖', 'kind': 'hand', 'role': 'box', 'open': True},
                 {'label': '撤离盒盖', 'kind': 'motion', 'role': 'box', 'stage': 'lift'},
+                {'label': '确认盒盖已对齐并盖合', 'kind': 'confirm'},
+            )},
+        ),
+    },
+    'cake_packaging': {
+        'name': '蛋糕打包',
+        'builtin': True,
+        'definition_revision': 1,
+        'roles': (('cake', '蛋糕'), ('box', '蛋糕盒'), ('lid', '盒盖')),
+        'steps': (
+            {'label': '装入蛋糕', 'kind': 'sequence', 'actions': (
+                {'label': '选择蛋糕', 'kind': 'target', 'role': 'cake'},
+                {'label': '预抓取蛋糕', 'kind': 'motion', 'role': 'cake', 'stage': 'pregrasp'},
+                {'label': '接近蛋糕', 'kind': 'motion', 'role': 'cake', 'stage': 'approach'},
+                {'label': '闭合抓取蛋糕', 'kind': 'hand', 'role': 'cake', 'open': False},
+                {'label': '确认蛋糕夹持稳定', 'kind': 'confirm'},
+                {'label': '抬起蛋糕', 'kind': 'motion', 'role': 'cake', 'stage': 'lift'},
+                {'label': '移动到蛋糕盒上方', 'kind': 'motion', 'role': 'box', 'stage': 'pregrasp'},
+                {'label': '放入蛋糕盒', 'kind': 'motion', 'role': 'box', 'stage': 'approach'},
+                {'label': '张开释放蛋糕', 'kind': 'hand', 'role': 'box', 'open': True},
+                {'label': '撤离蛋糕盒', 'kind': 'motion', 'role': 'box', 'stage': 'lift'},
+            )},
+            {'label': '盖上盒盖', 'kind': 'sequence', 'actions': (
+                {'label': '选择盒盖', 'kind': 'target', 'role': 'lid'},
+                {'label': '预抓取盒盖', 'kind': 'motion', 'role': 'lid', 'stage': 'pregrasp'},
+                {'label': '接近盒盖', 'kind': 'motion', 'role': 'lid', 'stage': 'approach'},
+                {'label': '闭合抓取盒盖', 'kind': 'hand', 'role': 'lid', 'open': False},
+                {'label': '确认盒盖夹持稳定', 'kind': 'confirm'},
+                {'label': '抬起盒盖', 'kind': 'motion', 'role': 'lid', 'stage': 'lift'},
+                {'label': '移动盒盖至包装盒上方', 'kind': 'motion', 'role': 'box', 'stage': 'pregrasp'},
+                {'label': '放下盒盖', 'kind': 'motion', 'role': 'box', 'stage': 'approach'},
+                {'label': '张开释放盒盖', 'kind': 'hand', 'role': 'box', 'open': True},
+                {'label': '撤离盒盖', 'kind': 'motion', 'role': 'box', 'stage': 'lift'},
+            )},
+            {'label': '确认打包', 'kind': 'sequence', 'actions': (
+                {'label': '检查蛋糕位于盒内', 'kind': 'confirm'},
+                {'label': '检查盒盖已对齐', 'kind': 'confirm'},
+                {'label': '确认蛋糕打包完成', 'kind': 'complete'},
+            )},
+        ),
+    },
+    'test_tube_experiment': {
+        'name': '试管实验',
+        'builtin': True,
+        'definition_revision': 1,
+        'roles': (('tube', '试管'), ('station', '实验位置'), ('rack', '试管架')),
+        'steps': (
+            {'label': '取出试管', 'kind': 'sequence', 'actions': (
+                {'label': '选择试管', 'kind': 'target', 'role': 'tube'},
+                {'label': '预抓取试管', 'kind': 'motion', 'role': 'tube', 'stage': 'pregrasp'},
+                {'label': '接近试管', 'kind': 'motion', 'role': 'tube', 'stage': 'approach'},
+                {'label': '闭合抓取试管', 'kind': 'hand', 'role': 'tube', 'open': False},
+                {'label': '确认试管夹持稳定', 'kind': 'confirm'},
+                {'label': '垂直抬起试管', 'kind': 'motion', 'role': 'tube', 'stage': 'lift'},
+            )},
+            {'label': '移至实验位置', 'kind': 'sequence', 'actions': (
+                {'label': '移动到实验位置上方', 'kind': 'motion', 'role': 'station', 'stage': 'pregrasp'},
+                {'label': '下降到实验位置', 'kind': 'motion', 'role': 'station', 'stage': 'approach'},
+                {'label': '人工完成加样或观察', 'kind': 'confirm'},
+                {'label': '离开实验位置', 'kind': 'motion', 'role': 'station', 'stage': 'lift'},
+            )},
+            {'label': '放回试管架', 'kind': 'sequence', 'actions': (
+                {'label': '移动到试管架上方', 'kind': 'motion', 'role': 'rack', 'stage': 'pregrasp'},
+                {'label': '插回试管架', 'kind': 'motion', 'role': 'rack', 'stage': 'approach'},
+                {'label': '张开释放试管', 'kind': 'hand', 'role': 'rack', 'open': True},
+                {'label': '撤离试管架', 'kind': 'motion', 'role': 'rack', 'stage': 'lift'},
+            )},
+            {'label': '确认完成', 'kind': 'sequence', 'actions': (
+                {'label': '确认试管已稳定放置', 'kind': 'confirm'},
+                {'label': '确认实验区域无遗留物', 'kind': 'confirm'},
+                {'label': '确认试管实验完成', 'kind': 'complete'},
+            )},
+        ),
+    },
+    'sichuan_mahjong': {
+        'name': '四川麻将',
+        'builtin': True,
+        'definition_revision': 1,
+        'roles': (('draw_tile', '待摸牌'), ('hand_slot', '手牌放置位'),
+                  ('discard_tile', '待打牌'), ('discard_area', '牌河位置')),
+        'steps': (
+            {'label': '摸牌', 'kind': 'sequence', 'actions': (
+                {'label': '选择待摸牌', 'kind': 'target', 'role': 'draw_tile'},
+                {'label': '预抓取待摸牌', 'kind': 'motion', 'role': 'draw_tile', 'stage': 'pregrasp'},
+                {'label': '接近待摸牌', 'kind': 'motion', 'role': 'draw_tile', 'stage': 'approach'},
+                {'label': '闭合夹取麻将牌', 'kind': 'hand', 'role': 'draw_tile', 'open': False},
+                {'label': '确认麻将牌夹持稳定', 'kind': 'confirm'},
+                {'label': '抬起麻将牌', 'kind': 'motion', 'role': 'draw_tile', 'stage': 'lift'},
+                {'label': '移动到手牌位置上方', 'kind': 'motion', 'role': 'hand_slot', 'stage': 'pregrasp'},
+                {'label': '放到手牌位置', 'kind': 'motion', 'role': 'hand_slot', 'stage': 'approach'},
+                {'label': '张开释放麻将牌', 'kind': 'hand', 'role': 'hand_slot', 'open': True},
+                {'label': '撤离手牌位置', 'kind': 'motion', 'role': 'hand_slot', 'stage': 'lift'},
+            )},
+            {'label': '整理与判断', 'kind': 'sequence', 'actions': (
+                {'label': '确认新牌已进入手牌区', 'kind': 'confirm'},
+                {'label': '人工判断定缺、碰、杠或胡', 'kind': 'confirm'},
+                {'label': '确认本轮待打牌', 'kind': 'confirm'},
+            )},
+            {'label': '打牌', 'kind': 'sequence', 'actions': (
+                {'label': '选择待打牌', 'kind': 'target', 'role': 'discard_tile'},
+                {'label': '预抓取待打牌', 'kind': 'motion', 'role': 'discard_tile', 'stage': 'pregrasp'},
+                {'label': '接近待打牌', 'kind': 'motion', 'role': 'discard_tile', 'stage': 'approach'},
+                {'label': '闭合夹取待打牌', 'kind': 'hand', 'role': 'discard_tile', 'open': False},
+                {'label': '确认待打牌夹持稳定', 'kind': 'confirm'},
+                {'label': '抬起待打牌', 'kind': 'motion', 'role': 'discard_tile', 'stage': 'lift'},
+                {'label': '移动到牌河上方', 'kind': 'motion', 'role': 'discard_area', 'stage': 'pregrasp'},
+                {'label': '放入牌河', 'kind': 'motion', 'role': 'discard_area', 'stage': 'approach'},
+                {'label': '张开释放待打牌', 'kind': 'hand', 'role': 'discard_area', 'open': True},
+                {'label': '撤离牌河', 'kind': 'motion', 'role': 'discard_area', 'stage': 'lift'},
+            )},
+            {'label': '确认回合', 'kind': 'sequence', 'actions': (
+                {'label': '确认手牌数量和排列', 'kind': 'confirm'},
+                {'label': '确认出牌位于正确牌河位置', 'kind': 'confirm'},
+                {'label': '确认本回合操作完成', 'kind': 'complete'},
+            )},
+        ),
+    },
+    'optical_module_installation': {
+        'name': '光模块安装',
+        'builtin': True,
+        'definition_revision': 1,
+        'roles': (('module', '光模块'), ('port', '安装端口')),
+        'steps': (
+            {'label': '准备安装位', 'kind': 'sequence', 'actions': (
+                {'label': '选择安装端口', 'kind': 'target', 'role': 'port'},
+                {'label': '确认端口无异物且方向正确', 'kind': 'confirm'},
+                {'label': '确认光模块保护帽和拉环状态', 'kind': 'confirm'},
+            )},
+            {'label': '拿起光模块', 'kind': 'sequence', 'actions': (
+                {'label': '选择光模块', 'kind': 'target', 'role': 'module'},
+                {'label': '预抓取光模块', 'kind': 'motion', 'role': 'module', 'stage': 'pregrasp'},
+                {'label': '接近光模块', 'kind': 'motion', 'role': 'module', 'stage': 'approach'},
+                {'label': '闭合夹取光模块', 'kind': 'hand', 'role': 'module', 'open': False},
+                {'label': '确认光模块夹持稳定', 'kind': 'confirm'},
+                {'label': '抬起光模块', 'kind': 'motion', 'role': 'module', 'stage': 'lift'},
+            )},
+            {'label': '对准并插入', 'kind': 'sequence', 'actions': (
+                {'label': '移动到安装端口前方', 'kind': 'motion', 'role': 'port', 'stage': 'pregrasp'},
+                {'label': '沿端口方向插入光模块', 'kind': 'motion', 'role': 'port', 'stage': 'approach'},
+                {'label': '确认光模块完全到位', 'kind': 'confirm'},
+                {'label': '张开释放光模块', 'kind': 'hand', 'role': 'port', 'open': True},
+                {'label': '撤离安装端口', 'kind': 'motion', 'role': 'port', 'stage': 'lift'},
+            )},
+            {'label': '验证安装', 'kind': 'sequence', 'actions': (
+                {'label': '确认锁扣或拉环已锁定', 'kind': 'confirm'},
+                {'label': '确认模块无倾斜和松动', 'kind': 'confirm'},
+                {'label': '确认光模块安装完成', 'kind': 'complete'},
+            )},
+        ),
+    },
+    'clothes_folding': {
+        'name': '叠衣服',
+        'builtin': True,
+        'definition_revision': 1,
+        'roles': (('garment_center', '衣服中心'), ('left_edge', '左侧衣边'),
+                  ('right_edge', '右侧衣边'), ('lower_edge', '衣服下摆')),
+        'steps': (
+            {'label': '展平定位', 'kind': 'sequence', 'actions': (
+                {'label': '选择衣服中心', 'kind': 'target', 'role': 'garment_center'},
+                {'label': '确认衣服已展平且无遮挡', 'kind': 'confirm'},
+                {'label': '确认左右衣边和下摆目标', 'kind': 'confirm'},
+            )},
+            {'label': '折左侧', 'kind': 'sequence', 'actions': (
+                {'label': '选择左侧衣边', 'kind': 'target', 'role': 'left_edge'},
+                {'label': '预抓取左侧衣边', 'kind': 'motion', 'role': 'left_edge', 'stage': 'pregrasp'},
+                {'label': '接近左侧衣边', 'kind': 'motion', 'role': 'left_edge', 'stage': 'approach'},
+                {'label': '闭合夹取左侧衣边', 'kind': 'hand', 'role': 'left_edge', 'open': False},
+                {'label': '抬起左侧衣边', 'kind': 'motion', 'role': 'left_edge', 'stage': 'lift'},
+                {'label': '移动到衣服中心上方', 'kind': 'motion', 'role': 'garment_center', 'stage': 'pregrasp'},
+                {'label': '放下左侧衣边', 'kind': 'motion', 'role': 'garment_center', 'stage': 'approach'},
+                {'label': '张开释放左侧衣边', 'kind': 'hand', 'role': 'garment_center', 'open': True},
+                {'label': '撤离并确认左侧折叠', 'kind': 'motion', 'role': 'garment_center', 'stage': 'lift'},
+                {'label': '确认衣服形状并按需重新估计', 'kind': 'confirm'},
+            )},
+            {'label': '折右侧', 'kind': 'sequence', 'actions': (
+                {'label': '选择右侧衣边', 'kind': 'target', 'role': 'right_edge'},
+                {'label': '预抓取右侧衣边', 'kind': 'motion', 'role': 'right_edge', 'stage': 'pregrasp'},
+                {'label': '接近右侧衣边', 'kind': 'motion', 'role': 'right_edge', 'stage': 'approach'},
+                {'label': '闭合夹取右侧衣边', 'kind': 'hand', 'role': 'right_edge', 'open': False},
+                {'label': '抬起右侧衣边', 'kind': 'motion', 'role': 'right_edge', 'stage': 'lift'},
+                {'label': '移动到衣服中心上方', 'kind': 'motion', 'role': 'garment_center', 'stage': 'pregrasp'},
+                {'label': '放下右侧衣边', 'kind': 'motion', 'role': 'garment_center', 'stage': 'approach'},
+                {'label': '张开释放右侧衣边', 'kind': 'hand', 'role': 'garment_center', 'open': True},
+                {'label': '撤离并确认右侧折叠', 'kind': 'motion', 'role': 'garment_center', 'stage': 'lift'},
+                {'label': '确认衣服形状并按需重新估计', 'kind': 'confirm'},
+            )},
+            {'label': '对折完成', 'kind': 'sequence', 'actions': (
+                {'label': '选择衣服下摆', 'kind': 'target', 'role': 'lower_edge'},
+                {'label': '预抓取衣服下摆', 'kind': 'motion', 'role': 'lower_edge', 'stage': 'pregrasp'},
+                {'label': '接近衣服下摆', 'kind': 'motion', 'role': 'lower_edge', 'stage': 'approach'},
+                {'label': '闭合夹取衣服下摆', 'kind': 'hand', 'role': 'lower_edge', 'open': False},
+                {'label': '抬起衣服下摆', 'kind': 'motion', 'role': 'lower_edge', 'stage': 'lift'},
+                {'label': '移动到衣服中心上方', 'kind': 'motion', 'role': 'garment_center', 'stage': 'pregrasp'},
+                {'label': '放下衣服下摆', 'kind': 'motion', 'role': 'garment_center', 'stage': 'approach'},
+                {'label': '张开释放衣服', 'kind': 'hand', 'role': 'garment_center', 'open': True},
+                {'label': '撤离衣服', 'kind': 'motion', 'role': 'garment_center', 'stage': 'lift'},
+                {'label': '确认衣服折叠完成', 'kind': 'complete'},
             )},
         ),
     },
@@ -59,7 +262,8 @@ def validate_task(task):
     if len(role_keys) != len(roles):
         raise ValueError('目标角色标识不能重复')
     def normalize_step(raw, *, nested=False):
-        step = dict(raw)
+        from grasp_world import expand_skill
+        step = expand_skill(dict(raw))
         step['label'] = str(step.get('label') or '').strip()
         step['kind'] = str(step.get('kind') or '').strip()
         if not step['label'] or step['kind'] not in VALID_KINDS:
@@ -84,8 +288,14 @@ def validate_task(task):
     steps = [normalize_step(raw) for raw in task.get('steps') or ()]
     if not steps:
         raise ValueError('任务至少需要一个流程步骤')
-    return {'name': name, 'builtin': bool(task.get('builtin', False)),
+    result={'name': name, 'builtin': bool(task.get('builtin', False)),
+            'definition_revision': max(1, int(task.get('definition_revision', 1))),
             'roles': roles, 'steps': tuple(steps)}
+    if task.get('program_type'):
+        if task['program_type']!='phone_assembly' or not {'phone','box','lid'}.issubset(role_keys) or len(steps)!=3:
+            raise ValueError('手机装配程序需要phone/box/lid角色和三个高层流程')
+        result['program_type']=task['program_type']
+    return result
 
 
 def load_tasks(path=TASK_CONFIG_PATH):
@@ -98,6 +308,24 @@ def load_tasks(path=TASK_CONFIG_PATH):
                 continue
             tasks[str(key)] = validate_task(task)
     return tasks
+
+
+def reconcile_settings(settings, task, allow_legacy=True):
+    """Match saved action semantics, not shifted ordinal positions after edits."""
+    fields=('label','kind','role','stage','open','operation')
+    def signature(step):return json.dumps({k:step[k] for k in fields if k in step},sort_keys=True)
+    locations={}
+    for index,top in enumerate(task['steps']):
+        for substep,action in enumerate(top.get('actions') or (top,)):
+            locations.setdefault(signature(action),[]).append(f'{index}:{substep}')
+    result={}
+    for key,value in settings.items():
+        old=value.get('step')
+        if old:
+            matches=locations.get(signature(old),[])
+            if len(matches)==1:result[matches[0]]=copy.deepcopy(value)
+        elif allow_legacy:result[key]=copy.deepcopy(value)
+    return result
 
 
 def save_tasks(tasks, path=TASK_CONFIG_PATH):
@@ -132,6 +360,8 @@ def parse_roles(text):
 def parse_steps(text):
     steps = []
     for line in str(text).splitlines():
+        nested=line.lstrip().startswith('>')
+        if nested:line=line.lstrip()[1:]
         parts = [part.strip() for part in line.split('|')]
         if not parts or not parts[0]:
             continue
@@ -143,19 +373,30 @@ def parse_steps(text):
             step['stage'] = parts[3]
         if kind == 'hand' and len(parts) > 3:
             step['open'] = parts[3].lower() in ('open', 'true', '1', '张开')
-        steps.append(step)
+        if len(parts)>4 and parts[4]:step['operation']=parts[4]
+        if nested:
+            if not steps or steps[-1]['kind']!='sequence':raise ValueError('子步骤必须位于 sequence 后面')
+            steps[-1].setdefault('actions',[]).append(step)
+        else:steps.append(step)
     return tuple(steps)
 
 
 def format_steps(task):
     lines = []
-    for step in task['steps']:
-        parts = [step['label'], step['kind'], str(step.get('role') or '')]
+    def emit(step,prefix=''):
+        kind=step.get('skill',step['kind'])
+        parts = [step['label'], kind, str(step.get('role') or '')]
         if step['kind'] == 'motion':
             parts.append(step['stage'])
         elif step['kind'] == 'hand':
             parts.append('open' if step.get('open') else 'close')
-        lines.append('|'.join(parts).rstrip('|'))
+        if step.get('operation'):
+            while len(parts)<4:parts.append('')
+            parts.append(step['operation'])
+        lines.append(prefix+'|'.join(parts).rstrip('|'))
+        if kind=='sequence':
+            for action in step['actions']:emit(action,'> ')
+    for step in task['steps']:emit(step)
     return '\n'.join(lines)
 
 
@@ -200,8 +441,10 @@ class TaskFlowWidget(QScrollArea):
         self._labels = []
         self._steps = ()
         self._current = 0
+        self._completed_steps = None
 
     def set_task(self, task):
+        self._runtime_status_key = None
         while self._layout.count():
             item = self._layout.takeAt(0)
             if item.widget():
@@ -228,7 +471,7 @@ class TaskFlowWidget(QScrollArea):
     def set_current(self, index):
         self._current = max(0, min(int(index), len(self._labels)))
         for i, label in enumerate(self._labels):
-            if i < self._current:
+            if i != self._current and (i in self._completed_steps if self._completed_steps is not None else i < self._current):
                 style = 'background:#245f3b;color:#dff7e7;border:1px solid #43a565;'
             elif i == self._current:
                 style = 'background:#7a4b12;color:#fff2d6;border:2px solid #ffb84d;font-weight:600;'
@@ -239,4 +482,29 @@ class TaskFlowWidget(QScrollArea):
     @property
     def current_step(self):
         return self._steps[self._current] if self._steps and self._current < len(self._steps) else None
+
+    def set_completed_steps(self, indices):
+        completed = set(indices)
+        if completed != self._completed_steps:
+            self._completed_steps = completed
+            self._runtime_status_key = None
+
+    def set_runtime_status(self, text, state='active'):
+        key = (self._current, text, state)
+        if getattr(self, '_runtime_status_key', None) == key:
+            return
+        self._runtime_status_key = key
+        self.setToolTip(text)
+        self.set_current(self._current)
+        if self._current >= len(self._labels):
+            return
+        label = self._labels[self._current]
+        label.setToolTip(text)
+        styles = {
+            'failed': 'background:#702c2c;color:#ffe1e1;border:2px solid #ff6969;',
+            'paused': 'background:#494050;color:#f1e7ff;border:2px solid #bc9bdd;',
+            'confirm': 'background:#194e69;color:#e1f5ff;border:2px solid #61c7ff;',
+        }
+        if state in styles:
+            label.setStyleSheet('QLabel{'+styles[state]+'border-radius:5px;padding:4px 8px;}')
 

@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from grasp_trajectory import exceeds, sample as sample_profiled_trajectory
 
 
 TCP_POSITION_TOLERANCE_M = .015
@@ -17,7 +18,7 @@ IK_ADJACENT_JUMP_LIMIT_RAD = .18
 WRENCH_MAX_AGE_S = .5
 
 
-def evaluate_wrench(sample, force_limit_n, torque_limit_nm, now=None):
+def evaluate_wrench(sample, force_limit_n, torque_limit_nm, now=None, policy=None):
     """Return (violation, force_norm, torque_norm) for a wrist sample."""
     now = time.time() if now is None else float(now)
     if not isinstance(sample, dict):
@@ -38,6 +39,24 @@ def evaluate_wrench(sample, force_limit_n, torque_limit_nm, now=None):
         return f'合力 {force_norm:.2f}N 超过 {force_limit_n:.2f}N', force_norm, torque_norm
     if torque_norm > float(torque_limit_nm):
         return f'合力矩 {torque_norm:.3f}N·m 超过 {torque_limit_nm:.3f}N·m', force_norm, torque_norm
+    if policy and policy.get('calibrated'):
+        # Raw norm limits above always remain active, even with compensation.
+        from click_pose import validate_transform
+        try:
+            if 'force_coordinate' in sample and int(sample['force_coordinate'])!=int(policy.get('input_coordinate',0)):
+                raise ValueError('六维力坐标类型与标定不一致')
+            T=validate_transform(policy['T_mount_sensor'])
+            bias=np.asarray(policy.get('bias',[0.]*6),float)
+            limits=np.asarray(policy['component_limits'],float)
+            if bias.shape!=(6,) or limits.shape!=(6,) or not np.isfinite([bias,limits]).all() or np.any(limits<=0):
+                raise ValueError('六维偏置/分量阈值无效')
+            mount_force=T[:3,:3]@(force-bias[:3])
+            mount_torque=T[:3,:3]@(torque-bias[3:])+np.cross(T[:3,3],mount_force)
+            values=np.r_[mount_force,mount_torque]
+            if np.any(abs(values)>limits):
+                axis=int(np.argmax(abs(values)/limits))
+                return f'连接件方向分量 {axis+1} 超限：{values[axis]:.3f}（阈值 {limits[axis]:.3f}）',force_norm,torque_norm
+        except Exception as exc:return '连接件力保护配置无效：'+str(exc),force_norm,torque_norm
     return None, force_norm, torque_norm
 
 from click_pose import validate_transform
@@ -117,7 +136,7 @@ class JointRunner:
         measured = self.feedback()
         if measured.get('urdf_sha256') != plan.get('urdf_sha256'):
             raise ValueError('反馈与轨迹使用了不同的机器人模型')
-        if np.max(np.abs(np.asarray(measured['q16'])-self.rows[0])) > .02:
+        if exceeds(measured['q16'], self.rows[0], 'start'):
             raise ValueError('机器人已偏离轨迹起点，请重新预检')
         self.started = clock()
         self.state, self.message = 'running', ''
@@ -141,7 +160,7 @@ class JointRunner:
         measured = self.feedback()
         if not self.enabled() or measured.get('urdf_sha256') != self.plan.get('urdf_sha256'):
             raise ValueError('使能或机器人模型不匹配，不能继续')
-        if np.max(np.abs(np.asarray(measured['q16']) - self.last_command)) > .005:
+        if exceeds(measured['q16'], self.last_command, 'hold'):
             raise ValueError('暂停后关节位置发生变化，请停止并重新预检')
         self.started = self.clock() - self.trajectory_elapsed
         self.stable_count = 0
@@ -173,7 +192,7 @@ class JointRunner:
                 if self.enabled():
                     self.publish(self.hold.tolist())
                 if measured['arm_received_at'] != self.last_feedback_stamp:
-                    self.stable_count = self.stable_count+1 if np.max(np.abs(q-self.hold)) < .005 else 0
+                    self.stable_count = self.stable_count+1 if not exceeds(q, self.hold, 'hold') else 0
                     self.last_feedback_stamp = measured['arm_received_at']
                 if self.stable_count >= 3:
                     self.state = 'failed' if self.failure else 'stopped'
@@ -184,19 +203,19 @@ class JointRunner:
                 if measured.get('urdf_sha256') != self.plan.get('urdf_sha256'):
                     raise ValueError('暂停期间机器人模型变化')
                 error = np.max(np.abs(q-self.last_command))
-                if error > .15 or (self.state == 'paused' and error > .005):
+                if exceeds(q, self.last_command, 'tracking') or (self.state == 'paused' and exceeds(q, self.last_command, 'hold')):
                     raise ValueError('暂停期间关节偏离保持位置')
                 self.publish(self.last_command.tolist())
                 if measured['arm_received_at'] != self.last_feedback_stamp:
-                    self.stable_count = self.stable_count+1 if error < .005 else 0
+                    self.stable_count = self.stable_count+1 if not exceeds(q, self.last_command, 'hold') else 0
                     self.last_feedback_stamp = measured['arm_received_at']
                 if self.stable_count >= 3:
                     self.state, self.message = 'paused', '已暂停，可点击继续执行'
                 elif now-self.pause_started > 3:
                     self.stop('暂停未获静止反馈确认', failed=True)
                 return
-            if np.max(np.abs(q-self.last_command)) > .15:
-                self.stop('实际关节偏离指令超过 0.15 rad', failed=True)
+            if exceeds(q, self.last_command, 'tracking'):
+                self.stop('实际关节偏离指令超过逐关节阈值（升降0.02m，旋转0.15rad）', failed=True)
                 return
             side = self.plan['arm_side']
             waist_fixed = [] if self.plan.get('waist_included') else [0, 1]
@@ -204,28 +223,37 @@ class JointRunner:
                      ([0, 1] if side == 'both' else
                       (list(range(9, 16)) + waist_fixed if side == 'left'
                        else list(range(2, 9)) + waist_fixed)))
-            if fixed and np.max(np.abs(q[fixed]-self.rows[0, fixed])) > .03:
+            if fixed and exceeds(q, self.rows[0], 'fixed', fixed):
                 self.stop('另一只手臂或腰部发生移动', failed=True)
                 return
+            if self.plan.get('other_tcp_held'):
+                held=measured[self.plan['held_side']]
+                target=validate_transform(self.plan['held_target'])
+                rotation=rotation_from_quaternion(held['xyzw'])
+                angle=np.arccos(np.clip((np.trace(target[:3,:3].T@rotation)-1)/2,-1,1))
+                if np.linalg.norm(np.asarray(held['xyz'])-target[:3,3])>TCP_POSITION_TOLERANCE_M or angle>TCP_ROTATION_TOLERANCE_RAD:
+                    self.stop('另一只手TCP偏离保持目标',failed=True)
+                    return
             elapsed = now-self.started
             # Large event-loop stalls must not skip forward along a trajectory.
-            command = sample_trajectory(self.rows, self.times, elapsed)
-            if np.max(np.abs(command-self.last_command)) > .03:
+            command = (sample_profiled_trajectory(self.plan, elapsed) if 'trajectory_coefficients' in self.plan
+                       else sample_trajectory(self.rows, self.times, elapsed))
+            if exceeds(command, self.last_command, 'tick'):
                 self.stop('控制循环延迟过大，取消后续轨迹', failed=True)
                 return
             self.publish(command.tolist())
             self.last_command = command
             self.trajectory_elapsed = elapsed
             if elapsed >= self.times[-1]:
-                reached = np.max(np.abs(q-self.rows[-1])) < .02
+                reached = not exceeds(q, self.rows[-1], 'goal')
                 for target_side in (('left','right') if side == 'both' else (side,)):
                     tcp = measured[target_side]
                     T = validate_transform(self.plan['targets'][target_side] if side == 'both' else self.plan['target'])
                     R = rotation_from_quaternion(tcp['xyzw'])
                     angle = np.arccos(np.clip((np.trace(T[:3, :3].T @ R)-1)/2, -1, 1))
                     reached = (reached
-                               and np.linalg.norm(np.asarray(tcp['xyz'])-T[:3, 3]) < TCP_POSITION_TOLERANCE_M
-                               and angle < TCP_ROTATION_TOLERANCE_RAD)
+                               and np.linalg.norm(np.asarray(tcp['xyz'])-T[:3, 3]) < self.plan.get('position_tolerance_m',TCP_POSITION_TOLERANCE_M)
+                               and angle < self.plan.get('rotation_tolerance_rad',TCP_ROTATION_TOLERANCE_RAD))
                 if self.plan.get('other_tcp_held'):
                     held_side = self.plan['held_side']
                     held_tcp = measured[held_side]
@@ -437,7 +465,7 @@ class Sequence:
             self.fail("规划已过期，请停止后重新估计/规划")
             raise ValueError(self.error)
         if not manual_path_confirmed:
-            raise ValueError("当前未接入碰撞规划，请先确认本段路径周围无障碍")
+            raise ValueError("请先确认现场与碰撞场景模型一致，本段路径没有未建模障碍")
         self.state = "executing"
         return copy.deepcopy(self.plan)
 

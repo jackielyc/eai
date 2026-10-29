@@ -6,6 +6,7 @@ import time
 import numpy as np
 from PyQt5.QtWidgets import (
     QComboBox,
+    QCheckBox,
     QDoubleSpinBox,
     QHBoxLayout,
     QLabel,
@@ -21,6 +22,7 @@ from camera_extrinsic_calib import (
     express_in_tcp,
     point_from_tcp,
     save_camera,
+    load_store,
     solve_rigid,
     unproject,
 )
@@ -71,6 +73,14 @@ class CameraExtrinsicCalibPanel(QWidget):
         self.probe.addItem("右臂 TCP", "right")
         row.addWidget(self.probe)
         layout.addLayout(row)
+
+        registration=QHBoxLayout()
+        self.depth_registered=QCheckBox('已核对传感器深度与彩色图像素配准')
+        self.depth_registered.setToolTip('须核对相机驱动的深度配准；勾选不会执行图像配准。LingBot生成深度单独记录来源。')
+        registration.addWidget(self.depth_registered)
+        registration_save=QPushButton('保存配准确认')
+        registration_save.clicked.connect(self.save_registration)
+        registration.addWidget(registration_save);layout.addLayout(registration)
 
         krow = QHBoxLayout()
         self.fx = _spin(0, 0, 5000, 10, "")
@@ -128,6 +138,9 @@ class CameraExtrinsicCalibPanel(QWidget):
         self.samples = []
         self.marker_base = None
         spec = self._spec()
+        try:registered=bool(load_store().get('cameras',{}).get(spec['topic'],{}).get('depth_registered_to_color'))
+        except Exception:registered=False
+        self.depth_registered.setChecked(registered)
         wrist = spec["model"] == "eye_in_hand"
         self.marker_button.setEnabled(wrist)
         self.fx.setValue(float(spec["fx"]))
@@ -135,6 +148,15 @@ class CameraExtrinsicCalibPanel(QWidget):
         self.cx.setValue(float(spec["cx"]))
         self.cy.setValue(float(spec["cy"]))
         self.log.setPlainText(self._instructions())
+
+    def save_registration(self):
+        try:
+            topic=self._spec()['topic'];entry=load_store().get('cameras',{}).get(topic)
+            if not entry:raise ValueError('请先完成该相机外参标定')
+            entry['depth_registered_to_color']=self.depth_registered.isChecked()
+            save_camera(topic,entry)
+            self._say('配准确认已保存；请重新估计目标，旧观测标定版本已失效。')
+        except Exception as exc:self._say('未保存配准确认：'+str(exc))
 
     def _instructions(self) -> str:
         spec = self._spec()
@@ -316,6 +338,7 @@ class CameraExtrinsicCalibPanel(QWidget):
                 "model": spec["model"],
                 "frame_id": self.samples[-1].get("frame_id") or "camera_frame",
                 "base_frame": "base_link",
+                "depth_registered_to_color": self.depth_registered.isChecked(),
                 "intrinsics": {"fx": self.fx.value(), "fy": self.fy.value(), "cx": self.cx.value(), "cy": self.cy.value(), "width": spec["width"], "height": spec["height"]},
                 "rms_m": float(np.sqrt(np.mean(err ** 2))),
                 "max_m": float(np.max(err)),

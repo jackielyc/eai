@@ -4,6 +4,7 @@
     "phone_box_assembly": {
       "name": "手机盒装配",
       "builtin": true,
+      "definition_revision": 2,
       "roles": [
         ["phone", "手机"],
         ["box", "手机盒"],
@@ -37,81 +38,239 @@
         ]}
       ]
     },
+    "cake_packaging": {
+      "name": "蛋糕打包",
+      "builtin": true,
+      "definition_revision": 1,
+      "roles": [["cake", "蛋糕"], ["box", "蛋糕盒"], ["lid", "盒盖"]],
+      "steps": [
+        {"label":"装入蛋糕","kind":"sequence","actions":[
+          {"label":"选择蛋糕","kind":"target","role":"cake"},
+          {"label":"预抓取蛋糕","kind":"motion","role":"cake","stage":"pregrasp"},
+          {"label":"接近蛋糕","kind":"motion","role":"cake","stage":"approach"},
+          {"label":"闭合抓取蛋糕","kind":"hand","role":"cake","open":false},
+          {"label":"确认蛋糕夹持稳定","kind":"confirm"},
+          {"label":"抬起蛋糕","kind":"motion","role":"cake","stage":"lift"},
+          {"label":"移动到蛋糕盒上方","kind":"motion","role":"box","stage":"pregrasp"},
+          {"label":"放入蛋糕盒","kind":"motion","role":"box","stage":"approach"},
+          {"label":"张开释放蛋糕","kind":"hand","role":"box","open":true},
+          {"label":"撤离蛋糕盒","kind":"motion","role":"box","stage":"lift"}
+        ]},
+        {"label":"盖上盒盖","kind":"sequence","actions":[
+          {"label":"选择盒盖","kind":"target","role":"lid"},
+          {"label":"预抓取盒盖","kind":"motion","role":"lid","stage":"pregrasp"},
+          {"label":"接近盒盖","kind":"motion","role":"lid","stage":"approach"},
+          {"label":"闭合抓取盒盖","kind":"hand","role":"lid","open":false},
+          {"label":"确认盒盖夹持稳定","kind":"confirm"},
+          {"label":"抬起盒盖","kind":"motion","role":"lid","stage":"lift"},
+          {"label":"移动盒盖至包装盒上方","kind":"motion","role":"box","stage":"pregrasp"},
+          {"label":"放下盒盖","kind":"motion","role":"box","stage":"approach"},
+          {"label":"张开释放盒盖","kind":"hand","role":"box","open":true},
+          {"label":"撤离盒盖","kind":"motion","role":"box","stage":"lift"}
+        ]},
+        {"label":"确认打包","kind":"sequence","actions":[
+          {"label":"检查蛋糕位于盒内","kind":"confirm"},
+          {"label":"检查盒盖已对齐","kind":"confirm"},
+          {"label":"确认蛋糕打包完成","kind":"complete"}
+        ]}
+      ]
+    },
+    "test_tube_experiment": {
+      "name": "试管实验",
+      "builtin": true,
+      "definition_revision": 1,
+      "roles": [["tube", "试管"], ["station", "实验位置"], ["rack", "试管架"]],
+      "steps": [
+        {"label":"取出试管","kind":"sequence","actions":[
+          {"label":"选择试管","kind":"target","role":"tube"},
+          {"label":"预抓取试管","kind":"motion","role":"tube","stage":"pregrasp"},
+          {"label":"接近试管","kind":"motion","role":"tube","stage":"approach"},
+          {"label":"闭合抓取试管","kind":"hand","role":"tube","open":false},
+          {"label":"确认试管夹持稳定","kind":"confirm"},
+          {"label":"垂直抬起试管","kind":"motion","role":"tube","stage":"lift"}
+        ]},
+        {"label":"移至实验位置","kind":"sequence","actions":[
+          {"label":"移动到实验位置上方","kind":"motion","role":"station","stage":"pregrasp"},
+          {"label":"下降到实验位置","kind":"motion","role":"station","stage":"approach"},
+          {"label":"人工完成加样或观察","kind":"confirm"},
+          {"label":"离开实验位置","kind":"motion","role":"station","stage":"lift"}
+        ]},
+        {"label":"放回试管架","kind":"sequence","actions":[
+          {"label":"移动到试管架上方","kind":"motion","role":"rack","stage":"pregrasp"},
+          {"label":"插回试管架","kind":"motion","role":"rack","stage":"approach"},
+          {"label":"张开释放试管","kind":"hand","role":"rack","open":true},
+          {"label":"撤离试管架","kind":"motion","role":"rack","stage":"lift"}
+        ]},
+        {"label":"确认完成","kind":"sequence","actions":[
+          {"label":"确认试管已稳定放置","kind":"confirm"},
+          {"label":"确认实验区域无遗留物","kind":"confirm"},
+          {"label":"确认试管实验完成","kind":"complete"}
+        ]}
+      ]
+    },
+    "sichuan_mahjong": {
+      "name": "四川麻将",
+      "builtin": true,
+      "definition_revision": 1,
+      "roles": [
+        ["draw_tile", "待摸牌"], ["hand_slot", "手牌放置位"],
+        ["discard_tile", "待打牌"], ["discard_area", "牌河位置"]
+      ],
+      "steps": [
+        {"label":"摸牌","kind":"sequence","actions":[
+          {"label":"选择待摸牌","kind":"target","role":"draw_tile"},
+          {"label":"预抓取待摸牌","kind":"motion","role":"draw_tile","stage":"pregrasp"},
+          {"label":"接近待摸牌","kind":"motion","role":"draw_tile","stage":"approach"},
+          {"label":"闭合夹取麻将牌","kind":"hand","role":"draw_tile","open":false},
+          {"label":"确认麻将牌夹持稳定","kind":"confirm"},
+          {"label":"抬起麻将牌","kind":"motion","role":"draw_tile","stage":"lift"},
+          {"label":"移动到手牌位置上方","kind":"motion","role":"hand_slot","stage":"pregrasp"},
+          {"label":"放到手牌位置","kind":"motion","role":"hand_slot","stage":"approach"},
+          {"label":"张开释放麻将牌","kind":"hand","role":"hand_slot","open":true},
+          {"label":"撤离手牌位置","kind":"motion","role":"hand_slot","stage":"lift"}
+        ]},
+        {"label":"整理与判断","kind":"sequence","actions":[
+          {"label":"确认新牌已进入手牌区","kind":"confirm"},
+          {"label":"人工判断定缺、碰、杠或胡","kind":"confirm"},
+          {"label":"确认本轮待打牌","kind":"confirm"}
+        ]},
+        {"label":"打牌","kind":"sequence","actions":[
+          {"label":"选择待打牌","kind":"target","role":"discard_tile"},
+          {"label":"预抓取待打牌","kind":"motion","role":"discard_tile","stage":"pregrasp"},
+          {"label":"接近待打牌","kind":"motion","role":"discard_tile","stage":"approach"},
+          {"label":"闭合夹取待打牌","kind":"hand","role":"discard_tile","open":false},
+          {"label":"确认待打牌夹持稳定","kind":"confirm"},
+          {"label":"抬起待打牌","kind":"motion","role":"discard_tile","stage":"lift"},
+          {"label":"移动到牌河上方","kind":"motion","role":"discard_area","stage":"pregrasp"},
+          {"label":"放入牌河","kind":"motion","role":"discard_area","stage":"approach"},
+          {"label":"张开释放待打牌","kind":"hand","role":"discard_area","open":true},
+          {"label":"撤离牌河","kind":"motion","role":"discard_area","stage":"lift"}
+        ]},
+        {"label":"确认回合","kind":"sequence","actions":[
+          {"label":"确认手牌数量和排列","kind":"confirm"},
+          {"label":"确认出牌位于正确牌河位置","kind":"confirm"},
+          {"label":"确认本回合操作完成","kind":"complete"}
+        ]}
+      ]
+    },
+    "optical_module_installation": {
+      "name": "光模块安装",
+      "builtin": true,
+      "definition_revision": 1,
+      "roles": [["module", "光模块"], ["port", "安装端口"]],
+      "steps": [
+        {"label":"准备安装位","kind":"sequence","actions":[
+          {"label":"选择安装端口","kind":"target","role":"port"},
+          {"label":"确认端口无异物且方向正确","kind":"confirm"},
+          {"label":"确认光模块保护帽和拉环状态","kind":"confirm"}
+        ]},
+        {"label":"拿起光模块","kind":"sequence","actions":[
+          {"label":"选择光模块","kind":"target","role":"module"},
+          {"label":"预抓取光模块","kind":"motion","role":"module","stage":"pregrasp"},
+          {"label":"接近光模块","kind":"motion","role":"module","stage":"approach"},
+          {"label":"闭合夹取光模块","kind":"hand","role":"module","open":false},
+          {"label":"确认光模块夹持稳定","kind":"confirm"},
+          {"label":"抬起光模块","kind":"motion","role":"module","stage":"lift"}
+        ]},
+        {"label":"对准并插入","kind":"sequence","actions":[
+          {"label":"移动到安装端口前方","kind":"motion","role":"port","stage":"pregrasp"},
+          {"label":"沿端口方向插入光模块","kind":"motion","role":"port","stage":"approach"},
+          {"label":"确认光模块完全到位","kind":"confirm"},
+          {"label":"张开释放光模块","kind":"hand","role":"port","open":true},
+          {"label":"撤离安装端口","kind":"motion","role":"port","stage":"lift"}
+        ]},
+        {"label":"验证安装","kind":"sequence","actions":[
+          {"label":"确认锁扣或拉环已锁定","kind":"confirm"},
+          {"label":"确认模块无倾斜和松动","kind":"confirm"},
+          {"label":"确认光模块安装完成","kind":"complete"}
+        ]}
+      ]
+    },
+    "clothes_folding": {
+      "name": "叠衣服",
+      "builtin": true,
+      "definition_revision": 1,
+      "roles": [
+        ["garment_center", "衣服中心"], ["left_edge", "左侧衣边"],
+        ["right_edge", "右侧衣边"], ["lower_edge", "衣服下摆"]
+      ],
+      "steps": [
+        {"label":"展平定位","kind":"sequence","actions":[
+          {"label":"选择衣服中心","kind":"target","role":"garment_center"},
+          {"label":"确认衣服已展平且无遮挡","kind":"confirm"},
+          {"label":"确认左右衣边和下摆目标","kind":"confirm"}
+        ]},
+        {"label":"折左侧","kind":"sequence","actions":[
+          {"label":"选择左侧衣边","kind":"target","role":"left_edge"},
+          {"label":"预抓取左侧衣边","kind":"motion","role":"left_edge","stage":"pregrasp"},
+          {"label":"接近左侧衣边","kind":"motion","role":"left_edge","stage":"approach"},
+          {"label":"闭合夹取左侧衣边","kind":"hand","role":"left_edge","open":false},
+          {"label":"抬起左侧衣边","kind":"motion","role":"left_edge","stage":"lift"},
+          {"label":"移动到衣服中心上方","kind":"motion","role":"garment_center","stage":"pregrasp"},
+          {"label":"放下左侧衣边","kind":"motion","role":"garment_center","stage":"approach"},
+          {"label":"张开释放左侧衣边","kind":"hand","role":"garment_center","open":true},
+          {"label":"撤离并确认左侧折叠","kind":"motion","role":"garment_center","stage":"lift"},
+          {"label":"确认衣服形状并按需重新估计","kind":"confirm"}
+        ]},
+        {"label":"折右侧","kind":"sequence","actions":[
+          {"label":"选择右侧衣边","kind":"target","role":"right_edge"},
+          {"label":"预抓取右侧衣边","kind":"motion","role":"right_edge","stage":"pregrasp"},
+          {"label":"接近右侧衣边","kind":"motion","role":"right_edge","stage":"approach"},
+          {"label":"闭合夹取右侧衣边","kind":"hand","role":"right_edge","open":false},
+          {"label":"抬起右侧衣边","kind":"motion","role":"right_edge","stage":"lift"},
+          {"label":"移动到衣服中心上方","kind":"motion","role":"garment_center","stage":"pregrasp"},
+          {"label":"放下右侧衣边","kind":"motion","role":"garment_center","stage":"approach"},
+          {"label":"张开释放右侧衣边","kind":"hand","role":"garment_center","open":true},
+          {"label":"撤离并确认右侧折叠","kind":"motion","role":"garment_center","stage":"lift"},
+          {"label":"确认衣服形状并按需重新估计","kind":"confirm"}
+        ]},
+        {"label":"对折完成","kind":"sequence","actions":[
+          {"label":"选择衣服下摆","kind":"target","role":"lower_edge"},
+          {"label":"预抓取衣服下摆","kind":"motion","role":"lower_edge","stage":"pregrasp"},
+          {"label":"接近衣服下摆","kind":"motion","role":"lower_edge","stage":"approach"},
+          {"label":"闭合夹取衣服下摆","kind":"hand","role":"lower_edge","open":false},
+          {"label":"抬起衣服下摆","kind":"motion","role":"lower_edge","stage":"lift"},
+          {"label":"移动到衣服中心上方","kind":"motion","role":"garment_center","stage":"pregrasp"},
+          {"label":"放下衣服下摆","kind":"motion","role":"garment_center","stage":"approach"},
+          {"label":"张开释放衣服","kind":"hand","role":"garment_center","open":true},
+          {"label":"撤离衣服","kind":"motion","role":"garment_center","stage":"lift"},
+          {"label":"确认衣服折叠完成","kind":"complete"}
+        ]}
+      ]
+    },
     "task_792ffcb18f": {
       "name": "叠纸盒",
       "builtin": false,
+      "definition_revision": 3,
       "roles": [
-        [
-          "phone",
-          "手机"
-        ],
-        [
-          "box",
-          "手机盒"
-        ]
+        ["paper_box", "纸盒"]
       ],
       "steps": [
-        {
-          "label": "选择手机",
-          "kind": "target",
-          "role": "phone"
-        },
-        {
-          "label": "预抓取手机",
-          "kind": "motion",
-          "role": "phone",
-          "stage": "pregrasp"
-        },
-        {
-          "label": "接近手机",
-          "kind": "motion",
-          "role": "phone",
-          "stage": "approach"
-        },
-        {
-          "label": "闭合抓取",
-          "kind": "hand",
-          "role": "phone",
-          "open": false
-        },
-        {
-          "label": "确认夹持",
-          "kind": "confirm"
-        },
-        {
-          "label": "抬起手机",
-          "kind": "motion",
-          "role": "phone",
-          "stage": "lift"
-        },
-        {
-          "label": "移动至盒上方",
-          "kind": "motion",
-          "role": "box",
-          "stage": "pregrasp"
-        },
-        {
-          "label": "放入盒内",
-          "kind": "motion",
-          "role": "box",
-          "stage": "approach"
-        },
-        {
-          "label": "张开释放",
-          "kind": "hand",
-          "role": "box",
-          "open": true
-        },
-        {
-          "label": "撤离盒子",
-          "kind": "motion",
-          "role": "box",
-          "stage": "lift"
-        },
-        {
-          "label": "完成",
-          "kind": "complete"
-        }
+        {"label":"叠后面","kind":"sequence","actions":[
+          {"label":"选择纸盒","kind":"target","role":"paper_box"},
+          {"label":"移动到后面折页上方","kind":"motion","role":"paper_box","stage":"pregrasp"},
+          {"label":"接近并折叠后面","kind":"motion","role":"paper_box","stage":"approach"},
+          {"label":"确认后面折叠完成","kind":"confirm"},
+          {"label":"撤离后面折页","kind":"motion","role":"paper_box","stage":"lift"}
+        ]},
+        {"label":"叠前面","kind":"sequence","actions":[
+          {"label":"移动到前面折页上方","kind":"motion","role":"paper_box","stage":"pregrasp"},
+          {"label":"接近并折叠前面","kind":"motion","role":"paper_box","stage":"approach"},
+          {"label":"确认前面折叠完成","kind":"confirm"},
+          {"label":"撤离前面折页","kind":"motion","role":"paper_box","stage":"lift"}
+        ]},
+        {"label":"叠左面","kind":"sequence","actions":[
+          {"label":"移动到左面折页上方","kind":"motion","role":"paper_box","stage":"pregrasp"},
+          {"label":"接近并折叠左面","kind":"motion","role":"paper_box","stage":"approach"},
+          {"label":"确认左面折叠完成","kind":"confirm"},
+          {"label":"撤离左面折页","kind":"motion","role":"paper_box","stage":"lift"}
+        ]},
+        {"label":"叠右面","kind":"sequence","actions":[
+          {"label":"移动到右面折页上方","kind":"motion","role":"paper_box","stage":"pregrasp"},
+          {"label":"接近并折叠右面","kind":"motion","role":"paper_box","stage":"approach"},
+          {"label":"确认右面折叠完成","kind":"confirm"},
+          {"label":"撤离右面折页","kind":"motion","role":"paper_box","stage":"lift"}
+        ]}
       ]
     }
   }

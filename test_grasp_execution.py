@@ -202,7 +202,7 @@ class RunnerTests(unittest.TestCase):
                     joint_waypoints=[[0.]*16, [.02, .02]+[0.]*14])
         runner = JointRunner(plan, self.sent.append, lambda:self.data, lambda:True,
                              clock=lambda:self.now)
-        self.now = .5
+        self.now = .2  # Keep the lift command increment within its metre-based tick limit.
         runner.tick()
         self.assertEqual(runner.state, 'running')
         self.assertGreater(self.sent[-1][0], 0.)
@@ -214,12 +214,13 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(runner.state, 'stopping')
 
     def test_other_arm_compensation_is_allowed_when_tcp_hold_is_planned(self):
+        self.data['left']={'xyz':[0,0,0],'xyzw':[0,0,0,1]}
         end=[.02,.02]+[.01]*14
         plan=dict(self.plan,waist_included=True,other_tcp_held=True,
                   held_side='left',held_target=np.eye(4).tolist(),
                   joint_waypoints=[[0.]*16,end])
         runner=JointRunner(plan,self.sent.append,lambda:self.data,lambda:True,clock=lambda:self.now)
-        self.now=.5;runner.tick()
+        self.now=.2;runner.tick()
         self.assertEqual(runner.state,'running')
         self.assertGreater(self.sent[-1][2],0.)
 

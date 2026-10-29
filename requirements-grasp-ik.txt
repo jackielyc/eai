@@ -1,0 +1,5 @@
+# Install in .cache/grasp_ik_env, alongside its existing Pinocchio/cmeel stack.
+# SciPy 1.14.1 supports Python 3.10 and this environment's NumPy 2.2.x.
+scipy==1.14.1
+mujoco==3.3.7
+Pillow>=9.0,<12

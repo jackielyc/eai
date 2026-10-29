@@ -1004,17 +1004,17 @@
     },
     "mv6d_head_u_spin": {
       "kind": "spin",
-      "value": 354
+      "value": 255
     },
     "mv6d_head_v_spin": {
       "kind": "spin",
-      "value": 183
+      "value": 270
     },
     "mv6d_target_combo": {
       "kind": "combo",
-      "index": 0,
-      "text": "✓ 目标 1 (354, 183)",
-      "data": "target-4"
+      "index": 2,
+      "text": "✓ 目标 3 (255, 270)",
+      "data": "target-6"
     },
     "mv6d_gt_enable_check": {
       "kind": "check",
@@ -1995,5 +1995,28 @@
     "/libero/preview",
     "/rynnvalue/live_hud"
   ],
-  "workspace_collapsed": true
+  "workspace_collapsed": true,
+  "robot_view": {
+    "version": 1,
+    "selections": {
+      "depth.head": true,
+      "depth.left": false,
+      "depth.right": false,
+      "pose.pca": true,
+      "pose.foundationpose": true,
+      "pose.any6d": true,
+      "pose.grasp_pregrasp": true,
+      "pose.grasp_approach": true,
+      "pose.grasp_lift": true,
+      "reachable.l": false,
+      "reachable.r": false,
+      "skeleton": true,
+      "wrist_accessories": true,
+      "sam3": true,
+      "lingbot": true,
+      "wrench": true,
+      "targets": true,
+      "collision_scene": true
+    }
+  }
 }

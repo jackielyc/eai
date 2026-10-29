@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "base_frame": "base_link",
+  "calibrated": false,
+  "world": [],
+  "allowed_pairs": [],
+  "contact_rules": [],
+  "modeled_targets": [],
+  "notes": "待标定：添加桌面/工装等实测包围盒，填写 id、size_m、T_base_object。核对模型与现场后才设 calibrated=true。禁止用空场景代表真实环境。"
+}

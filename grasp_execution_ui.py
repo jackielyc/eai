@@ -17,9 +17,12 @@ from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, 
 
 from grasp_execution import (Sequence, JointRunner, evaluate_wrench, load_profile,
                              make_preview, read_feedback, manual_candidate)
+from grasp_hand_execution import HandRunner
+from grasp_run_log import TaskRunLog
+from grasp_runtime_ui import GraspRuntimeMixin
 from grasp_task_workflow import (TASKS, TaskFlowWidget, format_steps, new_task_key,
                                  parse_roles, parse_steps, reload_tasks, save_tasks,
-                                 validate_task)
+                                 validate_task, reconcile_settings)
 
 
 class TaskEditorDialog(QDialog):
@@ -43,7 +46,8 @@ class TaskEditorDialog(QDialog):
         hint = QLabel(
             '角色格式：role=显示名，多个用逗号分隔。\n'
             '步骤每行：名称|动作|角色|参数。动作支持 target、motion、hand、confirm、complete；'
-            'motion 参数为 pregrasp/approach/lift，hand 参数为 open/close。')
+            'motion 参数为 pregrasp/approach/lift，hand 参数为 open/close。'
+            '高层动作支持 pick/place/align/insert/verify，自动展开为可确认的步骤。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -57,11 +61,12 @@ class TaskEditorDialog(QDialog):
                               'steps': parse_steps(self.steps_edit.toPlainText())})
 
 
-class GraspExecutionPanel(QWidget):
+class GraspExecutionPanel(GraspRuntimeMixin, QWidget):
     def __init__(self, node, busy, parent=None, preview_image=None, open_perception=None,
                  fill_extrinsic=None, ensure_feedback=None, open_calibration=None, robot_preview=None,
                  simulation_display=None, wrench_feedback=None, ensure_wrench_monitor=None,
-                 save_task_data=None, load_task_data=None):
+                 save_task_data=None, load_task_data=None, verify_observation=None, scene_display=None,
+                 reestimate_observation=None, open_robot=None, assembly_live_frame=None):
         super().__init__(parent)
         self.node, self.other_busy = node, busy
         self.preview_image_callback = preview_image
@@ -71,12 +76,23 @@ class GraspExecutionPanel(QWidget):
         self.ensure_wrench_monitor = ensure_wrench_monitor
         self.save_task_data = save_task_data
         self.load_task_data = load_task_data
+        self.scene_display_callback=scene_display
+        self.reestimate_callback=reestimate_observation
+        self.open_robot_callback=open_robot
+        self.assembly_live_frame_callback=assembly_live_frame
+        self._program_active=False;self._program_backend_authorized=False
+        self._program_validator=None;self._program_action_result=None;self._program_observation_role=None
+        self._last_execution_mode='simulation'
         self._wrench_guard_triggered = None
         self.target_observations = {}
         self._workflow_step = 0
         self._workflow_substep = 0
         self._workflow_finished = False
+        self._workflow_completed_steps = set()
         self._workflow_waiting = False
+        self.hand_runner = None
+        self._workflow_confirmation = None
+        self._workflow_error = ''
         self._workflow_step_settings = {}
         self._workflow_auto_running = False
         self._workflow_auto_paused = False
@@ -109,6 +125,9 @@ class GraspExecutionPanel(QWidget):
         self.runner = None
         self.mode = ''
         self.root = Path(__file__).resolve().parent
+        self.init_runtime(verify_observation)
+        self.run_log = TaskRunLog(os.environ.get('EAI_GRASP_RUN_LOG_DIR', self.root / '.cache/grasp_runs'))
+        self._run_log_error = ''
         self.job_directory = None
         self.message = '等待点击估计结果；这里只接受匹配实际手型的抓取候选'
         layout = QVBoxLayout(self)
@@ -139,6 +158,9 @@ class GraspExecutionPanel(QWidget):
         self.workflow_next_button = QPushButton('执行流程下一步')
         self.workflow_next_button.clicked.connect(self.execute_workflow_next)
         task_row.addWidget(self.workflow_next_button)
+        self.workflow_confirm_button = QPushButton('确认当前流程结果')
+        self.workflow_confirm_button.clicked.connect(self.confirm_workflow_action)
+        task_row.addWidget(self.workflow_confirm_button)
         self.workflow_reset_button = QPushButton('重置流程')
         self.workflow_reset_button.clicked.connect(self.reset_task_workflow)
         task_row.addWidget(self.workflow_reset_button)
@@ -157,6 +179,9 @@ class GraspExecutionPanel(QWidget):
         self.task_flow = TaskFlowWidget()
         self.task_flow.step_selected.connect(self.select_workflow_step)
         layout.addWidget(self.task_flow)
+        self.workflow_status_label = QLabel()
+        self.workflow_status_label.setWordWrap(True)
+        layout.addWidget(self.workflow_status_label)
         self.task_role_row = QHBoxLayout()
         self.task_role_combos = {}
         layout.addLayout(self.task_role_row)
@@ -174,6 +199,7 @@ class GraspExecutionPanel(QWidget):
         self.simulation_controls_button.clicked.connect(self.open_simulation_controls)
         mode_row.addWidget(self.simulation_controls_button)
         layout.addLayout(mode_row)
+        self.build_runtime_controls(layout)
         setup_row = QHBoxLayout()
         self.check_button = QPushButton('检查准备状态')
         self.check_button.clicked.connect(self.check_readiness)
@@ -265,7 +291,7 @@ class GraspExecutionPanel(QWidget):
         self.apply_shape_button.clicked.connect(self.apply_shape)
         shape_row.addWidget(self.apply_shape_button)
         layout.addLayout(shape_row)
-        self.scene_confirm = QCheckBox('手动分步模式：当前无自动避障，已确认本段路径及手周围无障碍')
+        self.scene_confirm = QCheckBox('已核对场景与现场一致，并确认路径及手周围没有未建模障碍')
         layout.addWidget(self.scene_confirm)
         stage_row = QHBoxLayout()
         stage_row.addWidget(QLabel('抓取手臂'))
@@ -351,6 +377,7 @@ class GraspExecutionPanel(QWidget):
         self.watchdog.start()
         self.profile_path.textChanged.connect(self.invalidate_preview)
         self.profile_path.textChanged.connect(self.load_plan_validity)
+        self.profile_path.textChanged.connect(lambda _text:self.check_readiness())
         self.load_plan_validity()
         self.candidates.currentIndexChanged.connect(self.invalidate_preview)
         for spin in self.contact_offsets:
@@ -361,6 +388,9 @@ class GraspExecutionPanel(QWidget):
         self.change_task_workflow()
         self.check_readiness()
         self.refresh()
+        if self.use_execution_service:
+            from phone_assembly.panel import install_phone_console
+            install_phone_console(self,layout)
 
     def wrench_guard_violation(self, sides=None):
         if self.is_simulation or not self.wrench_guard_check.isChecked():
@@ -420,7 +450,9 @@ class GraspExecutionPanel(QWidget):
             self._startup_recording = False
 
     def restore_startup(self):
-        if self.process or self.runner or self.sequence.state == 'stop_unconfirmed':
+        if self._program_active:
+            self.message='装配程序运行中；请先取消并等待停止。';self.refresh();return
+        if self.process or self.runner or self.hand_runner or self._workflow_waiting or self.sequence.state == 'stop_unconfirmed':
             self.message = '请先停止当前任务并等待停止确认，再恢复启动状态。'
             self.refresh()
             return
@@ -441,11 +473,16 @@ class GraspExecutionPanel(QWidget):
         self.refresh()
 
     def _start_restore_snapshot(self, startup, *, auto_restore=False):
+        if self.use_execution_service and not self.is_simulation and self._unverified_grips:
+            raise ValueError('闭合后夹持状态未确认，保持当前位置；确认物体状态后再恢复')
         profile = self.selected_profile()
         measured = self.simulation_backend().feedback() if self.is_simulation else self.feedback()
         from grasp_restore import prepare_restore
         identifier = uuid.uuid4().hex
         plan = prepare_restore(profile, measured, startup, identifier)
+        if self.use_execution_service:
+            from grasp_plan_validation import certify_plan
+            plan=certify_plan(plan,profile,self.runtime_plan_inputs())
         preview = dict(id=identifier, arm_side='both', hand_model=profile['hand_model'],
                        tcp_link='Link7_l / Link7_r', base_frame='base_link',
                        observation_id='restore:'+identifier, goals={'approach':plan['target']})
@@ -464,6 +501,12 @@ class GraspExecutionPanel(QWidget):
         hands = self._restore_hands_goal
         if not hands:
             return '双臂已恢复启动状态；启动时未采集到双手反馈，双手恢复已跳过。'
+        if self.use_execution_service:
+            if not self.is_simulation and self.world.attached:
+                raise ValueError('当前仍记录有夹持物体，不能自动恢复手型；请先确认安全放置')
+            self._restore_hand_queue=list(hands.items())
+            self._start_restore_hand_service()
+            return '双臂到位；独立服务正在恢复双手并检查实际反馈。'
         if self.is_simulation:
             for side, values in hands.items():
                 self.simulation_backend().hand(side, values)
@@ -478,6 +521,12 @@ class GraspExecutionPanel(QWidget):
         finally:
             self.node._grasp_hand_command_authorized = False
         return '双臂已恢复启动状态；双手恢复指令已发送，请观察实物确认到位。'
+
+    def _start_restore_hand_service(self):
+        side,values=self._restore_hand_queue[0]
+        self._hand_purpose='restore'
+        self.hand_runner=self.new_process_runner('hand',side=side,target=values)
+        self._workflow_waiting=True
 
     def load_plan_validity(self, *_):
         if not self.reserved:
@@ -520,6 +569,12 @@ class GraspExecutionPanel(QWidget):
         return self.execution_mode.currentData() == 'simulation'
 
     def change_execution_mode(self, *_):
+        if (self.runner or self.process or self.hand_runner or self._program_active) and not self._program_backend_authorized:
+            self.execution_mode.blockSignals(True)
+            self.execution_mode.setCurrentIndex(self.execution_mode.findData(self._last_execution_mode))
+            self.execution_mode.blockSignals(False)
+            self.message='当前控制仍被占用，不能切换仿真/真机模式。';self.refresh();return
+        self._last_execution_mode=str(self.execution_mode.currentData())
         self.simulation = None
         self._sim_reserved = False
         self.sequence = Sequence()
@@ -783,12 +838,16 @@ class GraspExecutionPanel(QWidget):
     def change_task_workflow(self, *_):
         task_key = str(self.task_combo.currentData() or 'phone_box_assembly')
         saved = None
+        definition_changed=False
         if self.load_task_data:
             try:
                 saved = self.load_task_data(task_key)
-                if (saved and saved.get('task_definition')
-                        and not TASKS.get(task_key, {}).get('builtin')):
-                    TASKS[task_key] = validate_task(saved['task_definition'])
+                if saved and saved.get('task_definition'):
+                    cached_definition = validate_task(saved['task_definition'])
+                    current_revision = int(TASKS.get(task_key, {}).get('definition_revision', 1))
+                    if cached_definition.get('definition_revision', 1) >= current_revision:
+                        TASKS[task_key] = cached_definition
+                    else:definition_changed=True
             except Exception as exc:
                 self.task_data_status.setText('任务数据加载失败：' + str(exc))
         task = TASKS[task_key]
@@ -797,7 +856,10 @@ class GraspExecutionPanel(QWidget):
         if saved:
             self.set_target_observations(saved.get('target_observations') or {})
             state = saved.get('panel_state') or {}
-            self._workflow_step_settings = copy.deepcopy(state.get('step_settings') or {})
+            self._workflow_step_settings = reconcile_settings(state.get('step_settings') or {},task,
+                                                              allow_legacy=not definition_changed)
+            if definition_changed:
+                state=dict(state,workflow_step=0,workflow_substep=0,workflow_finished=False,completed_steps=[])
             for role, target_id in (state.get('roles') or {}).items():
                 combo = self.task_role_combos.get(role)
                 if combo is not None:
@@ -812,16 +874,21 @@ class GraspExecutionPanel(QWidget):
             self._workflow_substep = max(0, min(int(state.get('workflow_substep', 0)),
                                                 max(0, len(actions)-1)))
             self._workflow_finished = bool(state.get('workflow_finished', False))
+            self._workflow_completed_steps = {
+                int(i) for i in state.get('completed_steps', [])
+                if isinstance(i, int) and 0 <= i < len(task['steps'])}
             self.task_flow.set_current(self._workflow_step)
             if self._workflow_finished:
                 self.task_flow.set_current(len(task['steps']))
             self._apply_workflow_step_settings(self._workflow_step, self._workflow_substep)
             saved_at = str(saved.get('saved_at_text') or '')
             self.task_data_status.setText('任务数据：已加载' + (f'（{saved_at}）' if saved_at else ''))
+            if definition_changed:self.task_data_status.setText(self.task_data_status.text()+'；流程已升级，参数按动作匹配，执行进度重置。')
         elif self.load_task_data:
             self.set_target_observations({})
             self._workflow_step_settings = {}
             self.task_data_status.setText('任务数据：该任务尚无保存结果')
+        if hasattr(self,'phone_program_panel'):self.phone_program_panel.refresh_visibility()
 
     def _render_task_controls(self, task):
         self.task_flow.set_task(task)
@@ -932,11 +999,14 @@ class GraspExecutionPanel(QWidget):
     def current_task_state(self):
         self._capture_workflow_step_settings(self._workflow_step, self._workflow_substep)
         return {
+            'last_run_id': self.run_log.run_id,
+            'world_snapshot': {'attached':copy.deepcopy(self.world.attached),'placed':copy.deepcopy(self.world.placed)},
             'roles': {role: str(combo.currentData() or '') for role, combo in self.task_role_combos.items()},
             'selected_target': str(self.grasp_target_combo.currentData() or ''),
             'workflow_step': self._workflow_step,
             'workflow_substep': self._workflow_substep,
             'workflow_finished': self._workflow_finished,
+            'completed_steps': sorted(self._workflow_completed_steps),
             'arm_side': str(self.grasp_arm.currentData() or ''),
             'allow_waist': self.waist_participation.isChecked(),
             'motion_stage': str(self.motion_stage.currentData() or ''),
@@ -1042,17 +1112,24 @@ class GraspExecutionPanel(QWidget):
             combo.blockSignals(False)
 
     def reset_task_workflow(self):
-        if self.runner or self.process:
+        if self.runner or self.process or self.hand_runner or self._workflow_auto_running:
             return
+        self._workflow_confirmation = None
+        self._workflow_error = ''
+        self.run_log.start()
         self._workflow_step = 0
         self._workflow_substep = 0
         self._workflow_finished = False
+        self._workflow_completed_steps.clear()
         self._workflow_waiting = False
         self.task_flow.set_current(0)
         self.message = f"{self.task_combo.currentText()}：请选择任务目标，然后执行流程下一步。"
         self.refresh()
 
     def select_workflow_step(self, index):
+        if (hasattr(self,'phone_program_panel') and self.phone_program_panel.is_current_task()
+                and not self.assembly_advanced_check.isChecked()):
+            self.phone_program_panel.inspect_stage(index);return
         if self.runner or self.process or self._workflow_waiting or self._workflow_auto_running:
             self.message = '当前正在规划或执行，不能跳转流程步骤。'
             self.refresh()
@@ -1060,6 +1137,8 @@ class GraspExecutionPanel(QWidget):
         task = TASKS[str(self.task_combo.currentData())]
         index = max(0, min(int(index), len(task['steps'])-1))
         self._workflow_step = index
+        self._workflow_confirmation = None
+        self._workflow_error = ''
         self._workflow_substep = 0
         self._workflow_finished = False
         self.sequence = Sequence()
@@ -1077,7 +1156,28 @@ class GraspExecutionPanel(QWidget):
             f" → {action['label']}" if top['kind'] == 'sequence' and action else '')
         self.refresh()
 
+    def record_workflow_event(self, event, **details):
+        try:
+            plan = self.sequence.plan or {}
+            context = {
+                'task_key': str(self.task_combo.currentData()),
+                'step': self._workflow_step, 'substep': self._workflow_substep,
+                'action': self._workflow_action(),
+                'mode': str(self.execution_mode.currentData()),
+                'arm_side': str(self.grasp_arm.currentData()),
+                'observation_id': (self.observation or {}).get('observation_id'),
+                'preview_id': (self.sequence.preview or {}).get('id'),
+                'urdf_sha256': plan.get('urdf_sha256'),
+                'message': self.message, **details,
+            }
+            self.run_log.append(event, context)
+        except Exception as exc:
+            self._run_log_error = '执行记录写入失败：' + str(exc)
+
     def _advance_task_workflow(self):
+        self.record_workflow_event('action_completed')
+        self._workflow_confirmation = None
+        self._workflow_error = ''
         task = TASKS[str(self.task_combo.currentData())]
         completed_action = self._workflow_action()
         completed_kind = (completed_action or {}).get('kind', 'confirm')
@@ -1090,6 +1190,7 @@ class GraspExecutionPanel(QWidget):
             action = self._workflow_action()
             self.message = f"流程：{top['label']} → {action['label']}"
         elif self._workflow_step+1 < len(task['steps']):
+            self._workflow_completed_steps.add(self._workflow_step)
             self._workflow_step += 1
             self._workflow_substep = 0
             self.task_flow.set_current(self._workflow_step)
@@ -1098,9 +1199,14 @@ class GraspExecutionPanel(QWidget):
             action = self._workflow_action()
             self.message = f"流程进入：{step['label']}" + (f" → {action['label']}" if step['kind']=='sequence' else '')
         else:
+            self._workflow_completed_steps.add(self._workflow_step)
             self._workflow_finished = True
             self.task_flow.set_current(len(task['steps']))
-            self.message = f"{task['name']}流程已完成。"
+            self.message = f"{task['name']}：" + ('全部流程执行完成。' if self._workflow_auto_running else '流程已完成。')
+            self.record_workflow_event('workflow_completed')
+            self._workflow_auto_running = False
+            self._workflow_auto_paused = False
+            self._workflow_auto_initial_snapshot = None
         if (self._workflow_auto_running and not self._workflow_auto_cancel_requested
                 and not self._workflow_finished):
             self._schedule_auto_workflow(1000 if completed_kind == 'hand' else 200)
@@ -1119,21 +1225,80 @@ class GraspExecutionPanel(QWidget):
         return target_id
 
     def _workflow_hand(self, opened):
+        self._hand_purpose='workflow'
+        self._startup_recording = False
         profile = self.selected_profile()
         self.reserve(require_preview=False)
+        violation = self.wrench_guard_violation((profile['arm_side'],))
+        if violation:
+            raise ValueError('六维力保护阻止手部动作：'+violation)
         values = profile['open_positions' if opened else 'close_positions']
-        if self.is_simulation:
-            self.simulation_backend().hand(profile['arm_side'], values)
-        else:
+        side = profile['arm_side']
+        if self.use_execution_service:
+            self.hand_runner=self.new_process_runner('hand',side=side,target=values)
+            self._workflow_waiting=True
+            self._pending_hand_open=opened
+            self._pending_hand_side=side
+            self._pending_hand_role=(self._workflow_action() or {}).get('role')
+            self._pending_hand_observation=copy.deepcopy(self.observation)
+            self._pending_hand_target=str(self.grasp_target_combo.currentData() or '')
+            self.message='独立服务执行手部动作，等待实际反馈'
+            return
+        simulation = self.is_simulation
+        def publish(positions):
+            if simulation:
+                self.simulation_backend().hand(side, positions)
+                return
             self.node._grasp_hand_command_authorized = True
             try:
-                self.node.apply_hand_joint_positions(profile['arm_side'], values)
+                self.node.apply_hand_joint_positions(side, positions)
             finally:
                 self.node._grasp_hand_command_authorized = False
-        self.set_reserved(False)
+        def feedback():
+            if simulation:
+                sim = self.simulation_backend()
+                return {'stamp': time.time(), 'positions': sim.hands.get(side, [0.]*6)}
+            return self.node.get_grasp_hand_feedback(side)
+        runner = HandRunner(side, values, publish, feedback,
+                            lambda: simulation or self.node.is_hand_enabled())
+        self.hand_runner = runner
+        try:
+            runner.start()
+        except Exception:
+            if runner.state == 'ready':
+                self.hand_runner = None
+            else:
+                self.sequence.state = 'stop_unconfirmed'
+            raise
+        self._workflow_waiting = True
+        self.message = runner.message
+        self.record_workflow_event('hand_command_sent', target=values)
+
+    def confirm_workflow_action(self):
+        token = (str(self.task_combo.currentData()), self._workflow_step, self._workflow_substep)
+        if (self._workflow_confirmation != token or self.runner or self.process or self.hand_runner
+                or self._workflow_auto_paused or self._workflow_auto_cancel_requested):
+            return
+        if self.use_execution_service and self.pending_attachment:
+            try:
+                item=self.pending_attachment
+                self.world.attach_confirmed(item['side'],item['role'],item['id'],item['observation'],self.feedback())
+                self._unverified_grips.discard(item['side'])
+                self.pending_attachment=None
+                self.record_workflow_event('object_attached',attached=self.world.attached)
+            except Exception as exc:
+                self.message='无法确认附着物：'+str(exc);self.refresh();return
+        self._workflow_waiting = False
+        self.record_workflow_event('operator_confirmed')
+        if getattr(self,'_attachment_only_confirm',False):
+            self._attachment_only_confirm=False;self._workflow_confirmation=None
+            if self._workflow_auto_running:self._schedule_auto_workflow(0)
+            self.message='已确认夹持；可继续当前动作。';self.refresh();return
+        self._advance_task_workflow()
+        self.refresh()
 
     def execute_workflow_next(self):
-        if self.runner or self.process or self._workflow_waiting:
+        if self.runner or self.process or self._workflow_waiting or self.sequence.state == 'stop_unconfirmed':
             return
         task = TASKS[str(self.task_combo.currentData())]
         step = self._workflow_action()
@@ -1142,30 +1307,45 @@ class GraspExecutionPanel(QWidget):
             self.refresh()
             return
         try:
+            self._workflow_error = ''
+            self.record_workflow_event('action_started')
             self._capture_workflow_step_settings(self._workflow_step, self._workflow_substep)
             kind = step['kind']
             if kind == 'target':
                 self._workflow_target(step['role'])
                 self._advance_task_workflow()
             elif kind == 'motion':
+                if self.use_execution_service and self.pending_attachment:
+                    self._attachment_only_confirm=True
+                    self._workflow_confirmation=(str(self.task_combo.currentData()),self._workflow_step,self._workflow_substep)
+                    self._workflow_waiting=True;self.message='先确认夹持，建立物体与手的相对关系后再移动。'
+                    self.refresh();return
                 self._workflow_target(step['role'])
                 self.motion_stage.setCurrentIndex(self.motion_stage.findData(step['stage']))
                 self._workflow_waiting = True
                 self.execute()
-                if self.runner is None and self.process is None:
+                if self.runner is None and self.process is None and not self._perception_pending:
                     self._workflow_waiting = False
+                    self._workflow_error = self.message
+                    self._workflow_auto_paused = self._workflow_auto_running
             elif kind == 'hand':
                 self._workflow_target(step['role'])
                 self._workflow_hand(step['open'])
-                self._advance_task_workflow()
             elif kind == 'confirm':
-                self._advance_task_workflow()
+                self._workflow_confirmation = (str(self.task_combo.currentData()),
+                                               self._workflow_step, self._workflow_substep)
+                self._workflow_waiting = True
+                self.message = '等待人工确认：' + step['label']
+                self.record_workflow_event('confirmation_requested')
             elif kind == 'complete':
                 self._advance_task_workflow()
         except Exception as exc:
             self._workflow_waiting = False
-            self.set_reserved(False)
+            if self.sequence.state != 'stop_unconfirmed':
+                self.set_reserved(False)
             self.message = str(exc)
+            self._workflow_error = self.message
+            self.record_workflow_event('action_failed')
             if self._workflow_auto_running:
                 self._workflow_auto_paused = True
         self.refresh()
@@ -1182,6 +1362,10 @@ class GraspExecutionPanel(QWidget):
         return measured
 
     def toggle_all_workflow(self):
+        if self.sequence.state == 'stop_unconfirmed':
+            self.message = '停止尚未确认，请检查机器人；不能开始或自动恢复流程。'
+            self.refresh()
+            return
         if self._workflow_auto_running:
             self.cancel_all_workflow()
             return
@@ -1197,12 +1381,17 @@ class GraspExecutionPanel(QWidget):
             self._workflow_step = 0
             self._workflow_substep = 0
             self._workflow_finished = False
+            self._workflow_completed_steps.clear()
             self._workflow_waiting = False
             self.task_flow.set_current(0)
             self._apply_workflow_step_settings(0, 0)
             if not self.is_simulation and not self.scene_confirm.isChecked():
                 raise ValueError('真机全部执行前，请确认完整流程路径及手周围无障碍')
             self._workflow_auto_initial_snapshot = self._capture_auto_workflow_start()
+            self.run_log.start()
+            self.record_workflow_event('workflow_started',
+                task_definition=copy.deepcopy(TASKS[str(self.task_combo.currentData())]),
+                initial_state=self._workflow_auto_initial_snapshot)
             self._workflow_auto_running = True
             self._workflow_auto_paused = False
             self._workflow_auto_cancel_requested = False
@@ -1244,9 +1433,19 @@ class GraspExecutionPanel(QWidget):
         if not self._workflow_auto_running or self._workflow_auto_cancel_requested:
             return
         if self._workflow_auto_paused:
+            if self.hand_runner is not None:
+                try:
+                    violation = self.wrench_guard_violation((self.hand_runner.side,))
+                    if violation:
+                        raise ValueError('六维力仍不满足继续条件：'+violation)
+                    self.hand_runner.resume()
+                except Exception as exc:
+                    self.message = str(exc)
+                    self.refresh()
+                    return
             if self.runner is not None and self.runner.state == 'paused':
                 self.pause_or_resume()
-                if self.runner.state != 'running':
+                if self.runner.state not in ('running','resuming'):
                     return
             elif self.runner is None and self.process is None and self.sequence.state == 'planned':
                 self._execute_ready_plan()
@@ -1258,26 +1457,38 @@ class GraspExecutionPanel(QWidget):
         else:
             self._workflow_auto_paused = True
             self._workflow_auto_timer.stop()
+            if self.hand_runner is not None:
+                self.hand_runner.pause()
             if self.runner is not None and self.runner.state == 'running':
                 self.pause_or_resume()
             self.message = '全部流程已暂停；当前轨迹保持位置。'
+        self.record_workflow_event('workflow_paused' if self._workflow_auto_paused else 'workflow_resumed')
         self.refresh()
 
     def cancel_all_workflow(self):
         if not self._workflow_auto_running:
             return
+        if self.sequence.state == 'stop_unconfirmed':
+            self.message = '停止尚未确认，不能自动恢复；请检查机器人。'
+            self.refresh()
+            return
         self._workflow_auto_cancel_requested = True
+        self._perception_pending=False;self._perception_token=None
+        self.record_workflow_event('cancel_requested')
         self._workflow_auto_paused = False
         self._workflow_auto_timer.stop()
         self._execute_after_plan = False
         self._workflow_waiting = False
+        self._workflow_confirmation = None
+        if self.hand_runner is not None:
+            self.hand_runner.stop('取消流程，等待手部停止确认')
         if self.process is not None:
             self.sequence.stop(motion_active=False)
             self.process.terminate()
         if self.runner is not None:
             self.runner.stop('全部流程取消，准备恢复流程初始状态')
         self.message = '正在取消全部流程；停止确认后恢复第一个流程的初始状态。'
-        if self.process is None and self.runner is None:
+        if self.process is None and self.runner is None and self.hand_runner is None:
             self._begin_auto_workflow_restore()
         self.refresh()
 
@@ -1304,10 +1515,12 @@ class GraspExecutionPanel(QWidget):
         self._workflow_step = 0
         self._workflow_substep = 0
         self._workflow_finished = False
+        self._workflow_completed_steps.clear()
         self.task_flow.set_current(0)
         self._apply_workflow_step_settings(0, 0)
         self.message = ('全部流程已取消并恢复到流程初始状态。' if restored else
                         '全部流程已取消，但恢复初始状态失败：' + detail)
+        self.record_workflow_event('cancel_finished', restored=restored)
         self.refresh()
 
     def set_method_observations(self, observations):
@@ -1350,6 +1563,7 @@ class GraspExecutionPanel(QWidget):
         return bool(getattr(self.node, '_grasp_execution_reserved', False))
 
     def set_reserved(self, value):
+        if not value and self._program_active and not self._program_backend_authorized:value=True
         if self.is_simulation:
             self._sim_reserved = value
         else:
@@ -1416,6 +1630,7 @@ class GraspExecutionPanel(QWidget):
                     self.observation, profile, self.feedback(), [s.value()/100 for s in self.contact_offsets])
                 self.populate_candidates()
             result = make_preview(self.observation, self.candidates.currentIndex(), profile)
+            result = self.apply_world_preview(result)
             self.sequence.reset(result, profile)
             if self.robot_preview_callback:
                 self.robot_preview_callback(result)
@@ -1439,11 +1654,12 @@ class GraspExecutionPanel(QWidget):
         self.refresh()
 
     def reserve(self, require_preview=True):
+        if self._program_active and not self._program_backend_authorized:raise ValueError('装配程序占用控制，请先取消程序')
         if not self.is_simulation and self.other_busy():
             raise ValueError('已有手臂移动/文本队列/遥控，请先结束，不能同时控制')
         if (not self.scene_confirm.isChecked() and not self.is_simulation
                 and not self._workflow_auto_restoring):
-            raise ValueError('本阶段尚未接入自动避障，请先确认本段路径周围无障碍')
+            raise ValueError('请先确认场景配置与现场一致，且本段路径周围没有未建模障碍')
         if not self.is_simulation and (not self.node.is_arm_enabled() or not self.node.is_hand_enabled()):
             raise ValueError('请先手动启用手臂和手；抓取流程不自动使能')
         if require_preview and not self.sequence.preview:
@@ -1456,13 +1672,21 @@ class GraspExecutionPanel(QWidget):
     def hand(self):
         try:
             self._startup_recording = False
-            if self.runner or self.process:
+            if self.runner or self.process or self.hand_runner or self._workflow_waiting or self._workflow_auto_running:
                 raise ValueError('请先结束当前轨迹或预检')
             self.reserve(require_preview=False)
             stage = 'close' if self.sequence.stage == 'close' else 'open'
             self.feedback()
             profile = self.selected_profile()
             values = profile['open_positions' if stage == 'open' else 'close_positions']
+            if self.use_execution_service:
+                self._hand_purpose='manual'
+                self._manual_hand_operation=(profile['arm_side'],stage)
+                self.hand_runner=self.new_process_runner('hand',side=profile['arm_side'],target=values)
+                self._workflow_waiting=True
+                if self.sequence.preview and self.sequence.stage in ('open','close'):self.sequence.hand_sent()
+                self.message='独立服务执行手部验证；等待实际反馈，不自动执行手臂。'
+                self.refresh();return
             if self.is_simulation:
                 self.simulation_backend().hand(profile['arm_side'], values)
             else:
@@ -1479,7 +1703,8 @@ class GraspExecutionPanel(QWidget):
                 self.sequence.fail(str(exc))
             self.message = str(exc)
         finally:
-            if not self.runner and not self.process and self.sequence.state != 'stop_unconfirmed':
+            if (not self.runner and not self.process and not self.hand_runner
+                    and not self._workflow_waiting and self.sequence.state != 'stop_unconfirmed'):
                 self.set_reserved(False)
         self.refresh()
 
@@ -1493,6 +1718,7 @@ class GraspExecutionPanel(QWidget):
         self.refresh()
 
     def plan(self, execute_after=False):
+        if self._program_active and not self._program_backend_authorized:return
         try:
             if self.runner or self.process or self.sequence.state == 'stop_unconfirmed':
                 raise ValueError('请先结束当前任务或确认停止状态')
@@ -1507,6 +1733,7 @@ class GraspExecutionPanel(QWidget):
                     self.observation, profile, self.feedback(), [s.value()/100 for s in self.contact_offsets])
                 self.populate_candidates()
             result = make_preview(self.observation, self.candidates.currentIndex(), profile)
+            result = self.apply_world_preview(result)
             self.sequence.reset(result, profile)
             if execute_after:
                 self.reserve()
@@ -1515,7 +1742,7 @@ class GraspExecutionPanel(QWidget):
             stage = self.sequence.begin_plan(self.motion_stage.currentData())
             feedback = self.feedback()
             self.launch('plan', stage=stage, start_joints=feedback['q16'],
-                        allow_waist=self.waist_participation.isChecked())
+                        allow_waist=self.waist_participation.isChecked(), **self.runtime_plan_inputs())
         except Exception as exc:
             self._execute_after_plan = False
             if self.process is None and self.runner is None and self.sequence.state != 'stop_unconfirmed':
@@ -1525,8 +1752,10 @@ class GraspExecutionPanel(QWidget):
         self.refresh()
 
     def execute(self):
-        if self.runner or self.process or self.sequence.state == 'stop_unconfirmed':
+        if self._program_active and not self._program_backend_authorized:return
+        if self.runner or self.process or self.hand_runner or self._workflow_confirmation or self.sequence.state == 'stop_unconfirmed':
             return
+        if self.maybe_reestimate_approach():return
         plan = self.sequence.plan
         valid = (self.sequence.state == 'planned' and plan is not None
                  and plan.get('stage') == self.motion_stage.currentData()
@@ -1539,9 +1768,13 @@ class GraspExecutionPanel(QWidget):
         self._execute_ready_plan()
 
     def _execute_ready_plan(self):
+        previous_authorized=self._program_backend_authorized
         try:
+            if self._program_active and (self.sequence.preview or {}).get('program_goal') and self._program_validator:
+                self._program_validator();self._program_backend_authorized=True
             self._startup_recording = False
             self.reserve()
+            self.validate_runtime_execution(self.sequence.plan)
             if not self.is_simulation:
                 sides = (('left', 'right') if (self.sequence.plan.get('arm_side') == 'both'
                                                or self.sequence.plan.get('other_tcp_held'))
@@ -1553,6 +1786,10 @@ class GraspExecutionPanel(QWidget):
                 manual_path_confirmed=(self.scene_confirm.isChecked() or self.is_simulation
                                        or self._workflow_auto_restoring)
             )
+            if self.use_execution_service:
+                self.runner=self.new_process_runner('arm',plan=plan)
+                self.message='独立执行服务已启动；界面只监控状态，不驱动轨迹时钟。'
+                self.refresh();return
             if self.is_simulation:
                 simulation = self.simulation_backend()
                 self.runner = JointRunner(plan, simulation.publish, simulation.feedback, lambda: True)
@@ -1583,13 +1820,31 @@ class GraspExecutionPanel(QWidget):
             else:
                 self.set_reserved(False)
             self.message = str(exc)
+            if self._program_active:self._program_action_result=('failed',self.message)
+        finally:
+            self._program_backend_authorized=previous_authorized
         self.refresh()
 
     def pause_or_resume(self):
+        if self.hand_runner is not None:
+            try:
+                if self.hand_runner.state == 'paused':
+                    violation = self.wrench_guard_violation((self.hand_runner.side,))
+                    if violation:
+                        raise ValueError('六维力仍不满足继续条件：'+violation)
+                    self.hand_runner.resume()
+                else:
+                    self.hand_runner.pause()
+                self.message = self.hand_runner.message
+            except Exception as exc:
+                self.message = str(exc)
+            self.refresh()
+            return
         if self.runner is None:
             return
         try:
             if self.runner.state == 'paused':
+                if self.use_execution_service:self.validate_runtime_execution(self.runner.plan)
                 if self._wrench_guard_triggered:
                     side = self.runner.plan.get('arm_side', 'right')
                     sides = (('left', 'right') if (side == 'both' or self.runner.plan.get('other_tcp_held'))
@@ -1660,6 +1915,8 @@ class GraspExecutionPanel(QWidget):
             path = self.job_directory / 'result.json'
             result = json.loads(path.read_text()) if path.is_file() else {
                 'ok': False, 'error': 'IK worker 未返回结果: '+self.log_tail}
+            if self.mode=='rank_candidates':
+                self.accept_candidate_ranking(result);self.set_reserved(False);self.refresh();return
             if self.sequence.state == 'stopped':
                 self.message = '预检已取消，没有发送运动命令'
             elif not result.get('ok'):
@@ -1670,8 +1927,12 @@ class GraspExecutionPanel(QWidget):
             else:
                 self.sequence.accept_plan(result)
                 hold_note = '；另一只手末端保持 base_link 位姿' if result.get('other_tcp_held') else ''
+                if result.get('solver') == 'bounded_dual_tcp':
+                    hold_note += '；已使用带关节限位的联合 IK'
+                collision_note=('静态完整几何碰撞复检通过（采样，不含动态障碍）' if result.get('collision_checked')
+                                else '未进行碰撞复检')
                 self.message = (f"{result['stage']} IK/限位/连续性预检通过，约 {result['times_s'][-1]:.1f} 秒。"
-                                f'本段路径确认已保留，可直接点击“执行本段”{hold_note}；未做自动碰撞检查。')
+                                f'本段路径确认已保留，可直接点击“执行本段”{hold_note}；{collision_note}。')
         except Exception as exc:
             self.sequence.fail(str(exc))
             self.message = ('执行未启动：' if execute_requested else '') + str(exc)
@@ -1681,10 +1942,11 @@ class GraspExecutionPanel(QWidget):
             self.set_reserved(False)
         if self._workflow_waiting and self.sequence.state == 'failed':
             self._workflow_waiting = False
+            self._workflow_error = self.message
         execute_after = self._execute_after_plan
         self._execute_after_plan = False
         if execute_after and self.sequence.state == 'planned':
-            if self._workflow_auto_running and self._workflow_auto_paused:
+            if (self._workflow_auto_running or self._program_active) and self._workflow_auto_paused:
                 self.execution_feedback.setText('IK 预检通过；全部流程已暂停，等待继续。')
                 self.message = self.execution_feedback.text()
             else:
@@ -1697,9 +1959,16 @@ class GraspExecutionPanel(QWidget):
             self._workflow_waiting = False
         if self._workflow_auto_cancel_requested and self.process is None and self.runner is None:
             QTimer.singleShot(0, self._begin_auto_workflow_restore)
+        if self._workflow_waiting and self.sequence.state == 'failed':
+            self._workflow_waiting = False
+            self._workflow_error = self.message
+            self._workflow_auto_paused = self._workflow_auto_running
         self.refresh()
 
     def stop(self):
+        if self._program_active and not self._program_backend_authorized:
+            self.phone_program_panel.cancel();return
+        self._perception_pending=False;self._perception_token=None
         if self._workflow_auto_running and not self._workflow_auto_cancel_requested:
             self.cancel_all_workflow()
             return
@@ -1708,6 +1977,12 @@ class GraspExecutionPanel(QWidget):
         self._restore_hands_goal = None
         self._wrench_guard_triggered = None
         self._workflow_waiting = False
+        self._workflow_confirmation = None
+        if self.hand_runner is not None:
+            self.hand_runner.stop()
+            self.message = self.hand_runner.message
+            self.refresh()
+            return
         if self.sequence.state == 'stop_unconfirmed':
             self.message = '保持位置未获反馈确认，保留控制锁。请使用机器人停止装置并检查状态。'
             self.refresh()
@@ -1725,6 +2000,75 @@ class GraspExecutionPanel(QWidget):
 
     def monitor(self):
         self.capture_startup_state()
+        if self._perception_pending and time.monotonic()-self._perception_started>120:
+            self._perception_pending=False;self._perception_token=None;self._workflow_waiting=False
+            self.set_reserved(False);self._workflow_error='接近前重新估计超时，未执行运动'
+            self._workflow_auto_paused=self._workflow_auto_running;self.message=self._workflow_error
+        if self.hand_runner:
+            if self.hand_runner.state == 'running':
+                violation = self.wrench_guard_violation((self.hand_runner.side,))
+                if violation:
+                    self.hand_runner.stop('六维力保护触发：'+violation, failed=True)
+            self.hand_runner.tick()
+            hand_state = self.hand_runner.state
+            self.message = self.hand_runner.message
+            if hand_state in ('complete', 'stopped', 'failed', 'stop_unconfirmed'):
+                self.record_workflow_event('hand_finished', state=hand_state,
+                    execution_directory=str(getattr(self.hand_runner,'directory','')))
+                self.hand_runner = None
+                self._workflow_waiting = False
+                if self._hand_purpose=='program':
+                    self._program_action_result=(hand_state,self.message)
+                    if hand_state=='stop_unconfirmed':self.sequence.state=hand_state
+                    else:self.set_reserved(False)
+                    self.refresh();return
+                if self._hand_purpose=='restore':
+                    if not self._restoring and hand_state=='complete':
+                        hand_state='stopped';self.message='恢复已取消，不继续发送其他手部命令。'
+                    if hand_state=='complete':
+                        self._restore_hand_queue.pop(0)
+                        if self._restore_hand_queue:
+                            try:self._start_restore_hand_service()
+                            except Exception as exc:hand_state='failed';self.message=str(exc)
+                            else:self.refresh();return
+                        else:self.sequence.motion_finished(True)
+                    if hand_state!='complete':
+                        self.sequence.fail(self.message)
+                        if hand_state=='stop_unconfirmed':self.sequence.state=hand_state
+                    auto=self._workflow_auto_restoring
+                    self._restoring=False;self._workflow_auto_restoring=False;self._restore_hands_goal=None
+                    if hand_state!='stop_unconfirmed':self.set_reserved(False)
+                    if auto:self._finish_auto_workflow_cancel(hand_state=='complete',self.message)
+                    else:self.message='双臂和双手已恢复并获得反馈确认。' if hand_state=='complete' else self.message
+                    self.refresh();return
+                if hand_state == 'stop_unconfirmed':
+                    self.sequence.state = 'stop_unconfirmed'
+                    self._workflow_error = self.message
+                    self._workflow_auto_paused = self._workflow_auto_running
+                    self._workflow_auto_cancel_requested = False
+                else:
+                    self.set_reserved(False)
+                    if self._workflow_auto_cancel_requested:
+                        self._begin_auto_workflow_restore()
+                    elif hand_state == 'complete':
+                        if self._hand_purpose=='manual':
+                            if self._manual_hand_operation[1]=='open':
+                                self.world.detach(self._manual_hand_operation[0],self.feedback());self.pending_attachment=None
+                                self._unverified_grips.discard(self._manual_hand_operation[0])
+                            self.message='手部位置反馈已到位；夹持结果仍需人工确认。'
+                            self.refresh();return
+                        if self.use_execution_service:
+                            if self._pending_hand_open:
+                                self.world.detach(self._pending_hand_side,self.feedback())
+                                self._unverified_grips.discard(self._pending_hand_side)
+                                self.pending_attachment=None
+                            else:
+                                self.pending_attachment={'side':self._pending_hand_side,'role':self._pending_hand_role,
+                                    'id':self._pending_hand_target,'observation':self._pending_hand_observation}
+                        self._advance_task_workflow()
+                    else:
+                        self._workflow_error = self.message
+                        self._workflow_auto_paused = self._workflow_auto_running
         if self.runner:
             if not self.is_simulation and self.runner.state == 'running':
                 side = self.runner.plan.get('arm_side', 'right')
@@ -1745,13 +2089,18 @@ class GraspExecutionPanel(QWidget):
                                     '六维力保护触发，正在暂停并保持位置：' + self._wrench_guard_triggered)
                 else:
                     self.message = self.runner.message
-            if self.runner.state not in ('running', 'pausing', 'paused', 'stopping'):
+            if self.runner.state not in ('starting', 'resuming', 'finishing', 'running', 'pausing', 'paused', 'stopping'):
                 state, message = self.runner.state, self.runner.message
+                if self._program_active:self._program_action_result=(state,message)
+                self.record_workflow_event('motion_finished', state=state, result_message=message,
+                                           plan=getattr(self.runner, 'plan', None))
                 was_auto_restore = self._workflow_auto_restoring
                 if self._restoring:
                     if state == 'complete':
                         try:
                             message = self.finish_restore_hands()
+                            if self.hand_runner is not None:
+                                self.runner=None;self.message=message;self.refresh();return
                         except Exception as exc:
                             state, message = 'failed', str(exc)
                     self._restoring = False
@@ -1771,7 +2120,7 @@ class GraspExecutionPanel(QWidget):
                     if state == 'stop_unconfirmed':
                         self.sequence.state = state
                 self.message = message
-                if not self._workflow_auto_running:
+                if not self._workflow_auto_running and not self._program_active:
                     self.scene_confirm.setChecked(False)
                 if state == 'complete':
                     self.set_reserved(False)
@@ -1788,6 +2137,7 @@ class GraspExecutionPanel(QWidget):
                         self._advance_task_workflow()
                     else:
                         self.message = '流程步骤未完成：' + (message or state)
+                        self._workflow_error = self.message
                         if self._workflow_auto_running:
                             self._workflow_auto_paused = True
         if self.process and self.sequence.state != 'stopped' and time.monotonic()-self.started > 180:
@@ -1796,10 +2146,50 @@ class GraspExecutionPanel(QWidget):
             self.execution_feedback.setText(self.message)
         self.refresh()
 
+    def workflow_status(self):
+        if self._program_active and hasattr(self,'phone_program_panel'):return self.phone_program_panel.workflow_text()
+        if self.sequence.state == 'stop_unconfirmed':
+            return '停止未确认'
+        if self._workflow_auto_cancel_requested:
+            return '正在取消并恢复'
+        if self._workflow_error:
+            return '流程失败：' + self._workflow_error
+        if self._workflow_auto_paused:
+            return '流程已暂停'
+        active=self.hand_runner or self.runner
+        if active and active.state in ('starting','resuming','pausing','paused','finishing'):
+            return {'starting':'执行服务启动/预检中','resuming':'等待继续确认','pausing':'正在暂停',
+                    'paused':'已暂停','finishing':'等待执行服务结束'}[active.state]
+        if self._perception_pending:return '接近前重新估计目标中'
+        if self._workflow_confirmation:
+            return '等待人工确认：' + self._workflow_action()['label']
+        if self.hand_runner:
+            return self.hand_runner.message
+        if self._workflow_finished:
+            return '流程已完成'
+        if self._workflow_waiting:
+            return '正在预检或执行机械臂动作'
+        return '等待执行下一步'
+
     def refresh(self):
+        if hasattr(self,'execution_feedback'):self.execution_feedback.setText(self.message)
         state, stage = self.sequence.state, self.sequence.stage
-        busy = self.process is not None or self.runner is not None
+        busy = self.process is not None or self.runner is not None or self.hand_runner is not None or self._perception_pending or self._program_active
         auto_locked = self._workflow_auto_running
+        for widget in (self.scene_edit_button,self.assembly_edit_button,self.rank_candidates_button,self.runtime_verify_button,self.motion_limits_button,self.attach_button,self.empty_hand_button):
+            widget.setEnabled(not busy and not auto_locked and not self._workflow_waiting and not self.reserved)
+        self.collision_check.setEnabled(self.is_simulation and not busy and not self.reserved and not auto_locked)
+        self.reestimate_check.setEnabled(not busy and not self.reserved and not auto_locked)
+        workflow_status = self.workflow_status()
+        self.workflow_status_label.setText(workflow_status)
+        self.task_flow.set_completed_steps(self._workflow_completed_steps)
+        flow_state = ('failed' if self._workflow_error or state == 'stop_unconfirmed' else
+                      'paused' if self._workflow_auto_paused else
+                      'confirm' if self._workflow_confirmation else 'active')
+        self.task_flow.set_runtime_status(workflow_status, flow_state)
+        self.workflow_confirm_button.setEnabled(
+            bool(self._workflow_confirmation) and not busy and not self._workflow_auto_paused
+            and not self._workflow_auto_cancel_requested and state != 'stop_unconfirmed')
         self.task_combo.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
         self.task_new_button.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
         self.task_copy_button.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
@@ -1812,8 +2202,11 @@ class GraspExecutionPanel(QWidget):
         self.workflow_auto_pause_button.setText('继续执行' if self._workflow_auto_paused else '暂停')
         pause_ready = (not self._workflow_auto_paused or self.runner is None
                        or self.runner.state == 'paused')
+        if self.hand_runner and self._workflow_auto_paused:
+            pause_ready = self.hand_runner.state == 'paused'
         self.workflow_auto_pause_button.setEnabled(
-            auto_locked and not self._workflow_auto_cancel_requested and pause_ready)
+            auto_locked and not self._workflow_auto_cancel_requested and pause_ready
+            and state != 'stop_unconfirmed')
         self.grasp_target_combo.setEnabled(not busy and not self.reserved and not auto_locked)
         for combo in self.task_role_combos.values():
             combo.setEnabled(not busy and not self._workflow_waiting and not auto_locked)
@@ -1825,8 +2218,9 @@ class GraspExecutionPanel(QWidget):
         self.execution_mode.setEnabled(not busy and not self.reserved and not auto_locked)
         self.simulation_controls_button.setEnabled(self.is_simulation and not busy)
         runner_state = self.runner.state if self.runner is not None else ''
-        self.pause_button.setEnabled(runner_state in ('running', 'paused'))
-        self.pause_button.setText('继续执行' if runner_state == 'paused' else ('暂停中…' if runner_state == 'pausing' else '暂停'))
+        pause_state = self.hand_runner.state if self.hand_runner is not None else runner_state
+        self.pause_button.setEnabled(pause_state in ('running', 'paused'))
+        self.pause_button.setText('继续执行' if pause_state == 'paused' else ('暂停中…' if pause_state == 'pausing' else '暂停'))
         self.plan_validity.setEnabled(not busy and not self.reserved)
         self.save_validity_button.setEnabled(not busy and not self.reserved)
         expired = False
@@ -1863,12 +2257,12 @@ class GraspExecutionPanel(QWidget):
         for button in (self.preview_button, self.manual_candidate_button, self.import_button):
             button.setToolTip(reason if not button.isEnabled() else '仅准备/预览，不会自动移动机器人')
         self.scene_confirm.setEnabled(not busy)
-        self.hand_button.setEnabled(not busy and state != 'stop_unconfirmed')
+        self.hand_button.setEnabled(not busy and not auto_locked and not self._workflow_waiting and state != 'stop_unconfirmed')
         self.hand_button.setText('闭合手' if stage == 'close' else '张开手')
-        self.confirm_button.setEnabled(not busy and state != 'stop_unconfirmed')
+        self.confirm_button.setEnabled(not busy and not auto_locked and not self._workflow_waiting and state != 'stop_unconfirmed')
         self.confirm_button.setText('确认已抓住物体' if state == 'await_grasp' else '确认手已张开')
-        self.plan_button.setEnabled(not busy and self.observation is not None and state != 'stop_unconfirmed')
-        self.execute_button.setEnabled(not busy and self.observation is not None and state != 'stop_unconfirmed')
+        self.plan_button.setEnabled(not busy and not auto_locked and not self._workflow_waiting and self.observation is not None and state != 'stop_unconfirmed')
+        self.execute_button.setEnabled(not busy and not auto_locked and not self._workflow_waiting and self.observation is not None and state != 'stop_unconfirmed')
         if self.process is not None and self._execute_after_plan:
             self.execute_button.setText('自动预检中…')
         elif self.runner is not None:
@@ -1876,7 +2270,15 @@ class GraspExecutionPanel(QWidget):
         else:
             self.execute_button.setText('执行本段（仿真）' if self.is_simulation else '执行本段（真机）')
         self.execute_button.setToolTip('执行所选阶段；如无有效计划，自动计算目标和预检，通过后执行。不自动开合手。')
-        self.stop_button.setEnabled(self.sequence.preview is not None or busy)
+        self.stop_button.setEnabled(self.sequence.preview is not None or busy or self._workflow_waiting or auto_locked)
+        if self._workflow_waiting or auto_locked:
+            for widget in (self.restore_button, self.execution_mode, self.source_combo,
+                           self.simulation_controls_button, self.preview_button,
+                           self.manual_candidate_button, self.import_button,
+                           self.suggest_shape_button, self.apply_shape_button,
+                           self.profile_path, self.browse_profile_button, self.scene_confirm,
+                           self.candidates, *self.contact_offsets):
+                widget.setEnabled(False)
         states = {'idle': '待开始', 'await_open': '等待确认张开', 'opened': '手已张开',
                   'planning': '预检中', 'planned': '等待执行确认', 'executing': '移动中',
                   'at_pregrasp': '已到预抓取位置', 'at_grasp': '已到抓取位置',
@@ -1899,12 +2301,18 @@ class GraspExecutionPanel(QWidget):
                  '启动恢复状态: '+startup_state,
                  ('腰部参与 IK 与执行' if self.waist_participation.isChecked() else '腰部固定'),
                  f"任务: {self.task_combo.currentText()}；当前流程: {workflow_text}",
-                 f"状态: {states.get(state, state)}；当前/下一阶段: {stages.get(display_stage, '--')}",
-                 '手动分步模式：未接入自动避障', self.message]
+                 '流程状态: ' + workflow_status,
+                 f"机械臂阶段状态: {states.get(state, state)}；当前/下一阶段: {stages.get(display_stage, '--')}",
+                 ('静态场景采样碰撞复检；不含动态避障' if self.use_execution_service and self.collision_check.isChecked()
+                  else '运动学模式：未进行碰撞复检'), self.message]
         if self.observation:
             lines.append('输入来源：'+self.observation.get('source_label', '彩色图点击估计'))
             lines.extend(self.observation.get('execution_blockers', []))
             lines.append('观测 ID: '+str(self.observation.get('observation_id', '缺失')))
+        if self.run_log.path:
+            lines.append('执行记录: '+str(self.run_log.path))
+        if self._run_log_error:
+            lines.append(self._run_log_error)
         if self.sequence.preview:
             p = self.sequence.preview
             lines.append(f"手臂: {p['arm_side']} / 手型: {p['hand_model']} / TCP: {p['tcp_link']} / {p['base_frame']}")

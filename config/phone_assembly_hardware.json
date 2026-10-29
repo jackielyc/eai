@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "source": "hardware_calibration",
+  "hardware_calibrated": false,
+  "tool_model": "ruiyan_6dof_v1",
+  "arm_side": "right",
+  "pose_method": "pca",
+  "table_z": null,
+  "phone_size": null,
+  "box_inner_size": null,
+  "wall": null,
+  "lid_inner_size": null,
+  "lid_wall": null,
+  "T_link_tool": null,
+  "T_box_frame_cavity": null,
+  "grasp_T_object_tool": {"phone": null, "lid": null},
+  "placement_T_reference_object": {"phone": null, "lid": null},
+  "hand_presets": {
+    "phone": {"open": null, "close": null, "release": null, "velocity": null, "effort": null},
+    "lid": {"open": null, "close": null, "release": null, "velocity": null, "effort": null}
+  },
+  "clearance_m": 0.08,
+  "release_height_m": null,
+  "tool_speed_m_s": 0.06,
+  "approach_speed_m_s": 0.02,
+  "settle_s": 1.0,
+  "verify_timeout_s": 120,
+  "notes": "尺寸单位m，矩阵为齐次变换。T_link_tool: Link7到任务工具TCP；T_box_frame_cavity: 视觉盒体坐标到内腔底面中心。hand_presets的velocity/effort为驱动协议原始单位，须实测限速限力，不是仿真N值。实际手指不能进入盒内时应标定盒口上方释放高度。不得把仿真示例参数复制后声明实测。"
+}

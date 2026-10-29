@@ -138,7 +138,9 @@ def save_camera(topic: str, entry: dict, path: Optional[os.PathLike] = None) -> 
     file.parent.mkdir(parents=True, exist_ok=True)
     data = load_store(file)
     data["cameras"][topic] = entry
-    file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary=file.with_suffix(file.suffix+'.tmp')
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(file)
     return str(file)
 
 

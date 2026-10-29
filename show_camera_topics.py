@@ -11209,10 +11209,8 @@ def load_viewer_ui_state() -> Dict[str, object]:
 
 
 def save_viewer_ui_state(data: Dict[str, object]) -> str:
-    os.makedirs(os.path.dirname(VIEWER_UI_STATE_PATH), exist_ok=True)
-    with open(VIEWER_UI_STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    return VIEWER_UI_STATE_PATH
+    from viewer_preferences import save_main_preferences
+    return save_main_preferences(data, VIEWER_UI_STATE_PATH)
 
 
 def _ui_state_skip_text_widget(name: str, widget: QWidget) -> bool:
@@ -17473,6 +17471,18 @@ class CameraTopicNode(Node):
                 right_tcp=self._robot_state.right_tcp,
                 updated_at=self._robot_state.updated_at,
             )
+
+    def get_grasp_hand_feedback(self, side: str) -> dict:
+        """Read measured hand positions and their receipt time atomically."""
+        if side not in ('left', 'right'):
+            raise ValueError('未知手臂')
+        with self._robot_lock:
+            values = {canonical_hand_joint(name): float(value)
+                      for name, value in getattr(self._robot_state, side+'_hand')}
+            stamp = getattr(self, '_grasp_hand_state_received_at', {}).get(side, 0.)
+            if any(name not in values for name in HAND_JOINT_ORDER):
+                raise ValueError('手部实际反馈不完整')
+            return {'positions': [values[name] for name in HAND_JOINT_ORDER], 'stamp': stamp}
 
     def get_camera_frame_id(self, topic: str) -> str:
         return self._camera_frame_ids.get(topic, "")
@@ -30553,6 +30563,11 @@ class CameraTopicWindow(QMainWindow):
             ensure_wrench_monitor=self._ensure_grasp_wrench_monitor,
             save_task_data=self._save_grasp_task_data,
             load_task_data=self._load_grasp_task_data,
+            verify_observation=self._verify_grasp_observation,
+            scene_display=self._show_runtime_scene,
+            reestimate_observation=self._request_grasp_reestimate,
+            open_robot=self._on_mv6d_show_robot,
+            assembly_live_frame=self._phone_task_live_frame,
         )
 
 
@@ -50925,7 +50940,7 @@ class CameraTopicWindow(QMainWindow):
 
     def _control_grasp_simulation_hand(self, side, values):
         panel = self.grasp_execution_panel
-        if panel.is_simulation:
+        if panel.is_simulation and not panel._program_active:
             panel.simulation_backend().hand(side, values)
 
     def _robot_grasp_action(self, action):
@@ -50940,6 +50955,42 @@ class CameraTopicWindow(QMainWindow):
             panel.stop()
         return panel.message
 
+    def _phone_task_live_frame(self):
+        frames=self.node.click_frames
+        with frames.lock:
+            bucket=list(frames.frames.get('/camera/head_color',()))
+        if not bucket or time.monotonic()-bucket[-1].received>.8:return None
+        return bucket[-1].image,bucket[-1].received
+
+    def _request_grasp_reestimate(self, target_id, completion):
+        if self._mv6d_busy or getattr(self,'_mv6d_batch_active',False):
+            raise ValueError('已有视觉估计正在运行，请等待完成')
+        target=next((item for item in self._mv6d_targets if item['id']==target_id),None)
+        if target is None:raise ValueError('当前任务目标不在视觉目标列表中')
+        self._grasp_reestimate_pending=(target_id,completion)
+        self._set_mv6d_active_target(target,show_result=False)
+        self._start_mv6d_estimate(silent=False)
+        if not self._mv6d_busy:
+            self._finish_grasp_reestimate(None,'视觉估计未启动')
+
+    def _finish_grasp_reestimate(self, observations, error=None, target_id=None):
+        pending=getattr(self,'_grasp_reestimate_pending',None)
+        if pending is None:return
+        self._grasp_reestimate_pending=None
+        if observations is not None and target_id!=pending[0]:
+            observations=None;error='重估结果目标标识不匹配'
+        QTimer.singleShot(0,lambda:pending[1](observations,error))
+
+    def _show_runtime_scene(self,scene,attachments):
+        self._robot_collision_scene=(copy.deepcopy(scene),copy.deepcopy(attachments))
+        view=getattr(self,'_robot_view',None)
+        if view is not None:view.set_collision_scene(scene,attachments)
+
+    def _verify_grasp_observation(self, observation):
+        from grasp_perception import verify_live
+        from camera_extrinsic_calib import STORE_PATH
+        return verify_live(observation, self.node.click_frames, STORE_PATH)
+
     def _grasp_wrench_feedback(self, side):
         with self._grasp_wrench_lock:
             sample = self._grasp_wrench_cache.get(str(side))
@@ -50953,6 +51004,7 @@ class CameraTopicWindow(QMainWindow):
                 'force': values[:3] if valid else None,
                 'torque': values[3:6] if valid else None,
                 'force_state': int(getattr(msg, 'force_state', 0) or 0),
+                'force_coordinate': int(getattr(msg, 'force_coordinate', 0) or 0),
                 'stamp': time.time(),
             }
         except Exception:
@@ -50989,12 +51041,13 @@ class CameraTopicWindow(QMainWindow):
 
     def _display_grasp_simulation(self, joints, hands):
         self._robot_grasp_simulation = (joints, hands)
-        if joints is not None and getattr(self, '_robot_view', None) is None:
+        task_console=getattr(getattr(self,'grasp_execution_panel',None),'_program_active',False)
+        if joints is not None and getattr(self, '_robot_view', None) is None and not task_console:
             self._on_mv6d_show_robot()
         view = getattr(self, '_robot_view', None)
         if view is not None:
             view.set_simulation_state(joints, hands)
-        if joints is not None and not getattr(self, '_grasp_sim_display_active', False):
+        if joints is not None and not getattr(self, '_grasp_sim_display_active', False) and not task_console:
             self._on_mv6d_show_robot()
         self._grasp_sim_display_active = joints is not None
 
@@ -54036,10 +54089,12 @@ class CameraTopicWindow(QMainWindow):
                 holder.layout().addWidget(view, 1)
                 self._robot_view = view
                 view.simulation_hand_callback = self._control_grasp_simulation_hand
+                view.simulation_controls_allowed = lambda: not self.grasp_execution_panel._program_active
                 view.grasp_action_callback = self._robot_grasp_action
                 sim_q, sim_hands = getattr(self, '_robot_grasp_simulation', (None, {}))
                 view.set_simulation_state(sim_q, sim_hands)
                 view.set_grasp_preview(getattr(self, '_robot_grasp_preview', None))
+                view.set_collision_scene(*getattr(self, '_robot_collision_scene', ({}, [])))
                 cached = getattr(self, "_robot_method_poses", None) or {}
                 if not cached:
                     old = getattr(self, "_robot_pose6d", None)
@@ -54917,6 +54972,26 @@ class CameraTopicWindow(QMainWindow):
             if right_wrist_bgr is not None
             else None
         )
+        selected_depth_frames = {}
+        capture_sync_issues = []
+        if not (getattr(self, '_mv6d_batch_active', False) and getattr(self, '_mv6d_batch_capture', None)):
+            aligned = {}
+            for label, topic, image, depth_image in (
+                ('head', head_topic, head_bgr, head_depth),
+                ('left', left_wrist_topic, left_wrist_bgr, left_wrist_depth),
+                ('right', right_wrist_topic, right_wrist_bgr, right_wrist_depth)):
+                if image is None or depth_image is None:
+                    aligned[label] = depth_image
+                    continue
+                try:
+                    _, depth_frame, _ = self.node.click_frames.pair(
+                        topic, self._get_paired_depth_topic_name(topic) or '', image)
+                    aligned[label] = depth_frame.image
+                    selected_depth_frames[label] = depth_frame
+                except Exception as exc:
+                    aligned[label] = depth_image  # Diagnostic preview remains available.
+                    capture_sync_issues.append(label+': '+str(exc))
+            head_depth, left_wrist_depth, right_wrist_depth = aligned['head'], aligned['left'], aligned['right']
         batch_active = bool(getattr(self, '_mv6d_batch_active', False))
         batch_capture = getattr(self, '_mv6d_batch_capture', None) if batch_active else None
         if batch_capture is None and batch_active:
@@ -55025,6 +55100,31 @@ class CameraTopicWindow(QMainWindow):
         except Exception:
             tf_buffer = None
 
+        from grasp_perception import capture_provenance, CaptureTimeTF
+        from camera_extrinsic_calib import STORE_PATH
+        provenance = (batch_capture or {}).get('provenance')
+        if provenance is None:
+            try:
+                provenance = capture_provenance(node.click_frames, {
+                    'head': (head_topic, head_depth_topic, head_bgr),
+                    'left': (left_wrist_topic, left_depth_topic, left_wrist_bgr if (use_lingbot or left_wrist_depth is not None) else None),
+                    'right': (right_wrist_topic, right_depth_topic, right_wrist_bgr if (use_lingbot or right_wrist_depth is not None) else None),
+                }, STORE_PATH, 'lingbot' if use_lingbot else 'sensor', tf_buffer, selected_depth_frames)
+                provenance['issues'].extend(capture_sync_issues)
+            except Exception as exc:
+                provenance = {'version': 1, 'issues': [str(exc)], 'frames': {}, 'captured_at': time.time()}
+            if batch_capture is not None:
+                batch_capture['provenance'] = copy.deepcopy(provenance)
+        if 'robot_q16' not in provenance:
+            try:
+                from grasp_execution import read_feedback
+                provenance['robot_q16'] = read_feedback(os.environ.get('EAI_HOST_FK_STATE', '/tmp/eai_host_fk_state.json'))['q16']
+            except Exception as exc:
+                provenance.setdefault('issues', []).append('采集时机器人反馈不可用：'+str(exc))
+        capture_stamp = (provenance.get('frames', {}).get('head') or {}).get('stamp')
+        if tf_buffer is not None and capture_stamp:
+            tf_buffer = CaptureTimeTF(tf_buffer, capture_stamp)
+
         self._mv6d_busy = True
         if hasattr(self, "_on_mv6d_methods_changed"):
             self._on_mv6d_methods_changed()
@@ -55051,6 +55151,7 @@ class CameraTopicWindow(QMainWindow):
             else:
                 self.status_bar.showMessage(msg + '（保留上次结果直到成功）')
 
+        requested_target_id = (getattr(self, '_mv6d_active_target', None) or {}).get('id')
         def _work() -> None:
             t0 = time.time()
             notes_extra: List[str] = list(cached_depth[3]) if cached_depth is not None else []
@@ -55165,11 +55266,22 @@ class CameraTopicWindow(QMainWindow):
                     )
                 if cancel_event is not None and cancel_event.is_set():
                     raise RuntimeError("已停止，本轮 6D 已取消")
+                if provenance.get('robot_q16') is not None:
+                    try:
+                        from grasp_execution import read_feedback
+                        from grasp_trajectory import exceeds
+                        end_feedback = read_feedback(os.environ.get('EAI_HOST_FK_STATE', '/tmp/eai_host_fk_state.json'))
+                        if exceeds(end_feedback['q16'], provenance['robot_q16'], 'hold'):
+                            provenance.setdefault('issues', []).append('估计期间机器人移动，需重新采集同步场景')
+                    except Exception as exc:
+                        provenance.setdefault('issues', []).append('估计结束时反馈不可用：'+str(exc))
                 payload = {
                     "ok": True,
                     "snap": snap,
                     "method_poses": method_poses,
-                    "captured_at": t0,
+                    "captured_at": provenance['captured_at'],
+                    "provenance": copy.deepcopy(provenance),
+                    "requested_target_id": requested_target_id,
                     "elapsed_s": time.time() - t0,
                     "silent": silent,
                     "lingbot_notes": notes_extra,
@@ -55494,427 +55606,36 @@ class CameraTopicWindow(QMainWindow):
 
         return wrist_result, notes
 
-    def _compute_mv6d_snapshot(
-        self,
-        *,
-        head_topic: str,
-        head_bgr: Optional[np.ndarray],
-        head_depth: Optional[np.ndarray],
-        head_depth_topic: str,
-        wrist_topic: str = "",
-        wrist_bgr: Optional[np.ndarray] = None,
-        wrist_depth: Optional[np.ndarray] = None,
-        wrist_depth_topic: str = "",
-        left_wrist_topic: str = "/camera/left_wrist_color",
-        left_wrist_bgr: Optional[np.ndarray] = None,
-        left_wrist_depth: Optional[np.ndarray] = None,
-        left_wrist_depth_topic: str = "",
-        right_wrist_topic: str = "/camera/right_wrist_color",
-        right_wrist_bgr: Optional[np.ndarray] = None,
-        right_wrist_depth: Optional[np.ndarray] = None,
-        right_wrist_depth_topic: str = "",
-        preferred_wrist_topic: str = "",
-        seed_u: int,
-        seed_v: int,
-        tf_buffer,
-        get_intrinsics,
-        get_camera_frame,
-        pose_backend: str = POSE_BACKEND_PCA,
-        assumed_depth_m: float = 0.45,
-    ) -> MultiView6DPoseSnapshot:
-        head_result = None
-        notes: List[str] = []
-        assumed_depth_m = float(assumed_depth_m or 0.45)
-
-        # 兼容旧单腕参数：未传左右腕时退化为 wrist_*
-        if left_wrist_bgr is None and right_wrist_bgr is None and wrist_bgr is not None:
-            if "right" in str(wrist_topic):
-                right_wrist_topic = wrist_topic
-                right_wrist_bgr = wrist_bgr
-                right_wrist_depth = wrist_depth
-                right_wrist_depth_topic = wrist_depth_topic
-            else:
-                left_wrist_topic = wrist_topic or left_wrist_topic
-                left_wrist_bgr = wrist_bgr
-                left_wrist_depth = wrist_depth
-                left_wrist_depth_topic = wrist_depth_topic
-
-        if head_bgr is not None:
-            if head_depth is not None:
-                dh, dw = head_depth.shape[:2]
-                fx, fy, cx, cy = get_intrinsics(head_depth_topic or head_topic, dw, dh)
-            else:
-                ch, cw = head_bgr.shape[:2]
-                fx, fy, cx, cy = get_intrinsics(head_topic, cw, ch)
-                notes.append("头部无深度 → RGB-only（假定平面深度）")
-            ch, cw = head_bgr.shape[:2]
-            su = max(0, min(cw - 1, seed_u))
-            sv = max(0, min(ch - 1, seed_v))
-            try:
-                head_result = self._estimate_view_6d(
-                    head_bgr,
-                    head_depth,
-                    su,
-                    sv,
-                    fx,
-                    fy,
-                    cx,
-                    cy,
-                    method_tag="head",
-                    assumed_depth_m=assumed_depth_m,
-                    pose_backend=pose_backend,
-                )
-            except Exception as exc:
-                raise RuntimeError(f"头部估计失败：{exc}") from exc
-            if head_result is None:
-                raise RuntimeError("头部估计失败：没有 SAM3 分割结果")
-        else:
-            notes.append("缺少头部 RGB")
-
-        # 头部中心 → base，供腕部一致性检查
-        head_center_base: Optional[np.ndarray] = None
-        if head_result is not None:
-            try:
-                hf = (
-                    get_camera_frame(head_topic, head_depth_topic)
-                    or get_camera_frame(head_depth_topic, head_topic)
-                    or ""
-                )
-            except Exception:
-                hf = ""
-            T_h = self._mv6d_sim_extrinsic_matrix(
-                head_topic, head_depth_topic, hf
-            )
-            if T_h is None:
-                T_h = self._mv6d_manual_extrinsic_matrix(head_topic, hf)
-            if T_h is None and tf_buffer is not None and hf:
-                T_h = lookup_transform_matrix(tf_buffer, BASE_LINK_FRAME, hf)
-            if T_h is not None:
-                head_center_base = transform_points_by_matrix(
-                    np.asarray([head_result.position_xyz], dtype=np.float32),
-                    T_h,
-                )[0]
-
-        # FP / Any6D：用头部学习位姿变换到 base，不再跑腕部（昂贵且 PCA 融合会冲掉学习结果）
-        if (
-            pose_backend in (POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY6D)
-            and head_result is not None
-        ):
-            notes.append(
-                f"方法={pose_backend}，分割=SAM3：仅头部，跳过腕部融合"
-            )
-            frame_id = BASE_LINK_FRAME
-            R_cam = np.asarray(head_result.rotation_matrix, dtype=np.float32)
-            t_cam = np.asarray(head_result.position_xyz, dtype=np.float32)
-            if T_h is not None:
-                R_b = (T_h[:3, :3] @ R_cam).astype(np.float32)
-                t_b = (
-                    T_h[:3, :3] @ t_cam + T_h[:3, 3]
-                ).astype(np.float32)
-                tf_ok = True
-            else:
-                R_b, t_b = R_cam, t_cam
-                frame_id = hf or "camera"
-                tf_ok = False
-                notes.append("无外参/TF，位姿仍在相机系")
-            half = np.array(
-                [
-                    float(head_result.obb_extents[0]) * 0.5,
-                    float(head_result.obb_extents[1]) * 0.5,
-                    float(head_result.obb_extents[2]) * 0.5,
-                ],
-                dtype=np.float32,
-            )
-            corners = obb_corners(t_b, R_b, half)
-            rpy = rotation_matrix_to_euler_xyz(R_b)
-            quat = rotation_matrix_to_quaternion(R_b)
-            method = f"{head_result.method}+mv6d-head-only"
-            # 仿真 GT 精修（与融合路径一致）
-            center_xyz = (float(t_b[0]), float(t_b[1]), float(t_b[2]))
-            if tf_ok:
-                try:
-                    xyz_gt, quat_gt, gt_note = self._mv6d_refine_with_sim_gt(
-                        center_xyz,
-                        max_dist_m=float(MV6D_EST_GT_SNAP_MAX_DIST_M),
-                        snap=None,
-                    )
-                    if gt_note and xyz_gt is not None:
-                        center_xyz = (
-                            float(xyz_gt[0]),
-                            float(xyz_gt[1]),
-                            float(xyz_gt[2]),
-                        )
-                        t_b = np.asarray(center_xyz, dtype=np.float32)
-                        corners = obb_corners(t_b, R_b, half)
-                        method = f"{method}+simGT"
-                        notes.append(gt_note)
-                        if quat_gt is not None:
-                            qx, qy, qz, qw = [float(v) for v in quat_gt[:4]]
-                            quat = (qx, qy, qz, qw)
-                            R_b = quat_to_rotation_matrix(qx, qy, qz, qw).astype(
-                                np.float32
-                            )
-                            rpy = rotation_matrix_to_euler_xyz(R_b)
-                            corners = obb_corners(t_b, R_b, half)
-                except Exception:
-                    pass
-            return MultiView6DPoseSnapshot(
-                frame_id=frame_id,
-                position_xyz=center_xyz,
-                euler_rpy_rad=rpy,
-                quaternion_xyzw=quat,
-                rotation_matrix=np.asarray(R_b, dtype=np.float32),
-                obb_extents=tuple(float(x) for x in head_result.obb_extents),
-                obb_corners=np.asarray(corners, dtype=np.float32),
-                head_topic=head_topic,
-                wrist_topic="",
-                head_points=int(head_result.point_count),
-                wrist_points=0,
-                fused_points=int(head_result.point_count),
-                method=method,
-                head_result=head_result,
-                wrist_result=None,
-                left_wrist_result=None,
-                right_wrist_result=None,
-                tf_ok=tf_ok,
-                notes="; ".join(notes),
-            )
-
-        left_wrist_result, n_l = self._mv6d_try_wrist_view_if_visible(
-            label="左腕",
-            head_result=head_result,
-            head_topic=head_topic,
-            head_depth_topic=head_depth_topic,
-            wrist_topic=left_wrist_topic,
-            wrist_bgr=left_wrist_bgr,
-            wrist_depth=left_wrist_depth,
-            wrist_depth_topic=left_wrist_depth_topic
-            or self._get_paired_depth_topic_name(left_wrist_topic)
-            or "",
-            tf_buffer=tf_buffer,
-            get_intrinsics=get_intrinsics,
-            get_camera_frame=get_camera_frame,
-            assumed_depth_m=assumed_depth_m,
-            head_center_base=head_center_base,
-            pose_backend=pose_backend,
+    def _compute_mv6d_snapshot(self, **kwargs):
+        from mv6d_engine import compute_snapshot
+        from types import SimpleNamespace
+        services = SimpleNamespace(
+            _estimate_view_6d=self._estimate_view_6d,
+            _get_paired_depth_topic_name=self._get_paired_depth_topic_name,
+            _mv6d_manual_extrinsic_matrix=self._mv6d_manual_extrinsic_matrix,
+            _mv6d_refine_with_sim_gt=self._mv6d_refine_with_sim_gt,
+            _mv6d_sim_extrinsic_matrix=self._mv6d_sim_extrinsic_matrix,
+            _mv6d_try_wrist_view_if_visible=self._mv6d_try_wrist_view_if_visible,
         )
-        notes.extend(n_l)
-        right_wrist_result, n_r = self._mv6d_try_wrist_view_if_visible(
-            label="右腕",
-            head_result=head_result,
-            head_topic=head_topic,
-            head_depth_topic=head_depth_topic,
-            wrist_topic=right_wrist_topic,
-            wrist_bgr=right_wrist_bgr,
-            wrist_depth=right_wrist_depth,
-            wrist_depth_topic=right_wrist_depth_topic
-            or self._get_paired_depth_topic_name(right_wrist_topic)
-            or "",
-            tf_buffer=tf_buffer,
-            get_intrinsics=get_intrinsics,
-            get_camera_frame=get_camera_frame,
-            assumed_depth_m=assumed_depth_m,
-            head_center_base=head_center_base,
-            pose_backend=pose_backend,
-        )
-        notes.extend(n_r)
-
-        # 主腕：优先 combo 偏好且可见；否则任一可见腕
-        pref = str(preferred_wrist_topic or wrist_topic or "")
-        wrist_result: Optional[Object6DPoseResult] = None
-        wrist_topic_used = ""
-        wrist_depth_topic_used = ""
-        if "right" in pref and right_wrist_result is not None:
-            wrist_result = right_wrist_result
-            wrist_topic_used = right_wrist_topic
-            wrist_depth_topic_used = right_wrist_depth_topic
-        elif "left" in pref and left_wrist_result is not None:
-            wrist_result = left_wrist_result
-            wrist_topic_used = left_wrist_topic
-            wrist_depth_topic_used = left_wrist_depth_topic
-        elif left_wrist_result is not None:
-            wrist_result = left_wrist_result
-            wrist_topic_used = left_wrist_topic
-            wrist_depth_topic_used = left_wrist_depth_topic
-        elif right_wrist_result is not None:
-            wrist_result = right_wrist_result
-            wrist_topic_used = right_wrist_topic
-            wrist_depth_topic_used = right_wrist_depth_topic
-
-        if head_result is None and left_wrist_result is None and right_wrist_result is None:
-            raise RuntimeError("头/腕均未能估计出 6D 位姿（检查彩色图与提示点）")
-
-        # 尝试变换到 base_link 后融合点云（头部权重大；腕部仅弱补充）
-        fused_chunks: List[Tuple[np.ndarray, float]] = []
-        tf_ok = False
-        target_frame = BASE_LINK_FRAME
-
-        def _view_points_in_target(
-            result: Object6DPoseResult,
-            color_topic: str,
-            depth_topic: str,
-        ) -> Optional[np.ndarray]:
-            nonlocal tf_ok
-            frame = get_camera_frame(color_topic, depth_topic) or get_camera_frame(
-                depth_topic, color_topic
-            )
-            pts = np.asarray(result.points_3d, dtype=np.float32)
-            if len(pts) == 0:
-                return None
-            # 优先 Isaac 外参（与 TCP 同系）；避免 A2D 真机 TF 把桌面点抬到 Z≈1.8
-            T = self._mv6d_sim_extrinsic_matrix(color_topic, depth_topic, frame)
-            if T is None:
-                T = self._mv6d_manual_extrinsic_matrix(color_topic, frame)
-            if T is None:
-                if not frame:
-                    return None
-                T = lookup_transform_matrix(tf_buffer, target_frame, frame)
-            if T is None:
-                return None
-            tf_ok = True
-            return transform_points_by_matrix(pts, T)
-
-        if head_result is not None:
-            pts = _view_points_in_target(head_result, head_topic, head_depth_topic)
-            if pts is not None and len(pts) > 0:
-                fused_chunks.append((pts, float(MV6D_FUSE_WEIGHT_HEAD)))
-        if left_wrist_result is not None:
-            pts = _view_points_in_target(
-                left_wrist_result,
-                left_wrist_topic,
-                left_wrist_depth_topic
-                or self._get_paired_depth_topic_name(left_wrist_topic)
-                or "",
-            )
-            if pts is not None and len(pts) > 0:
-                fused_chunks.append((pts, float(MV6D_FUSE_WEIGHT_WRIST)))
-        if right_wrist_result is not None:
-            pts = _view_points_in_target(
-                right_wrist_result,
-                right_wrist_topic,
-                right_wrist_depth_topic
-                or self._get_paired_depth_topic_name(right_wrist_topic)
-                or "",
-            )
-            if pts is not None and len(pts) > 0:
-                fused_chunks.append((pts, float(MV6D_FUSE_WEIGHT_WRIST)))
-
-        if fused_chunks:
-            weighted: List[np.ndarray] = []
-            for pts, w in fused_chunks:
-                n_rep = max(1, int(round(float(w))))
-                for _ in range(n_rep):
-                    weighted.append(pts)
-            all_pts = np.concatenate(weighted, axis=0)
-            # 子采样避免腕部重复后过大
-            if len(all_pts) > 20000:
-                rng = np.random.default_rng(0)
-                all_pts = all_pts[rng.choice(len(all_pts), 20000, replace=False)]
-            seed_for_pca = head_center_base
-            all_pts, clean_note = refine_fused_object_points(
-                all_pts, seed_xyz=seed_for_pca
-            )
-            notes.append(f"点云清洗:{clean_note}")
-            pose = estimate_6d_pose_pca(
-                all_pts, align_gravity=True, seed_xyz=seed_for_pca
-            )
-            if pose is None:
-                raise RuntimeError("融合点云 PCA 失败")
-            center, rotation, half_ext, rpy, quat = pose
-            frame_id = target_frame
-            method = "sam3+pca-multiview-base+gravity+clean"
-            corners = obb_corners(center, rotation, half_ext)
-            extents = (
-                float(half_ext[0] * 2),
-                float(half_ext[1] * 2),
-                float(half_ext[2] * 2),
-            )
-            fused_n = int(sum(len(p) for p, _ in fused_chunks))
-        else:
-            # 无 TF：以头部结果为主，腕部仅作备注
-            primary = head_result or wrist_result
-            assert primary is not None
-            frame_id = (
-                get_camera_frame(head_topic, head_depth_topic)
-                if head_result is not None
-                else get_camera_frame(wrist_topic_used, wrist_depth_topic_used)
-            ) or "camera"
-            center = np.asarray(primary.position_xyz, dtype=np.float32)
-            rotation = np.asarray(primary.rotation_matrix, dtype=np.float32)
-            rpy = primary.euler_rpy_rad
-            quat = primary.quaternion_xyzw
-            corners = primary.obb_corners
-            extents = primary.obb_extents
-            method = "sam3+pca-single-view"
-            fused_n = int(primary.point_count)
-            notes.append("无 TF→base_link，使用单视角相机系结果（未几何融合）")
-
-        wrist_pts = 0
-        if left_wrist_result is not None:
-            wrist_pts += int(left_wrist_result.point_count)
-        if right_wrist_result is not None:
-            wrist_pts += int(right_wrist_result.point_count)
-
-        # 仿真可用且估计已靠近某物体：位置吸到物体中心（姿态仍用视觉），显著减小平移误差
-        center_xyz = (float(center[0]), float(center[1]), float(center[2]))
-        if tf_ok and str(frame_id) == str(BASE_LINK_FRAME):
-            try:
-                xyz_gt, quat_gt, gt_note = self._mv6d_refine_with_sim_gt(
-                    center_xyz,
-                    max_dist_m=float(MV6D_EST_GT_SNAP_MAX_DIST_M),
-                    snap=None,
-                )
-                if gt_note and xyz_gt is not None:
-                    center_xyz = (
-                        float(xyz_gt[0]),
-                        float(xyz_gt[1]),
-                        float(xyz_gt[2]),
-                    )
-                    center = np.asarray(center_xyz, dtype=np.float32)
-                    half_ext_arr = np.asarray(
-                        [
-                            float(extents[0]) * 0.5,
-                            float(extents[1]) * 0.5,
-                            float(extents[2]) * 0.5,
-                        ],
-                        dtype=np.float32,
-                    )
-                    corners = obb_corners(center, rotation, half_ext_arr)
-                    method = f"{method}+simGT"
-                    notes.append(gt_note)
-                    if quat_gt is not None:
-                        # _mv6d_refine_with_sim_gt 已返回 xyzw
-                        qx, qy, qz, qw = [float(v) for v in quat_gt[:4]]
-                        quat = (qx, qy, qz, qw)
-                        rotation = quat_to_rotation_matrix(qx, qy, qz, qw).astype(
-                            np.float32
-                        )
-                        rpy = rotation_matrix_to_euler_xyz(rotation)
-                        corners = obb_corners(center, rotation, half_ext_arr)
-            except Exception:
-                pass
-
-        return MultiView6DPoseSnapshot(
-            frame_id=frame_id,
-            position_xyz=center_xyz,
-            euler_rpy_rad=rpy,
-            quaternion_xyzw=quat,
-            rotation_matrix=np.asarray(rotation, dtype=np.float32),
-            obb_extents=extents,
-            obb_corners=np.asarray(corners, dtype=np.float32),
-            head_topic=head_topic,
-            wrist_topic=wrist_topic_used,
-            head_points=int(head_result.point_count) if head_result else 0,
-            wrist_points=int(wrist_pts),
-            fused_points=int(fused_n),
-            method=method,
-            head_result=head_result,
-            wrist_result=wrist_result,
-            left_wrist_result=left_wrist_result,
-            right_wrist_result=right_wrist_result,
-            tf_ok=tf_ok,
-            notes="; ".join(notes),
-        )
+        return compute_snapshot(services, dependencies={
+            "BASE_LINK_FRAME": BASE_LINK_FRAME,
+            "MV6D_EST_GT_SNAP_MAX_DIST_M": MV6D_EST_GT_SNAP_MAX_DIST_M,
+            "MV6D_FUSE_WEIGHT_HEAD": MV6D_FUSE_WEIGHT_HEAD,
+            "MV6D_FUSE_WEIGHT_WRIST": MV6D_FUSE_WEIGHT_WRIST,
+            "MultiView6DPoseSnapshot": MultiView6DPoseSnapshot,
+            "Object6DPoseResult": Object6DPoseResult,
+            "POSE_BACKEND_ANY6D": POSE_BACKEND_ANY6D,
+            "POSE_BACKEND_FOUNDATIONPOSE": POSE_BACKEND_FOUNDATIONPOSE,
+            "POSE_BACKEND_PCA": POSE_BACKEND_PCA,
+            "estimate_6d_pose_pca": estimate_6d_pose_pca,
+            "lookup_transform_matrix": lookup_transform_matrix,
+            "obb_corners": obb_corners,
+            "quat_to_rotation_matrix": quat_to_rotation_matrix,
+            "refine_fused_object_points": refine_fused_object_points,
+            "rotation_matrix_to_euler_xyz": rotation_matrix_to_euler_xyz,
+            "rotation_matrix_to_quaternion": rotation_matrix_to_quaternion,
+            "transform_points_by_matrix": transform_points_by_matrix,
+        }, **kwargs)
 
     def _on_mv6d_copy_result(self) -> None:
         text = self.mv6d_result_edit.toPlainText().strip()
@@ -57254,6 +56975,8 @@ class CameraTopicWindow(QMainWindow):
             return
         if not payload.get("ok"):
             err = str(payload.get("error") or "未知错误")
+            if hasattr(self, '_finish_grasp_reestimate'):
+                self._finish_grasp_reestimate(None,err)
             if not silent or payload.get("depth_source") == "lingbot":
                 if self._mv6d_last_snap is None:
                     self.mv6d_result_edit.setPlainText(f"失败: {err}")
@@ -57308,8 +57031,24 @@ class CameraTopicWindow(QMainWindow):
                 key = 'foundationpose' if 'foundation' in method else ('any6d' if 'any6d' in method else 'pca')
                 observation['observation_id'] += ':' + key
                 observations[key] = observation
+            for method_key, obs in observations.items():
+                obs['pose_method'] = method_key
+                obs['provenance'] = copy.deepcopy(payload.get('provenance') or {})
+                head = snap.head_result
+                if head is not None and head.source_bgr is not None and head.mask is not None:
+                    from grasp_perception import thumbnail
+                    ys, xs = np.where(np.asarray(head.mask)>0)
+                    if len(xs):
+                        mh,mw=head.mask.shape[:2];ih,iw=head.source_bgr.shape[:2]
+                        roi=[float(xs.min()/mw),float(ys.min()/mh),float((xs.max()+1)/mw),float((ys.max()+1)/mh)]
+                        crop=head.source_bgr[int(roi[1]*ih):max(int(roi[1]*ih)+1,int(roi[3]*ih)),int(roi[0]*iw):max(int(roi[0]*iw)+1,int(roi[2]*iw))]
+                        obs['provenance']['target_patch']={'roi_normalized':roi,'thumbnail':thumbnail(crop).tolist()}
+                obs['quality'] = {'point_count': int(snap.fused_points), 'covariance': None,
+                                  'depth_source': payload.get('depth_source')}
             self.grasp_execution_panel.set_method_observations(observations)
             payload['observations'] = observations
+            if hasattr(self, '_finish_grasp_reestimate'):
+                self._finish_grasp_reestimate(observations,target_id=payload.get('requested_target_id'))
             target = getattr(self, '_mv6d_active_target', None)
             if target is not None:
                 payload['target'] = dict(target)
@@ -57327,6 +57066,8 @@ class CameraTopicWindow(QMainWindow):
                 'target_results': copy.deepcopy(list(getattr(self, '_mv6d_target_results', {}).values())),
             })
         except Exception as exc:
+            if hasattr(self, '_finish_grasp_reestimate'):
+                self._finish_grasp_reestimate(None,str(exc))
             self.grasp_execution_panel.message = f"视觉6D输入转换失败: {exc}"
             self.grasp_execution_panel.refresh()
 
@@ -57423,6 +57164,9 @@ class CameraTopicWindow(QMainWindow):
             raise ValueError('任务缓存标识不匹配')
         self._mv6d_targets = [dict(target) for target in saved.get('targets') or []]
         results = saved.get('target_results') or []
+        from grasp_perception import mark_cached
+        for result in results:
+            mark_cached(result.get('observations') or {})
         self._mv6d_target_results = {
             str(result.get('target', {}).get('id')): result
             for result in results if result.get('target', {}).get('id')
@@ -57499,6 +57243,8 @@ class CameraTopicWindow(QMainWindow):
                 if cloud.get('ply') and os.path.isfile(cloud['ply']):
                     view.set_lingbot_depth_from_ply(cloud['ply'], color_topic=cloud.get('color_topic', ''))
             observations = cached['observations']
+            from grasp_perception import mark_cached
+            mark_cached(observations)
             for obs in observations.values():
                 obs['source_label'] = obs.get('source_label', '') + ' / 历史缓存'
             self.grasp_execution_panel.set_method_observations(observations)

@@ -21,6 +21,7 @@ from test_grasp_execution import example
 
 class FakeNode:
     def __init__(self):
+        self._grasp_use_process_runner = False
         self.hand_commands = []
         self.arm_commands = []
         self._grasp_execution_reserved = False
@@ -56,6 +57,8 @@ class UiTests(unittest.TestCase):
             wrench_feedback=wrench_feedback,
             ensure_wrench_monitor=lambda:None,
         )
+        from grasp_run_log import TaskRunLog
+        self.panel.run_log = TaskRunLog(Path(self.tmp.name)/'runs')
         self.panel.execution_mode.setCurrentIndex(1)
         self.profile, self.obs = example()
         path = Path(self.tmp.name)/'profile.json'
@@ -65,6 +68,7 @@ class UiTests(unittest.TestCase):
 
     def tearDown(self):
         self.panel.watchdog.stop()
+        self.panel._workflow_auto_timer.stop()
         self.panel.deleteLater()
         self.tmp.cleanup()
 
@@ -149,7 +153,7 @@ class UiTests(unittest.TestCase):
         self.assertEqual(sim.hands,initial['hands'])
         self.assertIn('已取消并恢复',self.panel.message)
 
-    def test_all_execute_chains_immediate_workflow_steps_to_completion(self):
+    def test_all_execute_waits_for_hand_feedback_and_explicit_confirmation(self):
         from robot_view3d import _resolve_urdf
         key='task_auto_immediate'
         TASKS[key]={'name':'自动链测试','builtin':False,'roles':(('item','物品'),),
@@ -170,9 +174,29 @@ class UiTests(unittest.TestCase):
             with patch.object(self.panel,'_schedule_auto_workflow'):
                 self.panel.toggle_all_workflow()
                 for _ in range(4): self.panel._run_auto_workflow_next()
+                self.assertEqual(self.panel._workflow_step, 1)
+                self.assertIsNotNone(self.panel.hand_runner)
+                self.assertFalse(self.panel.execute_button.isEnabled())
+                for _ in range(3): self.panel.monitor()
+                self.assertEqual(self.panel._workflow_step, 2)
+                for _ in range(4): self.panel._run_auto_workflow_next()
+                self.assertEqual(self.panel._workflow_step, 2)
+                self.assertTrue(self.panel.workflow_confirm_button.isEnabled())
+                self.assertIn('等待人工确认', self.panel.report.toPlainText())
+                self.panel.toggle_auto_workflow_pause()
+                self.panel.confirm_workflow_action()
+                self.assertEqual(self.panel._workflow_step, 2)
+                self.panel.toggle_auto_workflow_pause()
+                self.panel.workflow_confirm_button.click()
+                self.assertEqual(self.panel._workflow_step, 3)
+                self.panel.confirm_workflow_action()  # Double clicks cannot skip a step.
+                self.panel._run_auto_workflow_next()
             self.assertFalse(self.panel._workflow_auto_running)
             self.assertEqual(self.panel._workflow_step,3)
             self.assertIn('全部流程执行完成',self.panel.message)
+            events = [json.loads(line)['event'] for line in self.panel.run_log.path.read_text().splitlines()]
+            self.assertLess(events.index('hand_finished'), events.index('confirmation_requested'))
+            self.assertLess(events.index('operator_confirmed'), events.index('workflow_completed'))
         finally:
             TASKS.pop(key,None)
 
@@ -192,6 +216,112 @@ class UiTests(unittest.TestCase):
         finally:
             TASKS.pop(key,None)
 
+    def test_hardware_workflow_hand_does_not_send_without_feedback(self):
+        self.panel.scene_confirm.setChecked(True)
+        self.node.get_grasp_hand_feedback = lambda side: {'stamp': 0., 'positions': [0.]*6}
+        action = {'kind': 'hand', 'role': 'phone', 'open': True, 'label': '张开手'}
+        with patch.object(self.panel, '_workflow_action', return_value=action), \
+             patch.object(self.panel, '_workflow_target'), \
+             patch.object(self.panel, '_advance_task_workflow') as advance:
+            self.panel.execute_workflow_next()
+        self.assertFalse(self.node.hand_commands)
+        advance.assert_not_called()
+        self.assertIn('反馈', self.panel.workflow_status())
+        self.assertFalse(self.panel.reserved)
+
+    def test_hardware_hand_feedback_loss_keeps_lock_and_blocks_restore(self):
+        import time
+        self.panel.scene_confirm.setChecked(True)
+        sample = {'stamp': time.time(), 'positions': [0.]*6}
+        self.node.get_grasp_hand_feedback = lambda side: sample
+        action = {'kind': 'hand', 'role': 'phone', 'open': True, 'label': '张开手'}
+        with patch.object(self.panel, '_workflow_action', return_value=action), \
+             patch.object(self.panel, '_workflow_target'), \
+             patch.object(self.panel, '_advance_task_workflow') as advance:
+            self.panel.execute_workflow_next()
+            self.assertTrue(self.panel.reserved)
+            sample['stamp'] = 0.
+            self.panel.monitor()
+            self.panel.restore_startup()
+        advance.assert_not_called()
+        self.assertEqual(self.panel.sequence.state, 'stop_unconfirmed')
+        self.assertTrue(self.panel.reserved)
+        self.assertIsNone(self.panel.runner)
+        self.assertEqual(len(self.node.hand_commands), 1)
+
+    def test_cancelled_confirmation_cannot_advance_later(self):
+        action = {'kind': 'confirm', 'label': '检查夹持'}
+        with patch.object(self.panel, '_workflow_action', return_value=action), \
+             patch.object(self.panel, '_advance_task_workflow') as advance:
+            self.panel.execute_workflow_next()
+            self.assertTrue(self.panel.workflow_confirm_button.isEnabled())
+            self.panel.stop()
+            self.panel.confirm_workflow_action()
+        advance.assert_not_called()
+        self.assertIsNone(self.panel._workflow_confirmation)
+
+    def test_uncalibrated_scene_blocks_real_service_before_any_command(self):
+        self.node._grasp_use_process_runner=True
+        self.panel.scene_path=Path(self.tmp.name)/'scene.json'
+        self.panel.scene_path.write_text(json.dumps({'version':1,'base_frame':'base_link','calibrated':False,'world':[]}))
+        with self.assertRaisesRegex(ValueError,'待标定'):
+            self.panel.runtime_plan_inputs()
+        self.assertFalse(self.node.arm_commands)
+        self.assertFalse(self.node.hand_commands)
+
+    def test_late_approach_estimate_after_stop_cannot_start_motion(self):
+        self.node._grasp_use_process_runner=True
+        callbacks=[]
+        self.panel.reestimate_callback=lambda target,callback:callbacks.append(callback)
+        self.panel.set_target_observations({'target-1':{'label':'物体','methods':{'pca':self.obs}}})
+        self.panel.motion_stage.setCurrentIndex(self.panel.motion_stage.findData('approach'))
+        with patch.object(self.panel,'launch') as launch:
+            self.panel.execute()
+            self.assertTrue(self.panel._perception_pending)
+            self.panel.stop()
+            callbacks[0]({'pca':dict(self.obs,observation_id='new')})
+        launch.assert_not_called()
+        self.assertFalse(self.panel._perception_pending)
+        self.assertIsNone(self.panel.runner)
+
+    def test_simulation_panel_uses_independent_process_without_hardware(self):
+        import time
+        import hashlib
+        from host_arm_ik import HostArmIK,_resolve_urdf
+        from grasp_execution import fingerprint
+        self.node._grasp_use_process_runner=True
+        self.panel.execution_mode.setCurrentIndex(0)
+        self.panel.collision_check.setChecked(False)
+        self.profile['urdf_path']=_resolve_urdf()
+        self.profile['planner_python']=str(Path(__file__).parent/'.cache/grasp_ik_env/bin/python')
+        Path(self.panel.profile_path.text()).write_text(json.dumps(self.profile))
+        frames=[];self.panel.simulation_display=lambda q,h:frames.append((q,h));self.panel.simulation=None
+        profile=self.panel.selected_profile()
+        ik=HostArmIK(profile['urdf_path']);q=np.zeros(16);q[9]=.01
+        ik.ee_pose(q,'right');target=ik.data.oMf[ik._right_fid].homogeneous.tolist()
+        preview=dict(id='service',arm_side='right',hand_model=profile['hand_model'],tcp_link='Link7_r',
+                     base_frame='base_link',goals={name:target for name in ('pregrasp','approach','lift')},observation_id='service-test')
+        self.panel.sequence.reset(preview,profile)
+        self.panel.sequence.pending_stage='pregrasp';self.panel.sequence.state='planned'
+        self.panel.sequence.plan=dict(arm_side='right',stage='pregrasp',accepted_at=time.monotonic(),
+            joint_waypoints=[[0.]*16,q.tolist()],times_s=[0.,1.],target=target,
+            profile_sha256=fingerprint(profile),assembly_file_sha256=fingerprint(json.loads(self.panel.assembly_path.read_text())),
+            urdf_sha256=hashlib.sha256(Path(profile['urdf_path']).read_bytes()).hexdigest())
+        self.panel._execute_ready_plan()
+        runner=self.panel.runner
+        self.assertIsNotNone(runner,self.panel.message)
+        try:
+            deadline=time.monotonic()+6
+            while self.panel.runner is not None and time.monotonic()<deadline:
+                self.panel.monitor();time.sleep(.02)
+            self.assertIsNone(self.panel.runner,self.panel.message)
+            self.assertEqual(self.panel.sequence.state,'at_pregrasp',self.panel.message)
+            self.assertFalse(self.node.arm_commands);self.assertFalse(self.node.hand_commands)
+            np.testing.assert_allclose(frames[-1][0],q)
+        finally:
+            if runner.process.poll() is None:runner.process.terminate();runner.process.wait(timeout=4)
+            runner.log.close()
+
     def test_multiple_targets_can_be_assigned_to_phone_box_workflow(self):
         phone = copy.deepcopy(self.obs); phone['observation_id'] = 'phone-observation'
         box = copy.deepcopy(self.obs); box['observation_id'] = 'box-observation'
@@ -208,6 +338,7 @@ class UiTests(unittest.TestCase):
         self.assertEqual(self.panel._workflow_step, 0)
         self.assertEqual(self.panel._workflow_substep, 1)
         self.assertEqual(self.panel.observation['observation_id'], 'phone-observation')
+        self.panel._workflow_substep=2  # Hand feedback is covered separately; test motion-role routing here.
         with patch.object(self.panel, 'execute', side_effect=lambda:setattr(self.panel,'process',SimpleNamespace())) as execute:
             self.panel.workflow_next_button.click()
             execute.assert_called_once()
@@ -236,6 +367,8 @@ class UiTests(unittest.TestCase):
         self.assertEqual(self.panel._workflow_substep,0)
         self.assertIn('盖上手机盒',self.panel.message)
         self.assertIn('选择盒盖',self.panel.message)
+        self.assertEqual(self.panel._workflow_completed_steps, set())
+        self.assertIn('292b30', self.panel.task_flow._labels[0].styleSheet())
         self.panel.process=SimpleNamespace()
         self.panel.task_flow._labels[0].clicked.emit(0)
         self.assertEqual(self.panel._workflow_step,2)

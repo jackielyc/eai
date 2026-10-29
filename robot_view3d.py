@@ -1171,7 +1171,7 @@ def _pack_depth_image(
 class RobotView3D(QWidget):
     """可嵌进手臂页的机器人视图。勾选要显示的深度。set_running(False) 时停止刷新。"""
 
-    def __init__(self, parent=None, ros_node=None) -> None:
+    def __init__(self, parent=None, ros_node=None, preferences_path=None) -> None:
         super().__init__(parent)
         self._ros_node = ros_node
         layout = QVBoxLayout(self)
@@ -1232,6 +1232,10 @@ class RobotView3D(QWidget):
         self._target_poses_check.setToolTip("同时显示多目标估计的包围盒和坐标轴，可取消勾选。")
         self._target_poses_check.toggled.connect(self._set_target_poses_enabled)
         row.addWidget(self._target_poses_check)
+        self._collision_scene_check=QCheckBox('碰撞场景 / 附着物')
+        self._collision_scene_check.setChecked(True)
+        self._collision_scene_check.toggled.connect(lambda _checked:self.set_collision_scene(*self._collision_scene_hold))
+        row.addWidget(self._collision_scene_check)
         row.addStretch(1)
         layout.addLayout(row)
         self._wrench_readout = QLabel("六维力：等待 /hal/left_arm_data、/hal/right_arm_data")
@@ -1312,6 +1316,8 @@ class RobotView3D(QWidget):
         self._wrench_by_side: Dict[str, dict] = {}
         self._wrench_on = True
         self._pose_items: Dict[str, dict] = {}
+        self._collision_scene_hold=({},[])
+        self._collision_scene_items={}
         self._pose_on = {key: True for key, _label, _rgb in _POSE_METHODS}
         self._pose_hold: Dict[str, tuple] = {}
         self._pose_note: Dict[str, str] = {}
@@ -1331,7 +1337,39 @@ class RobotView3D(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(100)
         self._timer.timeout.connect(self._tick)
+        self._init_display_preferences(preferences_path)
         QTimer.singleShot(0, self._load)
+
+    def _init_display_preferences(self, path):
+        from viewer_preferences import DEFAULT_PATH, load_state
+        self._preferences_path = DEFAULT_PATH if path is None else path
+        # Explicit whitelist: display selections only, never hand commands or
+        # the operator's transient confirmation that a real motion is safe.
+        self._display_preferences = {
+            **{'depth.'+key: box for key, box in self._depth_checks.items()},
+            **{'pose.'+key: box for key, box in self._pose_checks.items()},
+            **{'reachable.'+key: box for key, box in self._reach_checks.items()},
+            'skeleton': self._skel_check, 'wrist_accessories': self._wrist_accessories_check,
+            'sam3': self._sam3_check, 'lingbot': self._lingbot_check,
+            'wrench': self._wrench_check, 'targets': self._target_poses_check,
+            'collision_scene': self._collision_scene_check,
+        }
+        saved = load_state(self._preferences_path).get('robot_view', {})
+        values = saved.get('selections', {}) if isinstance(saved, dict) and saved.get('version') == 1 else {}
+        if isinstance(values, dict):
+            for key, box in self._display_preferences.items():
+                if type(values.get(key)) is bool:
+                    box.setChecked(values[key])  # Update both the checkbox and layer state before GL loading.
+        for box in self._display_preferences.values():
+            box.toggled.connect(self._save_display_preferences)
+
+    def _save_display_preferences(self, *_):
+        from viewer_preferences import save_robot_preferences
+        try:
+            save_robot_preferences({key: box.isChecked() for key, box in self._display_preferences.items()},
+                                   self._preferences_path)
+        except (OSError, ValueError) as exc:
+            self._status.setText('机器人页显示选项未保存：'+str(exc))
 
     def _set_depth_enabled(self, key: str, enabled: bool) -> None:
         self._depth_on[key] = bool(enabled)
@@ -1610,6 +1648,24 @@ class RobotView3D(QWidget):
         if self._gl is not None:
             self._gl.update()
 
+    def set_collision_scene(self,scene,attachments=()):
+        self._collision_scene_hold=(scene,list(attachments))
+        if not self._collision_scene_items:return
+        groups={'world':[], 'Link7_l':[], 'Link7_r':[]}
+        for item in scene.get('world',[]):
+            T=np.asarray(item['T_base_object'])
+            groups['world'].append(_pose6d_lines(T[:3,3],T[:3,:3],None,item['size_m'],(.9,.6,.15)))
+        for item in attachments:
+            T=np.asarray(item['T_link_object'])
+            groups[item['link']].append(_pose6d_lines(T[:3,3],T[:3,:3],None,item['size_m'],(.2,.9,.9)))
+        for key,rows in groups.items():
+            layer=self._collision_scene_items[key]
+            with layer['lock']:layer['pending']=np.concatenate(rows) if rows else np.zeros((0,6),np.float32)
+            layer['enabled']=bool(rows) and self._collision_scene_check.isChecked()
+        self._collision_scene_check.setToolTip('物理仿真对象状态，不是真机标定' if scene.get('source')=='simulation_task' else
+            ('已标定环境' if scene.get('calibrated') else '场景待标定，仅显示配置几何'))
+        if self._gl is not None:self._gl.update()
+
     def set_grasp_preview(self, preview) -> None:
         for stage in ('pregrasp', 'approach', 'lift'):
             goal = (preview or {}).get('goals', {}).get(stage)
@@ -1630,14 +1686,18 @@ class RobotView3D(QWidget):
             for box, value in zip(boxes, hands.get(side, [0.] * 6)):
                 box.blockSignals(True)
                 box.setValue(value)
-                box.setEnabled(joints is not None)
+                box.setEnabled(joints is not None and self._simulation_manual_allowed())
                 box.blockSignals(False)
         self._simulation_label.setText('仿真执行：模型姿态，不是真机反馈；无物体接触仿真'
                                        if joints is not None else '机器人姿态来源：真机反馈')
         self._tick()
 
+    def _simulation_manual_allowed(self):
+        callback=getattr(self,'simulation_controls_allowed',None)
+        return bool(callback()) if callback else True
+
     def _change_simulation_hand(self, side):
-        if self._simulation_q is not None and self.simulation_hand_callback:
+        if self._simulation_q is not None and self.simulation_hand_callback and self._simulation_manual_allowed():
             self.simulation_hand_callback(side, [box.value() for box in self._sim_hand_controls[side]])
 
     def _grasp_action(self, action):
@@ -1699,6 +1759,9 @@ class RobotView3D(QWidget):
             self._sam3 = self._make_sam3()
             self._lingbot = self._make_lingbot()
             self._target_pose_item = self._make_pose6d((1., .3, .3))
+            self._collision_scene_items={key:self._make_pose6d((1.,.6,.1)) for key in ('world','Link7_l','Link7_r')}
+            for key,item in self._collision_scene_items.items():
+                item['parent']='' if key=='world' else key;item['T']=np.eye(4)
             self._reach_items = {side: self._make_sam3() for side in ('l', 'r')}
             for item in self._reach_items.values():
                 item['point_size'] = 2.0
@@ -1708,11 +1771,13 @@ class RobotView3D(QWidget):
             self._gl.set_pose_items(
                 list(self._pose_items.values()) + [self._sam3, self._lingbot, self._target_pose_item]
                 + list(self._reach_items.values())
+                + list(self._collision_scene_items.values())
             )
             self._sync_pose6d()
             self._sync_sam3()
             self._sync_lingbot()
             self.set_target_poses(self._target_pose_hold)
+            self.set_collision_scene(*self._collision_scene_hold)
             self.layout().addWidget(self._gl, 1)
             try:
                 self._subscribe_depth()
@@ -2129,6 +2194,8 @@ class RobotView3D(QWidget):
         return "六维力 " + "，".join(parts) + "。"
 
     def _tick(self) -> None:
+        for boxes in self._sim_hand_controls.values():
+            for box in boxes:box.setEnabled(self._simulation_q is not None and self._simulation_manual_allowed())
         if self._gl is None or self._kin is None:
             return
         q16, age = read_q16()
