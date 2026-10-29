@@ -187,7 +187,7 @@ class ChatPanelWidget(ActionsMixin, ActionsAppendSystemLineMixin, _eai_platform_
         self.system_prompt_edit.setPlaceholderText("System prompt…")
         self.system_prompt_edit.setToolTip(
             "认知编排器 system 提示词；Lake 模式下随请求发送。"
-            "点「保存 System」写入 eai/chat_user_settings.json。"
+            "点「保存 System」写入 eai/config/chat_user_settings.json。"
         )
         self.system_prompt_edit.setStyleSheet(
             f"QTextEdit {{ background-color: {_eai_configuration_policies.UI_BG_LOG}; color: {_eai_configuration_policies.UI_TEXT_PRIMARY}; "

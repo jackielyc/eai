@@ -24,7 +24,7 @@ LINGBOT_VISION_PYTHON_DEFAULT = (
 )
 
 
-LINGBOT_VISION_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_lingbot_vision.sh")
+LINGBOT_VISION_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_lingbot_vision.sh")
 
 
 LINGBOT_VISION_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "lingbot_vision")
@@ -45,7 +45,7 @@ LINGBOT_DEPTH_PYTHON_DEFAULT = _eai_platform_bootstrap.os.path.abspath(_eai_plat
 ))
 
 
-LINGBOT_DEPTH_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_lingbot_depth.sh")
+LINGBOT_DEPTH_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_lingbot_depth.sh")
 
 
 LINGBOT_DEPTH_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "lingbot_depth")
@@ -64,7 +64,7 @@ LINGBOT_MAP_PYTHON_DEFAULT = (
 )
 
 
-LINGBOT_MAP_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_lingbot_map.sh")
+LINGBOT_MAP_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_lingbot_map.sh")
 
 
 LINGBOT_MAP_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "lingbot_map")
@@ -89,7 +89,7 @@ LINGBOT_VIDEO_PYTHON_DEFAULT = (
 )
 
 
-LINGBOT_VIDEO_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_lingbot_video.sh")
+LINGBOT_VIDEO_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_lingbot_video.sh")
 
 
 LINGBOT_VIDEO_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "lingbot_video")
@@ -114,7 +114,7 @@ LINGBOT_WORLD_PYTHON_DEFAULT = (
 )
 
 
-LINGBOT_WORLD_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_lingbot_world.sh")
+LINGBOT_WORLD_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_lingbot_world.sh")
 
 
 LINGBOT_WORLD_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "lingbot_world")
@@ -134,19 +134,19 @@ RLINF_PYTHON_CANDIDATES: _eai_platform_bootstrap.Tuple[str, ...] = (
 )
 
 
-RLINF_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_reward_model.sh")
+RLINF_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_reward_model.sh")
 
 
 RLINF_REWARD_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "reward_model")
 
 
-RLINF_REWARD_WORKFLOW_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_reward_workflow.sh")
+RLINF_REWARD_WORKFLOW_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_reward_workflow.sh")
 
 
 RLINF_REWARD_WORKFLOW_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "reward_workflow")
 
 
-ROBODOJO_ONLINE_RL_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_robodojo_online_rl.sh")
+ROBODOJO_ONLINE_RL_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_robodojo_online_rl.sh")
 
 
 ROBODOJO_ONLINE_RL_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "robodojo_online_rl")
@@ -162,7 +162,7 @@ ROBOMETER_PYTHON_CANDIDATES: _eai_platform_bootstrap.Tuple[str, ...] = (
 )
 
 
-ROBOMETER_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_robometer_policy.sh")
+ROBOMETER_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_robometer_policy.sh")
 
 
 ROBOMETER_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "robometer_policy")
@@ -188,7 +188,7 @@ RYNNVALUE_PYTHON_CANDIDATES: _eai_platform_bootstrap.Tuple[str, ...] = (
 )
 
 
-RYNNVALUE_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_rynnvalue.sh")
+RYNNVALUE_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_rynnvalue.sh")
 
 
 RYNNVALUE_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "rynnvalue")
@@ -243,7 +243,7 @@ ROBOICL_POLICY_PYTHON_CANDIDATES: _eai_platform_bootstrap.Tuple[str, ...] = (
 )
 
 
-ROBOICL_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_roboicl.sh")
+ROBOICL_RUN_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_roboicl.sh")
 
 
 ROBOICL_CACHE_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "roboicl")
@@ -263,7 +263,7 @@ ROBOICL_PROTOCOLS: _eai_platform_bootstrap.Tuple[_eai_platform_bootstrap.Tuple[s
 )
 
 
-MUJOCO_VIEWER_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_mujoco_viewer.sh")
+MUJOCO_VIEWER_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_mujoco_viewer.sh")
 
 
 MUJOCO_ROOT_DEFAULT = (
@@ -917,7 +917,7 @@ def format_control_tab_launch_tooltip(title: str) -> str:
             "将任意顶栏标签拖到本标签上，即可收入为子标签。\n"
             "子标签可在页内拖动排序，也可拖回顶栏。\n"
             "\n"
-            "布局写入 eai/control_tabs_order.json（order + misc_children）"
+            "布局写入 eai/config/control_tabs_order.json（order + misc_children）"
         )
     aliases = control_tab_cli_aliases(title)
     primary = aliases[0] if aliases else title
@@ -927,14 +927,14 @@ def format_control_tab_launch_tooltip(title: str) -> str:
         f"「{title}」\n"
         "\n"
         "启动时只显示本页:\n"
-        f"  bash run_local.sh --tab {tok}\n"
-        f"  bash run_in_docker.sh --tab {tok}\n"
-        f"  python3 show_camera_topics.py --tab {tok}\n"
+        f"  bash scripts/launch/run_local.sh --tab {tok}\n"
+        f"  bash scripts/launch/run_in_docker.sh --tab {tok}\n"
+        f"  python3 compat/show_camera_topics.py --tab {tok}\n"
         "\n"
         f"别名: {alias_line}\n"
         f"环境变量: EAI_ONLY_TAB={primary}\n"
         "\n"
         "可拖动标签调整顺序；拖到「其他」可收入为子标签\n"
-        "（写入 eai/control_tabs_order.json）"
+        "（写入 eai/config/control_tabs_order.json）"
     )
 

@@ -48,7 +48,7 @@
 
 ## 运行与记录
 
-项目隔离环境依赖见 `requirements-grasp-ik.txt`，包含MuJoCo 3.3.7。离线运行不连接机器人：
+项目隔离环境依赖见 `requirements/requirements-grasp-ik.txt`，包含MuJoCo 3.3.7。离线运行不连接机器人：
 
 ```bash
 MUJOCO_GL=egl .cache/grasp_ik_env/bin/python tools/run_phone_assembly.py \

@@ -141,7 +141,7 @@ class MuJoCoViewerLauncher(_eai_platform_bootstrap.QObject):
         proc.start("setsid", ["bash", script, *args])
         self._process = proc
         self.running_changed.emit(True)
-        self.log_line.emit(f"$ bash run_mujoco_viewer.sh {' '.join(args)}")
+        self.log_line.emit(f"$ bash scripts/launch/run_mujoco_viewer.sh {' '.join(args)}")
         if install:
             self.status_message.emit("正在安装 mujoco…")
         else:

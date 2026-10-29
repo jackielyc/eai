@@ -11,7 +11,7 @@ def source_path(legacy_filename):
     """Resolve an implementation for provenance hashes, not its compatibility stub."""
     from eai_app.infrastructure.compat import MODULE_ALIASES
     import importlib.util
-    name = str(legacy_filename).removesuffix('.py')
+    name = Path(legacy_filename).stem
     target = MODULE_ALIASES.get(name)
     if target:
         spec = importlib.util.find_spec(target)

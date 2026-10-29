@@ -2,7 +2,7 @@
 # 使用系统 Python 3.10 在宿主机运行
 #
 # ⚠️  若 ROS/camera 在 Docker 内运行，宿主机无法收到 SHM 图像数据！
-#     请改用: bash run_in_docker.sh
+#     请改用: bash scripts/launch/run_in_docker.sh
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,7 +44,7 @@ import rclpy
 from cv_bridge import CvBridge
 assert numpy.__version__.startswith("1.")
 PY
-    echo "错误: 依赖未就绪。请先执行: bash install.sh" >&2
+    echo "错误: 依赖未就绪。请先执行: bash scripts/setup/install.sh" >&2
     exit 1
 fi
 
@@ -65,7 +65,7 @@ if [[ "${topic_count}" -ge 10 && "${camera_hz}" -eq 0 ]]; then
     echo ""
     echo ">>> ⚠️  检测到 topic 但无图像数据 — ROS 很可能在 Docker 内运行" >&2
     echo ">>>     Docker 使用 SHM 共享内存，宿主机无法接收图像" >&2
-    echo ">>>     请改用: bash run_in_docker.sh" >&2
+    echo ">>>     请改用: bash scripts/launch/run_in_docker.sh" >&2
     echo ""
 fi
 
@@ -78,4 +78,4 @@ if [[ -z "${PYTHONPYCACHEPREFIX:-}" ]]; then
     mkdir -p "${PYTHONPYCACHEPREFIX}" 2>/dev/null || true
 fi
 
-exec "${PYTHON}" "${SCRIPT_DIR}/show_camera_boot.py" "$@"
+exec "${PYTHON}" "${SCRIPT_DIR}/compat/show_camera_boot.py" "$@"

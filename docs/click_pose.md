@@ -28,7 +28,7 @@
 沿用上方分割、位姿后端和 HTTP 配置：
 
 - 几何分割 + PCA 可用于检查数据链路，仅标为预览。
-- 选择 SAM3 点提示，使用现有 `sam3_segment_worker.py`；新点击总是传点击点，不使用概念文本匹配多个物体。需要独立 Python 环境与 checkpoint。
+- 选择 SAM3 点提示，使用现有 `compat/sam3_segment_worker.py`；新点击总是传点击点，不使用概念文本匹配多个物体。需要独立 Python 环境与 checkpoint。
 - FoundationPose 必须提供当前目标自身、尺寸正确的模型；不要复用默认盒子模型估计其他物体。
 - Any6D 沿用现有 worker；无模型返回结果明确标为 partial_hull_estimate。
 - 模型缺少环境/权重或返回错误时，显示错误，不自动回退成成功的 PCA 结果。
@@ -42,7 +42,7 @@
 
 ## 可选 GraspGen 候选
 
-新增 `graspgen_worker.py` 调用官方 `GraspGenSampler.run_inference`。在官方 GraspGen 环境装好依赖及对应夹爪 checkpoint 后，在某个相机配置中添加：
+新增 `compat/graspgen_worker.py` 调用官方 `GraspGenSampler.run_inference`。在官方 GraspGen 环境装好依赖及对应夹爪 checkpoint 后，在某个相机配置中添加：
 
 ```json
 "graspgen": {

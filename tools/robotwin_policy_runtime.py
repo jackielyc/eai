@@ -560,7 +560,7 @@ def install_hint(python_bin: str = "") -> str:
     rt = resolve_robotwin_root()
     return (
         "RoboTwin 依赖未就绪（需要 RLinf embodied + RoboTwin RLinf_support + assets + openpi）。\n"
-        f"  1) cd {rlinf} && bash requirements/install.sh embodied --model openpi --env robotwin\n"
+        f"  1) cd {rlinf} && bash requirements/scripts/setup/install.sh embodied --model openpi --env robotwin\n"
         f"     或在当前 python 安装：{py} -m pip install 'git+https://github.com/RLinf/openpi'\n"
         f"  2) RoboTwin 切到 RLinf_support：\n"
         f"       cd {rt} && git fetch origin RLinf_support && git checkout RLinf_support\n"

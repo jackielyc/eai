@@ -47,10 +47,10 @@ if sys.version_info[:2] != (3, 10):
             f"无法加载 rclpy（{exc}）。\n\n"
             "系统 apt Humble 请用 Python 3.10:\n"
             "  source /opt/ros/humble/setup.bash\n"
-            "  python3.10 show_camera_topics.py\n"
+            "  python3.10 compat/show_camera_topics.py\n"
             "  或: ./run.sh\n\n"
             "RoboStack Humble 请用该 conda 环境的 python，例如:\n"
-            "  bash run_local.sh",
+            "  bash scripts/launch/run_local.sh",
             file=sys.stderr,
         )
         sys.exit(1)

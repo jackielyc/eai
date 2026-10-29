@@ -4,8 +4,8 @@
 
 用法（在 ROS Docker 容器内）:
   source /opt/ros/humble/setup.bash
-  python3 depth_probe.py
-  python3 depth_probe.py --duration 10 --pairs hand_left,hand_right,head
+  python3 compat/depth_probe.py
+  python3 compat/depth_probe.py --duration 10 --pairs hand_left,hand_right,head
 """
 from __future__ import annotations
 

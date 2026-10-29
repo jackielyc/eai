@@ -135,7 +135,7 @@ IK 直接在 URDF 关节上下限内求解，返回轨迹不能越界。起点�
 - `T_grasp_tcp`：`T_base_tcp = T_base_grasp @ T_grasp_tcp`。表示机器人 Link7 坐标系在抓取接触坐标系中的米制变换，需实测。不要未经测量填单位矩阵。
 - `approach_axis_grasp`：抓取坐标系中的单位接近方向。预抓取点沿其反方向退开 `pregrasp_distance_m`，抬起沿 base_link +Z。
 - `open_positions` / `close_positions`：沿现有 `HAND_JOINT_ORDER` 的 6 个 [0,1] 驱动量，分别是 thumb_rotation、thumb_bend、index、middle、ring、pinky（以当前驱动配置核对）。不同物体可能需要不同的闭合预设。本版本不会自动优化逐指接触。
-- `urdf_path`：与 `host_fk_node.py` 使用的同一份 16 自由度 URDF。通过文件 SHA256 验证一致性。
+- `urdf_path`：与 `compat/host_fk_node.py` 使用的同一份 16 自由度 URDF。通过文件 SHA256 验证一致性。
 - `planner_python`：能导入 numpy、pinocchio 与 scipy.optimize 的 Python。IK 在独立进程运行，不能指向依赖缺失或 ABI 不兼容的环境。
 - `workspace_m`：按实际安装测量的 TCP XYZ 范围。
 - 速度、加速度、预抓取距离、抬起距离与过期时间均有范围检查。
@@ -170,7 +170,7 @@ IK 直接在 URDF 关节上下限内求解，返回轨迹不能越界。起点�
 
 ## 反馈与启用
 
-本次 `host_fk_node.py` 增加 `arm_received_at`、`waist_received_at` 和 `urdf_sha256`，区分实测反馈和命令。请在机器人静止、没有执行任务时重启该 FK 进程与界面。旧的 FK 状态文件会被新执行器拒绝；不能把时间戳手工改新来绕过检查。需要持续的手臂和腰部实测反馈。
+本次 `compat/host_fk_node.py` 增加 `arm_received_at`、`waist_received_at` 和 `urdf_sha256`，区分实测反馈和命令。请在机器人静止、没有执行任务时重启该 FK 进程与界面。旧的 FK 状态文件会被新执行器拒绝；不能把时间戳手工改新来绕过检查。需要持续的手臂和腰部实测反馈。
 
 运行中的 GUI/机器人服务不会被代码修改自动重启。本次未发送机器人动作，也未进行实机抓取验收。
 
@@ -188,7 +188,7 @@ IK 直接在 URDF 关节上下限内求解，返回轨迹不能越界。起点�
 
 项目内 `.cache/grasp_ik_env/bin/python`（Python 3.10）已安装 Pinocchio 3.4.0，并固定 urdfdom 4.0.1、tinyxml2 10.0.0，避免新版动态库 ABI 不匹配。启动脚本和预检进程优先使用此环境的 cmeel Python 包与动态库，避免 ROS overlay 中旧 Pinocchio 抢先加载。未修改系统 Python。
 
-联合 IK 额外需要 SciPy；项目虚拟环境已安装 SciPy 1.14.1，以兼容其中 NumPy 2.2.x。重建环境时用 `.cache/grasp_ik_env/bin/python -m pip install -r requirements-grasp-ik.txt`，不要把 ROS 的系统 SciPy 1.8 与此虚拟环境的 NumPy 2 混用。`test_bounded_arm_ik.py` 包含有界全位姿、双端联合、小位移腰部参与、雅可比有限差分和4条历史失败路径的离线回归测试。
+联合 IK 额外需要 SciPy；项目虚拟环境已安装 SciPy 1.14.1，以兼容其中 NumPy 2.2.x。重建环境时用 `.cache/grasp_ik_env/bin/python -m pip install -r requirements/requirements-grasp-ik.txt`，不要把 ROS 的系统 SciPy 1.8 与此虚拟环境的 NumPy 2 混用。`test_bounded_arm_ik.py` 包含有界全位姿、双端联合、小位移腰部参与、雅可比有限差分和4条历史失败路径的离线回归测试。
 
 已验证：该环境加载 ROS 的 rclpy、geometry_msgs、sensor_msgs，并成功构建当前 16 自由度 FK 模型；双臂离线 IK 路径测试通过。`genie_msgs` 仍需原有机器人 overlay；启动脚本通过 `EAI_GENIE_SETUP` 或已有路径加载。没有启动 FK 节点或发布机器人命令。
 
@@ -200,23 +200,23 @@ IK 直接在 URDF 关节上下限内求解，返回轨迹不能越界。起点�
 
 关键事件按运行 ID 追加写入 `.cache/grasp_runs/<run_id>.jsonl`（可用 `EAI_GRASP_RUN_LOG_DIR` 指定目录），包含任务/步骤、执行模式、观测 ID、人工确认、手部完成/失败、机械臂结果及轨迹、暂停与取消。任务快照保存 `last_run_id` 用于关联记录，不会因加载记录自动执行。该文件记录任务事件；每段独立执行服务另存约20Hz的实测关节、发送指令、手部和六维力数据，并强制记录终态。它没有将输入快照伪造成实时视频。
 
-手部反馈状态机位于 `grasp_hand_execution.py`，不依赖 Qt/ROS。生产执行调度已迁到独立进程，UI定时器只读状态和发送心跳。物体是否抓稳、是否正确放置仍由明确的人工确认节点判断，不由轨迹结束推断。
+手部反馈状态机位于 `compat/grasp_hand_execution.py`，不依赖 Qt/ROS。生产执行调度已迁到独立进程，UI定时器只读状态和发送心跳。物体是否抓稳、是否正确放置仍由明确的人工确认节点判断，不由轨迹结束推断。
 
 
 ## 新运行链路与待标定项目
 
-- `grasp_execution_service.py` / `grasp_execution_client.py`：每段动作由独立进程拥有控制循环、实际反馈、六维力保护与暂停/取消状态。真机使用进程间排他锁；不自动使能机器人。界面心跳丢失1.5秒后停止后续轨迹并等待实测停止确认。控制模式被外部改变、反馈过期、服务退出或通信失败均不会自动降级成界面直接发送。单元测试使用显式假后端；生产默认使用进程后端。
-- `grasp_scene.py`：加载 `config/grasp_scene.json`。初始 `calibrated=false`、无臆造桌面。请填写实测 `world` 包围盒（id、size_m、T_base_object），核对实际模型和安装件后确认。URDF模型与网格内容哈希、场景哈希、手型和配置版本变化都会使旧计划失效。模型中的重复腕部壳体不参与碰撞。
+- `compat/grasp_execution_service.py` / `compat/grasp_execution_client.py`：每段动作由独立进程拥有控制循环、实际反馈、六维力保护与暂停/取消状态。真机使用进程间排他锁；不自动使能机器人。界面心跳丢失1.5秒后停止后续轨迹并等待实测停止确认。控制模式被外部改变、反馈过期、服务退出或通信失败均不会自动降级成界面直接发送。单元测试使用显式假后端；生产默认使用进程后端。
+- `compat/grasp_scene.py`：加载 `config/grasp_scene.json`。初始 `calibrated=false`、无臆造桌面。请填写实测 `world` 包围盒（id、size_m、T_base_object），核对实际模型和安装件后确认。URDF模型与网格内容哈希、场景哈希、手型和配置版本变化都会使旧计划失效。模型中的重复腕部壳体不参与碰撞。
 - `allowed_pairs` 只用于核对后的固定机械接触对，不能为通过预检而批量忽略碰撞。当前手模型零开合姿态存在手掌/拇指网格重叠，会如实报告，须核对真实机构与模型再配置。`contact_rules` 可限定某个目标、具体手部连杆、动作阶段、路径后段及最多5mm穿透容差；不会忽略手臂/支架/相机碰撞。未配置规则时保持严格检查。
 - 自动感知物体默认采用保守OBB加入环境。空盒等凹形物体应在 `world` 中建模实际盒壁，并把对应目标ID加入 `modeled_targets`，避免把空腔当作实体。夹持后物体附着到 Link7，仅指定的手部接触连杆可接触；释放后更新为世界物体。机器人页的“碰撞场景 / 附着物”可开关显示。
-- `grasp_perception.py`：固定实际使用的RGB-D帧，记录采集时间/时间差、来源、标定哈希和机器人状态；TF查询使用采集时刻。传感器深度需在相机标定页核对“深度与彩色图像素配准”；勾选本身不执行配准。LingBot深度独立记录为推断深度，不冒充实测。
+- `compat/grasp_perception.py`：固定实际使用的RGB-D帧，记录采集时间/时间差、来源、标定哈希和机器人状态；TF查询使用采集时刻。传感器深度需在相机标定页核对“深度与彩色图像素配准”；勾选本身不执行配准。LingBot深度独立记录为推断深度，不冒充实测。
 - 历史缓存始终可加载预览。真机执行前检查新鲜头部画面、局部目标图像、标定版本与腰部基座是否变化；图像复核不是新的位姿估计。默认开启“接近前重新估计目标”，估计成功后重新生成路径，失败/超时/取消不继续运动。明确确认的夹持物体在运输时由实时FK与夹持变换维护。旧缓存没有这些证据时需重新估计。
-- `grasp_world.py`：手机/盒盖放置采用 `T_base_reference @ T_reference_object @ inverse(T_tcp_object)`，而不是把盒子的抓取点当作放置TCP。`config/grasp_assembly.json` 的两个手机盒关系均为待标定；支持按任务、物体角色、参考角色和位姿方法区分。没有实测关系不会猜测装配位置。夹持关系需要人工确认；手型改变后必须重新确认或明确确认手为空。未知夹持状态时取消只保持，不自动恢复并松手。
+- `compat/grasp_world.py`：手机/盒盖放置采用 `T_base_reference @ T_reference_object @ inverse(T_tcp_object)`，而不是把盒子的抓取点当作放置TCP。`config/grasp_assembly.json` 的两个手机盒关系均为待标定；支持按任务、物体角色、参考角色和位姿方法区分。没有实测关系不会猜测装配位置。夹持关系需要人工确认；手型改变后必须重新确认或明确确认手为空。未知夹持状态时取消只保持，不自动恢复并松手。
 - 高层动作 `pick / place / align / insert / verify` 可从任务编辑器展开成动作序列。显式序列写成 `名称|sequence`，下一行以 `> 子动作|motion|角色|阶段` 添加子步骤。`align` 使用 `tcp_targets[任务:角色:align]` 的已标定 `T_reference_tcp`；`insert` 额外需要已标定装配精度、速度比例及连接件六维力保护。它是受保护的位置接近，不是阻抗/导纳控制。
 - 手机盒装配模板修订为4，主界面使用26步程序，分段脚本保留作高级调试：取手机/盒盖前显式张开手，夹持后确认，放置手机和盖合后分别人工验证。旧快照保留图像和目标，运行参数按动作内容匹配迁移；执行进度重置，避免新增动作使原下标指向错误的动作。
-- `grasp_trajectory.py`：升降使用米，其他关节使用弧度；逐关节速度/加速度/jerk以及起点、跟踪、保持阈值分别处理。“执行约束…”可修改参数，保存后旧计划失效。原始合力/合力矩阈值始终有效，额外的 `force_policy` 支持传感器到连接件坐标变换、偏置、力臂和六分量阈值，默认未标定，不能当作打印件强度认证。
+- `compat/grasp_trajectory.py`：升降使用米，其他关节使用弧度；逐关节速度/加速度/jerk以及起点、跟踪、保持阈值分别处理。“执行约束…”可修改参数，保存后旧计划失效。原始合力/合力矩阈值始终有效，额外的 `force_policy` 支持传感器到连接件坐标变换、偏置、力臂和六分量阈值，默认未标定，不能当作打印件强度认证。
 - “采样并评估抓取朝向”只生成当前朝向附近的候选，并以终点IK、关节余量、运动距离及雅可比奇异值排序。不会执行；排名不代表接触质量或全路径检查通过。
-- 多视角计算抽出到 `mv6d_engine.py`，运行配置/场景/执行适配抽出到 `grasp_runtime_ui.py`。感知和任务界面仍是Qt客户端，独立执行器没有Qt依赖。
+- 多视角计算抽出到 `compat/mv6d_engine.py`，运行配置/场景/执行适配抽出到 `compat/grasp_runtime_ui.py`。感知和任务界面仍是Qt客户端，独立执行器没有Qt依赖。
 
 独立执行记录位于 `.cache/grasp_service/<id>/`：request.json、environment.json、status.json、telemetry.jsonl、service.log，以及存在时的不可变输入 observation_snapshot.npz。任务事件可关联到该目录。离线导出不调用机器人：
 
@@ -233,4 +233,4 @@ bash scripts/run_grasp_executor.sh "$PWD/.cache/grasp_ik_env/bin/python" --check
 
 ### 机器人页显示偏好
 
-机器人页的深度、手骨架、腕部支架/相机、各位姿与抓取阶段图层、SAM3、LingBot、六维力、多目标6D、碰撞场景及左右臂可达采样勾选项会在修改时立即写入 `viewer_ui_state.json` 的 `robot_view` 分区。页面延迟创建时也会读取并恢复；关闭主窗口保存其他设置不会覆盖该分区。恢复仅作用于显示选择，不恢复真机路径确认、仿真手部控制数值或发送任何运动命令。
+机器人页的深度、手骨架、腕部支架/相机、各位姿与抓取阶段图层、SAM3、LingBot、六维力、多目标6D、碰撞场景及左右臂可达采样勾选项会在修改时立即写入 `config/viewer_ui_state.json` 的 `robot_view` 分区。页面延迟创建时也会读取并恢复；关闭主窗口保存其他设置不会覆盖该分区。恢复仅作用于显示选择，不恢复真机路径确认、仿真手部控制数值或发送任何运动命令。

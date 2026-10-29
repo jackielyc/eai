@@ -29,7 +29,7 @@ from eai_app.application.simulation.catalog import (
 )
 
 _HERE = str(PROJECT_ROOT)
-_DEFAULT_PATH = os.path.join(_HERE, "sim_eval_leaderboards.json")
+_DEFAULT_PATH = os.path.join(_HERE, "config/sim_eval_leaderboards.json")
 
 BACKEND_KEYS = tuple(list_backend_keys())
 

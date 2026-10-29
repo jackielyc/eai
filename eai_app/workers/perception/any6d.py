@@ -6,7 +6,7 @@ Any6D 6D 位姿估计 worker（HTTP / 单次 stdin 模式）。
 再走 Any6D.register_any6d（尺度+位姿联合精修）。
 
 依赖: 已克隆 taeyeopl/Any6D，设置 ANY6D_ROOT；FoundationPose 权重默认放
-models/FoundationPose/weights（由 run_any6d.sh 软链到 Any6D/foundationpose/weights）。
+models/FoundationPose/weights（由 scripts/launch/run_any6d.sh 软链到 Any6D/foundationpose/weights）。
 
 stdin/POST JSON 与 FoundationPose worker 兼容，额外字段:
   {
@@ -87,7 +87,7 @@ def _probe_any6d_dependencies() -> Tuple[bool, str, list[str], list[str]]:
     except Exception as exc:
         return False, str(exc), [], [
             "git clone https://github.com/taeyeopl/Any6D.git eai/Any6D",
-            "bash run_any6d.sh --check",
+            "bash scripts/launch/run_any6d.sh --check",
         ]
 
     missing: list[str] = []
@@ -105,7 +105,7 @@ def _probe_any6d_dependencies() -> Tuple[bool, str, list[str], list[str]]:
     hints: list[str] = []
     if missing:
         hints.append("按 Any6D README 创建 conda 环境 Any6D 并安装依赖")
-        hints.append("bash run_any6d.sh --check")
+        hints.append("bash scripts/launch/run_any6d.sh --check")
     weights = Path(root) / "foundationpose" / "weights"
     models_w = Path(
         os.environ.get(

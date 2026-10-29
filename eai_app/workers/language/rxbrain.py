@@ -15,9 +15,9 @@ and weights:
 Usage:
   export HY_RXBRAIN_REPO=/path/to/Hy-Embodied-RxBrain-1.0
   export HY_RXBRAIN_CKPT=/path/to/Hy-Embodied-RxBrain-1.0   # local weights dir
-  python hy_rxbrain_worker.py --host 0.0.0.0 --port 8090
+  python compat/hy_rxbrain_worker.py --host 0.0.0.0 --port 8090
 
-Or: bash run_hy_rxbrain.sh
+Or: bash scripts/launch/run_hy_rxbrain.sh
 """
 
 from __future__ import annotations

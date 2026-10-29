@@ -126,4 +126,4 @@ echo
 echo "用法:"
 echo "  source ${ENV_FILE}"
 echo "  ros2 topic hz /camera/head_color"
-echo "  cd ${EAI_DIR} && bash run_local.sh   # 已自动对齐 Domain/RMW/DDS"
+echo "  cd ${EAI_DIR} && bash scripts/launch/run_local.sh   # 已自动对齐 Domain/RMW/DDS"

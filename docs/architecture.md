@@ -24,7 +24,7 @@ eai_app/
   development/       方法热更新、Qt 开发菜单和源代码一致性检查
   paths.py           PROJECT_ROOT 等稳定资源路径
 tests/               单元测试和离线集成测试；data/ 存放固定测试数据
-config/              用户标定、任务和场景配置（位置保持不变）
+config/              用户标定、任务、场景配置和界面偏好
 scripts/             运维/执行/回归入口
 ```
 
@@ -34,7 +34,7 @@ scripts/             运维/执行/回归入口
 
 ## 大文件如何定位
 
-原约 60,000 行的 `show_camera_topics.py` 现在仅保留入口；主窗口组合位于 `application/main_window.py`。原来的 `build_heavy_ui` 拆成约 40 个页面构造器，跨构造器局部状态显式放入 `BuildContext`，布局顺序不变。
+原约 60,000 行的 `compat/show_camera_topics.py` 现在仅保留入口；主窗口组合位于 `application/main_window.py`。原来的 `build_heavy_ui` 拆成约 40 个页面构造器，跨构造器局部状态显式放入 `BuildContext`，布局顺序不变。
 
 - 改手动控制布局：`ui/builders/manual_control.py`。
 - 改机器人页布局：`ui/builders/robot_workspace.py`；三维显示在 `ui/robot/`。
@@ -43,7 +43,7 @@ scripts/             运维/执行/回归入口
 - 改 IK/碰撞：`planning/`；任务状态和数据校验在 `domain/`。
 - 查找原主窗口/ROS 节点方法：`application/viewer_registry.json` 的方法映射，或 `rg 'def 方法名' eai_app`。
 
-根目录 Python 兼容入口和旧 `phone_assembly` 包转发到同一个实现模块，避免维护两份代码。已有 shell 启动命令、进程参数和导入路径继续可用；新代码请直接导入 `eai_app`。`source_path()` 使执行日志记录真实实现的哈希，而非入口文件哈希。
+`compat/` Python 兼容入口和旧 `phone_assembly` 包转发到同一个实现模块，避免维护两份代码。Shell 启动文件已归入 `scripts/launch/` 和 `scripts/setup/`，调用方需使用新路径；旧模块导入需先 `import eai_app` 或设置 `PYTHONPATH=compat`；新代码请直接导入 `eai_app`。`source_path()` 使执行日志记录真实实现的哈希，而非入口文件哈希。
 
 配置、模型、缓存、任务图片的路径统一以 `PROJECT_ROOT` 为基准，不能继续用某个新模块的 `__file__.parent` 猜项目根目录。不要把运行数据移动进源代码包。
 

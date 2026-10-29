@@ -16,7 +16,7 @@
 #   bash scripts/start_cameras_minimal.sh hz
 #   bash scripts/start_cameras_minimal.sh stop
 #
-# 然后: ./run_local.sh →「连接相机 Topic」勾选 head/hand_*_color
+# 然后: ./scripts/launch/run_local.sh →「连接相机 Topic」勾选 head/hand_*_color
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -143,7 +143,7 @@ cmd_start() {
         fi
     fi
     echo ">>> 验证: $0 hz"
-    echo "    UI: ./run_local.sh → 连接相机 Topic → 勾选 head/hand_*_color"
+    echo "    UI: ./scripts/launch/run_local.sh → 连接相机 Topic → 勾选 head/hand_*_color"
 }
 
 cmd_robot_service() {

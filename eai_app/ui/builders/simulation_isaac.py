@@ -66,7 +66,7 @@ def build(self, build):
     sim_ctrl_row.addWidget(self.sim_isaac_status_label)
     self.sim_bridge_start_btn = _eai_platform_bootstrap.QPushButton("启动相机桥")
     self.sim_bridge_start_btn.setFocusPolicy(_eai_platform_bootstrap.Qt.NoFocus)
-    self.sim_bridge_start_btn.setToolTip("运行 run_isaac_cam_bridge.sh（无 Humble 时自动进 Docker）")
+    self.sim_bridge_start_btn.setToolTip("运行 scripts/launch/run_isaac_cam_bridge.sh（无 Humble 时自动进 Docker）")
     self.sim_bridge_start_btn.clicked.connect(self._on_sim_bridge_start_clicked)
     sim_ctrl_row.addWidget(self.sim_bridge_start_btn)
     self.sim_bridge_stop_btn = _eai_platform_bootstrap.QPushButton("停止")

@@ -8,8 +8,8 @@
 
 ```bash
 cd eai
-bash run_cad_ui.sh --install-deps   # 首次
-bash run_cad_ui.sh                  # 打开 http://127.0.0.1:7860
+bash scripts/launch/run_cad_ui.sh --install-deps   # 首次
+bash scripts/launch/run_cad_ui.sh                  # 打开 http://127.0.0.1:7860
 ```
 
 在浏览器里上传多视角照片或外部 mesh，填写物体名与真实尺寸（最大边长），点生成即可。
@@ -20,22 +20,22 @@ bash run_cad_ui.sh                  # 打开 http://127.0.0.1:7860
 cd eai
 
 # 1. 安装依赖（COLMAP + Python）
-bash run_mesh_reconstruct.sh --install-deps
+bash scripts/launch/run_mesh_reconstruct.sh --install-deps
 
 # 2a. 从照片重建
-bash run_mesh_reconstruct.sh --images /path/to/photos --name my_object
+bash scripts/launch/run_mesh_reconstruct.sh --images /path/to/photos --name my_object
 
 # 2b. 或导入 Meshroom / RealityCapture 已导出的 mesh
-bash run_mesh_reconstruct.sh --import-mesh ~/Downloads/model.obj --name my_object
+bash scripts/launch/run_mesh_reconstruct.sh --import-mesh ~/Downloads/model.obj --name my_object
 
 # 3. 启动 FoundationPose
-bash run_foundationpose.sh --host 0.0.0.0 --mesh meshes/my_object/reconstructed.obj
+bash scripts/launch/run_foundationpose.sh --host 0.0.0.0 --mesh meshes/my_object/reconstructed.obj
 ```
 
 一键重建并启动 FP：
 
 ```bash
-bash run_mesh_reconstruct.sh --images ~/photos/cup --name cup --start-fp
+bash scripts/launch/run_mesh_reconstruct.sh --images ~/photos/cup --name cup --start-fp
 ```
 
 ## 拍照建议
@@ -74,7 +74,7 @@ meshes/<name>/
 若真实物体更大/更小，重建后位姿的**绝对平移**会与真实尺寸成比例；可在 viewer 里用已知尺寸校正，或重建时指定：
 
 ```bash
-bash run_mesh_reconstruct.sh --images ... --name bottle --target-extent-m 0.25
+bash scripts/launch/run_mesh_reconstruct.sh --images ... --name bottle --target-extent-m 0.25
 ```
 
 ## Meshroom 用户
@@ -84,14 +84,14 @@ bash run_mesh_reconstruct.sh --images ... --name bottle --target-extent-m 0.25
 3. 导入后处理（无需 COLMAP）：
 
 ```bash
-bash run_mesh_reconstruct.sh --import-mesh /path/to/Meshroom.obj --name my_object
+bash scripts/launch/run_mesh_reconstruct.sh --import-mesh /path/to/Meshroom.obj --name my_object
 ```
 
 ## 故障排查
 
 | 现象 | 处理 |
 |------|------|
-| `未找到 colmap` | `bash run_mesh_reconstruct.sh --install-deps` |
+| `未找到 colmap` | `bash scripts/launch/run_mesh_reconstruct.sh --install-deps` |
 | mapper 失败 | 增加照片、提高重叠、改善光照 |
 | 点云过少 | 物体太光滑/透明，加纹理贴纸或喷哑光漆 |
 | FP 位姿飘 | 检查 `--target-extent-m` 是否与真实尺寸接近 |

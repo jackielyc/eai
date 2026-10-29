@@ -102,11 +102,11 @@ def _probe_fp_dependencies() -> Tuple[bool, str, list[str], list[str]]:
     hints: list[str] = []
     if any(m in missing for m in ("nvdiffrast", "pytorch3d", "torch")):
         hints.append(
-            "cd eai && bash run_foundationpose.sh --install-gpu  "
+            "cd eai && bash scripts/launch/run_foundationpose.sh --install-gpu  "
             "# 安装 torch / nvdiffrast / pytorch3d"
         )
         hints.append(
-            "bash run_foundationpose.sh --mesh <object.obj>  "
+            "bash scripts/launch/run_foundationpose.sh --mesh <object.obj>  "
             "# 安装完成后重启 FP 服务"
         )
     if not missing:

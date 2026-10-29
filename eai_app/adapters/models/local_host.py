@@ -8,7 +8,7 @@
   POST /start   JSON 可选: model_dir / model_id / model_label
   POST /stop
 
-由 run_in_docker.sh 在宿主机后台拉起；viewer 在 host 网络下直接访问 127.0.0.1。
+由 scripts/launch/run_in_docker.sh 在宿主机后台拉起；viewer 在 host 网络下直接访问 127.0.0.1。
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from urllib.request import urlopen
 
 HERE = str(PROJECT_ROOT)
 WORKSPACE_DIR = os.path.dirname(HERE)
-RUN_SCRIPT = os.path.join(HERE, "run_local_qwen.sh")
+RUN_SCRIPT = os.path.join(HERE, "scripts/launch/run_local_qwen.sh")
 CTL_HOST = os.environ.get("LOCAL_QWEN_CTL_HOST", "127.0.0.1")
 CTL_PORT = int(os.environ.get("LOCAL_QWEN_CTL_PORT", "18101"))
 QWEN_PORT = int(os.environ.get("LOCAL_QWEN_PORT", "8100"))
@@ -335,7 +335,7 @@ def stop_service() -> Dict[str, Any]:
     # 清理残留 worker
     try:
         subprocess.run(
-            ["pkill", "-f", "local_qwen_worker.py"],
+            ["pkill", "-f", "compat/local_qwen_worker.py"],
             capture_output=True,
             timeout=2,
             check=False,

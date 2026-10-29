@@ -440,7 +440,7 @@ def install_hint(python_bin: str = "") -> str:
     src = resolve_libero_src()
     return (
         "LIBERO 依赖未就绪（需要 robosuite + libero）。示例安装：\n"
-        f"  1) RLinf: cd {resolve_rlinf_root()} && bash requirements/install.sh libero\n"
+        f"  1) RLinf: cd {resolve_rlinf_root()} && bash requirements/scripts/setup/install.sh libero\n"
         f"  2) 或: {py} -m pip install 'robosuite==1.4.1' imageio tqdm pyyaml\n"
         f"     && {py} -m pip install -e {src}\n"
         f"  并设置 LIBERO_PYTHON={py}"

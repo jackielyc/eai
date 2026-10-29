@@ -155,7 +155,7 @@ class ShellSelectControlTabByTitleMixin:
             status_bar.showMessage(f"已将「{title}」移回顶栏", 2500)
 
     def _restore_control_misc_children(self) -> None:
-        """按 eai/control_tabs_order.json 的 misc_children 收入「其他」。"""
+        """按 eai/config/control_tabs_order.json 的 misc_children 收入「其他」。"""
         if getattr(self, "_only_tabs", None):
             return
         children = _eai_infrastructure_ui_storage.load_control_misc_children()
@@ -205,7 +205,7 @@ class ShellSelectControlTabByTitleMixin:
             inner.setTabToolTip(i, tip)
 
     def _restore_control_tabs_order(self) -> None:
-        """按 eai/control_tabs_order.json 恢复当前可见 tab 顺序。"""
+        """按 eai/config/control_tabs_order.json 恢复当前可见 tab 顺序。"""
         tabs = getattr(self, "control_tabs", None)
         if tabs is None or tabs.count() <= 1:
             return
@@ -226,7 +226,7 @@ class ShellSelectControlTabByTitleMixin:
             self._control_tabs_order_guard = False
 
     def _save_viewer_ui_state(self) -> str:
-        """关闭前把所有可操作控件状态写入 eai/viewer_ui_state.json。"""
+        """关闭前把所有可操作控件状态写入 eai/config/viewer_ui_state.json。"""
         if getattr(self, "_viewer_ui_state_saved", False):
             return _eai_configuration_chat.VIEWER_UI_STATE_PATH
         if not getattr(self, "_heavy_ui_built", False):
@@ -416,7 +416,7 @@ class ShellSelectControlTabByTitleMixin:
         self._pending_combo_state = still
 
     def _restore_sim_backends_order(self) -> None:
-        """按 eai/sim_backends_order.json 恢复仿真后端选择条顺序。"""
+        """按 eai/config/sim_backends_order.json 恢复仿真后端选择条顺序。"""
         bar = getattr(self, "sim_backend_tab_bar", None)
         if bar is None or bar.count() <= 1:
             return

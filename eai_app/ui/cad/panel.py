@@ -5,8 +5,8 @@ CAD / Mesh 生成 Web 界面（仅标准库 + 现有 mesh 依赖）
 把多视角照片或外部 mesh 转成 FoundationPose 可用的 .obj。
 
 用法:
-  bash run_cad_ui.sh
-  python3 cad_generate_ui.py --host 0.0.0.0 --port 7860
+  bash scripts/launch/run_cad_ui.sh
+  python3 compat/cad_generate_ui.py --host 0.0.0.0 --port 7860
 """
 from __future__ import annotations
 
@@ -195,7 +195,7 @@ def _run_photos_job(
             f"完成：{obj_path}\n"
             f"顶点/面: {meta.get('vertex_count')} / {meta.get('face_count')}\n"
             f"最大边长: {max(meta.get('final_extents_m') or [0]):.4f} m\n"
-            f"启动 FP: bash run_foundationpose.sh --host 0.0.0.0 --mesh {obj_path}"
+            f"启动 FP: bash scripts/launch/run_foundationpose.sh --host 0.0.0.0 --mesh {obj_path}"
         )
         _set_job(
             status="done",
@@ -234,7 +234,7 @@ def _run_mesh_job(
             f"完成：{obj_path}\n"
             f"顶点/面: {meta.get('vertex_count')} / {meta.get('face_count')}\n"
             f"最大边长: {max(meta.get('final_extents_m') or [0]):.4f} m\n"
-            f"启动 FP: bash run_foundationpose.sh --host 0.0.0.0 --mesh {obj_path}"
+            f"启动 FP: bash scripts/launch/run_foundationpose.sh --host 0.0.0.0 --mesh {obj_path}"
         )
         _set_job(
             status="done",

@@ -15,7 +15,7 @@
 启动示例::
 
     export ISAAC_CAM_BRIDGE_DIR=/tmp/isaac_cam_bridge
-    bash run_isaac_cam_bridge.sh
+    bash scripts/launch/run_isaac_cam_bridge.sh
 
     # 另开终端启动 Isaac 评测时同样 export ISAAC_CAM_BRIDGE_DIR
 """

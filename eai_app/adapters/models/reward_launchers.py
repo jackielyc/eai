@@ -122,7 +122,7 @@ class RewardModelLauncher(_eai_platform_bootstrap.QObject):
         proc.start("bash", [script, *args])
         self._process = proc
         self.running_changed.emit(True)
-        self.log_line.emit(f"$ bash run_reward_model.sh --mode {mode} --ckpt {ckpt}")
+        self.log_line.emit(f"$ bash scripts/launch/run_reward_model.sh --mode {mode} --ckpt {ckpt}")
         self.status_message.emit(f"正在运行 Reward 评测（{mode}）…")
 
     def start_teleop(
@@ -412,7 +412,7 @@ class RewardWorkflowLauncher(_eai_platform_bootstrap.QObject):
         self._process = proc
         self.running_changed.emit(True)
         self.log_line.emit(
-            f"$ bash run_reward_workflow.sh --mode {mode_norm} "
+            f"$ bash scripts/launch/run_reward_workflow.sh --mode {mode_norm} "
             f"--dataset-type {ds}"
             + (f" --config {cfg}" if cfg else "")
         )
@@ -612,7 +612,7 @@ class RoboDojoOnlineRLLauncher(_eai_platform_bootstrap.QObject):
         self._process = proc
         self.running_changed.emit(True)
         self.log_line.emit(
-            f"$ bash run_robodojo_online_rl.sh --mode {mode_norm} --config {cfg}"
+            f"$ bash scripts/launch/run_robodojo_online_rl.sh --mode {mode_norm} --config {cfg}"
         )
         self.status_message.emit(
             f"正在启动 仿真强化学习训练（{mode_norm} / {cfg}）…"
@@ -813,7 +813,7 @@ class RoboMeterPolicyLauncher(_eai_platform_bootstrap.QObject):
         self.running_changed.emit(True)
         gui_flag = " --gui" if render_gui else ""
         self.log_line.emit(
-            f"$ bash run_robometer_policy.sh --job {job_norm} --config {cfg}{gui_flag}"
+            f"$ bash scripts/launch/run_robometer_policy.sh --job {job_norm} --config {cfg}{gui_flag}"
         )
         self.status_message.emit(f"正在启动 RoboMeter（{job_norm} / {cfg}）…")
 

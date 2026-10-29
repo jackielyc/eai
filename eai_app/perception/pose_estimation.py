@@ -92,7 +92,7 @@ def evaluate_any6d_availability(
         return _eai_perception_segmentation.FpAvailabilityStatus(
             label="无worker",
             color="#ff6b6b",
-            detail="缺少 any6d_worker.py",
+            detail="缺少 compat/any6d_worker.py",
             tooltip=f"未找到 {_eai_configuration_perception.ANY6D_WORKER_SCRIPT}",
             can_invoke=False,
             worker_ok=False,
@@ -104,7 +104,7 @@ def evaluate_any6d_availability(
         color="#8be9fd" if mesh_ok else "#ffb86c",
         detail=("model-free" if not mesh else "有 mesh"),
         tooltip=(
-            f"将用 {_eai_configuration_perception.ANY6D_PYTHON_DEFAULT} 调 any6d_worker.py --once\n"
+            f"将用 {_eai_configuration_perception.ANY6D_PYTHON_DEFAULT} 调 compat/any6d_worker.py --once\n"
             "mesh 留空 → 深度凸包任意物体；有 mesh 更准"
         ),
         can_invoke=True,

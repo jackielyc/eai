@@ -97,7 +97,7 @@ class LingbotVisionLauncher(_eai_platform_bootstrap.QObject):
         proc.start("bash", [script, *args])
         self._process = proc
         self.running_changed.emit(True)
-        self.log_line.emit(f"$ bash run_lingbot_vision.sh --variant {variant} --input {input_path}")
+        self.log_line.emit(f"$ bash scripts/launch/run_lingbot_vision.sh --variant {variant} --input {input_path}")
         self.status_message.emit(f"正在运行 LingBot-Vision PCA（{variant}）…")
 
     def stop(self) -> None:
@@ -158,7 +158,7 @@ class LingbotVisionLauncher(_eai_platform_bootstrap.QObject):
 
     def _on_process_error(self, error: _eai_platform_bootstrap.QProcess.ProcessError) -> None:
         if error == _eai_platform_bootstrap.QProcess.FailedToStart:
-            self.log_line.emit("[ERROR] 无法启动 run_lingbot_vision.sh")
+            self.log_line.emit("[ERROR] 无法启动 scripts/launch/run_lingbot_vision.sh")
             self.status_message.emit("无法启动 LingBot-Vision")
             self.running_changed.emit(False)
 
@@ -289,7 +289,7 @@ class LingbotDepthLauncher(_eai_platform_bootstrap.QObject):
         proc.start("bash", [script, *args])
         self.running_changed.emit(True)
         src = f"example={example}" if example.strip() else f"rgb={rgb}"
-        self.log_line.emit(f"$ bash run_lingbot_depth.sh --model {model} {src}")
+        self.log_line.emit(f"$ bash scripts/launch/run_lingbot_depth.sh --model {model} {src}")
         self.status_message.emit("正在运行 LingBot-Depth…")
 
     def stop(self) -> None:
@@ -351,7 +351,7 @@ class LingbotDepthLauncher(_eai_platform_bootstrap.QObject):
 
     def _on_process_error(self, error: _eai_platform_bootstrap.QProcess.ProcessError) -> None:
         if error == _eai_platform_bootstrap.QProcess.FailedToStart:
-            self.log_line.emit("[ERROR] 无法启动 run_lingbot_depth.sh")
+            self.log_line.emit("[ERROR] 无法启动 scripts/launch/run_lingbot_depth.sh")
             self.status_message.emit("无法启动 LingBot-Depth")
             self.running_changed.emit(False)
             self._process = None

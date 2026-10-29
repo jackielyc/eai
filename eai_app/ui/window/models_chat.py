@@ -31,7 +31,7 @@ class ModelsChatMixin:
                 "当前 viewer 在 Docker 内运行，无法直接启动宿主机 SAM3。\n\n"
                 "请在宿主机终端执行：\n"
                 "  cd ~/workspace_liyichao/eai\n"
-                "  bash run_sam3.sh --host 0.0.0.0\n\n"
+                "  bash scripts/launch/run_sam3.sh --host 0.0.0.0\n\n"
                 "启动后本界面会自动通过 HTTP 连接 SAM3，并尝试启动 Ollama。",
             )
 

@@ -107,7 +107,7 @@ class LingbotMapLauncher(_eai_platform_bootstrap.QObject):
         self._process = proc
         self.running_changed.emit(True)
         src = image_folder or video_path
-        self.log_line.emit(f"$ bash run_lingbot_map.sh … {src}")
+        self.log_line.emit(f"$ bash scripts/launch/run_lingbot_map.sh … {src}")
         self.status_message.emit(f"正在运行 LingBot-Map（viser {self._viser_url}）…")
 
     def stop(self) -> None:
@@ -161,7 +161,7 @@ class LingbotMapLauncher(_eai_platform_bootstrap.QObject):
 
     def _on_process_error(self, error: _eai_platform_bootstrap.QProcess.ProcessError) -> None:
         if error == _eai_platform_bootstrap.QProcess.FailedToStart:
-            self.log_line.emit("[ERROR] 无法启动 run_lingbot_map.sh")
+            self.log_line.emit("[ERROR] 无法启动 scripts/launch/run_lingbot_map.sh")
             self.status_message.emit("无法启动 LingBot-Map")
             self.running_changed.emit(False)
 
@@ -287,7 +287,7 @@ class LingbotVideoLauncher(_eai_platform_bootstrap.QObject):
         proc.start("bash", [script, *args])
         self._process = proc
         self.running_changed.emit(True)
-        self.log_line.emit(f"$ bash run_lingbot_video.sh --mode {mode} --output {out_path}")
+        self.log_line.emit(f"$ bash scripts/launch/run_lingbot_video.sh --mode {mode} --output {out_path}")
         self.status_message.emit(f"正在运行 LingBot-Video（{mode}）…")
 
     def stop(self) -> None:
@@ -348,7 +348,7 @@ class LingbotVideoLauncher(_eai_platform_bootstrap.QObject):
 
     def _on_process_error(self, error: _eai_platform_bootstrap.QProcess.ProcessError) -> None:
         if error == _eai_platform_bootstrap.QProcess.FailedToStart:
-            self.log_line.emit("[ERROR] 无法启动 run_lingbot_video.sh")
+            self.log_line.emit("[ERROR] 无法启动 scripts/launch/run_lingbot_video.sh")
             self.status_message.emit("无法启动 LingBot-Video")
             self.running_changed.emit(False)
 
@@ -448,7 +448,7 @@ class LingbotWorldLauncher(_eai_platform_bootstrap.QObject):
         proc.start("bash", [script, *args])
         self._process = proc
         self.running_changed.emit(True)
-        self.log_line.emit(f"$ bash run_lingbot_world.sh --image {image}")
+        self.log_line.emit(f"$ bash scripts/launch/run_lingbot_world.sh --image {image}")
         self.status_message.emit("正在运行 LingBot-World…")
 
     def stop(self) -> None:
@@ -509,7 +509,7 @@ class LingbotWorldLauncher(_eai_platform_bootstrap.QObject):
 
     def _on_process_error(self, error: _eai_platform_bootstrap.QProcess.ProcessError) -> None:
         if error == _eai_platform_bootstrap.QProcess.FailedToStart:
-            self.log_line.emit("[ERROR] 无法启动 run_lingbot_world.sh")
+            self.log_line.emit("[ERROR] 无法启动 scripts/launch/run_lingbot_world.sh")
             self.status_message.emit("无法启动 LingBot-World")
             self.running_changed.emit(False)
 

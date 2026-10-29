@@ -1,6 +1,6 @@
 # 远程 API 调用示例 — 使用说明
 
-独立示例，对齐仓库 `show_camera_topics.py` 中的 `LlmChatClient`：用标准库 `urllib` 调用 **OpenAI 兼容** `POST {api_base}/chat/completions`，无需 `requests` / `openai` SDK。
+独立示例，对齐仓库 `compat/show_camera_topics.py` 中的 `LlmChatClient`：用标准库 `urllib` 调用 **OpenAI 兼容** `POST {api_base}/chat/completions`，无需 `requests` / `openai` SDK。
 
 路径：`eai/examples/`。
 
@@ -149,7 +149,7 @@ print(reply)
 
 ## 与主仓库的关系
 
-| 能力 | 本示例 | `show_camera_topics.py` |
+| 能力 | 本示例 | `compat/show_camera_topics.py` |
 |------|--------|-------------------------|
 | Chat Completions | ✅ | ✅ `LlmChatClient` |
 | 探测 `/health` `/models` | ✅ | ✅ `probe_llm_endpoint` |
@@ -182,7 +182,7 @@ Isaac（宿主机 Python 3.11）与 ROS2（a2d Docker / Humble）分进程：仿
 
 ```bash
 # 终端 A：ROS 桥（宿主机无 Humble 时会自动 docker exec）
-bash /share_data/projects/mahjong/share/personal/liyichao/eai/run_isaac_cam_bridge.sh
+bash /share_data/projects/mahjong/share/personal/liyichao/eai/scripts/launch/run_isaac_cam_bridge.sh
 
 # 终端 B：启动 RoboDojo / Isaac 前必须同样设置目录
 export ISAAC_CAM_BRIDGE_DIR=/share_data/projects/mahjong/share/personal/liyichao/eai/.cache/isaac_cam_bridge
@@ -190,7 +190,7 @@ export ISAAC_CAM_BRIDGE_DIR=/share_data/projects/mahjong/share/personal/liyichao
 # 然后启动评测（需重启已在跑的 Isaac 才能生效）
 
 # 终端 C：viewer（同一 Docker / 同一 ROS_DOMAIN_ID）
-bash run_in_docker.sh
+bash scripts/launch/run_in_docker.sh
 # 勾选 /camera/head_color
 ```
 

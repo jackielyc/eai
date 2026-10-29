@@ -9,7 +9,7 @@ _eai_perception_segmentation = module_ref('eai_app.perception.segmentation')
 _eai_platform_bootstrap = module_ref('eai_app.platform.bootstrap')
 
 def load_remote_qwen_ctl():
-    """动态加载 remote_qwen_ctl.py（避免 ROS/Qt 环境下的包导入问题）。"""
+    """动态加载 compat/remote_qwen_ctl.py（避免 ROS/Qt 环境下的包导入问题）。"""
     import importlib.util
 
     path = _eai_configuration_policies.REMOTE_QWEN_CTL_SCRIPT
@@ -247,8 +247,8 @@ class RemoteQwenServiceLauncher(_eai_platform_bootstrap.QObject):
                             "ok": False,
                             "message": (
                                 "未检测到宿主机 remote hostctl (:18103)。"
-                                "请重新 bash run_in_docker.sh，或在宿主机执行: "
-                                f"python3 {_eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, 'remote_qwen_hostctl.py')}"
+                                "请重新 bash scripts/launch/run_in_docker.sh，或在宿主机执行: "
+                                f"python3 {_eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, 'compat/remote_qwen_hostctl.py')}"
                             ),
                         }
                     else:

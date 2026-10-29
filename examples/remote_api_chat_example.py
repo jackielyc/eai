@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 # ---------------------------------------------------------------------------
-# 默认值（与 show_camera_topics.py 保持一致）
+# 默认值（与 compat/show_camera_topics.py 保持一致）
 # ---------------------------------------------------------------------------
 
 LLM_API_BASE_DEFAULT = os.environ.get("LLM_API_BASE", "https://api.openai.com/v1")

@@ -99,7 +99,7 @@ class HostArmIK:
         try:
             from scipy.optimize import least_squares
         except ImportError as exc:
-            raise RuntimeError('IK 环境缺少兼容的 SciPy，请安装 requirements-grasp-ik.txt') from exc
+            raise RuntimeError('IK 环境缺少兼容的 SciPy，请安装 requirements/requirements-grasp-ik.txt') from exc
         pin = self._pin
         seed = np.asarray(q16_seed, dtype=float)
         if seed.shape != (16,) or not np.isfinite(seed).all():

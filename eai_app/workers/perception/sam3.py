@@ -4,10 +4,10 @@ SAM3 本地分割 worker（Ultralytics SAM 点提示 / 可选文本概念分割�
 
 用法:
   # 单次（stdin JSON -> stdout JSON）
-  python3 sam3_segment_worker.py --once
+  python3 compat/sam3_segment_worker.py --once
 
   # 常驻 HTTP 服务（模型只加载一次，推荐）
-  python3 sam3_segment_worker.py --serve --port 8765 --model sam3.pt
+  python3 compat/sam3_segment_worker.py --serve --port 8765 --model sam3.pt
 
 stdin/POST JSON 示例:
   {"image_b64": "<jpeg b64>", "u": 320, "v": 240, "model": "sam3.pt"}

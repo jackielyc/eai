@@ -72,5 +72,7 @@
   "phone_assembly.worker": "eai_app.tasks.phone_assembly.worker",
   "phone_assembly.mujoco_backend": "eai_app.tasks.phone_assembly.mujoco_backend",
   "phone_assembly.program": "eai_app.tasks.phone_assembly.program",
-  "grasp_simulation": "eai_app.adapters.simulation.kinematic_playback"
+  "grasp_simulation": "eai_app.adapters.simulation.kinematic_playback",
+  "grasp_candidates": "eai_app.domain.grasp.candidates",
+  "grasp_perception": "eai_app.perception.grasp_provenance"
 }

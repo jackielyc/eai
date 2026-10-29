@@ -15,7 +15,7 @@ RSP_PID_FILE="${CACHE_DIR}/host_rviz_rsp.pid"
 STATIC_PID_FILE="${CACHE_DIR}/host_rviz_static_tf.pid"
 RVIZ_PID_FILE="${CACHE_DIR}/host_rviz_gui.pid"
 DEPTH_PID_FILE="${CACHE_DIR}/host_rviz_depth.pid"
-DEPTH_NODE="${EAI_DIR}/depth_cloud_node.py"
+DEPTH_NODE="${EAI_DIR}/compat/depth_cloud_node.py"
 URDF_OUT="${CACHE_DIR}/A2D_NoHand_Flattened.rviz.urdf"
 RSP_PARAMS="${CACHE_DIR}/host_rviz_rsp_params.yaml"
 FK_SCRIPT="${SCRIPT_DIR}/start_host_fk.sh"
@@ -412,7 +412,7 @@ cmd_viz() {
 }
 
 _start_depth() {
-    if _pid_alive "${DEPTH_PID_FILE}" depth_cloud_node.py; then
+    if _pid_alive "${DEPTH_PID_FILE}" compat/depth_cloud_node.py; then
         echo ">>> 头/腕深度点云已在运行"
         return 0
     fi
@@ -424,7 +424,7 @@ _start_depth() {
     setsid nohup /usr/bin/python3.10 "${DEPTH_NODE}" >>"${LOG_FILE}" 2>&1 < /dev/null &
     echo $! >"${DEPTH_PID_FILE}"
     sleep 0.6
-    if _pid_alive "${DEPTH_PID_FILE}" depth_cloud_node.py; then
+    if _pid_alive "${DEPTH_PID_FILE}" compat/depth_cloud_node.py; then
         echo ">>> depth pid=$(cat "${DEPTH_PID_FILE}")"
     else
         echo "深度点云启动失败，见 ${LOG_FILE}" >&2
@@ -447,12 +447,12 @@ cmd_stop() {
     done
     pkill -f 'robot_state_publisher .*eai_host_robot_state_publisher|__node:=eai_host_robot_state_publisher' 2>/dev/null || true
     pkill -f 'eai_host_map_to_a2d' 2>/dev/null || true
-    pkill -f 'depth_cloud_node.py' 2>/dev/null || true
+    pkill -f 'compat/depth_cloud_node.py' 2>/dev/null || true
     echo ">>> host_rviz stopped（未停 host_fk）"
 }
 
 cmd_status() {
-    echo "depth: $(_pid_alive "${DEPTH_PID_FILE}" depth_cloud_node.py && echo running || echo stopped)"
+    echo "depth: $(_pid_alive "${DEPTH_PID_FILE}" compat/depth_cloud_node.py && echo running || echo stopped)"
     echo "rsp: $(_pid_alive "${RSP_PID_FILE}" robot_state_publisher && echo running || echo stopped)"
     echo "static_tf: $(_pid_alive "${STATIC_PID_FILE}" static_transform_publisher && echo running || echo stopped)"
     echo "rviz: $(_pid_alive "${RVIZ_PID_FILE}" rviz2 && echo running || echo stopped)"

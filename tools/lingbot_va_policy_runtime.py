@@ -655,7 +655,7 @@ def install_hint(python_bin: str = "") -> str:
     base = resolve_base_model()
     return (
         "LingBot-VA 依赖未就绪。安装与配置示例：\n"
-        f"  1) cd {root} && bash install.sh\n"
+        f"  1) cd {root} && bash scripts/setup/install.sh\n"
         f"     conda activate lingbot_va  # 或设置 LINGBOT_VA_PYTHON={py}\n"
         f"  2) export LINGBOT_VA_BASE_MODEL_PATH=<lingbot-va-base>  # 当前探测: {base}\n"
         f"  3) 将 post-train ckpt 放到 {root}/checkpoints/<run_name>\n"

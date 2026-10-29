@@ -384,7 +384,7 @@ class ExecutionControllerMixin:
         self.process.errorOccurred.connect(self.process_error)
         self.log_tail = ''
         self.started = _deps.time.monotonic()
-        self.process.start(self.sequence.profile['planner_python'], [str(self.root / 'host_grasp_plan_worker.py'),
+        self.process.start(self.sequence.profile['planner_python'], [str(self.root / 'compat/host_grasp_plan_worker.py'),
                            '--request', str(self.job_directory / 'request.json'),
                            '--output', str(self.job_directory / 'result.json')])
         self.message = '宿主机 IK 预检中（不会发送运动命令）…'

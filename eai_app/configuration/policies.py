@@ -11,7 +11,7 @@ CAD_MESHES_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.
 TEST_IMAGES_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "images")
 
 
-ISAAC_CAM_BRIDGE_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "run_isaac_cam_bridge.sh")
+ISAAC_CAM_BRIDGE_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "scripts/launch/run_isaac_cam_bridge.sh")
 
 
 ISAAC_CAM_BRIDGE_DIR_DEFAULT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, ".cache", "isaac_cam_bridge")
@@ -507,7 +507,7 @@ LOCAL_QWEN_OLLAMA_NAME = _eai_platform_bootstrap.os.environ.get("LOCAL_QWEN_OLLA
 LOCAL_QWEN_OLLAMA_FALLBACK = _eai_platform_bootstrap.os.environ.get("LOCAL_QWEN_OLLAMA_FALLBACK", "qwen3.5:4b")
 
 
-LOCAL_QWEN_RUN_SCRIPT_NAME = "run_local_qwen.sh"
+LOCAL_QWEN_RUN_SCRIPT_NAME = "scripts/launch/run_local_qwen.sh"
 
 
 LOCAL_QWEN_PORT_DEFAULT = int(_eai_platform_bootstrap.os.environ.get("LOCAL_QWEN_PORT", "8100"))
@@ -571,7 +571,7 @@ REMOTE_QWEN_API_BASE_DEFAULT = _eai_platform_bootstrap.os.environ.get(
 REMOTE_QWEN_CHAT_PRESET_NAME = "远程 Qwen 服务"
 
 
-REMOTE_QWEN_CTL_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "remote_qwen_ctl.py")
+REMOTE_QWEN_CTL_SCRIPT = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "compat/remote_qwen_ctl.py")
 
 
 REMOTE_QWEN_HOSTCTL_PORT = int(_eai_platform_bootstrap.os.environ.get("REMOTE_QWEN_CTL_PORT", "18103"))
@@ -582,7 +582,7 @@ REMOTE_QWEN_HOSTCTL_URL = _eai_platform_bootstrap.os.environ.get(
 ).rstrip("/")
 
 
-CAD_PHOTOGRAMMETRY_PY = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "photogrammetry_reconstruct.py")
+CAD_PHOTOGRAMMETRY_PY = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "compat/photogrammetry_reconstruct.py")
 
 
 CAD_TARGET_EXTENT_DEFAULT_M = 0.15

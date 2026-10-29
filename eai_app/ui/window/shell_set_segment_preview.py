@@ -696,10 +696,10 @@ class ShellSetSegmentPreviewMixin:
             except Exception:
                 pass
         script = _eai_platform_bootstrap.os.path.join(
-            str(PROJECT_ROOT), "robot_tcp_bridge.py"
+            str(PROJECT_ROOT), "compat/robot_tcp_bridge.py"
         )
         if not _eai_platform_bootstrap.os.path.isfile(script):
-            self.status_bar.showMessage("缺少 robot_tcp_bridge.py")
+            self.status_bar.showMessage("缺少 compat/robot_tcp_bridge.py")
             return
         env = _eai_platform_bootstrap.os.environ.copy()
         env["EAI_ROBOT_TCP_STATE"] = self._robot_tcp_state_path()

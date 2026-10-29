@@ -331,13 +331,13 @@ EAI_DATASETS_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_model
 EAI_IMAGES_DIR = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "images")
 
 
-CHAT_USER_SETTINGS_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "chat_user_settings.json")
+CHAT_USER_SETTINGS_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "config/chat_user_settings.json")
 
 
-CONTROL_TABS_ORDER_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "control_tabs_order.json")
+CONTROL_TABS_ORDER_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "config/control_tabs_order.json")
 
 
-SIM_BACKENDS_ORDER_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "sim_backends_order.json")
+SIM_BACKENDS_ORDER_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "config/sim_backends_order.json")
 
 
 ARM_PANELS_ORDER_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "arm_panels_order.json")
@@ -346,10 +346,10 @@ ARM_PANELS_ORDER_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_
 REAL_ROBOT_BACKENDS_ORDER_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "real_robot_backends_order.json")
 
 
-TEST_QWEN_LAST_CONFIG_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "test_qwen_last_config.json")
+TEST_QWEN_LAST_CONFIG_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "config/test_qwen_last_config.json")
 
 
-VIEWER_UI_STATE_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "viewer_ui_state.json")
+VIEWER_UI_STATE_PATH = _eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, "config/viewer_ui_state.json")
 
 
 _UI_STATE_SKIP_TEXT_NAME_RE = _eai_platform_bootstrap.re.compile(

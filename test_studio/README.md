@@ -14,7 +14,7 @@ bash test_studio/run_test_studio.sh
 python3 -m test_studio.main
 ```
 
-主窗口 `run_in_docker.sh` **不会**再出现「测试工作室」Tab；原「测试」Tab 仍可用。
+主窗口 `scripts/launch/run_in_docker.sh` **不会**再出现「测试工作室」Tab；原「测试」Tab 仍可用。
 
 ## 结构
 

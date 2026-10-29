@@ -103,7 +103,7 @@ class ProgSotaTab(QWidget):
 
         hint = QLabel(
             "编程冲 SOTA：选取仿真后端与任务，用文本 + 图像归纳手/臂动作，"
-            "编译成可编程策略并迭代抬高成功率，再与 eai/sim_eval_leaderboards.json "
+            "编译成可编程策略并迭代抬高成功率，再与 eai/config/sim_eval_leaderboards.json "
             "业内榜单对照。本地 harness 用于快速闭环；官方协议请到「仿真评测」页复现。"
         )
         hint.setWordWrap(True)

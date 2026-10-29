@@ -78,5 +78,5 @@ for m in mods:
 PY
 
 echo ">>> 完成。启动示例:"
-echo "  bash ${EAI_DIR}/run_robometer_policy.sh --job train --config libero_online_rl --gui"
+echo "  bash ${EAI_DIR}/scripts/launch/run_robometer_policy.sh --job train --config libero_online_rl --gui"
 echo "  或在 GUI RoboMeter 页使用 Python=${ENV_PREFIX}/bin/python"

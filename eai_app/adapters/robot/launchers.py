@@ -90,9 +90,9 @@ class LocalAiLauncher(_eai_platform_bootstrap.QObject):
         script = _eai_perception_segmentation.resolve_sam3_run_script()
         if script is None:
             hint = (
-                "cd eai && bash run_sam3.sh --host 0.0.0.0"
+                "cd eai && bash scripts/launch/run_sam3.sh --host 0.0.0.0"
                 if _eai_perception_segmentation.is_running_in_docker()
-                else f"未找到 {_eai_configuration_perception.SAM3_RUN_SCRIPT_NAME}，请确认与 show_camera_topics.py 同目录"
+                else f"未找到 {_eai_configuration_perception.SAM3_RUN_SCRIPT_NAME}，请确认与 compat/show_camera_topics.py 同目录"
             )
             self.status_message.emit(f"无法启动 SAM3: {hint}")
             return

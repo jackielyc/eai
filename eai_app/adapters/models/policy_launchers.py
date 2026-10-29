@@ -215,7 +215,7 @@ class RynnValueLauncher(_eai_platform_bootstrap.QObject):
             self.log_dir_ready.emit(self._log_dir)
         gui_flag = " --gui" if self._render_gui else ""
         self.log_line.emit(
-            f"$ bash run_rynnvalue.sh --job {job_norm}{gui_flag}"
+            f"$ bash scripts/launch/run_rynnvalue.sh --job {job_norm}{gui_flag}"
         )
         self.status_message.emit(f"正在启动 RynnValue（{job_norm}）…")
 
@@ -504,7 +504,7 @@ class RoboICLLauncher(_eai_platform_bootstrap.QObject):
         self.log_dir_ready.emit(self._log_dir)
         gui_flag = " --gui" if render_gui else ""
         self.log_line.emit(
-            f"$ bash run_roboicl.sh --mode {mode_norm} --task {task_name}"
+            f"$ bash scripts/launch/run_roboicl.sh --mode {mode_norm} --task {task_name}"
             f" --shots {int(shots)}{gui_flag}"
         )
         self.status_message.emit(

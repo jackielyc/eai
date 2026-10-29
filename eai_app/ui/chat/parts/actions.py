@@ -636,9 +636,9 @@ class ActionsMixin:
         if not silent:
             hint = ""
             if name == "Hy-Embodied-VLM-1.0":
-                hint = "（需: bash run_hy_embodied_vlm.sh，约 4×80GB GPU）"
+                hint = "（需: bash scripts/launch/run_hy_embodied_vlm.sh，约 4×80GB GPU）"
             elif name == "Hy-Embodied-RxBrain-1.0":
-                hint = "（需: bash run_hy_rxbrain.sh，约 1×GPU + 权重）"
+                hint = "（需: bash scripts/launch/run_hy_rxbrain.sh，约 1×GPU + 权重）"
             elif name == _eai_configuration_policies.LOCAL_QWEN_CHAT_PRESET_NAME:
                 hint = "（需: 测试 Tab 选择模型并「启动推理服务」）"
             elif name == _eai_configuration_policies.REMOTE_QWEN_CHAT_PRESET_NAME:

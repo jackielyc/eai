@@ -5,9 +5,9 @@
 供 run_local / show_camera_topics 勾选预览。
 
 用法（先 source ROS）:
-  python3 host_camera_publisher.py --head /dev/video4
-  python3 host_camera_publisher.py --head /dev/video4 --left /dev/videoX --right /dev/videoY
-  python3 host_camera_publisher.py --list
+  python3 compat/host_camera_publisher.py --head /dev/video4
+  python3 compat/host_camera_publisher.py --head /dev/video4 --left /dev/videoX --right /dev/videoY
+  python3 compat/host_camera_publisher.py --list
 """
 from __future__ import annotations
 

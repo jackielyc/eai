@@ -31,7 +31,7 @@ def _load_bridge():
 
         return sink
     except Exception:
-        sink_path = os.path.join(_EAI_DIR, "isaac_cam_bridge_sink.py")
+        sink_path = os.path.join(_EAI_DIR, "compat/isaac_cam_bridge_sink.py")
         if not os.path.isfile(sink_path):
             return None
         import importlib.util

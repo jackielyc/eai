@@ -8,7 +8,7 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EAI_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
-FK_PY="${EAI_DIR}/host_fk_node.py"
+FK_PY="${EAI_DIR}/compat/host_fk_node.py"
 CACHE_DIR="${EAI_DIR}/.cache"
 LOG_FILE="${CACHE_DIR}/host_fk.log"
 PID_FILE="${CACHE_DIR}/host_fk.pid"

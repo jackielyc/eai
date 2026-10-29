@@ -464,7 +464,7 @@ def build_psi_remote_server_argv(
     wan_dir = resolve_wan22_dir()
     policy_root = resolve_psi_policy_root(psi_policy_root)
     python_bin = resolve_psi_policy_python(policy_root)
-    # Strip VirtualGL / ROS library injection inherited from run_local.sh GUI.
+    # Strip VirtualGL / ROS library injection inherited from scripts/launch/run_local.sh GUI.
     env: Dict[str, Optional[str]] = {
         "PYTHONUNBUFFERED": "1",
         "CUDA_VISIBLE_DEVICES": str(gpu_id).strip() or "0",

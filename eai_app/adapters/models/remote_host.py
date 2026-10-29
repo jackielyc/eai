@@ -35,7 +35,7 @@ LOG_PATH = os.environ.get(
     "REMOTE_QWEN_CTL_LOG",
     os.path.join(HERE, "log", "remote_qwen_hostctl.log"),
 )
-REMOTE_CTL_PATH = os.path.join(HERE, "remote_qwen_ctl.py")
+REMOTE_CTL_PATH = os.path.join(HERE, "compat/remote_qwen_ctl.py")
 
 _LOCK = threading.Lock()
 _BUSY = False

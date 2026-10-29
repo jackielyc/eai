@@ -176,7 +176,7 @@ def run_graspgen(points, settings):
     required = ("python", "config", "gripper")
     if any(not settings.get(key) for key in required):
         raise ValueError("GraspGen 需要 python、config 和 gripper；不能用通用夹爪替代当前灵巧手")
-    worker = str((PROJECT_ROOT / "graspgen_worker.py"))
+    worker = str((PROJECT_ROOT / "compat/graspgen_worker.py"))
     with tempfile.TemporaryDirectory(prefix="click_grasp_") as directory:
         points_path = os.path.join(directory, "points.npy")
         output = os.path.join(directory, "result.json")

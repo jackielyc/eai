@@ -8,7 +8,7 @@ _eai_configuration_policies = module_ref('eai_app.configuration.policies')
 _eai_platform_bootstrap = module_ref('eai_app.platform.bootstrap')
 
 class IsaacCamBridgeLauncher(_eai_platform_bootstrap.QObject):
-    """启动/停止 Isaac 共享帧 → ROS2 相机桥（run_isaac_cam_bridge.sh）。"""
+    """启动/停止 Isaac 共享帧 → ROS2 相机桥（scripts/launch/run_isaac_cam_bridge.sh）。"""
 
     log_line = _eai_platform_bootstrap.pyqtSignal(str)
     status_message = _eai_platform_bootstrap.pyqtSignal(str)
@@ -48,7 +48,7 @@ class IsaacCamBridgeLauncher(_eai_platform_bootstrap.QObject):
         proc.start("setsid", ["bash", "-lc", env_exports])
         self._process = proc
         self.running_changed.emit(True)
-        self.log_line.emit(f"$ ISAAC_CAM_BRIDGE_DIR={bridge_dir} bash run_isaac_cam_bridge.sh --hz {hz_val}")
+        self.log_line.emit(f"$ ISAAC_CAM_BRIDGE_DIR={bridge_dir} bash scripts/launch/run_isaac_cam_bridge.sh --hz {hz_val}")
         self.status_message.emit("正在启动 Isaac 相机桥…")
 
     def stop(self) -> None:

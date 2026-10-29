@@ -7,11 +7,11 @@
   nb-1668047664206989312-cp0nfah4b37k   — TI-ONE notebook（集群内网 :22）
 
 用法:
-  python3 remote_qwen_ctl.py --host tione-develop sync
-  python3 remote_qwen_ctl.py --host tione-develop deploy --model-key qwen3.5-35b-a3b
-  python3 remote_qwen_ctl.py --host psi_motus_2_for_liyichao status
-  python3 remote_qwen_ctl.py --host nb-1668047664206989312-cp0nfah4b37k status
-  python3 remote_qwen_ctl.py --host tione-develop stop
+  python3 compat/remote_qwen_ctl.py --host tione-develop sync
+  python3 compat/remote_qwen_ctl.py --host tione-develop deploy --model-key qwen3.5-35b-a3b
+  python3 compat/remote_qwen_ctl.py --host psi_motus_2_for_liyichao status
+  python3 compat/remote_qwen_ctl.py --host nb-1668047664206989312-cp0nfah4b37k status
+  python3 compat/remote_qwen_ctl.py --host tione-develop stop
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from __future__ import annotations
 from eai_app.paths import PROJECT_ROOT
 
 import argparse
+import shlex
 import json
 import os
 import signal
@@ -58,8 +59,16 @@ REMOTE_MODELS: Tuple[Tuple[str, str, str, str], ...] = (
 )
 
 SYNC_FILES = (
-    "local_qwen_worker.py",
-    "run_local_qwen.sh",
+    "compat/local_qwen_worker.py",
+    "scripts/launch/run_local_qwen.sh",
+    "eai_app/__init__.py",
+    "eai_app/paths.py",
+    "eai_app/infrastructure/__init__.py",
+    "eai_app/infrastructure/compat.py",
+    "eai_app/infrastructure/module_aliases.json",
+    "eai_app/workers/__init__.py",
+    "eai_app/workers/language/__init__.py",
+    "eai_app/workers/language/qwen.py",
 )
 
 # 每台远程机独立配置；可用环境变量覆盖（见 apply_host）
@@ -469,7 +478,9 @@ def sync_runtime() -> Dict[str, object]:
     if missing:
         return {"ok": False, "message": f"本地缺少文件: {missing}"}
 
-    prep = ssh_bash(f"mkdir -p {json.dumps(REMOTE_WORK)}")
+    directories = sorted({os.path.dirname(name) for name in SYNC_FILES})
+    prep = ssh_bash("mkdir -p " + " ".join(
+        shlex.quote(REMOTE_WORK + "/" + directory) for directory in directories))
     if prep.returncode != 0:
         return {
             "ok": False,
@@ -506,7 +517,7 @@ def sync_runtime() -> Dict[str, object]:
                 "message": f"scp {name} 失败: {(proc.stderr or proc.stdout).strip()}",
             }
 
-    chmod = ssh_bash(f"chmod +x {REMOTE_WORK}/run_local_qwen.sh")
+    chmod = ssh_bash(f"chmod +x {REMOTE_WORK}/scripts/launch/run_local_qwen.sh")
     if chmod.returncode != 0:
         return {
             "ok": False,
@@ -725,8 +736,8 @@ def start_tunnel() -> Dict[str, object]:
 
 def stop_remote_service() -> Dict[str, object]:
     script = f"""
-pkill -f 'local_qwen_worker.py' >/dev/null 2>&1 || true
-pkill -f 'run_local_qwen.sh' >/dev/null 2>&1 || true
+pkill -f 'compat/local_qwen_worker.py' >/dev/null 2>&1 || true
+pkill -f 'scripts/launch/run_local_qwen.sh' >/dev/null 2>&1 || true
 sleep 0.5
 if curl -fsS --max-time 1 http://127.0.0.1:{REMOTE_PORT}/health >/dev/null 2>&1; then
   echo STILL_UP
@@ -832,7 +843,7 @@ export LOCAL_QWEN_HOST=127.0.0.1
 export LOCAL_QWEN_PORT={REMOTE_PORT}
 export LOCAL_QWEN_CUDNN=0
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
-nohup bash ./run_local_qwen.sh \\
+nohup bash ./scripts/launch/run_local_qwen.sh \\
   --host 127.0.0.1 \\
   --port {REMOTE_PORT} \\
   --model "$MODEL_DIR" \\

@@ -150,7 +150,7 @@ def _sam3_segment_via_http(
     except _eai_platform_bootstrap.urllib.error.URLError as exc:
         raise RuntimeError(
             f"SAM3 服务不可达 ({server_url})，请先运行: "
-            f"python3 sam3_segment_worker.py --serve --model sam3.pt"
+            f"python3 compat/sam3_segment_worker.py --serve --model sam3.pt"
         ) from exc
     if not body.get("ok"):
         raise RuntimeError(str(body.get("error") or body))
@@ -499,7 +499,7 @@ def resolve_sam3_viewer_server_url(port: int = _eai_configuration_perception.SAM
 
 
 def _stop_sam3_server_processes() -> None:
-    for pattern in ("sam3_segment_worker.py --serve", "sam3_segment_worker --serve"):
+    for pattern in ("compat/sam3_segment_worker.py --serve", "sam3_segment_worker --serve"):
         try:
             _eai_platform_bootstrap.subprocess.run(
                 ["pkill", "-f", pattern],
@@ -512,7 +512,7 @@ def _stop_sam3_server_processes() -> None:
 
 
 def _sam3_server_process_running() -> bool:
-    return _eai_adapters_robot_services._pgrep_pattern("sam3_segment_worker.py --serve") or _eai_adapters_robot_services._pgrep_pattern(
+    return _eai_adapters_robot_services._pgrep_pattern("compat/sam3_segment_worker.py --serve") or _eai_adapters_robot_services._pgrep_pattern(
         "sam3_segment_worker --serve"
     )
 
@@ -549,15 +549,15 @@ def format_foundationpose_error(message: str) -> str:
             "缺少 nvdiffrast（需在宿主机 foundationpose conda 环境安装）。\n"
             "请在本机终端执行：\n"
             "  cd ~/workspace_liyichao/eai\n"
-            "  bash run_foundationpose.sh --install-gpu\n"
-            "  bash run_foundationpose.sh --mesh "
+            "  bash scripts/launch/run_foundationpose.sh --install-gpu\n"
+            "  bash scripts/launch/run_foundationpose.sh --mesh "
             "FoundationPose/demo_data/mustard0/mesh/textured_simple.obj\n"
             "然后 viewer 中重试「调用 FP」。"
         )
     if "pytorch3d" in msg:
         return (
             f"{msg}\n\n"
-            "请运行: bash run_foundationpose.sh --install-gpu"
+            "请运行: bash scripts/launch/run_foundationpose.sh --install-gpu"
         )
     return msg
 
@@ -657,7 +657,7 @@ def evaluate_fp_availability(
             missing = health.get("missing_deps") or []
             hints = health.get("install_hints") or []
             hint_text = "\n".join(hints) if hints else (
-                "bash run_foundationpose.sh --install-gpu"
+                "bash scripts/launch/run_foundationpose.sh --install-gpu"
             )
             missing_text = ", ".join(missing) if missing else "未知"
             return FpAvailabilityStatus(
@@ -682,7 +682,7 @@ def evaluate_fp_availability(
             detail=detail,
             tooltip=(
                 f"无法连接 {server_url}\n"
-                "宿主机请运行: bash run_foundationpose.sh --host 0.0.0.0\n"
+                "宿主机请运行: bash scripts/launch/run_foundationpose.sh --host 0.0.0.0\n"
                 + (f"错误: {err}" if err else "")
             ),
             color=_eai_configuration_policies.UI_ACCENT_RED,
@@ -744,7 +744,7 @@ def evaluate_fp_availability(
 
 
 def _fp_server_process_running() -> bool:
-    return _eai_adapters_robot_services._pgrep_pattern("foundationpose_worker.py --serve") or _eai_adapters_robot_services._pgrep_pattern(
+    return _eai_adapters_robot_services._pgrep_pattern("compat/foundationpose_worker.py --serve") or _eai_adapters_robot_services._pgrep_pattern(
         "foundationpose_worker --serve"
     )
 
@@ -858,7 +858,7 @@ def _fp_pose_via_http(
     except _eai_platform_bootstrap.urllib.error.URLError as exc:
         raise RuntimeError(
             f"FoundationPose 服务不可达 ({server_url})，请先运行: "
-            f"bash run_foundationpose.sh --host 0.0.0.0 --mesh <object.obj>"
+            f"bash scripts/launch/run_foundationpose.sh --host 0.0.0.0 --mesh <object.obj>"
         ) from exc
     if not body.get("ok"):
         raise RuntimeError(str(body.get("error") or body))

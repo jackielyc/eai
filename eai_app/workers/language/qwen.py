@@ -10,10 +10,10 @@
   POST /v1/responses   # Codex / EmbodiedEvo 用（简化实现，支持文本+图像）
 
 用法:
-  bash run_local_qwen.sh
-  bash run_local_qwen.sh --model /path/to/Qwen3.5-35B-A3B --model-id qwen3.5-35b-a3b
+  bash scripts/launch/run_local_qwen.sh
+  bash scripts/launch/run_local_qwen.sh --model /path/to/Qwen3.5-35B-A3B --model-id qwen3.5-35b-a3b
   LOCAL_QWEN_PYTHON=~/miniconda3/envs/psi-policy/bin/python \\
-    python local_qwen_worker.py --model /path/to/Qwen3.5-4B --host 0.0.0.0 --port 8100
+    python compat/local_qwen_worker.py --model /path/to/Qwen3.5-4B --host 0.0.0.0 --port 8100
 """
 
 from __future__ import annotations

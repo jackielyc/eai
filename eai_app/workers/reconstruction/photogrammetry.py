@@ -3,10 +3,10 @@
 方案 A：多视角照片 / 外部 mesh → FoundationPose 可用 .obj
 
 流程 1（照片重建，需 COLMAP）:
-  python3 photogrammetry_reconstruct.py --images /path/to/photos --name my_object
+  python3 compat/photogrammetry_reconstruct.py --images /path/to/photos --name my_object
 
 流程 2（Meshroom / RealityCapture 等已导出 mesh）:
-  python3 photogrammetry_reconstruct.py --import-mesh model.obj --name my_object
+  python3 compat/photogrammetry_reconstruct.py --import-mesh model.obj --name my_object
 
 输出:
   meshes/<name>/reconstructed.obj
@@ -98,7 +98,7 @@ def run_colmap_sparse(images_dir: Path, work_dir: Path) -> Path:
     if not colmap:
         raise RuntimeError(
             "未找到 colmap。请安装: sudo apt install -y colmap\n"
-            "或: bash run_mesh_reconstruct.sh --install-deps"
+            "或: bash scripts/launch/run_mesh_reconstruct.sh --install-deps"
         )
 
     db_path = work_dir / "database.db"
@@ -203,7 +203,7 @@ def poisson_mesh_from_ply(ply_path: Path, mesh_out: Path, poisson_depth: int = 9
         import open3d as o3d
     except ImportError as exc:
         raise RuntimeError(
-            "需要 open3d: python3 -m pip install -r requirements-mesh.txt"
+            "需要 open3d: python3 -m pip install -r requirements/requirements-mesh.txt"
         ) from exc
 
     pcd = o3d.io.read_point_cloud(str(ply_path))

@@ -32,7 +32,7 @@ def build(self, build):
     self.sim_hint_label.setStyleSheet(f"color: {_eai_configuration_policies.UI_TEXT_MUTED};")
     build.sim_form_l.addWidget(self.sim_hint_label)
 
-    # 可拖动的后端选择条（顺序写入 eai/sim_backends_order.json，重启恢复）
+    # 可拖动的后端选择条（顺序写入 eai/config/sim_backends_order.json，重启恢复）
     # 隐藏 radio 仍保留，供 viewer_ui_state / 既有 isChecked 逻辑使用
     sim_backend_row = _eai_platform_bootstrap.QHBoxLayout()
     sim_backend_row.setSpacing(8)
@@ -47,7 +47,7 @@ def build(self, build):
     self.sim_backend_tab_bar.setElideMode(_eai_platform_bootstrap.Qt.ElideRight)
     self.sim_backend_tab_bar.setToolTip(
         "可拖动调整仿真后端顺序；下次启动会按此顺序打开"
-        "（写入 eai/sim_backends_order.json）"
+        "（写入 eai/config/sim_backends_order.json）"
     )
     self.sim_backend_isaac_radio = _eai_platform_bootstrap.QRadioButton("Isaac / RoboDojo")
     self.sim_backend_mujoco_radio = _eai_platform_bootstrap.QRadioButton("MuJoCo")
@@ -159,7 +159,7 @@ def build(self, build):
     self.sim_leaderboard_refresh_btn.setStyleSheet(f"color: {_eai_configuration_policies.UI_ACCENT_BLUE};")
     self.sim_leaderboard_refresh_btn.setToolTip(
         "从公开榜单源实时抓取当前后端结果，更新表格并写回\n"
-        "eai/sim_eval_leaderboards.json（后台线程，不卡 UI）。\n"
+        "eai/config/sim_eval_leaderboards.json（后台线程，不卡 UI）。\n"
         "已合并的本地评测会保留，并与实时业内条目重新排序对比。"
     )
     self.sim_leaderboard_refresh_btn.clicked.connect(
@@ -169,7 +169,7 @@ def build(self, build):
     self.sim_leaderboard_reload_btn = _eai_platform_bootstrap.QPushButton("本地")
     self.sim_leaderboard_reload_btn.setFocusPolicy(_eai_platform_bootstrap.Qt.NoFocus)
     self.sim_leaderboard_reload_btn.setToolTip(
-        "仅重新读取本地 eai/sim_eval_leaderboards.json（不联网）\n"
+        "仅重新读取本地 eai/config/sim_eval_leaderboards.json（不联网）\n"
         "已合并的本地评测会与业内条目放在同一表对比"
     )
     self.sim_leaderboard_reload_btn.clicked.connect(

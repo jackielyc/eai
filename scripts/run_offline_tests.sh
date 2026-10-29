@@ -21,7 +21,7 @@ raise SystemExit(not result.wasSuccessful())
 PY
 fi
 if [[ "$suite" != ui ]]; then
-    "${EAI_PLANNER_PYTHON:-$root/.cache/grasp_ik_env/bin/python}" -m unittest -v \
+    env -u PYTHONPATH -u PYTHONHOME "${EAI_PLANNER_PYTHON:-$root/.cache/grasp_ik_env/bin/python}" -m unittest -v \
         tests.test_host_grasp_plan tests.test_bounded_arm_ik tests.test_grasp_scene \
         tests.test_phone_assembly
 fi

@@ -86,7 +86,7 @@ SAM3_SEGMENT_BACKENDS = (
 
 
 SAM3_WORKER_SCRIPT = _eai_platform_bootstrap.os.path.join(
-    str(PROJECT_ROOT), "sam3_segment_worker.py"
+    str(PROJECT_ROOT), "compat/sam3_segment_worker.py"
 )
 
 
@@ -150,7 +150,7 @@ SAM3_USE_HTTP_DEFAULT = _eai_platform_bootstrap.os.environ.get("SAM3_USE_HTTP", 
 SAM3_TIMEOUT_S = float(_eai_platform_bootstrap.os.environ.get("SAM3_TIMEOUT_S", "120"))
 
 
-SAM3_RUN_SCRIPT_NAME = "run_sam3.sh"
+SAM3_RUN_SCRIPT_NAME = "scripts/launch/run_sam3.sh"
 
 
 SAM3_DEFAULT_PORT = int(_eai_platform_bootstrap.os.environ.get("SAM3_PORT", "8765"))
@@ -172,11 +172,11 @@ POSE_BACKENDS = (POSE_BACKEND_PCA, POSE_BACKEND_FOUNDATIONPOSE, POSE_BACKEND_ANY
 
 
 FP_WORKER_SCRIPT = _eai_platform_bootstrap.os.path.join(
-    str(PROJECT_ROOT), "foundationpose_worker.py"
+    str(PROJECT_ROOT), "compat/foundationpose_worker.py"
 )
 
 
-FP_RUN_SCRIPT_NAME = "run_foundationpose.sh"
+FP_RUN_SCRIPT_NAME = "scripts/launch/run_foundationpose.sh"
 
 
 def resolve_fp_python() -> str:
@@ -216,11 +216,11 @@ FP_DEFAULT_PORT = int(_eai_platform_bootstrap.os.environ.get("FP_PORT", "8766"))
 
 
 ANY6D_WORKER_SCRIPT = _eai_platform_bootstrap.os.path.join(
-    str(PROJECT_ROOT), "any6d_worker.py"
+    str(PROJECT_ROOT), "compat/any6d_worker.py"
 )
 
 
-ANY6D_RUN_SCRIPT_NAME = "run_any6d.sh"
+ANY6D_RUN_SCRIPT_NAME = "scripts/launch/run_any6d.sh"
 
 
 def resolve_any6d_python() -> str:

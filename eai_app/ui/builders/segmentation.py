@@ -24,7 +24,7 @@ def build(self, build):
     self.segment_backend_combo.addItem("SAM3 文本", _eai_configuration_perception.SAM3_BACKEND_TEXT)
     self.segment_backend_combo.setToolTip(
         "SAM3 需单独环境安装 ultralytics 并下载 sam3.pt；"
-        "推荐先启动 sam3_segment_worker.py --serve"
+        "推荐先启动 compat/sam3_segment_worker.py --serve"
     )
     self.segment_backend_combo.currentIndexChanged.connect(
         self._on_segment_settings_changed
@@ -50,10 +50,10 @@ def build(self, build):
     self._local_ai_launcher = _eai_adapters_robot_launchers.LocalAiLauncher(self)
     self.local_ai_deploy_btn = _eai_platform_bootstrap.QPushButton("本地部署 AI")
     self.local_ai_deploy_btn.setToolTip(
-        "启动本地 SAM3 分割服务 (run_sam3.sh) 与 Ollama 对话服务。\n"
+        "启动本地 SAM3 分割服务 (scripts/launch/run_sam3.sh) 与 Ollama 对话服务。\n"
         "SAM3: 自动勾选 HTTP，分割模式切到 SAM3 点提示。\n"
         "Ollama: 自动切换 AI 对话为本地 Qwen 预设。\n"
-        "Docker 内 viewer 时请在宿主机执行: bash run_sam3.sh --host 0.0.0.0"
+        "Docker 内 viewer 时请在宿主机执行: bash scripts/launch/run_sam3.sh --host 0.0.0.0"
     )
     self.local_ai_deploy_btn.clicked.connect(self._on_local_ai_deploy_clicked)
     segment_layout.addWidget(self.local_ai_deploy_btn)
@@ -120,7 +120,7 @@ def build(self, build):
     self.pose_backend_combo.addItem("Any6D（无模型时为凸包近似）", _eai_configuration_perception.POSE_BACKEND_ANY6D)
     self.pose_backend_combo.setToolTip(
         "PCA：点云几何；FoundationPose：需 CAD mesh；\n"
-        "Any6D：任意物体，mesh 可空（深度凸包），推荐 run_any6d.sh"
+        "Any6D：任意物体，mesh 可空（深度凸包），推荐 scripts/launch/run_any6d.sh"
     )
     self.pose_backend_combo.currentIndexChanged.connect(self._on_pose_settings_changed)
     pose_row.addWidget(self.pose_backend_combo)
@@ -155,7 +155,7 @@ def build(self, build):
     self.fp_invoke_btn.setToolTip(
         "对当前彩色+深度调用所选后端（PCA/FP/Any6D）。\n"
         "Any6D：mesh 可留空=任意物体（深度凸包）；有 mesh 更准。\n"
-        "服务: bash run_foundationpose.sh 或 bash run_any6d.sh"
+        "服务: bash scripts/launch/run_foundationpose.sh 或 bash scripts/launch/run_any6d.sh"
     )
     self.fp_invoke_btn.clicked.connect(self._on_fp_invoke_clicked)
     pose_row.addWidget(self.fp_invoke_btn)

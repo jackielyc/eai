@@ -7,7 +7,7 @@ base_link -> head_camera_depth_link from URDF + waist/neck joints, then aliases
 camera_frame to that link.
 
 Usage (inside a2d-tele container / same ROS domain as the robot):
-  python3.10 a2d_head_camera_tf.py
+  python3.10 compat/a2d_head_camera_tf.py
   # or imported by show_camera_topics.CameraTopicNode
 """
 from __future__ import annotations
@@ -401,7 +401,7 @@ class HeadCameraTfPublisher:
             if not bridge:
                 return False
             sink_path = os.path.join(
-                str(PROJECT_ROOT), "isaac_cam_bridge_sink.py"
+                str(PROJECT_ROOT), "compat/isaac_cam_bridge_sink.py"
             )
             if not os.path.isfile(sink_path):
                 return False

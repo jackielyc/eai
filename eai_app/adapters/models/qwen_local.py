@@ -151,7 +151,7 @@ def fetch_deploy_model_dirs(
                     False,
                     [],
                     "Docker 内列举远程目录需宿主机 remote hostctl (:18103)。"
-                    "请重新执行 bash eai/run_in_docker.sh 以重启 hostctl。",
+                    "请重新执行 bash eai/scripts/launch/run_in_docker.sh 以重启 hostctl。",
                 )
             result = ctl.list_deploy_model_dirs(roots=scan_roots, host_id=host)
             if result.get("ok"):
@@ -598,19 +598,19 @@ class LocalQwenServiceLauncher(_eai_platform_bootstrap.QObject):
             self.running_changed.emit(False)
             self.status_message.emit(
                 "未检测到宿主机 hostctl。请在宿主机执行: "
-                f"python3 {_eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, 'local_qwen_hostctl.py')} "
-                "或重新 bash run_in_docker.sh"
+                f"python3 {_eai_platform_bootstrap.os.path.join(_eai_configuration_models.EAI_DIR, 'compat/local_qwen_hostctl.py')} "
+                "或重新 bash scripts/launch/run_in_docker.sh"
             )
             self.log_line.emit(
                 "容器内无 NVIDIA 驱动库，不能直接加载 GPU 模型；"
-                "必须由宿主机 hostctl / run_local_qwen.sh 启动。"
+                "必须由宿主机 hostctl / scripts/launch/run_local_qwen.sh 启动。"
             )
             return
 
         script = resolve_local_qwen_run_script()
         if script is None:
             self.status_message.emit(
-                f"未找到 {_eai_configuration_policies.LOCAL_QWEN_RUN_SCRIPT_NAME}，请确认与 show_camera_topics.py 同目录"
+                f"未找到 {_eai_configuration_policies.LOCAL_QWEN_RUN_SCRIPT_NAME}，请确认与 compat/show_camera_topics.py 同目录"
             )
             return
 
@@ -666,7 +666,7 @@ class LocalQwenServiceLauncher(_eai_platform_bootstrap.QObject):
                 self._process = None
         try:
             _eai_platform_bootstrap.subprocess.run(
-                ["pkill", "-f", "local_qwen_worker.py"],
+                ["pkill", "-f", "compat/local_qwen_worker.py"],
                 capture_output=True,
                 timeout=2,
                 check=False,

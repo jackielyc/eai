@@ -257,7 +257,7 @@ class AspireRunner:
         uv = find_uv()
         if not uv:
             raise RuntimeError(
-                "bootstrap 需要 uv。请先: curl -LsSf https://astral.sh/uv/install.sh | sh"
+                "bootstrap 需要 uv。请先: curl -LsSf https://astral.sh/uv/scripts/setup/install.sh | sh"
             )
         py = req.python or resolve_python(repo)
         env = child_env(repo, python=py, gpu=req.gpu)

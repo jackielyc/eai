@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 在 a2d Docker 容器内启动相机桥接，让宿主机 run_local.sh 能收到 /camera/* 图像。
+# 在 a2d Docker 容器内启动相机桥接，让宿主机 scripts/launch/run_local.sh 能收到 /camera/* 图像。
 #
 # 原理: 容器内相机多为 FastDDS「仅 SHM」；本桥接用 SHM 收图，再经 UDP 发出。
-# 宿主机请用:  bash run_local.sh（会自动对齐 Domain=0 + FastDDS）
+# 宿主机请用:  bash scripts/launch/run_local.sh（会自动对齐 Domain=0 + FastDDS）
 #
 # 用法:
 #   bash scripts/start_host_camera_bridge.sh
@@ -13,11 +13,11 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EAI_DIR="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 CONTAINER="${A2D_DOCKER_CONTAINER:-a2d-tele-release-2-1-0rc3-latest}"
-BRIDGE_PY_HOST="${EAI_DIR}/camera_host_bridge.py"
+BRIDGE_PY_HOST="${EAI_DIR}/compat/camera_host_bridge.py"
 DDS_XML_HOST="${EAI_DIR}/dds/fastdds_profiles_shm_udp.xml"
 # 容器未必挂载 share_data：拷到容器内固定目录
 REMOTE_DIR="/tmp/a2d_eai_camera_bridge"
-BRIDGE_PY_CT="${REMOTE_DIR}/camera_host_bridge.py"
+BRIDGE_PY_CT="${REMOTE_DIR}/compat/camera_host_bridge.py"
 DDS_XML_CT="${REMOTE_DIR}/fastdds_profiles_shm_udp.xml"
 LOG_FILE_CT="${REMOTE_DIR}/camera_host_bridge.log"
 PID_FILE_HOST="${EAI_DIR}/.cache/camera_host_bridge.docker.pid"
@@ -35,7 +35,7 @@ if [[ "${1:-}" == "--stop" || "${1:-}" == "stop" ]]; then
         rm -f "${PID_FILE_HOST}"
     fi
     docker exec "${CONTAINER}" bash -lc \
-        "pkill -f 'camera_host_bridge.py' 2>/dev/null || true" || true
+        "pkill -f 'compat/camera_host_bridge.py' 2>/dev/null || true" || true
     echo ">>> 已停止 camera_host_bridge"
     exit 0
 fi
@@ -54,7 +54,7 @@ docker exec "${CONTAINER}" bash -lc "mkdir -p '${REMOTE_DIR}' && chmod 777 '${RE
 docker cp "${BRIDGE_PY_HOST}" "${CONTAINER}:${BRIDGE_PY_CT}"
 docker cp "${DDS_XML_HOST}" "${CONTAINER}:${DDS_XML_CT}"
 
-docker exec "${CONTAINER}" bash -lc "pkill -f 'camera_host_bridge.py' 2>/dev/null || true" || true
+docker exec "${CONTAINER}" bash -lc "pkill -f 'compat/camera_host_bridge.py' 2>/dev/null || true" || true
 
 echo ">>> 启动 camera_host_bridge（SHM 收图 → UDP 给宿主机）"
 # 与相机同用 root，避免 SHM/IPC 权限不一致
@@ -87,11 +87,11 @@ if [[ -n "${BRIDGE_PID}" ]]; then
 fi
 
 sleep 1.5
-if docker exec "${CONTAINER}" bash -lc "pgrep -af camera_host_bridge.py" >/dev/null 2>&1; then
+if docker exec "${CONTAINER}" bash -lc "pgrep -af compat/camera_host_bridge.py" >/dev/null 2>&1; then
     echo ">>> 桥接已启动 (pid=${BRIDGE_PID:-?})"
     echo ">>> 容器日志: docker exec ${CONTAINER} tail -f ${LOG_FILE_CT}"
     echo ">>> 宿主机启动界面:"
-    echo "    cd ${EAI_DIR} && bash run_local.sh"
+    echo "    cd ${EAI_DIR} && bash scripts/launch/run_local.sh"
     echo ">>> 验证收图:"
     echo "    source /opt/ros/humble/setup.bash"
     echo "    export ROS_DOMAIN_ID=0 RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_LOCALHOST_ONLY=1"

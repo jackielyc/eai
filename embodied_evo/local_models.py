@@ -21,9 +21,9 @@ MODELS_ROOT = Path(
     )
 )
 LAKE_OUTPUT_ROOT = EAI_DIR / "train" / "lake_qwen35" / "output"
-RUN_SCRIPT = EAI_DIR / "run_local_qwen.sh"
-VLLM_SCRIPT = EAI_DIR / "run_vllm_coder.sh"
-WORKER_NAME = "local_qwen_worker.py"
+RUN_SCRIPT = EAI_DIR / "scripts/launch/run_local_qwen.sh"
+VLLM_SCRIPT = EAI_DIR / "scripts/launch/run_vllm_coder.sh"
+WORKER_NAME = "compat/local_qwen_worker.py"
 VLLM_PROC_MATCH = "vllm.entrypoints.openai.api_server"
 WORKER_PORT = int(os.environ.get("LOCAL_QWEN_PORT", "8100"))
 VLLM_PORT = int(os.environ.get("LOCAL_VLLM_PORT", "8000"))
@@ -222,7 +222,7 @@ def uses_vllm(model: Optional[LocalModel] = None) -> bool:
 def api_base_for(model: Optional[LocalModel] = None) -> str:
     """按后端选 API base。
 
-    run_local.sh 会导出 LOCAL_QWEN_API_BASE=:8100（HF worker 遗留）。
+    scripts/launch/run_local.sh 会导出 LOCAL_QWEN_API_BASE=:8100（HF worker 遗留）。
     Coder / vLLM 必须走 :8000，不能被该变量盖掉。
     """
     if uses_vllm(model):

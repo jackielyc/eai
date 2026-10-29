@@ -47,11 +47,11 @@ chmod 644 "${XAUTH_COPY}" 2>/dev/null || true
 
 # 推理 hostctl（与 viewer 相同）
 if ! curl -fsS --max-time 1 "http://127.0.0.1:${LOCAL_QWEN_CTL_PORT:-18101}/health" >/dev/null 2>&1; then
-  nohup python3 "${EAI_DIR_HOST}/local_qwen_hostctl.py" >>"${EAI_DIR_HOST}/log/local_qwen_hostctl.log" 2>&1 &
+  nohup python3 "${EAI_DIR_HOST}/compat/local_qwen_hostctl.py" >>"${EAI_DIR_HOST}/log/local_qwen_hostctl.log" 2>&1 &
   disown || true
 fi
 if ! curl -fsS --max-time 1 "http://127.0.0.1:${REMOTE_QWEN_CTL_PORT:-18103}/health" >/dev/null 2>&1; then
-  nohup python3 "${EAI_DIR_HOST}/remote_qwen_hostctl.py" >>"${EAI_DIR_HOST}/log/remote_qwen_hostctl.log" 2>&1 &
+  nohup python3 "${EAI_DIR_HOST}/compat/remote_qwen_hostctl.py" >>"${EAI_DIR_HOST}/log/remote_qwen_hostctl.log" 2>&1 &
   disown || true
 fi
 

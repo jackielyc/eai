@@ -56,7 +56,7 @@ def launch_a2d_ros_detached(
 
     - force_local=True：始终在本机执行，绝不 docker exec
     - 已在 a2d 容器内，或本机有 a2d-tele install：在当前环境执行
-    - 否则（例如 ./run_local.sh 宿主机 viewer 的 docker 模式）：docker exec 进 A2D 容器执行
+    - 否则（例如 ./scripts/launch/run_local.sh 宿主机 viewer 的 docker 模式）：docker exec 进 A2D 容器执行
     """
     env_prefix = f"{extra_env} && " if extra_env.strip() else ""
     use_local = (
@@ -96,7 +96,7 @@ def launch_a2d_ros_detached(
                 parts.append(
                     f"export FASTRTPS_DEFAULT_PROFILES_FILE={_eai_platform_bootstrap.shlex.quote(dds)}"
                 )
-            # 与 run_local.sh 一致：尊重已有 RMW（勿强行覆盖 cyclonedds）
+            # 与 scripts/launch/run_local.sh 一致：尊重已有 RMW（勿强行覆盖 cyclonedds）
             parts.append(
                 "export RMW_IMPLEMENTATION="
                 "${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
@@ -122,7 +122,7 @@ def launch_a2d_ros_detached(
         return (
             False,
             "宿主机无 a2d-tele install，且无 docker CLI，无法启动 GUI。"
-            "请用 run_in_docker.sh、切到 A2D→local，或先 docker start A2D 容器。",
+            "请用 scripts/launch/run_in_docker.sh、切到 A2D→local，或先 docker start A2D 容器。",
         )
     name = a2d_docker_container_name(container)
     try:

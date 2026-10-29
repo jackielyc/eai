@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 
 
-DEFAULT_PATH = (PROJECT_ROOT / 'viewer_ui_state.json')
+DEFAULT_PATH = (PROJECT_ROOT / 'config/viewer_ui_state.json')
 
 
 def load_state(path=DEFAULT_PATH):

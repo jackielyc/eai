@@ -24,5 +24,5 @@ done
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export ROS_LOG_DIR="${ROS_LOG_DIR:-$root/.cache/ros_execution_logs}"
 mkdir -p "$ROS_LOG_DIR"
-if [[ "$2" == --check-environment || "$2" == --probe-feedback ]]; then exec "$1" "$root/grasp_execution_service.py" "$2"; fi
-exec "$1" "$root/grasp_execution_service.py" --directory "$2"
+if [[ "$2" == --check-environment || "$2" == --probe-feedback ]]; then exec "$1" "$root/compat/grasp_execution_service.py" "$2"; fi
+exec "$1" "$root/compat/grasp_execution_service.py" --directory "$2"

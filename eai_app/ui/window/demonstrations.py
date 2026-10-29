@@ -654,7 +654,7 @@ class DemonstrationsMixin:
                 "手骨架遥控",
                 "未安装 mediapipe。请在当前 ROS conda 环境执行:\n"
                 "  python -m pip install 'mediapipe==0.10.14'\n"
-                "（本机 run_local.sh 使用 Python 3.11；勿强行降 numpy，"
+                "（本机 scripts/launch/run_local.sh 使用 Python 3.11；勿强行降 numpy，"
                 "conda 已带的 numpy 可与 cv_bridge 共存。）",
             )
             return
