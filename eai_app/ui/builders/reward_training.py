@@ -1,0 +1,273 @@
+"""ui.builders.reward training — extracted application responsibilities."""
+from __future__ import annotations
+from eai_app.paths import PROJECT_ROOT
+from eai_app.infrastructure.module_ref import module_ref
+_eai_adapters_models_discovery = module_ref('eai_app.adapters.models.discovery')
+_eai_adapters_models_reward_launchers = module_ref('eai_app.adapters.models.reward_launchers')
+_eai_configuration_policies = module_ref('eai_app.configuration.policies')
+_eai_configuration_tabs = module_ref('eai_app.configuration.tabs')
+_eai_platform_bootstrap = module_ref('eai_app.platform.bootstrap')
+_eai_ui_widgets_inputs = module_ref('eai_app.ui.widgets.inputs')
+_eai_ui_widgets_layouts = module_ref('eai_app.ui.widgets.layouts')
+
+def build(self, build):
+    build.reward_wf_tab = _eai_platform_bootstrap.QWidget()
+    build.reward_wf_tab.setObjectName("rewardWorkflowTab")
+    rwf_outer = _eai_platform_bootstrap.QVBoxLayout(build.reward_wf_tab)
+    rwf_outer.setContentsMargins(8, 6, 8, 6)
+    rwf_outer.setSpacing(6)
+    rwf_hint = _eai_platform_bootstrap.QLabel(
+        "RLinf 奖励模型工作流：真机采集 → 数据预处理（ResNet / QwenTrend）→ "
+        "train_reward_model.py 训练。评测请用「Reward评测」页。"
+        "pipeline 会先预处理再训练，并自动覆盖 data.train/val_data_paths。"
+    )
+    rwf_hint.setWordWrap(True)
+    rwf_hint.setStyleSheet(f"color: {_eai_configuration_policies.UI_TEXT_MUTED};")
+    rwf_outer.addWidget(rwf_hint)
+
+    rwf_path_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_path_row.setSpacing(6)
+    rwf_path_row.addWidget(_eai_platform_bootstrap.QLabel("RLinf"))
+    self.reward_wf_root_edit = _eai_platform_bootstrap.QLineEdit(
+        _eai_platform_bootstrap.os.environ.get("RLINF_ROOT", _eai_configuration_tabs.RLINF_ROOT_DEFAULT)
+    )
+    self.reward_wf_root_edit.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    rwf_path_row.addWidget(self.reward_wf_root_edit, 1)
+    self.reward_wf_root_browse_btn = _eai_platform_bootstrap.QPushButton("…")
+    self.reward_wf_root_browse_btn.setFixedWidth(28)
+    self.reward_wf_root_browse_btn.clicked.connect(self._on_reward_wf_root_browse)
+    rwf_path_row.addWidget(self.reward_wf_root_browse_btn)
+    rwf_path_row.addWidget(_eai_platform_bootstrap.QLabel("Python"))
+    self.reward_wf_python_edit = _eai_platform_bootstrap.QLineEdit(
+        _eai_adapters_models_discovery.resolve_rlinf_python(self.reward_wf_root_edit.text())
+    )
+    self.reward_wf_python_edit.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    rwf_path_row.addWidget(self.reward_wf_python_edit, 1)
+    rwf_outer.addLayout(rwf_path_row)
+
+    rwf_mode_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_mode_row.setSpacing(6)
+    rwf_mode_row.addWidget(_eai_platform_bootstrap.QLabel("步骤"))
+    self.reward_wf_mode_combo = _eai_ui_widgets_inputs.ImeSafeComboBox()
+    self.reward_wf_mode_combo.addItem("数据预处理", "preprocess")
+    self.reward_wf_mode_combo.addItem("训练", "train")
+    self.reward_wf_mode_combo.addItem("预处理→训练", "pipeline")
+    self.reward_wf_mode_combo.addItem("真机采集", "collect")
+    self.reward_wf_mode_combo.currentIndexChanged.connect(
+        self._on_reward_wf_mode_changed
+    )
+    rwf_mode_row.addWidget(self.reward_wf_mode_combo)
+    rwf_mode_row.addWidget(_eai_platform_bootstrap.QLabel("数据集"))
+    self.reward_wf_dataset_combo = _eai_ui_widgets_inputs.ImeSafeComboBox()
+    self.reward_wf_dataset_combo.addItem("ResNet (.pt)", "resnet")
+    self.reward_wf_dataset_combo.addItem("QwenTrend (.jsonl)", "qwentrend")
+    rwf_mode_row.addWidget(self.reward_wf_dataset_combo)
+    rwf_mode_row.addWidget(_eai_platform_bootstrap.QLabel("GPU"))
+    self.reward_wf_cuda_edit = _eai_platform_bootstrap.QLineEdit(
+        _eai_platform_bootstrap.os.environ.get("CUDA_VISIBLE_DEVICES", "0")
+    )
+    self.reward_wf_cuda_edit.setFixedWidth(72)
+    self.reward_wf_cuda_edit.setPlaceholderText("0")
+    self.reward_wf_cuda_edit.setToolTip("CUDA_VISIBLE_DEVICES，留空则用系统默认")
+    rwf_mode_row.addWidget(self.reward_wf_cuda_edit)
+    rwf_mode_row.addStretch(1)
+    rwf_outer.addLayout(rwf_mode_row)
+
+    self.reward_wf_stack = _eai_platform_bootstrap.QStackedWidget()
+
+    # page 0: preprocess / pipeline 共用（pipeline 再叠训练栏）
+    rwf_prep_page = _eai_platform_bootstrap.QWidget()
+    rwf_prep_lay = _eai_platform_bootstrap.QVBoxLayout(rwf_prep_page)
+    rwf_prep_lay.setContentsMargins(0, 0, 0, 0)
+    rwf_prep_lay.setSpacing(6)
+    rwf_raw_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_raw_row.setSpacing(6)
+    rwf_raw_row.addWidget(_eai_platform_bootstrap.QLabel("原始数据"))
+    self.reward_wf_raw_edit = _eai_platform_bootstrap.QLineEdit()
+    self.reward_wf_raw_edit.setPlaceholderText(
+        "collected_data 目录（含 episode .pkl）"
+    )
+    self.reward_wf_raw_edit.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    rwf_raw_row.addWidget(self.reward_wf_raw_edit, 1)
+    self.reward_wf_raw_browse_btn = _eai_platform_bootstrap.QPushButton("…")
+    self.reward_wf_raw_browse_btn.setFixedWidth(28)
+    self.reward_wf_raw_browse_btn.clicked.connect(self._on_reward_wf_raw_browse)
+    rwf_raw_row.addWidget(self.reward_wf_raw_browse_btn)
+    rwf_prep_lay.addLayout(rwf_raw_row)
+    rwf_out_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_out_row.setSpacing(6)
+    rwf_out_row.addWidget(_eai_platform_bootstrap.QLabel("输出目录"))
+    self.reward_wf_out_edit = _eai_platform_bootstrap.QLineEdit("logs/processed_reward_data")
+    self.reward_wf_out_edit.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    rwf_out_row.addWidget(self.reward_wf_out_edit, 1)
+    self.reward_wf_out_browse_btn = _eai_platform_bootstrap.QPushButton("…")
+    self.reward_wf_out_browse_btn.setFixedWidth(28)
+    self.reward_wf_out_browse_btn.clicked.connect(self._on_reward_wf_out_browse)
+    rwf_out_row.addWidget(self.reward_wf_out_browse_btn)
+    rwf_prep_lay.addLayout(rwf_out_row)
+    rwf_samp_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_samp_row.setSpacing(6)
+    rwf_samp_row.addWidget(_eai_platform_bootstrap.QLabel("每集采样"))
+    self.reward_wf_samples_spin = _eai_platform_bootstrap.QSpinBox()
+    self.reward_wf_samples_spin.setRange(0, 512)
+    self.reward_wf_samples_spin.setValue(0)
+    self.reward_wf_samples_spin.setToolTip("0 = 使用全部帧")
+    rwf_samp_row.addWidget(self.reward_wf_samples_spin)
+    rwf_samp_row.addWidget(_eai_platform_bootstrap.QLabel("val_split"))
+    self.reward_wf_val_spin = _eai_platform_bootstrap.QDoubleSpinBox()
+    self.reward_wf_val_spin.setRange(0.0, 0.9)
+    self.reward_wf_val_spin.setSingleStep(0.05)
+    self.reward_wf_val_spin.setDecimals(2)
+    self.reward_wf_val_spin.setValue(0.20)
+    rwf_samp_row.addWidget(self.reward_wf_val_spin)
+    rwf_samp_row.addWidget(_eai_platform_bootstrap.QLabel("fail:success"))
+    self.reward_wf_ratio_spin = _eai_platform_bootstrap.QDoubleSpinBox()
+    self.reward_wf_ratio_spin.setRange(0.1, 20.0)
+    self.reward_wf_ratio_spin.setSingleStep(0.5)
+    self.reward_wf_ratio_spin.setDecimals(1)
+    self.reward_wf_ratio_spin.setValue(2.0)
+    rwf_samp_row.addWidget(self.reward_wf_ratio_spin)
+    rwf_samp_row.addWidget(_eai_platform_bootstrap.QLabel("seed"))
+    self.reward_wf_seed_spin = _eai_platform_bootstrap.QSpinBox()
+    self.reward_wf_seed_spin.setRange(0, 999999)
+    self.reward_wf_seed_spin.setValue(42)
+    rwf_samp_row.addWidget(self.reward_wf_seed_spin)
+    self.reward_wf_keep_last_check = _eai_platform_bootstrap.QCheckBox("保留末帧")
+    self.reward_wf_keep_last_check.setChecked(True)
+    rwf_samp_row.addWidget(self.reward_wf_keep_last_check)
+    rwf_samp_row.addStretch(1)
+    rwf_prep_lay.addLayout(rwf_samp_row)
+    self.reward_wf_stack.addWidget(rwf_prep_page)
+
+    # page 1: train-only data paths（也可在 pipeline 时用 Hydra 覆盖）
+    rwf_train_page = _eai_platform_bootstrap.QWidget()
+    rwf_train_lay = _eai_platform_bootstrap.QVBoxLayout(rwf_train_page)
+    rwf_train_lay.setContentsMargins(0, 0, 0, 0)
+    rwf_train_lay.setSpacing(6)
+    rwf_train_pt_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_train_pt_row.setSpacing(6)
+    rwf_train_pt_row.addWidget(_eai_platform_bootstrap.QLabel("train.pt"))
+    self.reward_wf_train_pt_edit = _eai_platform_bootstrap.QLineEdit(
+        "logs/processed_reward_data/train.pt"
+    )
+    self.reward_wf_train_pt_edit.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    rwf_train_pt_row.addWidget(self.reward_wf_train_pt_edit, 1)
+    self.reward_wf_train_pt_browse_btn = _eai_platform_bootstrap.QPushButton("…")
+    self.reward_wf_train_pt_browse_btn.setFixedWidth(28)
+    self.reward_wf_train_pt_browse_btn.clicked.connect(
+        self._on_reward_wf_train_pt_browse
+    )
+    rwf_train_pt_row.addWidget(self.reward_wf_train_pt_browse_btn)
+    rwf_train_lay.addLayout(rwf_train_pt_row)
+    rwf_val_pt_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_val_pt_row.setSpacing(6)
+    rwf_val_pt_row.addWidget(_eai_platform_bootstrap.QLabel("val.pt"))
+    self.reward_wf_val_pt_edit = _eai_platform_bootstrap.QLineEdit(
+        "logs/processed_reward_data/val.pt"
+    )
+    self.reward_wf_val_pt_edit.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    rwf_val_pt_row.addWidget(self.reward_wf_val_pt_edit, 1)
+    self.reward_wf_val_pt_browse_btn = _eai_platform_bootstrap.QPushButton("…")
+    self.reward_wf_val_pt_browse_btn.setFixedWidth(28)
+    self.reward_wf_val_pt_browse_btn.clicked.connect(
+        self._on_reward_wf_val_pt_browse
+    )
+    rwf_val_pt_row.addWidget(self.reward_wf_val_pt_browse_btn)
+    rwf_train_lay.addLayout(rwf_val_pt_row)
+    self.reward_wf_stack.addWidget(rwf_train_page)
+
+    # page 2: collect hint
+    rwf_collect_page = _eai_platform_bootstrap.QWidget()
+    rwf_collect_lay = _eai_platform_bootstrap.QVBoxLayout(rwf_collect_page)
+    rwf_collect_lay.setContentsMargins(0, 0, 0, 0)
+    rwf_collect_hint = _eai_platform_bootstrap.QLabel(
+        "真机采集需 Franka + SpaceMouse，并在 config 中改好 ROBOT_IP / "
+        "TARGET_EE_POSE。日志目录下会生成 collected_data。"
+    )
+    rwf_collect_hint.setWordWrap(True)
+    rwf_collect_hint.setStyleSheet(f"color: {_eai_configuration_policies.UI_TEXT_MUTED};")
+    rwf_collect_lay.addWidget(rwf_collect_hint)
+    rwf_collect_lay.addStretch(1)
+    self.reward_wf_stack.addWidget(rwf_collect_page)
+
+    rwf_outer.addWidget(self.reward_wf_stack)
+
+    rwf_cfg_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_cfg_row.setSpacing(6)
+    rwf_cfg_row.addWidget(_eai_platform_bootstrap.QLabel("config"))
+    self.reward_wf_config_combo = _eai_ui_widgets_inputs.ImeSafeComboBox()
+    self.reward_wf_config_combo.setEditable(True)
+    self.reward_wf_config_combo.setInsertPolicy(_eai_platform_bootstrap.QComboBox.NoInsert)
+    self.reward_wf_config_combo.setMinimumWidth(220)
+    self.reward_wf_config_combo.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    rwf_cfg_row.addWidget(self.reward_wf_config_combo, 1)
+    self.reward_wf_refresh_btn = _eai_platform_bootstrap.QPushButton("刷新")
+    self.reward_wf_refresh_btn.setToolTip("重新扫描 examples/reward/config")
+    self.reward_wf_refresh_btn.clicked.connect(self._refresh_reward_wf_configs)
+    rwf_cfg_row.addWidget(self.reward_wf_refresh_btn)
+    rwf_outer.addLayout(rwf_cfg_row)
+
+    rwf_ov_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_ov_row.setSpacing(6)
+    rwf_ov_row.addWidget(_eai_platform_bootstrap.QLabel("Hydra"))
+    self.reward_wf_overrides_edit = _eai_platform_bootstrap.QLineEdit()
+    self.reward_wf_overrides_edit.setPlaceholderText(
+        "可选 Hydra 覆盖。例: actor.optim.lr=1e-4 runner.max_epochs=200"
+    )
+    self.reward_wf_overrides_edit.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    rwf_ov_row.addWidget(self.reward_wf_overrides_edit, 1)
+    rwf_outer.addLayout(rwf_ov_row)
+
+    rwf_run_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_run_row.setSpacing(6)
+    self.reward_wf_start_btn = _eai_platform_bootstrap.QPushButton("启动")
+    self.reward_wf_start_btn.setToolTip("启动当前步骤的 Reward 工作流")
+    self.reward_wf_start_btn.clicked.connect(self._on_reward_wf_start_clicked)
+    rwf_run_row.addWidget(self.reward_wf_start_btn)
+    self.reward_wf_stop_btn = _eai_platform_bootstrap.QPushButton("停止")
+    self.reward_wf_stop_btn.setObjectName("dangerAction")
+    self.reward_wf_stop_btn.setEnabled(False)
+    self.reward_wf_stop_btn.clicked.connect(self._on_reward_wf_stop_clicked)
+    rwf_run_row.addWidget(self.reward_wf_stop_btn)
+    self.reward_wf_status_label = _eai_platform_bootstrap.QLabel("空闲")
+    self.reward_wf_status_label.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    rwf_run_row.addWidget(self.reward_wf_status_label, 1)
+    rwf_outer.addLayout(rwf_run_row)
+
+    rwf_log_row = _eai_platform_bootstrap.QHBoxLayout()
+    rwf_log_row.setSpacing(6)
+    rwf_log_row.addWidget(_eai_platform_bootstrap.QLabel("日志目录"))
+    self.reward_wf_log_dir_edit = _eai_platform_bootstrap.QLineEdit()
+    self.reward_wf_log_dir_edit.setReadOnly(True)
+    self.reward_wf_log_dir_edit.setPlaceholderText(
+        "训练/采集启动后显示 runner.logger.log_path"
+    )
+    self.reward_wf_log_dir_edit.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    rwf_log_row.addWidget(self.reward_wf_log_dir_edit, 1)
+    self.reward_wf_open_log_btn = _eai_platform_bootstrap.QPushButton("打开")
+    self.reward_wf_open_log_btn.setEnabled(False)
+    self.reward_wf_open_log_btn.clicked.connect(self._on_reward_wf_open_log_clicked)
+    rwf_log_row.addWidget(self.reward_wf_open_log_btn)
+    rwf_outer.addLayout(rwf_log_row)
+
+    self.reward_wf_log_edit = _eai_platform_bootstrap.QTextEdit()
+    self.reward_wf_log_edit.setReadOnly(True)
+    self.reward_wf_log_edit.setFont(_eai_platform_bootstrap.QFont(_eai_configuration_policies.UI_MONO_FAMILY, _eai_configuration_policies.UI_MONO_SIZE_SMALL))
+    self.reward_wf_log_edit.setMinimumHeight(180)
+    self.reward_wf_log_edit.setPlaceholderText("Reward 工作流日志…")
+    self.reward_wf_log_edit.setStyleSheet(
+        f"QTextEdit {{ color: {_eai_configuration_policies.UI_TEXT_PRIMARY}; background-color: {_eai_configuration_policies.UI_BG_LOG}; "
+        f"border: 1px solid {_eai_configuration_policies.UI_BORDER}; }}"
+    )
+    self.reward_wf_clear_log_btn = _eai_ui_widgets_layouts._add_clear_log_button_row(
+        rwf_outer, self.reward_wf_log_edit
+    )
+    rwf_outer.addWidget(self.reward_wf_log_edit, 1)
+
+    self._reward_wf_launcher = _eai_adapters_models_reward_launchers.RewardWorkflowLauncher(self)
+    self._reward_wf_launcher.log_line.connect(self._append_reward_wf_log)
+    self._reward_wf_launcher.status_message.connect(self._on_reward_wf_status)
+    self._reward_wf_launcher.running_changed.connect(self._update_reward_wf_ui)
+    self._reward_wf_launcher.log_dir_ready.connect(self._on_reward_wf_log_dir)
+    self._on_reward_wf_mode_changed()
+    self._refresh_reward_wf_configs()

@@ -177,9 +177,9 @@ IK 直接在 URDF 关节上下限内求解，返回轨迹不能越界。起点�
 测试：
 
 ```bash
-/usr/bin/python3 eai/test_click_pose.py -v
-/usr/bin/python3 eai/test_grasp_execution.py -v
-QT_QPA_PLATFORM=offscreen /usr/bin/python3 eai/test_grasp_execution_ui.py -v
+(cd eai && /usr/bin/python3 -m unittest tests.test_click_pose -v)
+(cd eai && /usr/bin/python3 -m unittest tests.test_grasp_execution -v)
+(cd eai && QT_QPA_PLATFORM=offscreen /usr/bin/python3 -m unittest tests.test_grasp_execution_ui -v)
 ```
 
 状态机、轨迹播放器和 Qt 测试使用合成数据/假机器人对象。它们验证控制逻辑，不能代替真实标定、真实 IK 环境验证或实机验收。预检请求和结果保存在 `.cache/grasp_execution/`。
@@ -192,7 +192,7 @@ QT_QPA_PLATFORM=offscreen /usr/bin/python3 eai/test_grasp_execution_ui.py -v
 
 已验证：该环境加载 ROS 的 rclpy、geometry_msgs、sensor_msgs，并成功构建当前 16 自由度 FK 模型；双臂离线 IK 路径测试通过。`genie_msgs` 仍需原有机器人 overlay；启动脚本通过 `EAI_GENIE_SETUP` 或已有路径加载。没有启动 FK 节点或发布机器人命令。
 
-离线 IK 测试：`eai/.cache/grasp_ik_env/bin/python eai/test_host_grasp_plan.py -v`。
+离线 IK 测试：`(cd eai && .cache/grasp_ik_env/bin/python -m unittest tests.test_host_grasp_plan -v)`。
 
 ### 流程反馈与执行记录
 

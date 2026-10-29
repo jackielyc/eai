@@ -1,0 +1,1201 @@
+#!/usr/bin/env python3
+"""
+本地 Qwen3.5 OpenAI 兼容推理服务。
+
+读取 HuggingFace 权重目录（默认 workspace/models/Qwen/Qwen3.5-4B，
+也可指向 Qwen3.5-35B-A3B 等），提供:
+  GET  /health
+  GET  /v1/models
+  POST /v1/chat/completions
+  POST /v1/responses   # Codex / EmbodiedEvo 用（简化实现，支持文本+图像）
+
+用法:
+  bash run_local_qwen.sh
+  bash run_local_qwen.sh --model /path/to/Qwen3.5-35B-A3B --model-id qwen3.5-35b-a3b
+  LOCAL_QWEN_PYTHON=~/miniconda3/envs/psi-policy/bin/python \\
+    python local_qwen_worker.py --model /path/to/Qwen3.5-4B --host 0.0.0.0 --port 8100
+"""
+
+from __future__ import annotations
+
+from eai_app.paths import PROJECT_ROOT
+
+import argparse
+import base64
+import json
+import os
+import sys
+import tempfile
+import threading
+import time
+import traceback
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
+
+MODEL_ID = os.environ.get("LOCAL_QWEN_MODEL_ID", "qwen3.5-4b")
+_LOCK = threading.Lock()
+_STATE: Dict[str, Any] = {
+    "ready": False,
+    "error": "",
+    "model": None,
+    "processor": None,
+    "model_dir": "",
+    "device": "",
+    "kind": "",
+}
+
+
+def _log(msg: str) -> None:
+    print(f"[local_qwen] {msg}", flush=True)
+
+
+def _configure_torch_backends() -> None:
+    """在首次 CUDA/视觉算子前配置后端。
+
+    部分机房/驱动组合下 cuDNN 句柄初始化失败，会导致带图推理
+    CUDNN_STATUS_NOT_INITIALIZED，纯文本却正常。默认关闭 cuDNN，
+    走原生卷积（稍慢但稳）。可用 LOCAL_QWEN_CUDNN=1 强制开启。
+    """
+    try:
+        import torch
+    except Exception:
+        return
+    want = os.environ.get("LOCAL_QWEN_CUDNN", "").strip().lower()
+    enable = want in ("1", "true", "yes", "on")
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.init()
+        torch.backends.cudnn.enabled = enable
+        torch.backends.cudnn.benchmark = False
+        _log(f"torch.backends.cudnn.enabled={enable}")
+    except Exception as exc:
+        _log(f"configure torch backends failed: {exc}")
+
+
+def _ensure_cudnn_ready() -> None:
+    """加载后确认后端；若仍开启 cuDNN 则做一次预热。"""
+    _configure_torch_backends()
+    import torch
+
+    if not torch.cuda.is_available() or not torch.backends.cudnn.enabled:
+        return
+    try:
+        x = torch.zeros(1, 3, 2, 16, 16, device="cuda", dtype=torch.float16)
+        w = torch.zeros(8, 3, 2, 3, 3, device="cuda", dtype=torch.float16)
+        y = torch.nn.functional.conv3d(x, w, padding=1)
+        del x, w, y
+        torch.cuda.synchronize()
+        _log("cuDNN warmup ok")
+    except Exception as exc:
+        _log(f"cuDNN warmup failed, disabling cudnn: {exc}")
+        try:
+            torch.backends.cudnn.enabled = False
+        except Exception:
+            pass
+
+
+def resolve_model_dir(user: Optional[str] = None) -> Optional[str]:
+    candidates: List[str] = []
+    if user:
+        candidates.append(os.path.abspath(os.path.expanduser(user)))
+    env = os.environ.get("LOCAL_QWEN_MODEL_DIR", "").strip()
+    if env:
+        candidates.append(os.path.abspath(os.path.expanduser(env)))
+    here = str(PROJECT_ROOT)
+    workspace = os.path.dirname(here)
+    for name in ("Qwen3.5-4B", "Qwen3.5-35B-A3B"):
+        candidates.append(os.path.join(workspace, "models", "Qwen", name))
+        candidates.append(os.path.join(here, "models", "Qwen", name))
+    for path in candidates:
+        if os.path.isfile(os.path.join(path, "config.json")):
+            return path
+        if os.path.isfile(os.path.join(path, "adapter_config.json")):
+            return path
+    return None
+
+
+def _decode_data_url_to_path(url: str, tmp_paths: List[str]) -> Optional[str]:
+    if not url.startswith("data:"):
+        return None
+    try:
+        header, b64 = url.split(",", 1)
+    except ValueError:
+        return None
+    ext = ".jpg"
+    if "png" in header:
+        ext = ".png"
+    elif "webp" in header:
+        ext = ".webp"
+    raw = base64.b64decode(b64)
+    fd, path = tempfile.mkstemp(suffix=ext, prefix="local_qwen_")
+    os.close(fd)
+    with open(path, "wb") as f:
+        f.write(raw)
+    tmp_paths.append(path)
+    return path
+
+
+def _extract_user_content(messages: List[Dict[str, Any]]) -> Tuple[str, List[str]]:
+    """从 OpenAI messages 提取最后一条 user 文本与图片路径。"""
+    tmp_paths: List[str] = []
+    text_parts: List[str] = []
+    image_paths: List[str] = []
+    for msg in messages:
+        if str(msg.get("role") or "") != "user":
+            continue
+        content = msg.get("content")
+        text_parts.clear()
+        image_paths.clear()
+        if isinstance(content, str):
+            text_parts.append(content)
+            continue
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            ptype = str(part.get("type") or "")
+            if ptype == "text":
+                text_parts.append(str(part.get("text") or ""))
+            elif ptype == "image_url":
+                image_url = part.get("image_url") or {}
+                url = ""
+                if isinstance(image_url, dict):
+                    url = str(image_url.get("url") or "")
+                elif isinstance(image_url, str):
+                    url = image_url
+                path = _decode_data_url_to_path(url, tmp_paths)
+                if path:
+                    image_paths.append(path)
+    question = "\n".join(t.strip() for t in text_parts if t and t.strip()).strip()
+    return question or "请描述图像。", image_paths
+
+
+def load_model(model_dir: str) -> None:
+    if os.path.isfile(os.path.join(model_dir, "adapter_config.json")):
+        load_lora_model(model_dir)
+        return
+    load_full_model(model_dir)
+
+
+def _model_is_causal_lm(model_dir: str) -> bool:
+    """Qwen3-Coder 等为 CausalLM；Qwen3.5-VL/3.5 MoE 多为 ImageTextToText。"""
+    cfg_path = os.path.join(model_dir, "config.json")
+    try:
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return False
+    arches = [str(a) for a in (cfg.get("architectures") or [])]
+    joined = " ".join(arches + [str(cfg.get("model_type") or "")]).lower()
+    if "imagetext" in joined or "conditionalgeneration" in joined:
+        return False
+    if "forcausallm" in joined:
+        return True
+    # Qwen3-Coder: model_type=qwen3_moe（不是 qwen3_5_moe）
+    if "qwen3_moe" in joined and "qwen3_5" not in joined:
+        return True
+    return False
+
+
+def _gpu_load_kwargs(model_dir: str) -> Dict[str, Any]:
+    import torch
+
+    load_kwargs: Dict[str, Any] = {
+        "trust_remote_code": True,
+        "low_cpu_mem_usage": True,
+        "torch_dtype": torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+    }
+    if not torch.cuda.is_available():
+        load_kwargs["device_map"] = None
+        return load_kwargs
+    # 单卡放不下（如 35B MoE）时 accelerate 会把溢出权重落到 disk，
+    # MoE 必须显式提供 offload_folder，否则直接报错退出。
+    offload_root = os.environ.get("LOCAL_QWEN_OFFLOAD_DIR", "").strip()
+    if not offload_root:
+        offload_root = os.path.join(
+            tempfile.gettempdir(), "local_qwen_offload", os.path.basename(model_dir)
+        )
+    os.makedirs(offload_root, exist_ok=True)
+    props = torch.cuda.get_device_properties(0)
+    total_gib = max(1, int(props.total_memory / (1024**3)))
+    env_budget = os.environ.get("LOCAL_QWEN_GPU_BUDGET_GIB", "").strip()
+    if env_budget.isdigit():
+        gpu_budget = max(4, int(env_budget))
+    else:
+        gpu_budget = max(4, total_gib - 2)
+    load_kwargs["device_map"] = "auto"
+    load_kwargs["max_memory"] = {0: f"{gpu_budget}GiB", "cpu": "64GiB"}
+    load_kwargs["offload_folder"] = offload_root
+    _log(
+        f"device_map=auto max_memory[0]={gpu_budget}GiB "
+        f"offload_folder={offload_root}"
+    )
+    return load_kwargs
+
+
+def load_full_model(model_dir: str) -> None:
+    import torch
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoModelForImageTextToText,
+        AutoProcessor,
+        AutoTokenizer,
+    )
+
+    _log(f"loading model from {model_dir}")
+    causal = _model_is_causal_lm(model_dir)
+    load_kwargs = _gpu_load_kwargs(model_dir)
+    modality = "causal_lm" if causal else "vl"
+
+    if causal:
+        _log("architecture=CausalLM (tokenizer path)")
+        processor = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+        try:
+            model = AutoModelForCausalLM.from_pretrained(model_dir, **load_kwargs)
+        except TypeError:
+            load_kwargs.pop("low_cpu_mem_usage", None)
+            model = AutoModelForCausalLM.from_pretrained(model_dir, **load_kwargs)
+    else:
+        _log("architecture=ImageTextToText (processor path)")
+        processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
+        try:
+            model = AutoModelForImageTextToText.from_pretrained(model_dir, **load_kwargs)
+        except TypeError:
+            load_kwargs.pop("low_cpu_mem_usage", None)
+            model = AutoModelForImageTextToText.from_pretrained(model_dir, **load_kwargs)
+
+    if not torch.cuda.is_available():
+        model = model.to("cpu")
+    model.eval()
+    try:
+        device = str(next(model.parameters()).device)
+    except StopIteration:
+        device = "unknown"
+    with _LOCK:
+        _STATE["processor"] = processor
+        _STATE["model"] = model
+        _STATE["model_dir"] = model_dir
+        _STATE["device"] = device
+        _STATE["kind"] = "full"
+        _STATE["modality"] = modality
+        _STATE["ready"] = True
+        _STATE["error"] = ""
+    _ensure_cudnn_ready()
+    _log(f"model ready on {device} modality={modality}")
+
+
+def load_lora_model(adapter_dir: str) -> None:
+    import json
+
+    import torch
+    from peft import PeftModel
+    from transformers import AutoModelForImageTextToText, AutoProcessor
+
+    with open(os.path.join(adapter_dir, "adapter_config.json"), encoding="utf-8") as f:
+        adapter_cfg = json.load(f)
+    base_dir = str(adapter_cfg.get("base_model_name_or_path") or "").strip()
+    if not base_dir or not os.path.isfile(os.path.join(base_dir, "config.json")):
+        raise FileNotFoundError(f"LoRA base model not found: {base_dir}")
+
+    weight_candidates = (
+        "adapter_model.safetensors",
+        "adapter_model.bin",
+        "pytorch_model.bin",
+    )
+    weight_path = ""
+    for name in weight_candidates:
+        cand = os.path.join(adapter_dir, name)
+        if os.path.isfile(cand):
+            weight_path = cand
+            break
+    if not weight_path:
+        raise FileNotFoundError(
+            f"LoRA adapter weights missing under {adapter_dir} "
+            f"(expected one of {', '.join(weight_candidates)})"
+        )
+    if not os.access(weight_path, os.R_OK):
+        st = os.stat(weight_path)
+        raise PermissionError(
+            f"LoRA adapter weights not readable by current user: {weight_path} "
+            f"(mode={oct(st.st_mode & 0o777)}, uid={st.st_uid}). "
+            f"Fix with: sudo chmod a+r {weight_path}"
+        )
+
+    _log(f"loading LoRA adapter from {adapter_dir}, base={base_dir}")
+    proc_dir = (
+        adapter_dir
+        if os.path.isfile(os.path.join(adapter_dir, "tokenizer.json"))
+        else base_dir
+    )
+    processor = AutoProcessor.from_pretrained(proc_dir, trust_remote_code=True)
+    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+    load_kwargs: Dict[str, Any] = {
+        "trust_remote_code": True,
+        "low_cpu_mem_usage": True,
+        "torch_dtype": dtype,
+    }
+    if torch.cuda.is_available():
+        offload_root = os.environ.get("LOCAL_QWEN_OFFLOAD_DIR", "").strip()
+        if not offload_root:
+            offload_root = os.path.join(
+                tempfile.gettempdir(),
+                "local_qwen_offload",
+                os.path.basename(base_dir),
+            )
+        os.makedirs(offload_root, exist_ok=True)
+        props = torch.cuda.get_device_properties(0)
+        total_gib = max(1, int(props.total_memory / (1024**3)))
+        gpu_budget = max(4, total_gib - 2)
+        load_kwargs["device_map"] = "auto"
+        load_kwargs["max_memory"] = {0: f"{gpu_budget}GiB", "cpu": "64GiB"}
+        load_kwargs["offload_folder"] = offload_root
+        _log(
+            f"LoRA device_map=auto max_memory[0]={gpu_budget}GiB "
+            f"offload_folder={offload_root}"
+        )
+    else:
+        load_kwargs["device_map"] = None
+
+    try:
+        base_model = AutoModelForImageTextToText.from_pretrained(base_dir, **load_kwargs)
+    except TypeError:
+        load_kwargs.pop("low_cpu_mem_usage", None)
+        base_model = AutoModelForImageTextToText.from_pretrained(base_dir, **load_kwargs)
+    try:
+        model = PeftModel.from_pretrained(base_model, adapter_dir)
+    except FileNotFoundError as exc:
+        # safetensors may raise FileNotFoundError for EACCES on root-owned 600 files
+        raise PermissionError(
+            f"Failed to open LoRA weights at {weight_path}. "
+            f"If the file exists, check permissions (often root:root mode 600). "
+            f"Fix: sudo chmod a+r {weight_path}"
+        ) from exc
+    if not torch.cuda.is_available():
+        model = model.to("cpu")
+    model.eval()
+    try:
+        device = str(next(model.parameters()).device)
+    except StopIteration:
+        device = "unknown"
+    with _LOCK:
+        _STATE["processor"] = processor
+        _STATE["model"] = model
+        _STATE["model_dir"] = adapter_dir
+        _STATE["device"] = device
+        _STATE["kind"] = "lora"
+        _STATE["ready"] = True
+        _STATE["error"] = ""
+    _ensure_cudnn_ready()
+    _log(f"LoRA model ready on {device}")
+
+
+def run_chat(
+    messages: List[Dict[str, Any]],
+    image_paths: List[str],
+    max_new_tokens: int,
+    *,
+    enable_thinking: bool = False,
+    temperature: float = 0.0,
+) -> str:
+    with _LOCK:
+        if not _STATE["ready"]:
+            raise RuntimeError(_STATE.get("error") or "model not ready")
+        model = _STATE["model"]
+        processor = _STATE["processor"]
+        modality = str(_STATE.get("modality") or "vl")
+
+    # 构造 chat 模板输入；有图时附加 image
+    chat_messages: List[Dict[str, Any]] = []
+    for msg in messages:
+        role = str(msg.get("role") or "user")
+        content = msg.get("content")
+        if role == "system":
+            if isinstance(content, str) and content.strip():
+                chat_messages.append({"role": "system", "content": content.strip()})
+            continue
+        if role not in ("user", "assistant"):
+            continue
+        if isinstance(content, str):
+            chat_messages.append({"role": role, "content": content})
+        elif isinstance(content, list):
+            # 简化：仅保留文本；图片走 processor images
+            texts = [
+                str(p.get("text") or "")
+                for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            chat_messages.append(
+                {"role": role, "content": "\n".join(t for t in texts if t).strip()}
+            )
+
+    if not chat_messages:
+        chat_messages = [{"role": "user", "content": "你好"}]
+
+    import torch
+
+    # CausalLM（Coder）：只用 tokenizer，忽略图像
+    if modality == "causal_lm":
+        template_kwargs: Dict[str, Any] = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        try:
+            prompt = processor.apply_chat_template(
+                chat_messages, **template_kwargs, enable_thinking=bool(enable_thinking)
+            )
+        except TypeError:
+            prompt = processor.apply_chat_template(chat_messages, **template_kwargs)
+        inputs = processor(prompt, return_tensors="pt")
+        device = next(model.parameters()).device
+        inputs = {k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()}
+    else:
+        # 若有图，把图挂到最后一条 user
+        images = None
+        if image_paths:
+            from PIL import Image
+
+            images = [Image.open(p).convert("RGB") for p in image_paths]
+            last_user_idx = None
+            for i in range(len(chat_messages) - 1, -1, -1):
+                if chat_messages[i].get("role") == "user":
+                    last_user_idx = i
+                    break
+            if last_user_idx is not None:
+                text = chat_messages[last_user_idx].get("content") or ""
+                content_parts: List[Dict[str, Any]] = [{"type": "image"} for _ in images]
+                content_parts.append({"type": "text", "text": text})
+                chat_messages[last_user_idx] = {
+                    "role": "user",
+                    "content": content_parts,
+                }
+
+        # Qwen3.5 默认会打开 <think>；关闭后模板写入空 think 块，避免长篇思考占满 max_tokens
+        template_kwargs = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+            "enable_thinking": bool(enable_thinking),
+        }
+        try:
+            prompt = processor.apply_chat_template(chat_messages, **template_kwargs)
+        except TypeError:
+            template_kwargs.pop("enable_thinking", None)
+            prompt = processor.apply_chat_template(chat_messages, **template_kwargs)
+        inputs = processor(
+            text=[prompt],
+            images=images,
+            return_tensors="pt",
+            padding=True,
+        )
+        device = next(model.parameters()).device
+        inputs = {
+            k: v.to(device) if hasattr(v, "to") else v for k, v in inputs.items()
+        }
+
+    gen_kwargs: Dict[str, Any] = {
+        "max_new_tokens": max(16, int(max_new_tokens)),
+    }
+    if temperature and float(temperature) > 1e-6:
+        gen_kwargs["do_sample"] = True
+        gen_kwargs["temperature"] = float(temperature)
+    else:
+        gen_kwargs["do_sample"] = False
+
+    def _generate_once() -> Any:
+        with torch.inference_mode():
+            return model.generate(**inputs, **gen_kwargs)
+
+    try:
+        generated = _generate_once()
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "CUDNN_STATUS_NOT_INITIALIZED" in msg or "cuDNN" in msg:
+            _log(f"generate hit cuDNN error, retry with cudnn disabled: {msg}")
+            _ensure_cudnn_ready()
+            try:
+                generated = _generate_once()
+            except RuntimeError:
+                torch.backends.cudnn.enabled = False
+                _log("retry generate with torch.backends.cudnn.enabled=False")
+                generated = _generate_once()
+        else:
+            raise
+    # 只解码新生成部分
+    in_len = int(inputs["input_ids"].shape[-1])
+    out_ids = generated[:, in_len:]
+    text = processor.batch_decode(
+        out_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+    )[0]
+    text = str(text).strip()
+    # 兜底：若仍带上 think 块，只保留正文
+    if "</think>" in text:
+        text = text.split("</think>", 1)[-1].strip()
+    elif text.startswith("<think>"):
+        # 未闭合则整段当思考丢弃
+        text = ""
+    return text
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "LocalQwenWorker/1.0"
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        # UI 会高频轮询 /health，默认不打 access log，避免刷屏
+        try:
+            msg = fmt % args
+        except Exception:
+            msg = str(fmt)
+        low = msg.lower()
+        if "/health" in low and ('" 200' in msg or " 200 " in msg):
+            return
+        _log("%s - %s" % (self.address_string(), msg))
+
+    def _send_json(self, code: int, body: Dict[str, Any]) -> None:
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        if path in ("/health", "/v1/health"):
+            ready = bool(_STATE["ready"])
+            err = str(_STATE.get("error") or "")
+            self._send_json(
+                200,
+                {
+                    "ok": ready,
+                    "loading": (not ready) and (not err),
+                    "model": MODEL_ID,
+                    "model_dir": _STATE.get("model_dir") or "",
+                    "device": _STATE.get("device") or "",
+                    "kind": _STATE.get("kind") or "",
+                    "error": err,
+                },
+            )
+            return
+        if path == "/v1/models":
+            self._send_json(
+                200,
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": MODEL_ID,
+                            "object": "model",
+                            "owned_by": "local",
+                        }
+                    ],
+                },
+            )
+            return
+        self._send_json(404, {"error": f"unknown path {path}"})
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlparse(self.path).path
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception:
+            self._send_json(400, {"error": "invalid JSON"})
+            return
+
+        if path == "/v1/chat/completions":
+            self._handle_chat_completions(payload)
+            return
+        if path == "/v1/responses":
+            self._handle_responses(payload)
+            return
+        self._send_json(404, {"error": f"unknown path {path}"})
+
+    def _handle_chat_completions(self, payload: Dict[str, Any]) -> None:
+        messages = payload.get("messages") or []
+        max_tokens = int(payload.get("max_tokens") or 512)
+        temperature = float(payload.get("temperature") or 0.0)
+        enable_thinking = False
+        ctk = payload.get("chat_template_kwargs")
+        if isinstance(ctk, dict) and "enable_thinking" in ctk:
+            enable_thinking = bool(ctk.get("enable_thinking"))
+        elif "enable_thinking" in payload:
+            enable_thinking = bool(payload.get("enable_thinking"))
+        tmp_paths: List[str] = []
+        try:
+            if not _STATE.get("ready"):
+                self._send_json(503, {"error": "model still loading"})
+                return
+            _, image_paths = _extract_user_content(messages)
+            tmp_paths.extend(image_paths)
+            answer = run_chat(
+                messages,
+                image_paths,
+                max_new_tokens=max_tokens,
+                enable_thinking=enable_thinking,
+                temperature=temperature,
+            )
+            self._send_json(
+                200,
+                {
+                    "id": f"chatcmpl-local-qwen-{int(time.time())}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": payload.get("model") or MODEL_ID,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": answer},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+        except Exception as exc:
+            detail = f"{exc}\n{traceback.format_exc()}"
+            _log(detail)
+            self._send_json(500, {"error": str(exc)})
+        finally:
+            for p in tmp_paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+    def _send_sse(self, event_type: str, data: Dict[str, Any]) -> None:
+        payload = dict(data)
+        payload.setdefault("type", event_type)
+        chunk = f"event: {event_type}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        self.wfile.write(chunk.encode("utf-8"))
+        self.wfile.flush()
+
+    def _handle_responses(self, payload: Dict[str, Any]) -> None:
+        """Minimal OpenAI Responses API for Codex/EmbodiedEvo.
+
+        Supports text (+ image). Codex requires SSE when stream=true (default for CLI).
+        Tool/function calling is best-effort via prompt injection.
+        """
+        if not _STATE.get("ready"):
+            self._send_json(503, {"error": "model still loading"})
+            return
+        messages = _responses_input_to_messages(payload)
+        tools = payload.get("tools") or []
+        # Debug one Codex turn shape (truncate) — helps diagnose reconnect loops.
+        try:
+            dbg = {
+                "n_tools": len(tools) if isinstance(tools, list) else 0,
+                "tool_names": [
+                    str((t.get("name") or (t.get("function") or {}).get("name") or t.get("type") or ""))
+                    for t in (tools if isinstance(tools, list) else [])[:12]
+                ],
+                "stream": payload.get("stream"),
+                "model": payload.get("model"),
+                "n_messages": len(messages),
+                "max_output_tokens": payload.get("max_output_tokens")
+                or payload.get("max_tokens"),
+            }
+            with open("/tmp/local_qwen_last_request.json", "w", encoding="utf-8") as f:
+                json.dump(dbg, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+                if isinstance(tools, list) and tools:
+                    f.write("\n--- first tool ---\n")
+                    f.write(json.dumps(tools[0], ensure_ascii=False)[:2000])
+                    f.write("\n")
+        except Exception:
+            pass
+        if tools:
+            # Codex may send tools as {type,name,description,parameters} or
+            # nested {type:"function", function:{name,...}}.
+            tool_summaries = []
+            for t in tools if isinstance(tools, list) else []:
+                if not isinstance(t, dict):
+                    continue
+                fn = t.get("function") if isinstance(t.get("function"), dict) else None
+                name = str((fn or {}).get("name") or t.get("name") or "").strip()
+                desc = str((fn or {}).get("description") or t.get("description") or "")
+                params = (fn or {}).get("parameters") if fn else t.get("parameters")
+                if name:
+                    tool_summaries.append(
+                        {"name": name, "description": desc, "parameters": params or {}}
+                    )
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a coding agent. You MUST use tools via a single JSON object:\n"
+                        '{"tool_call":{"name":"<tool_name>","arguments":{...}}}\n'
+                        "Do not wrap in markdown. Available tools:\n"
+                        + json.dumps(tool_summaries, ensure_ascii=False)
+                    ),
+                },
+                *messages,
+            ]
+        max_tokens = int(
+            payload.get("max_output_tokens")
+            or payload.get("max_tokens")
+            or 1024
+        )
+        temperature = float(payload.get("temperature") or 0.0)
+        # Codex always streams; treat missing stream as true for Responses.
+        want_stream = payload.get("stream")
+        if want_stream is None:
+            want_stream = True
+        tmp_paths: List[str] = []
+        try:
+            _, image_paths = _extract_user_content(messages)
+            tmp_paths.extend(image_paths)
+            answer = run_chat(
+                messages,
+                image_paths,
+                max_new_tokens=max_tokens,
+                enable_thinking=False,
+                temperature=temperature,
+            )
+            try:
+                with open("/tmp/local_qwen_last_answer.txt", "w", encoding="utf-8") as f:
+                    f.write(answer or "")
+            except Exception:
+                pass
+            output_items = _responses_output_from_answer(answer)
+            rid = f"resp_local_qwen_{int(time.time() * 1000)}"
+            response_obj = {
+                "id": rid,
+                "object": "response",
+                "created_at": int(time.time()),
+                "status": "completed",
+                "model": payload.get("model") or MODEL_ID,
+                "output": output_items,
+                "error": None,
+            }
+            if not want_stream:
+                self._send_json(200, response_obj)
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            # Codex 会一直等到连接关闭；keep-alive 会导致 exec 挂死。
+            self.send_header("Connection", "close")
+            self.end_headers()
+
+            seq = 0
+            self._send_sse(
+                "response.created",
+                {
+                    "sequence_number": seq,
+                    "response": {**response_obj, "status": "in_progress", "output": []},
+                },
+            )
+            seq += 1
+            self._send_sse(
+                "response.in_progress",
+                {
+                    "sequence_number": seq,
+                    "response": {**response_obj, "status": "in_progress", "output": []},
+                },
+            )
+            seq += 1
+
+            # Emit text path (most Codex turns); tool_call path as a single completed item.
+            if output_items and output_items[0].get("type") == "function_call":
+                item = output_items[0]
+                self._send_sse(
+                    "response.output_item.added",
+                    {
+                        "sequence_number": seq,
+                        "output_index": 0,
+                        "item": {**item, "status": "in_progress", "arguments": ""},
+                    },
+                )
+                seq += 1
+                args = str(item.get("arguments") or "")
+                self._send_sse(
+                    "response.function_call_arguments.delta",
+                    {
+                        "sequence_number": seq,
+                        "output_index": 0,
+                        "item_id": item.get("id"),
+                        "delta": args,
+                    },
+                )
+                seq += 1
+                self._send_sse(
+                    "response.function_call_arguments.done",
+                    {
+                        "sequence_number": seq,
+                        "output_index": 0,
+                        "item_id": item.get("id"),
+                        "arguments": args,
+                    },
+                )
+                seq += 1
+                self._send_sse(
+                    "response.output_item.done",
+                    {"sequence_number": seq, "output_index": 0, "item": item},
+                )
+                seq += 1
+            else:
+                msg_id = f"msg_local_{int(time.time() * 1000)}"
+                text = ""
+                if output_items:
+                    content = output_items[0].get("content") or []
+                    if content and isinstance(content[0], dict):
+                        text = str(content[0].get("text") or "")
+                item = {
+                    "type": "message",
+                    "id": msg_id,
+                    "role": "assistant",
+                    "status": "in_progress",
+                    "content": [],
+                }
+                self._send_sse(
+                    "response.output_item.added",
+                    {"sequence_number": seq, "output_index": 0, "item": item},
+                )
+                seq += 1
+                part = {"type": "output_text", "text": ""}
+                self._send_sse(
+                    "response.content_part.added",
+                    {
+                        "sequence_number": seq,
+                        "item_id": msg_id,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "part": part,
+                    },
+                )
+                seq += 1
+                # Fake token stream so Codex keeps the connection alive.
+                step = max(1, len(text) // 8) if text else 1
+                for i in range(0, max(len(text), 1), step):
+                    delta = text[i : i + step] if text else ""
+                    if not delta and not text:
+                        break
+                    self._send_sse(
+                        "response.output_text.delta",
+                        {
+                            "sequence_number": seq,
+                            "item_id": msg_id,
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": delta,
+                        },
+                    )
+                    seq += 1
+                self._send_sse(
+                    "response.output_text.done",
+                    {
+                        "sequence_number": seq,
+                        "item_id": msg_id,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "text": text,
+                    },
+                )
+                seq += 1
+                done_item = {
+                    "type": "message",
+                    "id": msg_id,
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text}],
+                }
+                self._send_sse(
+                    "response.content_part.done",
+                    {
+                        "sequence_number": seq,
+                        "item_id": msg_id,
+                        "output_index": 0,
+                        "content_index": 0,
+                        "part": {"type": "output_text", "text": text},
+                    },
+                )
+                seq += 1
+                self._send_sse(
+                    "response.output_item.done",
+                    {"sequence_number": seq, "output_index": 0, "item": done_item},
+                )
+                seq += 1
+                response_obj["output"] = [done_item]
+
+            self._send_sse(
+                "response.completed",
+                {"sequence_number": seq, "response": response_obj},
+            )
+            try:
+                self.wfile.flush()
+            except Exception:
+                pass
+            self.close_connection = True
+        except Exception as exc:
+            detail = f"{exc}\n{traceback.format_exc()}"
+            _log(detail)
+            if want_stream and not self.wfile.closed:
+                try:
+                    self._send_sse(
+                        "error",
+                        {"message": str(exc), "type": "error"},
+                    )
+                except Exception:
+                    pass
+            else:
+                self._send_json(500, {"error": str(exc)})
+            self.close_connection = True
+        finally:
+            for p in tmp_paths:
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
+def _responses_input_to_messages(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw = payload.get("input")
+    if raw is None and payload.get("messages"):
+        return list(payload.get("messages") or [])
+    if isinstance(raw, str):
+        return [{"role": "user", "content": raw}]
+    if not isinstance(raw, list):
+        return [{"role": "user", "content": str(raw)}]
+    messages: List[Dict[str, Any]] = []
+    type_hist: List[str] = []
+    for item in raw:
+        if isinstance(item, str):
+            messages.append({"role": "user", "content": item})
+            continue
+        if not isinstance(item, dict):
+            continue
+        # Chat-style message
+        if "role" in item and "content" in item and item.get("type") in (None, "", "message"):
+            role = str(item.get("role") or "user")
+            # local CausalLM templates often dislike role=tool
+            if role == "tool":
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Tool result:\n{item.get('content')}",
+                    }
+                )
+            else:
+                messages.append({"role": role, "content": item.get("content")})
+            continue
+        # Responses item types
+        typ = str(item.get("type") or "")
+        type_hist.append(typ or "message")
+        role = str(item.get("role") or "user")
+        if typ in {"message", "input_text", ""} and item.get("content") is not None:
+            content = item.get("content")
+            if isinstance(content, list):
+                texts: List[str] = []
+                for p in content:
+                    if isinstance(p, str):
+                        texts.append(p)
+                    elif isinstance(p, dict):
+                        ptype = str(p.get("type") or "")
+                        if ptype in {"input_text", "text", "output_text"}:
+                            texts.append(str(p.get("text") or p.get("content") or ""))
+                text = "\n".join(t for t in texts if t).strip()
+                if text:
+                    messages.append({"role": role if role in {"user", "assistant", "system"} else "user", "content": text})
+            else:
+                messages.append(
+                    {
+                        "role": role if role in {"user", "assistant", "system"} else "user",
+                        "content": content,
+                    }
+                )
+        elif typ == "input_text":
+            messages.append({"role": "user", "content": item.get("text") or ""})
+        elif typ == "function_call":
+            # Replay prior tool call so the model sees what it already did.
+            name = str(item.get("name") or "").strip()
+            args = item.get("arguments")
+            parsed_args: Any
+            if isinstance(args, str):
+                try:
+                    parsed_args = json.loads(args) if args.strip().startswith("{") else {"raw": args}
+                except Exception:
+                    parsed_args = {"raw": args}
+            else:
+                parsed_args = args or {}
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {"tool_call": {"name": name, "arguments": parsed_args}},
+                        ensure_ascii=False,
+                    ),
+                }
+            )
+        elif typ == "function_call_output":
+            out = str(item.get("output") or item.get("content") or "")
+            call_id = str(item.get("call_id") or item.get("id") or "")
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        f"Tool result (call_id={call_id}):\n{out}\n"
+                        "Continue the task. Prefer writing/editing files over repeating ls."
+                    ),
+                }
+            )
+    try:
+        with open("/tmp/local_qwen_input_types.txt", "w", encoding="utf-8") as f:
+            f.write(",".join(type_hist[:80]) + f"\nconverted_messages={len(messages)}\n")
+    except Exception:
+        pass
+    return messages or [{"role": "user", "content": ""}]
+
+
+def _extract_tool_call_blob(text: str) -> Optional[Dict[str, Any]]:
+    """Parse {"tool_call":{...}} even if surrounded by prose/markdown fences."""
+    s = (text or "").strip()
+    if not s or '"tool_call"' not in s:
+        return None
+    # strip common fences
+    if "```" in s:
+        parts = s.split("```")
+        for p in parts:
+            if '"tool_call"' in p:
+                s = p.strip()
+                if s.startswith("json"):
+                    s = s[4:].strip()
+                break
+    # try whole string, then each balanced {...} substring containing tool_call
+    candidates = [s]
+    start = 0
+    while True:
+        i = s.find("{", start)
+        if i < 0:
+            break
+        depth = 0
+        for j in range(i, len(s)):
+            if s[j] == "{":
+                depth += 1
+            elif s[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    candidates.append(s[i : j + 1])
+                    start = j + 1
+                    break
+        else:
+            break
+    for cand in candidates:
+        if '"tool_call"' not in cand:
+            continue
+        try:
+            data = json.loads(cand)
+        except Exception:
+            continue
+        call = data.get("tool_call") if isinstance(data, dict) else None
+        if isinstance(call, dict) and call.get("name"):
+            return call
+    return None
+
+
+def _responses_output_from_answer(answer: str) -> List[Dict[str, Any]]:
+    text = (answer or "").strip()
+    call = _extract_tool_call_blob(text)
+    if call:
+        name = str(call.get("name") or "").strip()
+        args = call.get("arguments")
+        if not isinstance(args, str):
+            args = json.dumps(args or {}, ensure_ascii=False)
+        cid = f"call_local_{int(time.time() * 1000)}"
+        return [
+            {
+                "type": "function_call",
+                "id": cid,
+                "call_id": cid,
+                "name": name,
+                "arguments": args,
+            }
+        ]
+    return [
+        {
+            "type": "message",
+            "id": f"msg_local_{int(time.time() * 1000)}",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": text}],
+        }
+    ]
+
+
+def main() -> int:
+    global MODEL_ID
+    parser = argparse.ArgumentParser(description="Local Qwen3.5 OpenAI worker")
+    parser.add_argument("--host", default=os.environ.get("LOCAL_QWEN_HOST", "127.0.0.1"))
+    parser.add_argument(
+        "--port", type=int, default=int(os.environ.get("LOCAL_QWEN_PORT", "8100"))
+    )
+    parser.add_argument("--model", default=os.environ.get("LOCAL_QWEN_MODEL_DIR", ""))
+    parser.add_argument(
+        "--model-id",
+        default=os.environ.get("LOCAL_QWEN_MODEL_ID", "qwen3.5-4b"),
+        help="OpenAI /v1/models 中暴露的 model id",
+    )
+    parser.add_argument(
+        "--lazy",
+        action="store_true",
+        help="兼容旧参数：与默认相同（先起 HTTP，后台加载模型）",
+    )
+    parser.add_argument(
+        "--eager",
+        action="store_true",
+        help="启动时阻塞加载模型，就绪后再监听端口（旧行为）",
+    )
+    args = parser.parse_args()
+    MODEL_ID = str(args.model_id or "").strip() or "qwen3.5-4b"
+    os.environ["LOCAL_QWEN_MODEL_ID"] = MODEL_ID
+    _configure_torch_backends()
+
+    model_dir = resolve_model_dir(args.model or None)
+    if not model_dir:
+        _log(
+            "ERROR: 未找到本地 Qwen 权重目录（需含 config.json 或 adapter_config.json）。"
+            "请设置 LOCAL_QWEN_MODEL_DIR 或 --model"
+        )
+        return 1
+
+    _STATE["model_dir"] = model_dir
+
+    def _bg_load() -> None:
+        try:
+            _log("background loading model…")
+            load_model(model_dir)
+        except Exception as exc:
+            _STATE["error"] = str(exc)
+            _log(f"load failed: {exc}")
+            traceback.print_exc()
+
+    if args.eager and not args.lazy:
+        try:
+            load_model(model_dir)
+        except Exception as exc:
+            _STATE["error"] = str(exc)
+            _log(f"load failed: {exc}")
+            traceback.print_exc()
+            return 1
+    else:
+        # 默认：先监听端口，再后台加载。UI/hostctl 可立刻探测到「启动中」。
+        threading.Thread(target=_bg_load, daemon=True, name="qwen-load").start()
+
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    _log(f"serving OpenAI-compatible API on http://{args.host}:{args.port}/v1")
+    _log(f"model_id={MODEL_ID}")
+    _log(f"model_dir={model_dir}")
+    if not _STATE["ready"]:
+        _log("model still loading in background; /health ok=false until ready")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        _log("stopped")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

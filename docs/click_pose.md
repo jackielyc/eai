@@ -59,8 +59,8 @@
 ## 验证与启用
 
 ```bash
-python3 eai/test_click_pose.py -v
-python3 -m py_compile eai/click_pose.py eai/graspgen_worker.py eai/show_camera_topics.py
+(cd eai && python3 -m unittest tests.test_click_pose -v)
+python3 -m compileall -q eai/eai_app
 ```
 
 修改不会热更新正在运行的 GUI。完成真实标定和模型配置后，重新启动界面，再点击头部彩色图验证。先用静止、有实际尺寸可量测的物体检查米制位置和多次点击稳定性；这些单元测试不等于实机抓取验收。
